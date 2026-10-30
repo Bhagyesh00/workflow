@@ -35,7 +35,8 @@ beforeAll(async () => {
   await flushRedis();
   main = await createTestServer(QUEUE_ENV);
   worker = await createContext({
-    config: testConfig(QUEUE_ENV),
+    // mains and workers share the binary data directory (a volume in production)
+    config: testConfig({ ...QUEUE_ENV, BINARY_DATA_DIR: main.ctx.config.binaryData.dir }),
     nodePackages: [nodesBasePackage, testPackage],
     http: new HttpClient({ ssrf: { enabled: true, allow: ['127.0.0.1'], deny: [] } }),
     migrate: false,

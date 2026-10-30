@@ -4,6 +4,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { HttpClient } from '@workflow/core';
@@ -331,7 +332,7 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     BASE_URL,
     LOG_LEVEL: 'silent',
     ENCRYPTION_KEYS: TEST_KEY,
-    BINARY_DATA_DIR: mkdtempSync(path.join(tmpdir(), 'wf-binary-')),
+    BINARY_DATA_DIR: overrides.BINARY_DATA_DIR ?? mkdtempSync(path.join(tmpdir(), 'wf-binary-')),
     LOGIN_RATE_LIMIT_MAX: '5',
     WAIT_TRACKER_INTERVAL_MS: '600000',
     QUEUE_PREFIX: 'wftest',
@@ -398,6 +399,7 @@ export async function createTestServer(
     async close() {
       await app.close();
       await ctx.close();
+      await rm(config.binaryData.dir, { recursive: true, force: true });
     },
   };
 }
