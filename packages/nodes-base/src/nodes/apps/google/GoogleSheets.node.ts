@@ -341,12 +341,22 @@ async function writeRows(ctx: ExecuteContext, operation: string): Promise<Item[]
           continue;
         }
         for (const row of matches) {
-          // only the provided columns change; others keep their current values
-          const values = headers.map((h, c) =>
-            h in entry.data ? cell(entry.data[h]) : (row.values[c] ?? null),
-          );
-          const range = `${quoteSheet(group.sheet.title)}!A${row.rowNumber}:${columnLetter(headers.length)}${row.rowNumber}`;
-          updates.push({ range, values: [values] });
+          // only the provided columns are written (one range per contiguous run), so formulas and
+          // concurrent edits in the other columns are left alone
+          const provided = headers.flatMap((h, c) => (h in entry.data ? [c] : []));
+          for (let i = 0; i < provided.length; ) {
+            let end = i;
+            while (end + 1 < provided.length && provided[end + 1] === provided[end] + 1) end++;
+            const startCol = provided[i];
+            const endCol = provided[end];
+            const from = `${columnLetter(startCol + 1)}${row.rowNumber}`;
+            const to = `${columnLetter(endCol + 1)}${row.rowNumber}`;
+            updates.push({
+              range: `${quoteSheet(group.sheet.title)}!${startCol === endCol ? from : `${from}:${to}`}`,
+              values: [headers.slice(startCol, endCol + 1).map((h) => cell(entry.data[h]))],
+            });
+            i = end + 1;
+          }
         }
         out[entry.index] = {
           json: { ...entry.data, row_number: matches[0].rowNumber },

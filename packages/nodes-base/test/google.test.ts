@@ -415,7 +415,8 @@ describe('Google Sheets', () => {
     ]);
     const batch = http.requests.find((q) => q.url.endsWith('values:batchUpdate'))!;
     expect((batch.body as DataObject).data).toEqual([
-      { range: "'Bob''s Sheet'!A3:C3", values: [['bob@x', 'Bob', 'paid']] },
+      { range: "'Bob''s Sheet'!A3", values: [['bob@x']] },
+      { range: "'Bob''s Sheet'!C3", values: [['paid']] },
     ]);
 
     const http2 = sheetsApi();
@@ -427,6 +428,20 @@ describe('Google Sheets', () => {
     expect(http2.requests.filter((q) => q.url.endsWith('values:batchUpdate'))).toHaveLength(1);
     expect((http2.requests.find((q) => q.url.includes(':append'))!.body as DataObject).values).toEqual([
       ['new@x', '', ''],
+    ]);
+  });
+
+  it('writes only the provided columns, one range per contiguous run', async () => {
+    const http = sheetsApi();
+    await run(
+      { resource: 'sheet', operation: 'update', columnToMatchOn: 'email' },
+      items({ email: 'bob@x', name: 'Robert', status: 'paid' }, { email: 'ada@x', name: 'Ada B' }),
+      http,
+    );
+    const batch = http.requests.find((q) => q.url.endsWith('values:batchUpdate'))!;
+    expect((batch.body as DataObject).data).toEqual([
+      { range: "'Bob''s Sheet'!A3:C3", values: [['bob@x', 'Robert', 'paid']] },
+      { range: "'Bob''s Sheet'!A2:B2", values: [['ada@x', 'Ada B']] },
     ]);
   });
 

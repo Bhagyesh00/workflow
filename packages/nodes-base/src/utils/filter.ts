@@ -7,6 +7,7 @@
  * unambiguous ("10" -> 10, "true" -> true, ISO strings / timestamps -> dates, JSON -> arrays).
  */
 import {
+  createSafeRegExp,
   type FilterCondition,
   type FilterOperation,
   type FilterOperatorType,
@@ -253,9 +254,12 @@ export function toRegExp(source: string, caseSensitive: boolean): RegExp {
   }
   if (!caseSensitive && !flags.includes('i')) flags += 'i';
   try {
-    return new RegExp(pattern, flags);
+    return createSafeRegExp(pattern, flags);
   } catch (error) {
-    throw new FilterError(`Invalid regular expression: ${(error as Error).message}`);
+    const message = (error as Error).message;
+    throw new FilterError(
+      message.startsWith('Invalid regular expression') ? message : `Invalid regular expression: ${message}`,
+    );
   }
 }
 
@@ -264,8 +268,16 @@ function lengthOf(value: unknown): number {
   throw new FilterError(`Cannot take the length of ${describeValue(value)}`);
 }
 
+/**
+ * Strict validation is about the data (left) side. A right value the user typed into the editor
+ * is stored as text, so for number, boolean and date comparisons it is always parsed.
+ */
+function isTypedConstant(value: unknown, type: FilterOperatorType): boolean {
+  return typeof value === 'string' && (type === 'number' || type === 'boolean' || type === 'dateTime');
+}
+
 function toLengthNumber(value: unknown, loose: boolean): number {
-  const n = coerce(value, 'number', loose, 'right');
+  const n = coerce(value, 'number', loose || isTypedConstant(value, 'number'), 'right');
   if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
     throw new FilterError(`Length must be a whole number, got ${preview(value)}`);
   }
@@ -354,7 +366,7 @@ export function evaluateCondition(condition: FilterCondition, options: FilterOpt
   const right = coerce(
     condition.rightValue === '' && rightType !== 'string' ? undefined : condition.rightValue,
     rightType,
-    loose,
+    loose || isTypedConstant(condition.rightValue, rightType),
     'right',
   );
 

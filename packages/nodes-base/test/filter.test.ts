@@ -3,6 +3,7 @@ import { DateTime } from 'luxon';
 import { describe, expect, it } from 'vitest';
 import { evaluateCondition, evaluateFilter, FilterError, OPERATIONS_BY_TYPE } from '../src';
 import { coerce, parseDate, toRegExp } from '../src/utils/filter';
+import { runNode } from './harness';
 
 const strict = { caseSensitive: true, typeValidation: 'strict' as const };
 const loose = { caseSensitive: true, typeValidation: 'loose' as const };
@@ -161,6 +162,46 @@ describe('filter: type validation', () => {
     expect(check('any', 'equals', 1, '1', loose)).toBe(true);
   });
 
+  it('strict validation applies to the data side: a typed right value is parsed', () => {
+    expect(check('number', 'gt', 150, '100')).toBe(true);
+    expect(check('string', 'lengthGt', 'abc', '2')).toBe(true);
+    expect(check('boolean', 'equals', true, 'true')).toBe(true);
+    expect(check('boolean', 'equals', true, 'false')).toBe(false);
+    expect(check('dateTime', 'after', '2024-06-01', '2024-01-01')).toBe(true);
+    expect(() => check('number', 'gt', '150', '100')).toThrow(/expecting a number/);
+    expect(() => check('number', 'gt', 150, 'abc')).toThrow(/Wrong type|Check the value/);
+  });
+
+  it('runs the editor-stored IF config (string right values, strict) on the engine', async () => {
+    const conditions = (
+      type: FilterOperatorType,
+      operation: FilterOperation,
+      rightValue: string,
+    ): FilterValue => ({
+      combinator: 'and',
+      conditions: [{ id: 'c1', leftValue: '={{ $json.v }}', rightValue, operator: { type, operation } }],
+      options: { caseSensitive: true, typeValidation: 'strict' },
+    });
+    const input = (v: unknown) => [{ json: { v } }];
+    const big = await runNode('core.if', { conditions: conditions('number', 'gt', '100') }, input(150));
+    expect(big.status).toBe('success');
+    expect(big.outputs[0]).toEqual([{ v: 150 }]);
+    const flag = await runNode(
+      'core.if',
+      { conditions: conditions('boolean', 'equals', 'true') },
+      input(true),
+    );
+    expect(flag.status).toBe('success');
+    expect(flag.outputs[0]).toEqual([{ v: true }]);
+    const wrongData = await runNode(
+      'core.if',
+      { conditions: conditions('number', 'gt', '100') },
+      input('150'),
+    );
+    expect(wrongData.status).toBe('error');
+    expect(wrongData.error?.message).toMatch(/Wrong type/);
+  });
+
   it('loose validation still fails when conversion is impossible', () => {
     expect(() => check('number', 'gt', 'abc', 1, loose)).toThrow(/expecting a number/);
     expect(() => check('boolean', 'true', 'maybe', undefined, loose)).toThrow(/expecting a boolean/);
@@ -193,6 +234,8 @@ describe('filter: type validation', () => {
     expect(() => check('string', 'lengthGt', 'abc', -1)).toThrow(/whole number/);
     expect(() => check('number', 'contains', 1, 1)).toThrow(/not available for number/);
     expect(() => check('string', 'regex', 'a', '(')).toThrow(/Invalid regular expression/);
+    expect(() => check('string', 'regex', 'aaaa!', '(a+)+$')).toThrow(FilterError);
+    expect(() => check('string', 'regex', 'aaaa!', '(a+)+$')).toThrow(/not allowed/);
     expect(() => evaluateCondition(cond('nope' as never, 'equals', 1, 1), strict)).toThrow(
       /Unknown condition type/,
     );
