@@ -20,7 +20,7 @@ export const GraphqlNode: NodeType = {
     name: 'core.graphql',
     displayName: 'GraphQL',
     description: 'Send a GraphQL query or mutation to an API',
-    icon: 'simple:graphql',
+    icon: 'lucide:braces',
     iconColor: '#e10098',
     group: ['input'],
     version: 1,

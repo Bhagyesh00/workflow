@@ -23,6 +23,14 @@ import {
   oAuth2Api,
   slackOAuth2Api,
 } from './credentials/oauth2.credentials';
+import { AirtableNode } from './nodes/apps/Airtable.node';
+import { GmailNode, GmailTriggerNode } from './nodes/apps/google/Gmail.node';
+import { GoogleSheetsNode } from './nodes/apps/google/GoogleSheets.node';
+import { NotionNode } from './nodes/apps/Notion.node';
+import { SlackNode } from './nodes/apps/Slack.node';
+import { MySqlNode } from './nodes/apps/sql/MySql.node';
+import { PostgresNode } from './nodes/apps/sql/Postgres.node';
+import { TelegramNode, TelegramTriggerNode } from './nodes/apps/Telegram.node';
 import { CryptoNode } from './nodes/core/Crypto.node';
 import { FilterNode, IfNode, SwitchNode } from './nodes/core/conditions.nodes';
 import { DateTimeNode } from './nodes/core/DateTime.node';
@@ -99,7 +107,18 @@ export const coreNodes: NodeType[] = [
   GraphqlNode,
 ];
 
-export const appNodes: NodeType[] = [];
+export const appNodes: NodeType[] = [
+  SlackNode,
+  GmailNode,
+  GmailTriggerNode,
+  GoogleSheetsNode,
+  PostgresNode,
+  MySqlNode,
+  NotionNode,
+  AirtableNode,
+  TelegramNode,
+  TelegramTriggerNode,
+];
 
 export const nodes: NodeType[] = [...coreNodes, ...appNodes];
 
