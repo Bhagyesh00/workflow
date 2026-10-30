@@ -1,0 +1,42 @@
+# Local services for development and tests: Postgres 16 (with pgvector) and Redis 7.
+#
+#   docker compose -f docker/docker-compose.dev.yml up -d
+#
+# Ports and credentials match what the tests expect:
+#   postgres://postgres:postgres@127.0.0.1:5432/<db>   (workflow_dev, workflow_test, nodes_test, ai_test)
+#   redis://127.0.0.1:6379
+# The databases and the vector extension are created on first start by test-db-init/.
+# Reset everything with `docker compose -f docker/docker-compose.dev.yml down -v`.
+name: workflow-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./test-db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:

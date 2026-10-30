@@ -207,7 +207,7 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
    for db in workflow_test ai_test; do su postgres -c "psql -d $db -c 'CREATE EXTENSION IF NOT EXISTS vector;'"; done
    ```
 
-   Or use `docker/docker-compose.yml`.
+   Or, with Docker and GNU Make (also on Windows): `make i` installs, `make db-migrate` starts Postgres (pgvector) + Redis from `docker/docker-compose.dev.yml` (creates the four databases and the vector extension on first start) and migrates, `make start` also builds the editor if missing and runs the dev server, `make stop` stops the services. `make` alone lists all targets.
 3. Verify everything is green. Server tests must not run concurrently with another server test run, because they share `workflow_test`.
 
    ```bash
