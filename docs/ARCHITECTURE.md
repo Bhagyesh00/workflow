@@ -117,6 +117,14 @@ Data: an **item** is `{ json, binary?, pairedItem?, error? }`. A node receives i
 
 `ExecutionState` is fully JSON-serializable (stack, waiting inputs, run data, context data).
 
+Durability and limits (new features, see SPEC §2.1):
+
+- **Retry from the failed node (NF-01).** When a node stops the execution, its inputs are stored in `state.executionData.failedExecuteData`. `WorkflowExecute.retryFromFailure()` re-runs only that node and its successors. It can run on a new engine built from the persisted state, optionally with the current workflow version. Upstream outputs are reused, so completed side effects are not repeated. `continueExecution()` resumes from persisted progress after a crash (`saveExecutionProgress`).
+- **Backoff (NF-02).** `node.retryBackoff = 'exponential'` doubles `waitBetweenTries` per attempt with ±20% jitter. Both modes honour a server's `Retry-After`, capped at 60 s per wait.
+- **Quotas (NF-20).** `limits.maxItemsPerOutput` (default 1,000,000) and `limits.maxNodeRuns` (default 100,000) fail the execution with `QUOTA_EXCEEDED` instead of exhausting a worker.
+- **Error catalogue (NF-15).** `serializeError` adds a stable `code` (`HTTP_401`, `EXPRESSION_REFERENCE`, `SSRF_BLOCKED`, `TIMEOUT`, `CODE_MEMORY`, `QUOTA_EXCEEDED`, ...) and a plain-language `hint`. API errors carry `request {method,url}` (no query string) and a secret-scrubbed `response.body` excerpt.
+- **Semantic diff (NF-10).** `diffWorkflows(a, b)` in `@workflow/workflow` reports added, removed, renamed and changed nodes, rewiring and settings changes, ignoring layout. The editor uses it for version history, and the server for restore previews.
+
 ## 7. Expression language & security
 
 A parameter value is an expression when it is a string starting with `=`; `{{ }}` segments are JavaScript. A template containing only one segment returns the raw value; otherwise the result is a string.
@@ -142,6 +150,7 @@ The interpreter's security rules are in `packages/workflow/src/expression/interp
 - The API never returns secret fields. Properties with `typeOptions.password` come back as `__REDACTED__`; on update, the sentinel keeps the stored value (`mergeRedacted`).
 - OAuth2: authorization-code flow with server-side `state` (signed, tenant-bound, 10 min TTL) and PKCE when the type asks for it. Tokens are refreshed automatically when expired or on a 401 (`oauth2Request`), and refreshed tokens are persisted.
 - Generic auth templates (`={{$credentials.x}}`) resolve keys and values.
+- **Credential slots (NF-05).** A node's credential reference may have an expression id (`{ id: '={{ $json.customer.credentialId }}', name: 'Customer CRM' }`), resolved per item (`getCredentials(type, itemIndex)`, `httpRequestWithAuthentication(type, options, itemIndex)`). The `CredentialsProvider` must load the id **within the execution's tenant only** and verify the stored credential's `type` matches the requested type.
 
 ## 10. Multi-tenancy, auth, authorization
 
@@ -160,6 +169,7 @@ The interpreter's security rules are in `packages/workflow/src/expression/interp
 - Activation validates the workflow (unique paths, required credentials, known node types), registers webhooks in the `webhooks` table, starts trigger nodes (`trigger()`), schedules pollers (`poll()`), and calls `webhookMethods.create` for third-party registrations.
 - Response modes: `onReceived` (immediate `{ message: 'Workflow was started' }` or the configured code), `lastNode` (data of the last executed node), `responseNode` (the first `Respond to Webhook` node; the request is held until it responds or the execution ends).
 - Test webhooks: the editor's "Listen for test event" registers an in-memory (Redis in queue mode) listener for 2 minutes. The first call runs the workflow in manual mode and streams to the editor.
+- **User-authored responses are sandboxed (security rule S8).** Every response from `/webhook*`, `/form*` and the chat pages carries `Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups allow-downloads` (no `allow-same-origin`) and `X-Content-Type-Options: nosniff`. A tenant can therefore never serve script that runs with the editor's origin, cookies or API access. Binary previews in the editor are served the same way.
 - Error workflow: when `settings.errorWorkflow` is set and an execution fails (non-manual), the error workflow runs with `{ execution: { id, url, error, lastNodeExecuted, mode }, workflow: { id, name } }` through its Error Trigger node.
 
 ## 12. Outbound HTTP & SSRF
