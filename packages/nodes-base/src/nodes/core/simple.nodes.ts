@@ -49,6 +49,7 @@ export const NoOpNode: NodeType = {
     inputs: ['main'],
     outputs: ['main'],
     categories: ['Core', 'Flow'],
+    alias: ['nothing', 'pass through', 'placeholder', 'noop', 'empty'],
     properties: [],
   },
   async execute(ctx) {
@@ -349,6 +350,7 @@ export const RespondToWebhookNode: NodeType = {
     inputs: ['main'],
     outputs: ['main'],
     categories: ['Core', 'Flow'],
+    alias: ['response', 'reply', 'http response', 'return', 'api response'],
     properties: [
       {
         displayName: 'Respond With',
