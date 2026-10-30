@@ -378,6 +378,8 @@ export class WebhookService {
             triggerItems: JSON.parse(JSON.stringify(result.workflowData[0] ?? [])),
             executionId,
             userId: input.userId,
+            // test runs use pinned data like other manual runs (the webhook's own output excluded)
+            pinData: input.mode === 'manual' ? manualPinData(definition, node.name) : undefined,
             wait: hook.responseMode !== 'onReceived',
             observer:
               streaming?.observer ?? (hook.responseMode === 'onReceived' ? undefined : handle.observer),
@@ -609,6 +611,11 @@ export class WebhookService {
 }
 
 // ---------------------------------------------------------------------------------------------
+
+function manualPinData(definition: WorkflowDefinition, startNode: string) {
+  const entries = Object.entries(definition.pinData ?? {}).filter(([name]) => name !== startNode);
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
 
 export function header(headers: WebhookRequest['headers'], name: string): string | undefined {
   const v = headers[name.toLowerCase()];

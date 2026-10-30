@@ -214,6 +214,14 @@ describe('production webhooks', () => {
     expect(dynamic.json().params).toEqual({ id: '42' });
     const me = await server.app.inject({ url: `/webhook/${tenant.slug}/users/me` });
     expect(me.json().params).toEqual({});
+
+    // a differently named parameter in the same position would be ambiguous
+    const ambiguous = await createWorkflow(client, {
+      nodes: [webhook({ path: 'users/:userId', httpMethod: 'GET' }, 'ambiguous')],
+    });
+    const refused = await client.post(`/rest/workflows/${ambiguous.id}/activate`);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.details[0].message).toMatch(/already used/);
   });
 
   it('checks webhook authentication, handles multipart uploads and never forwards the session cookie', async () => {
@@ -574,8 +582,11 @@ describe('test webhooks', () => {
       nodes: [
         webhook({ path: 'try', responseMode: 'lastNode' }),
         setNode('Set', 'draft', true as unknown as string),
+        node('Pinned', 'test.fail', {}, [400, 0]),
       ],
-      connections: chain('Webhook', 'Set'),
+      connections: chain('Webhook', 'Set', 'Pinned'),
+      // pinned output replaces the failing node in test runs
+      pinData: { Pinned: [{ json: { pinned: true } }] },
     };
     const events: Array<{ type: string; data: any }> = [];
     const unsubscribe = await server.ctx.push.subscribe(tenant.id, (e) => events.push(e));
@@ -599,7 +610,7 @@ describe('test webhooks', () => {
         payload: { x: 1 },
       });
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toMatchObject({ body: { x: 1 }, draft: 'true' });
+      expect(res.json()).toEqual({ pinned: true });
       const second = await server.app.inject({ method: 'POST', url: `/webhook-test/${tenant.slug}/try` });
       expect(second.statusCode).toBe(404);
 

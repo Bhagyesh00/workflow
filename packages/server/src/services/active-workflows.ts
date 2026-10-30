@@ -56,6 +56,13 @@ interface RunningTriggers {
 
 export const RESPOND_TO_WEBHOOK = 'core.respondToWebhook';
 
+/** path with parameter names erased: equal shapes match the same requests */
+const shapeOf = (path: string) =>
+  path
+    .split('/')
+    .map((s) => (s.startsWith(':') ? ':' : s))
+    .join('/');
+
 /**
  * Poll schedule of a polling node: `parameters.pollTimes` either a cron string or
  * `{ item: [{ mode, hour?, minute?, weekday?, dayOfMonth?, value?, unit?, cronExpression? }] }`.
@@ -189,7 +196,8 @@ export class ActiveWorkflowManager {
     }
     const seen = new Map<string, string>();
     for (const hook of hooks) {
-      const key = `${hook.method} ${hook.path}`;
+      // `users/:id` and `users/:userId` match the same requests
+      const key = `${hook.method} ${shapeOf(hook.path)}`;
       const other = seen.get(key);
       if (other) {
         issues.push({
@@ -210,8 +218,20 @@ export class ActiveWorkflowManager {
     }
     if (hooks.length) {
       const conflicts = await repos.webhooks.findConflicts(tenantId, workflowId ?? '', hooks);
+      for (const hook of hooks.filter((h) => h.isDynamic)) {
+        const same = await repos.webhooks.listDynamic(tenantId, hook.method, hook.segments);
+        for (const other of same) {
+          if (
+            other.workflowId !== workflowId &&
+            other.path !== hook.path &&
+            shapeOf(other.path) === shapeOf(hook.path)
+          ) {
+            conflicts.push(other);
+          }
+        }
+      }
       for (const c of conflicts) {
-        const hook = hooks.find((h) => h.method === c.method && h.path === c.path);
+        const hook = hooks.find((h) => h.method === c.method && shapeOf(h.path) === shapeOf(c.path));
         issues.push({
           node: hook?.nodeName ?? null,
           message: `The webhook path "${c.method} ${c.path}" is already used by another active workflow`,
