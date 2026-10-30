@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { createWebhookContext } from '@workflow/core';
+import { createWebhookContext, WorkflowExecute } from '@workflow/core';
 import {
   type DataObject,
   ExpressionEvaluator,
@@ -421,6 +421,65 @@ describe('HTTP Request', () => {
       services: { ...services(), executionId: 'e2' },
     });
     expect((other.outputs[0][0].headers as DataObject)['idempotency-key']).not.toBe(keys[0]);
+    // a different request for the same item (e.g. the next round of a loop) gets a new key
+    const otherBody = await runNode(
+      'core.httpRequest',
+      { ...params, sendBody: true, specifyBody: 'json', jsonBody: '={{ JSON.stringify({ round: 2 }) }}' },
+      items({ a: 1 }),
+      { services: services() },
+    );
+    expect((otherBody.outputs[0][0].headers as DataObject)['idempotency-key']).not.toBe(keys[0]);
+    // an explicit header wins
+    const explicit = await runNode(
+      'core.httpRequest',
+      {
+        ...params,
+        sendHeaders: true,
+        headerParameters: { parameters: [{ name: 'Idempotency-Key', value: 'mine' }] },
+      },
+      items({ a: 1 }),
+      { services: services() },
+    );
+    expect((explicit.outputs[0][0].headers as DataObject)['idempotency-key']).toBe('mine');
+  });
+
+  it('keeps the idempotency key when the execution is retried from the failed node', async () => {
+    const seen: string[] = [];
+    const flaky = await startHttpServer((req, res) => {
+      seen.push(String(req.headers['idempotency-key']));
+      return seen.length === 1 ? json(res, { error: 'gateway timeout' }, 504) : json(res, { charged: true });
+    });
+    try {
+      const definition = {
+        name: 'charge',
+        nodes: [
+          node('Start', 'core.manualTrigger'),
+          node(
+            'Charge',
+            'core.httpRequest',
+            { method: 'POST', url: `${flaky.url}/charge`, options: { idempotencyKey: true } },
+            [200, 0],
+          ),
+        ],
+        connections: { Start: { main: [[{ node: 'Charge', type: 'main' as const, index: 0 }]] } },
+      };
+      const first = await new WorkflowExecute(
+        new Workflow(definition, nodeTypes),
+        testServices({}, services()),
+      ).run();
+      expect(first.status).toBe('error');
+      const persisted = JSON.parse(JSON.stringify(first.state));
+      const retried = await new WorkflowExecute(
+        new Workflow(definition, nodeTypes),
+        testServices({}, services()),
+        persisted,
+      ).retryFromFailure();
+      expect(retried.status).toBe('success');
+      expect(seen).toHaveLength(2);
+      expect(seen[0]).toBe(seen[1]);
+    } finally {
+      await flaky.close();
+    }
   });
 
   it('batches requests with an interval', async () => {

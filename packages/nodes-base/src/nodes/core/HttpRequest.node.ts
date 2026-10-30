@@ -30,6 +30,7 @@ import {
   keyValuePairs,
   parseJsonObject,
   parseJsonParameter,
+  stableStringify,
   withItemIndex,
 } from '../../utils/utilities';
 
@@ -449,7 +450,7 @@ export const HttpRequestNode: NodeType = {
             displayName: 'Redirects',
             name: 'redirect',
             type: 'fixedCollection',
-            default: { redirect: { followRedirects: true, maxRedirects: 21 } },
+            default: { redirect: { followRedirects: true } },
             options: [
               {
                 displayName: 'Redirect',
@@ -460,8 +461,9 @@ export const HttpRequestNode: NodeType = {
                     name: 'followRedirects',
                     type: 'boolean',
                     default: true,
+                    description:
+                      'Whether to follow 3xx redirects (every hop is checked against the SSRF policy)',
                   },
-                  { displayName: 'Max Redirects', name: 'maxRedirects', type: 'number', default: 21 },
                 ],
               },
             ],
@@ -683,10 +685,33 @@ function hasHeader(headers: Record<string, string> | undefined, name: string): b
   return Object.keys(headers ?? {}).some((k) => k.toLowerCase() === name.toLowerCase());
 }
 
-function idempotencyKey(ctx: ExecuteContext, i: number, page: number): string {
-  const node = ctx.getNode();
+/** Hash of what a request does (method, URL, query, body), ignoring headers and auth. */
+function requestFingerprint(req: HttpRequestOptions): string {
+  const hash = createHash('sha256');
+  hash.update(`${req.method ?? 'GET'} ${req.url}\n${stableStringify(req.qs ?? {})}\n`);
+  const addBody = (value: unknown) => {
+    if (value instanceof Uint8Array) hash.update(value);
+    else
+      hash.update(
+        stableStringify(value, (_k, v) =>
+          v instanceof Uint8Array ? createHash('sha256').update(v).digest('hex') : v,
+        ),
+      );
+  };
+  addBody(req.body ?? null);
+  return hash.digest('hex');
+}
+
+/**
+ * Idempotency-Key for one logical request: stable when the same execution re-sends it (retry on
+ * fail, retry from the failed node), different for other items, pages or request contents (for
+ * example later rounds of a loop).
+ */
+function idempotencyKey(ctx: ExecuteContext, i: number, page: number, req: HttpRequestOptions): string {
   return createHash('sha256')
-    .update(`${ctx.getTenantId()}:${ctx.getExecutionId()}:${node.id}:${ctx.getRunIndex()}:${i}:${page}`)
+    .update(
+      `${ctx.getTenantId()}:${ctx.getExecutionId()}:${ctx.getNode().id}:${i}:${page}:${requestFingerprint(req)}`,
+    )
     .digest('hex')
     .slice(0, 40);
 }
@@ -858,7 +883,6 @@ async function requestForItem(ctx: ExecuteContext, i: number, item: Item): Promi
     request.skipSslCertificateValidation = true;
   const redirect = ctx.getNodeParameter('options.redirect.redirect', i, {}) as DataObject;
   if (redirect.followRedirects === false) request.followRedirects = false;
-  if (redirect.maxRedirects !== undefined) request.maxRedirects = Number(redirect.maxRedirects);
   const response = ctx.getNodeParameter('options.response.response', i, {}) as DataObject;
   const opts: ResponseOptions = {
     fullResponse: Boolean(response.fullResponse),
@@ -884,7 +908,7 @@ async function requestForItem(ctx: ExecuteContext, i: number, item: Item): Promi
       ignoreHttpStatusErrors: opts.neverError || ignoreStatus,
     };
     if (sendIdempotencyKey && !hasHeader(final.headers, 'idempotency-key')) {
-      final.headers = { ...(final.headers ?? {}), 'Idempotency-Key': idempotencyKey(ctx, i, page) };
+      final.headers = { ...(final.headers ?? {}), 'Idempotency-Key': idempotencyKey(ctx, i, page, final) };
     }
     try {
       return (await authenticatedRequest(ctx, i, final)) as HttpFullResponse<unknown>;

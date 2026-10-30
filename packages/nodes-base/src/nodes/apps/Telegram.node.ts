@@ -118,7 +118,7 @@ function common(ctx: ExecuteContext, i: number): DataObject {
   return {
     parse_mode: fields.parse_mode && fields.parse_mode !== 'none' ? fields.parse_mode : undefined,
     disable_notification: fields.disable_notification,
-    message_thread_id: fields.message_thread_id,
+    message_thread_id: fields.message_thread_id || undefined,
     reply_markup: replyMarkup(ctx, i, fields),
     ...(fields.reply_to_message_id
       ? { reply_parameters: { message_id: Number(fields.reply_to_message_id) } }

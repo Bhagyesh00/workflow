@@ -169,17 +169,21 @@ export function unsetField(json: DataObject, field: string, dotNotation = true):
 }
 
 /** JSON serialisation with sorted keys, so equal objects produce equal strings. */
-export function stableStringify(value: unknown): string {
-  return JSON.stringify(sortKeys(value)) ?? 'undefined';
+export function stableStringify(value: unknown, replacer?: (key: string, value: unknown) => unknown): string {
+  return JSON.stringify(sortKeys(replacer ? replacer('', value) : value, replacer)) ?? 'undefined';
 }
 
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value && typeof value === 'object' && !(value instanceof Date)) {
+function sortKeys(value: unknown, replacer?: (key: string, value: unknown) => unknown): unknown {
+  if (Array.isArray(value))
+    return value.map((v, i) => sortKeys(replacer ? replacer(String(i), v) : v, replacer));
+  if (value && typeof value === 'object' && !(value instanceof Date) && !(value instanceof Uint8Array)) {
     return Object.fromEntries(
       Object.keys(value as object)
         .sort()
-        .map((k) => [k, sortKeys((value as DataObject)[k])]),
+        .map((k) => {
+          const v = (value as DataObject)[k];
+          return [k, sortKeys(replacer ? replacer(k, v) : v, replacer)];
+        }),
     );
   }
   return value;
