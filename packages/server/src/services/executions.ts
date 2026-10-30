@@ -137,6 +137,8 @@ export function binaryDirOf(config: Config, tenantId: string, executionId: strin
 export class ExecutionService {
   private readonly running = new Map<string, { engine: WorkflowExecute; done: Promise<void> }>();
   private readonly waiters = new Map<string, Waiter>();
+  /** stop requests that arrived before the execution's engine was registered */
+  private readonly cancelRequests = new Set<string>();
   private readonly unsubscribers: Array<() => void> = [];
 
   constructor(private readonly deps: ExecutionServiceDeps) {}
@@ -147,7 +149,7 @@ export class ExecutionService {
     this.unsubscribers.push(
       await bus.subscribe('control', (message: { type: string; executionId?: string }) => {
         if (message?.type === 'cancel' && message.executionId) {
-          this.running.get(message.executionId)?.engine.cancel('Execution was stopped');
+          this.cancel(message.executionId);
         }
       }),
     );
@@ -165,6 +167,16 @@ export class ExecutionService {
       await Promise.race([Promise.allSettled(pending), new Promise((r) => setTimeout(r, timeoutMs))]);
     }
     for (const { engine } of this.running.values()) engine.cancel('The server is shutting down');
+  }
+
+  private cancel(executionId: string): void {
+    const local = this.running.get(executionId);
+    if (local) {
+      local.engine.cancel('Execution was stopped');
+      return;
+    }
+    this.cancelRequests.add(executionId);
+    setTimeout(() => this.cancelRequests.delete(executionId), 60_000).unref();
   }
 
   get runningCount(): number {
@@ -333,12 +345,20 @@ export class ExecutionService {
     const data = await repos.executions.getData(tenantId, executionId);
     if (!row || !data) return;
     const emit = (outcome: ExecutionOutcome) => this.emitFinished(outcome, delivery);
-    if (row.status === 'canceled' || (kind === 'run' && row.status !== 'new')) {
-      emit({ executionId, status: row.status as ExecutionStatus });
+    // claim atomically: a stop request may have canceled the execution in the meantime
+    const claimed =
+      kind === 'run'
+        ? await repos.executions.transition(tenantId, executionId, ['new'], {
+            status: 'running',
+            startedAt: new Date(),
+          })
+        : row.status === 'running';
+    const tenant = await repos.tenants.get(tenantId);
+    if (!claimed || !tenant) {
+      const current = await repos.executions.get(tenantId, executionId);
+      emit({ executionId, status: (current?.status ?? row.status) as ExecutionStatus });
       return;
     }
-    const tenant = await repos.tenants.get(tenantId);
-    if (!tenant) return;
 
     const definition = data.workflowData as unknown as WorkflowDefinition;
     const options = (data.runOptions ?? {}) as StoredRunOptions;
@@ -375,8 +395,8 @@ export class ExecutionService {
       release = r;
     });
     this.running.set(executionId, { engine, done });
+    if (this.cancelRequests.delete(executionId)) engine.cancel('Execution was stopped');
     try {
-      await repos.executions.update(tenantId, executionId, { status: 'running', waitTill: null });
       let result: ExecutionResult;
       try {
         result =
@@ -733,6 +753,7 @@ export class ExecutionService {
         local.engine.cancel('Execution was stopped');
         await local.done;
       } else {
+        this.cancel(executionId);
         await bus.publish('control', { type: 'cancel', executionId });
         // give the worker a moment to observe the cancellation
         for (let i = 0; i < 50; i++) {

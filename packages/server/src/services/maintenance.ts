@@ -66,13 +66,20 @@ export class Pruner {
     private readonly intervalMs = 3_600_000,
   ) {}
 
+  private initial?: NodeJS.Timeout;
+
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.prune().catch(() => {}), this.intervalMs);
+    const run = () => void this.prune().catch((error) => this.logger.warn({ err: error }, 'Pruning failed'));
+    // first run shortly after start-up, then on the interval
+    this.initial = setTimeout(run, 60_000);
+    this.initial.unref();
+    this.timer = setInterval(run, this.intervalMs);
     this.timer.unref();
   }
 
   stop(): void {
+    clearTimeout(this.initial);
     clearInterval(this.timer);
     this.timer = undefined;
   }
