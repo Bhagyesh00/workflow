@@ -19,24 +19,129 @@ import {
 
 /** documents per in-memory store; the oldest are dropped beyond this */
 export const MEMORY_STORE_MAX_DOCUMENTS = 20_000;
+/** approximate bytes one workspace may hold across all its in-memory stores */
+export const MEMORY_STORE_MAX_BYTES_PER_TENANT = 128 * 1024 * 1024;
+/** vector length accepted on insert (the largest hosted embedding models use up to 4,096) */
+export const MEMORY_STORE_MAX_DIMENSIONS = 8_192;
+/** characters of text accepted per document on insert */
+export const MEMORY_STORE_MAX_CONTENT_CHARS = 200_000;
 
+/** fixed cost of one entry: the entry object, the document, the metadata object and array headers */
+const ENTRY_OVERHEAD_BYTES = 200;
+
+/** Approximate heap bytes of one stored document: 8 per vector number, 2 per text character. */
+export function documentBytes(document: AiDocument, vector: number[]): number {
+  let metadataChars = 0;
+  try {
+    metadataChars = JSON.stringify(document.metadata)?.length ?? 0;
+  } catch {
+    metadataChars = 0;
+  }
+  return ENTRY_OVERHEAD_BYTES + vector.length * 8 + (document.pageContent.length + metadataChars) * 2;
+}
+
+export interface MemoryVectorBackendOptions {
+  /** approximate bytes this store may hold; the oldest documents are evicted beyond it */
+  maxBytes?: number;
+  maxDimensions?: number;
+  maxContentChars?: number;
+  /** node name shown in limit errors */
+  nodeName?: string;
+  /** called after the size changed, so the owner can enforce its tenant-wide byte budget */
+  onChange?: () => void;
+}
+
+/**
+ * Limits: a batch is rejected up front (nothing is stored) with a NodeOperationError when a vector
+ * or a text is over its cap. Growth is handled by evicting the oldest documents, first past the
+ * document count, then past the byte budget, so inserting never fails because the store is full
+ * and the newest data always survives.
+ */
 export class MemoryVectorBackend implements VectorBackend {
-  private entries: Array<{ document: AiDocument; vector: number[] }> = [];
+  private entries: Array<{ document: AiDocument; vector: number[]; bytes: number }> = [];
+  private totalBytes = 0;
+  private readonly maxBytes: number;
+  private readonly maxDimensions: number;
+  private readonly maxContentChars: number;
+  private readonly nodeName: string;
+  private readonly onChange?: () => void;
 
-  constructor(private readonly maxDocuments = MEMORY_STORE_MAX_DOCUMENTS) {}
+  constructor(
+    private readonly maxDocuments = MEMORY_STORE_MAX_DOCUMENTS,
+    options: MemoryVectorBackendOptions = {},
+  ) {
+    this.maxBytes = options.maxBytes ?? MEMORY_STORE_MAX_BYTES_PER_TENANT;
+    this.maxDimensions = options.maxDimensions ?? MEMORY_STORE_MAX_DIMENSIONS;
+    this.maxContentChars = options.maxContentChars ?? MEMORY_STORE_MAX_CONTENT_CHARS;
+    this.nodeName = options.nodeName ?? 'Simple Vector Store';
+    this.onChange = options.onChange;
+  }
 
   get size(): number {
     return this.entries.length;
   }
 
+  /** approximate heap bytes held by this store */
+  get bytes(): number {
+    return this.totalBytes;
+  }
+
   async add(documents: AiDocument[], vectors: number[][]): Promise<void> {
-    for (const [i, d] of documents.entries()) {
-      this.entries.push({
-        document: { pageContent: d.pageContent, metadata: { ...d.metadata } },
-        vector: vectors[i],
-      });
+    if (vectors.length !== documents.length) {
+      throw new NodeOperationError(
+        this.nodeName,
+        `Got ${vectors.length} embeddings for ${documents.length} documents`,
+      );
     }
-    if (this.entries.length > this.maxDocuments) this.entries = this.entries.slice(-this.maxDocuments);
+    const staged = documents.map((d, i) => {
+      const received: unknown = vectors[i];
+      if (!Array.isArray(received)) {
+        throw new NodeOperationError(this.nodeName, `Embedding ${i + 1} is not a list of numbers`);
+      }
+      if (received.length > this.maxDimensions) {
+        throw new NodeOperationError(
+          this.nodeName,
+          `An embedding has ${received.length} dimensions, more than the ${this.maxDimensions} the Simple Vector Store accepts`,
+          {
+            description:
+              'Use a smaller embedding model, or a database-backed vector store for larger vectors.',
+          },
+        );
+      }
+      if (d.pageContent.length > this.maxContentChars) {
+        throw new NodeOperationError(
+          this.nodeName,
+          `A document has ${d.pageContent.length} characters, more than the ${this.maxContentChars} the Simple Vector Store accepts`,
+          { description: 'Split the text into smaller chunks with a text splitter before inserting.' },
+        );
+      }
+      for (let j = 0; j < received.length; j++) {
+        if (typeof received[j] !== 'number' || !Number.isFinite(received[j])) {
+          throw new NodeOperationError(this.nodeName, `Embedding ${i + 1} must hold only finite numbers`, {
+            description: 'The embeddings service returned a value that is not a number.',
+          });
+        }
+      }
+      // validated and copied, so the 8 bytes per number charged below is what is really held
+      const vector = Array.from(received as number[]);
+      const document = { pageContent: d.pageContent, metadata: { ...d.metadata } };
+      return { document, vector, bytes: documentBytes(document, vector) };
+    });
+    for (const entry of staged) {
+      this.entries.push(entry);
+      this.totalBytes += entry.bytes;
+    }
+    let drop = Math.max(0, this.entries.length - this.maxDocuments);
+    let remaining = this.totalBytes;
+    for (let i = 0; i < drop; i++) remaining -= this.entries[i].bytes;
+    while (remaining > this.maxBytes && drop < this.entries.length - 1) {
+      remaining -= this.entries[drop].bytes;
+      drop++;
+    }
+    if (drop > 0) {
+      for (const removed of this.entries.splice(0, drop)) this.totalBytes -= removed.bytes;
+    }
+    this.onChange?.();
   }
 
   async search(vector: number[], k: number, filter?: DataObject): Promise<ScoredDocument[]> {
@@ -52,10 +157,17 @@ export class MemoryVectorBackend implements VectorBackend {
 
   async clear(): Promise<void> {
     this.entries = [];
+    this.totalBytes = 0;
+    this.onChange?.();
   }
 }
 
-const memoryStores = new TenantStore<MemoryVectorBackend>({ maxKeysPerTenant: 20, maxTenants: 1000 });
+const memoryStores = new TenantStore<MemoryVectorBackend>({
+  maxKeysPerTenant: 20,
+  maxTenants: 1000,
+  maxBytesPerTenant: MEMORY_STORE_MAX_BYTES_PER_TENANT,
+  sizeOf: (backend) => backend.bytes,
+});
 
 /** test hook */
 export function clearMemoryVectorStores(): void {
@@ -70,7 +182,7 @@ export const VectorStoreInMemoryNode = createVectorStoreNode({
   properties: [
     {
       displayName:
-        'Data lives in the memory of the process: it is lost on restart, not shared between workers, and capped at 20,000 documents per store and 20 stores per workspace.',
+        'Data lives in the memory of the process: it is lost on restart, not shared between workers, and capped at 20,000 documents per store, 20 stores and about 128 MB per workspace (the oldest documents are dropped first).',
       name: 'notice',
       type: 'notice',
       default: '',
@@ -89,7 +201,17 @@ export const VectorStoreInMemoryNode = createVectorStoreNode({
     const key = String(
       ctx.getNodeParameter('memoryKey', itemIndex, 'vector_store_key') || 'vector_store_key',
     );
-    return { backend: memoryStores.getOrCreate(ctx.getTenantId(), key, () => new MemoryVectorBackend()) };
+    const tenantId = ctx.getTenantId();
+    const backend = memoryStores.getOrCreate(
+      tenantId,
+      key,
+      () =>
+        new MemoryVectorBackend(MEMORY_STORE_MAX_DOCUMENTS, {
+          nodeName: ctx.getNode().name,
+          onChange: () => memoryStores.settle(tenantId, key),
+        }),
+    );
+    return { backend };
   },
 });
 

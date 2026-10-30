@@ -126,7 +126,43 @@ function logged(ctx: SupplyDataContext, memory: SessionMemory): SessionMemory {
 // Window buffer (in-process)
 // ---------------------------------------------------------------------------------------------
 
-const bufferStore = new TenantStore<AiChatMessage[]>({ maxKeysPerTenant: 1000, maxTenants: 2000 });
+/** approximate bytes one workspace may hold across all its Simple Memory conversations */
+export const MEMORY_BUFFER_MAX_BYTES_PER_TENANT = 64 * 1024 * 1024;
+
+/** Approximate heap bytes of stored messages: 2 per text character plus a fixed cost per message. */
+export function messagesBytes(messages: AiChatMessage[]): number {
+  let total = 0;
+  for (const m of messages) total += 64 + messageText(m.content).length * 2;
+  return total;
+}
+
+/**
+ * Appends to a conversation and keeps the newest messages that fit both the window (a little more
+ * than twice `k`) and the byte budget: the oldest messages are dropped first and the newest message
+ * is always kept. Whole conversations are evicted by the store once a workspace passes its budget.
+ */
+export function appendWithinBudget(
+  stored: AiChatMessage[],
+  added: AiChatMessage[],
+  k: number,
+  maxBytes: number,
+): AiChatMessage[] {
+  const next = [...stored, ...added].slice(-Math.max(2 * k, 40));
+  let bytes = messagesBytes(next);
+  let drop = 0;
+  while (bytes > maxBytes && drop < next.length - 1) {
+    bytes -= messagesBytes([next[drop]]);
+    drop++;
+  }
+  return drop > 0 ? next.slice(drop) : next;
+}
+
+const bufferStore = new TenantStore<AiChatMessage[]>({
+  maxKeysPerTenant: 1000,
+  maxTenants: 2000,
+  maxBytesPerTenant: MEMORY_BUFFER_MAX_BYTES_PER_TENANT,
+  sizeOf: messagesBytes,
+});
 
 /** test hook */
 export function clearBufferMemory(): void {
@@ -144,7 +180,7 @@ export const MemoryBufferWindowNode: NodeType = {
     [
       {
         displayName:
-          'Stored in the memory of the process that runs the workflow: history is lost on restart, is not shared between queue workers, and only the 1,000 most recent conversations per workspace are kept. Use Postgres or Redis memory in production.',
+          'Stored in the memory of the process that runs the workflow: history is lost on restart, is not shared between queue workers, and only the 1,000 most recent conversations (up to about 64 MB) per workspace are kept. Use Postgres or Redis memory in production.',
         name: 'notice',
         type: 'notice',
         default: '',
@@ -168,9 +204,14 @@ export const MemoryBufferWindowNode: NodeType = {
       },
       async append(sessionId, messages) {
         const stored = bufferStore.get(tenantId, keyOf(sessionId)) ?? [];
-        const next = [...stored, ...messages.map((m) => toStoredMessage(m) as AiChatMessage)];
         // keep a little more than the window so a larger window later still has history
-        bufferStore.set(tenantId, keyOf(sessionId), next.slice(-Math.max(2 * k, 40)));
+        const next = appendWithinBudget(
+          stored,
+          messages.map((m) => toStoredMessage(m) as AiChatMessage),
+          k,
+          MEMORY_BUFFER_MAX_BYTES_PER_TENANT,
+        );
+        bufferStore.set(tenantId, keyOf(sessionId), next);
       },
       async clear(sessionId) {
         bufferStore.delete(tenantId, keyOf(sessionId));
