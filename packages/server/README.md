@@ -85,9 +85,16 @@ src/
   services/              auth, credentials, OAuth2, executions, activation, webhooks,
                          test webhooks, wait tracker + pruning, queue + leader election, bus/push, metrics
   routes/                REST (/rest), public API (/api/v1), webhooks, push (SSE), health/metrics/editor
-migrations/              generated SQL migrations
+migrations/              generated SQL migrations (+ 0001: row-level security policies)
 test/                    integration tests (real Postgres + Redis)
 ```
+
+## Tenancy and security
+
+- Every repository method takes `tenantId` first; webhook paths are namespaced by tenant slug; binary files live under `<BINARY_DATA_DIR>/<tenantId>/<executionId>` and reads are checked against the tenant.
+- Row-level security is enabled on every tenant table as defence in depth. The application connects as the table owner and is not affected; any other database role only sees the tenant set with `SET app.tenant_id = '<uuid>'`.
+- Credentials are encrypted with AES-256-GCM (`CredentialCipher`, per-tenant HKDF keys, AAD `tenantId:credentialId`); the API returns password fields and OAuth token data as `__REDACTED__`.
+- Outbound HTTP from nodes, credential tests and OAuth2 token exchanges goes through the SSRF-guarded `HttpClient` (`SSRF_*` settings).
 
 ## Notes for API clients (editor)
 

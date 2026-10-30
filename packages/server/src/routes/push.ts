@@ -13,6 +13,12 @@ function frame(event: string, data: unknown): string {
 }
 
 export function registerPushRoutes(app: FastifyInstance, ctx: ServerContext): void {
+  const open = new Set<() => void>();
+  // streams never end on their own: close them so shutdown does not wait for editors to leave
+  app.addHook('preClose', async () => {
+    for (const end of [...open]) end();
+  });
+
   app.get('/push', async (request, reply) => {
     const auth = requireAuth(request);
     reply.hijack();
@@ -36,7 +42,13 @@ export function registerPushRoutes(app: FastifyInstance, ctx: ServerContext): vo
     const close = () => {
       clearInterval(ping);
       unsubscribe();
+      open.delete(end);
     };
+    const end = () => {
+      close();
+      if (!res.writableEnded) res.end();
+    };
+    open.add(end);
     request.raw.on('close', close);
     res.on('close', close);
   });

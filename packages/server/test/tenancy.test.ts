@@ -122,6 +122,35 @@ describe('tenant isolation', () => {
     expect((await a.client.get(`/rest/variables/${variable.id}`)).statusCode).toBe(200);
   });
 
+  it('defines row-level security policies for roles other than the application owner', async () => {
+    const a = await signup(server.app);
+    const b = await signup(server.app);
+    await createWorkflow(a.client, { nodes: [] });
+    await createWorkflow(b.client, { nodes: [] });
+    const pool = server.ctx.database.pool;
+    await pool.query(`DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'workflow_rls_probe') THEN
+        CREATE ROLE workflow_rls_probe NOLOGIN;
+      END IF;
+    END $$`);
+    await pool.query('GRANT SELECT ON workflows, tenants TO workflow_rls_probe');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET LOCAL ROLE workflow_rls_probe');
+      expect((await client.query('SELECT count(*)::int AS n FROM workflows')).rows[0].n).toBe(0);
+      await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [a.tenant.id]);
+      const rows = (await client.query('SELECT tenant_id FROM workflows')).rows;
+      expect(rows).toEqual([{ tenant_id: a.tenant.id }]);
+      expect((await client.query('SELECT id FROM tenants')).rows).toEqual([{ id: a.tenant.id }]);
+      await client.query('ROLLBACK');
+    } finally {
+      client.release();
+    }
+    // the application role (table owner) is not restricted
+    expect((await pool.query('SELECT count(*)::int AS n FROM workflows')).rows[0].n).toBe(2);
+  });
+
   it('never resolves credentials of another tenant inside executions', async () => {
     const a = await signup(server.app);
     const b = await signup(server.app);

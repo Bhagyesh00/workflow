@@ -159,6 +159,22 @@ describe('manual executions', () => {
     }
   });
 
+  it('ends open push streams when the server shuts down', async () => {
+    const other = await createTestServer({}, { startMain: false, reset: false });
+    await other.app.listen({ port: 0, host: '127.0.0.1' });
+    const url = `http://127.0.0.1:${(other.app.server.address() as AddressInfo).port}`;
+    const { client } = await signup(other.app);
+    const res = await fetch(`${url}/rest/push`, { headers: { cookie: client.cookie! } });
+    const reader = res.body!.getReader();
+    await reader.read();
+    const started = Date.now();
+    await other.close();
+    expect(Date.now() - started).toBeLessThan(5000);
+    // the stream was ended by the server
+    let done = false;
+    while (!done) done = (await reader.read()).done;
+  });
+
   it('runs unsaved workflow data with pin data and partial execution', async () => {
     const { client, tenant } = await signup(server.app);
     const wf = await createWorkflow(client, { nodes: [node('Start', 'core.manualTrigger')] });
