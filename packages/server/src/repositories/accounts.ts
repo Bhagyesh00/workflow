@@ -43,6 +43,11 @@ export class TenantRepository {
     return row;
   }
 
+  async delete(tenantId: string): Promise<boolean> {
+    const rows = await this.db.delete(tenants).where(eq(tenants.id, tenantId)).returning({ id: tenants.id });
+    return rows.length > 0;
+  }
+
   async update(tenantId: string, patch: Partial<Pick<TenantRow, 'name' | 'plan' | 'settings'>>) {
     const [row] = await this.db.update(tenants).set(patch).where(eq(tenants.id, tenantId)).returning();
     return row;

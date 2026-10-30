@@ -227,6 +227,38 @@ describe('system endpoints', () => {
     expect((await client.patch('/rest/settings', { timezone: 'Mars/Base' })).statusCode).toBe(400);
   });
 
+  it('lets owners (only) delete their workspace with everything in it', async () => {
+    const owner = await signup(server.app);
+    const other = await signup(server.app);
+    const wf = await createWorkflow(owner.client, {
+      nodes: [node('Hook', 'core.webhook', { path: 'gone', httpMethod: 'POST' }, [0, 0], { webhookId: 'g' })],
+    });
+    await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/activate`));
+    const invite = await owner.client.data(
+      owner.client.post('/rest/members/invite', { email: 'adm@example.com', role: 'admin' }),
+    );
+    const { TestClient } = await import('./helpers');
+    const admin = new TestClient(server.app);
+    await admin.data(
+      admin.post(`/rest/invitations/${invite.token}/accept`, { name: 'A', password: 'Passw0rd!' }),
+    );
+    expect((await admin.request('DELETE', '/rest/tenant', { confirm: owner.tenant.slug })).statusCode).toBe(
+      403,
+    );
+    expect((await owner.client.request('DELETE', '/rest/tenant', { confirm: 'wrong' })).statusCode).toBe(400);
+
+    const res = await owner.client.request('DELETE', '/rest/tenant', { confirm: owner.tenant.slug });
+    expect(res.statusCode).toBe(200);
+    expect(await server.ctx.repos.tenants.get(owner.tenant.id)).toBeUndefined();
+    expect(await server.ctx.repos.workflows.get(owner.tenant.id, wf.id)).toBeUndefined();
+    expect(
+      (await server.app.inject({ method: 'POST', url: `/webhook/${owner.tenant.slug}/gone` })).statusCode,
+    ).toBe(404);
+    expect((await owner.client.get('/rest/auth/me')).statusCode).toBe(401);
+    // other workspaces are untouched
+    expect((await other.client.get('/rest/auth/me')).statusCode).toBe(200);
+  });
+
   it('serves the editor with an SPA fallback that never shadows API routes', async () => {
     const dist = mkdtempSync(path.join(tmpdir(), 'editor-dist-'));
     mkdirSync(path.join(dist, 'assets'));

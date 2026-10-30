@@ -106,6 +106,7 @@ test/                    integration tests (real Postgres + Redis)
 - Polling nodes read `parameters.pollTimes`: a cron string or `{ item: [{ mode: 'everyMinute' | 'everyHour' | 'everyDay' | 'everyWeek' | 'everyMonth' | 'everyX' | 'custom', hour?, minute?, weekday?, dayOfMonth?, value?, unit?: 'seconds' | 'minutes' | 'hours', cronExpression? }] }`. Default: every minute.
 - The OAuth2 popup receives `postMessage({ type: 'oauth2-callback', status: 'success' | 'error', credentialId?, message? })` with the `BASE_URL` origin as target.
 - An editor served from another origin (e.g. a Vite dev server) works when that origin is listed in `CORS_ORIGINS`: `/rest` then answers preflights and sends credentialed CORS headers for it.
+- `DELETE /rest/tenant` with `{ "confirm": "<workspace slug>" }` (owner only) deactivates the workspace's workflows and deletes all its data and binary files.
 - `POST /rest/members/invite` returns the invitation `token` and `inviteUrl` once (there is no mail transport); `GET`/`DELETE /rest/invitations[/:id]` list and revoke pending invitations; `GET /rest/audit-log` (admin) pages through the audit log.
 
 ## Beyond the usual feature set

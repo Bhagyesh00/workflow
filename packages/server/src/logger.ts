@@ -21,6 +21,9 @@ const REDACT = [
   '*.apiKey',
   '*.data_enc',
   '*.dataEnc',
+  // database errors carry the query parameters (hashes, ciphertexts, run data)
+  'err.params',
+  'err.cause.params',
 ];
 
 export function createLogger(level: string, base: DataObject = {}): PinoLogger {

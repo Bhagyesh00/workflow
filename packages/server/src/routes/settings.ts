@@ -1,4 +1,6 @@
 /** /rest/settings, /rest/node-types, /rest/credential-types */
+import { rm } from 'node:fs/promises';
+import path from 'node:path';
 import { createBaseContext } from '@workflow/core';
 import {
   type CredentialTypeDescription,
@@ -10,7 +12,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import { requireAuth, requireRole } from '../http/auth';
+import { clearSessionCookie, requireAuth, requireRole } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { nodeSchema } from '../http/schemas';
 import { currentPeriod, effectiveLimits, PLANS, type TenantSettings } from '../plans';
@@ -118,6 +120,24 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         timezone: next.timezone ?? null,
       },
     };
+  });
+
+  // owners can delete the whole workspace (all its data, cascading); the slug must be confirmed
+  app.delete('/tenant', async (request, reply) => {
+    const auth = requireRole(request, 'owner');
+    const { confirm } = parse(z.object({ confirm: z.string() }), request.body ?? {});
+    if (confirm !== auth.tenant.slug) {
+      throw ApiError.badRequest('Confirm the deletion with the workspace slug in "confirm"');
+    }
+    const active = await repos.workflows.list(auth.tenant.id, { active: true, limit: 10_000 });
+    for (const wf of active) await ctx.activeWorkflows.deactivate(auth.tenant.id, wf.id);
+    await repos.tenants.delete(auth.tenant.id);
+    await rm(path.join(config.binaryData.dir, auth.tenant.id), { recursive: true, force: true }).catch(
+      () => {},
+    );
+    clearSessionCookie(reply, config);
+    request.log.info({ tenantId: auth.tenant.id, userId: auth.user.id }, 'Workspace deleted');
+    return { data: { ok: true } };
   });
 
   let nodeTypesCache: unknown;
