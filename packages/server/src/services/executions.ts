@@ -64,6 +64,8 @@ export interface StoredRunOptions {
   resumeOutput?: Item[][] | null;
   depth?: number;
   userId?: string;
+  /** the execution is an error workflow or runs below one: its failure never starts another error workflow */
+  errorChain?: boolean;
 }
 
 export interface ExecutionOutcome {
@@ -97,6 +99,8 @@ export interface StartExecutionInput {
   parentExecutionId?: string;
   depth?: number;
   userId?: string;
+  /** set for sub-workflows started below an error workflow (error executions always carry it) */
+  errorChain?: boolean;
   /** run in this process even in queue mode */
   inline?: boolean;
   /** resolve `finished` when the execution stops (webhook responses, sub-workflows) */
@@ -192,7 +196,8 @@ export class ExecutionService {
     const { repos } = this.deps;
     const tenant = await repos.tenants.get(input.tenantId);
     if (!tenant) throw ApiError.notFound('Tenant');
-    if (input.mode !== 'integrated' && input.mode !== 'error') await this.checkLimits(tenant, input.mode);
+    // sub-workflows run inside a parent that already holds a slot; error workflows only skip the monthly quota
+    if (input.mode !== 'integrated') await this.checkLimits(tenant, input.mode);
 
     const executionId = input.executionId ?? randomUUID();
     const workflowData = cloneDefinition(input.workflow);
@@ -203,44 +208,71 @@ export class ExecutionService {
       pinData: input.pinData,
       depth: input.depth ?? 0,
       userId: input.userId,
+      errorChain: input.mode === 'error' || input.errorChain === true ? true : undefined,
     };
-    await repos.executions.create(
-      tenant.id,
-      {
-        id: executionId,
-        workflowId: input.workflowId ?? null,
-        workflowName: input.workflow.name ?? '',
-        mode: input.mode,
-        status: 'new',
-        startedAt: new Date(),
-        retryOf: input.retryOf ?? null,
-        parentExecutionId: input.parentExecutionId ?? null,
-      },
-      {
-        workflowData: workflowData as unknown as Record<string, unknown>,
-        runOptions: JSON.parse(JSON.stringify(runOptions)),
-      },
-    );
-    // only production executions count towards the monthly quota
-    if (BILLABLE_MODES.has(input.mode)) await repos.usage.increment(tenant.id, currentPeriod(), 1, 0);
-    this.deps.push.send(tenant.id, 'executionStarted', {
-      executionId,
-      workflowId: input.workflowId ?? input.workflow.id ?? null,
-      mode: input.mode,
-    });
-
-    const finished = input.wait || input.observer ? this.addWaiter(executionId, input.observer) : undefined;
-    if (this.deps.queue && !input.inline) {
-      await this.deps.queue.enqueue({
-        executionId,
-        tenantId: tenant.id,
-        kind: 'run',
-        notify: Boolean(finished),
-      });
-    } else {
-      this.runInBackground(tenant.id, executionId, 'run', 'local');
+    const workflowId = input.workflowId ?? input.workflow.id ?? null;
+    try {
+      await repos.executions.create(
+        tenant.id,
+        {
+          id: executionId,
+          workflowId: input.workflowId ?? null,
+          workflowName: input.workflow.name ?? '',
+          mode: input.mode,
+          status: 'new',
+          startedAt: new Date(),
+          retryOf: input.retryOf ?? null,
+          parentExecutionId: input.parentExecutionId ?? null,
+        },
+        {
+          workflowData: workflowData as unknown as Record<string, unknown>,
+          runOptions: JSON.parse(JSON.stringify(runOptions)),
+        },
+      );
+    } catch (error) {
+      // files a trigger stored for this execution (webhook uploads) have no row to be pruned with
+      await this.removeBinaryData(tenant.id, executionId);
+      throw error;
     }
+    this.deps.push.send(tenant.id, 'executionStarted', { executionId, workflowId, mode: input.mode });
+
+    // start() rejects only while the execution cannot run, so callers may clean up after a rejection
+    const finished = input.wait || input.observer ? this.addWaiter(executionId, input.observer) : undefined;
+    try {
+      // only production executions count towards the monthly quota
+      if (BILLABLE_MODES.has(input.mode)) await repos.usage.increment(tenant.id, currentPeriod(), 1, 0);
+      if (this.deps.queue && !input.inline) {
+        await this.deps.queue.enqueue({
+          executionId,
+          tenantId: tenant.id,
+          kind: 'run',
+          notify: Boolean(finished),
+        });
+      }
+    } catch (error) {
+      await this.abandon(tenant.id, executionId, workflowId);
+      throw error;
+    }
+    if (!this.deps.queue || input.inline) this.runInBackground(tenant.id, executionId, 'run', 'local');
     return { executionId, finished };
+  }
+
+  /** an execution row exists but the run could not be scheduled: close it so it holds no concurrency slot */
+  private async abandon(tenantId: string, executionId: string, workflowId: string | null): Promise<void> {
+    const message = 'The execution could not be scheduled';
+    this.waiters.delete(executionId);
+    await this.deps.repos.executions
+      .update(tenantId, executionId, { status: 'crashed', stoppedAt: new Date(), errorMessage: message })
+      .catch((e) =>
+        this.deps.logger.warn({ err: e, tenantId, executionId }, 'Execution could not be closed'),
+      );
+    await this.removeBinaryData(tenantId, executionId);
+    this.deps.push.send(tenantId, 'executionFinished', {
+      executionId,
+      workflowId,
+      status: 'crashed',
+      error: { message },
+    });
   }
 
   private async checkLimits(tenant: TenantRow, mode: ExecutionMode): Promise<void> {
@@ -383,6 +415,7 @@ export class ExecutionService {
         mode: row.mode as ExecutionMode,
         workflowId: row.workflowId ?? undefined,
         depth: options.depth ?? 0,
+        errorChain: options.errorChain,
         hooks: this.hooks(tenant.id, row, definition, delivery),
       });
       engine = new WorkflowExecute(
@@ -393,7 +426,15 @@ export class ExecutionService {
     } catch (error) {
       const state = createInitialState();
       state.resultData.error = serializeError(error);
-      await this.finish(tenant, row, definition, staticBefore, failedResult(state), delivery);
+      await this.finish(
+        tenant,
+        row,
+        definition,
+        staticBefore,
+        failedResult(state),
+        delivery,
+        options.errorChain,
+      );
       return;
     }
 
@@ -421,7 +462,7 @@ export class ExecutionService {
         engine.state.resultData.error = serializeError(error);
         result = failedResult(engine.state);
       }
-      await this.finish(tenant, row, definition, staticBefore, result, delivery);
+      await this.finish(tenant, row, definition, staticBefore, result, delivery, options.errorChain);
     } catch (error) {
       logger.error({ err: error, tenantId, executionId }, 'Could not persist execution result');
       emit({ executionId, status: 'crashed', error: serializeError(error) });
@@ -456,7 +497,10 @@ export class ExecutionService {
       nodeExecuteAfter: async (nodeName, runIndex, taskData, state) => {
         if (manual) push.send(tenantId, 'nodeExecuteAfter', { executionId, nodeName, runIndex, taskData });
         if (definition.settings?.saveExecutionProgress) {
-          await repos.executions.saveState(tenantId, executionId, state);
+          // progress is best effort: a failed write must not fail the node that just ran
+          await repos.executions.saveState(tenantId, executionId, state).catch((e) => {
+            this.deps.logger.warn({ err: e, tenantId, executionId, nodeName }, 'Progress could not be saved');
+          });
         }
       },
       sendResponse: (response) => {
@@ -487,6 +531,7 @@ export class ExecutionService {
     staticBefore: string,
     result: ExecutionResult,
     delivery: Delivery,
+    errorChain?: boolean,
   ): Promise<void> {
     const { repos, push, metrics, logger } = this.deps;
     const { status, state } = result;
@@ -540,7 +585,7 @@ export class ExecutionService {
     }
 
     if (status === 'error' || status === 'crashed') {
-      await this.startErrorWorkflow(tenant.id, row, definition, state).catch((e) =>
+      await this.startErrorWorkflow(tenant.id, row, definition, state, errorChain).catch((e) =>
         logger.warn({ err: e, tenantId: tenant.id, executionId: row.id }, 'Error workflow could not start'),
       );
     }
@@ -580,6 +625,7 @@ export class ExecutionService {
     mode: ExecutionMode;
     workflowId?: string;
     depth?: number;
+    errorChain?: boolean;
     hooks?: ExecutionHooks;
   }): Promise<ExecutionServices> {
     const { config, repos, nodeTypes, credentials, http, codeRunner, logger } = this.deps;
@@ -609,7 +655,7 @@ export class ExecutionService {
       ),
       hooks: input.hooks,
       limits: { maxTries: 5 },
-      executeSubWorkflow: (request) => this.executeSubWorkflow(request, depth),
+      executeSubWorkflow: (request) => this.executeSubWorkflow(request, depth, input.errorChain === true),
     };
   }
 
@@ -619,6 +665,7 @@ export class ExecutionService {
   private async executeSubWorkflow(
     request: SubWorkflowRequest,
     depth: number,
+    errorChain: boolean,
   ): Promise<{ executionId: string; data: Item[][] | null }> {
     if (depth >= MAX_SUB_WORKFLOW_DEPTH) {
       throw new Error(`Sub-workflows can be nested at most ${MAX_SUB_WORKFLOW_DEPTH} levels deep`);
@@ -656,6 +703,7 @@ export class ExecutionService {
       triggerItems: JSON.parse(JSON.stringify(items)),
       parentExecutionId: request.parent.executionId || undefined,
       depth: depth + 1,
+      errorChain,
       inline: !detached,
       wait: !detached,
     });
@@ -672,12 +720,12 @@ export class ExecutionService {
     row: ExecutionRow,
     definition: WorkflowDefinition,
     state: ExecutionState,
+    errorChain?: boolean,
   ): Promise<void> {
     const errorWorkflowId = definition.settings?.errorWorkflow;
-    if (!errorWorkflowId || row.mode === 'manual') return;
-    // an error workflow that fails must not trigger itself forever
-    if (row.mode === 'error' && (errorWorkflowId === row.workflowId || errorWorkflowId === definition.id))
-      return;
+    // a failing error workflow, or a sub-workflow it called, never starts another one: error workflows
+    // naming each other (directly or through Execute Workflow) would loop
+    if (!errorWorkflowId || row.mode === 'manual' || row.mode === 'error' || errorChain) return;
     const target = await this.deps.repos.workflows.get(tenantId, errorWorkflowId);
     if (!target) {
       this.deps.logger.warn({ tenantId, errorWorkflowId }, 'Error workflow not found');

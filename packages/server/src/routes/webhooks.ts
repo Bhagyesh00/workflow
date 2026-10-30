@@ -10,7 +10,7 @@ import multipart from '@fastify/multipart';
 import type { WebhookRequest } from '@workflow/workflow';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerContext } from '../context';
-import { errorBody } from '../http/errors';
+import { ApiError, errorBody } from '../http/errors';
 import { SESSION_COOKIE } from '../services/auth';
 import { normalizePath } from '../services/webhook-paths';
 import type { IncomingWebhook, WebhookReply } from '../services/webhooks';
@@ -73,7 +73,10 @@ function withoutSessionCookie(headers: FastifyRequest['headers']): WebhookReques
   return out;
 }
 
-async function toWebhookRequest(request: FastifyRequest): Promise<WebhookRequest> {
+const tooLarge = (bodyLimit: number) =>
+  new ApiError(413, 'payload_too_large', `The request body is larger than ${bodyLimit} bytes`);
+
+async function toWebhookRequest(request: FastifyRequest, bodyLimit: number): Promise<WebhookRequest> {
   const headers = withoutSessionCookie(request.headers);
   let body: unknown = {};
   let rawBody: Uint8Array | undefined;
@@ -81,18 +84,32 @@ async function toWebhookRequest(request: FastifyRequest): Promise<WebhookRequest
   if (request.isMultipart()) {
     const fields: Record<string, unknown> = {};
     files = [];
+    // the multipart limits are per part: one budget across all parts keeps a request within the body limit
+    let total = 0;
+    const consume = (bytes: number) => {
+      total += bytes;
+      if (total > bodyLimit) throw tooLarge(bodyLimit);
+    };
     for await (const part of request.parts()) {
-      if (BLOCKED_KEYS.has(part.fieldname)) continue;
       if (part.type === 'file') {
+        const chunks: Buffer[] = [];
+        for await (const chunk of part.file as AsyncIterable<Buffer>) {
+          consume(chunk.length);
+          chunks.push(chunk);
+        }
+        if (part.file.truncated) throw tooLarge(bodyLimit);
+        if (BLOCKED_KEYS.has(part.fieldname)) continue;
         files.push({
           fieldName: part.fieldname,
           fileName: part.filename,
           mimeType: part.mimetype,
-          data: new Uint8Array(await part.toBuffer()),
+          data: new Uint8Array(Buffer.concat(chunks)),
         });
       } else {
-        const existing = fields[part.fieldname];
         const value = part.value;
+        consume(Buffer.byteLength(typeof value === 'string' ? value : (JSON.stringify(value) ?? '')));
+        if (BLOCKED_KEYS.has(part.fieldname)) continue;
+        const existing = fields[part.fieldname];
         fields[part.fieldname] =
           existing === undefined ? value : Array.isArray(existing) ? [...existing, value] : [existing, value];
       }
@@ -149,10 +166,41 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
   const bodyLimit = ctx.config.bodyLimitBytes;
   app.removeAllContentTypeParsers();
   app.addContentTypeParser('*', { parseAs: 'buffer', bodyLimit }, (_req, body, done) => done(null, body));
+  // per-part limits; toWebhookRequest also holds all parts of one request to bodyLimit bytes in total
+  const files = 50;
+  const fields = 500;
   await app.register(multipart, {
-    limits: { fileSize: bodyLimit, files: 50, fields: 500, fieldSize: 1024 * 1024 },
+    limits: {
+      fileSize: bodyLimit,
+      files,
+      fields,
+      parts: files + fields,
+      fieldSize: Math.min(bodyLimit, 1024 * 1024),
+    },
     throwFileSizeLimit: true,
   });
+
+  /** the body is read only when the service has found the webhook: unknown paths are never parsed */
+  const incomingOf = (request: FastifyRequest, path: string): IncomingWebhook => ({
+    method: request.method,
+    path,
+    read: () => toWebhookRequest(request, bodyLimit),
+  });
+
+  const respond = async (reply: FastifyReply, result: () => Promise<WebhookReply>) => {
+    try {
+      return send(reply, await result());
+    } catch (error) {
+      if (error instanceof BadBodyError)
+        return send(reply, { statusCode: 400, headers: {}, body: errorBody('bad_request', error.message) });
+      // the total body budget and the multipart limits (file size, file and field counts)
+      if ((error as { statusCode?: number }).statusCode === 413) {
+        const body = errorBody('payload_too_large', (error as Error).message);
+        return send(reply, { statusCode: 413, headers: {}, body });
+      }
+      throw error;
+    }
+  };
 
   const handle = (kind: Kind) => async (request: FastifyRequest, reply: FastifyReply) => {
     const params = request.params as { tenantSlug: string; '*'?: string };
@@ -163,38 +211,18 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
         await ctx.webhooks.handlePreflight(params.tenantSlug, path, request.headers.origin, kind === 'test'),
       );
     }
-    let webhookRequest: WebhookRequest;
-    try {
-      webhookRequest = await toWebhookRequest(request);
-    } catch (error) {
-      if (error instanceof BadBodyError)
-        return send(reply, { statusCode: 400, headers: {}, body: errorBody('bad_request', error.message) });
-      throw error;
-    }
-    const incoming: IncomingWebhook = { method: request.method, path, request: webhookRequest };
-    const result =
+    const incoming = incomingOf(request, path);
+    return respond(reply, () =>
       kind === 'production'
-        ? await ctx.webhooks.handleProduction(params.tenantSlug, incoming)
-        : await ctx.webhooks.handleTest(params.tenantSlug, incoming);
-    return send(reply, result);
+        ? ctx.webhooks.handleProduction(params.tenantSlug, incoming)
+        : ctx.webhooks.handleTest(params.tenantSlug, incoming),
+    );
   };
 
   const waiting = async (request: FastifyRequest, reply: FastifyReply) => {
     const { executionId } = request.params as { executionId: string };
-    let webhookRequest: WebhookRequest;
-    try {
-      webhookRequest = await toWebhookRequest(request);
-    } catch (error) {
-      if (error instanceof BadBodyError)
-        return send(reply, { statusCode: 400, headers: {}, body: errorBody('bad_request', error.message) });
-      throw error;
-    }
-    const result = await ctx.webhooks.handleWaiting(executionId, {
-      method: request.method,
-      path: normalizePath((request.params as { '*'?: string })['*'] ?? ''),
-      request: webhookRequest,
-    });
-    return send(reply, result);
+    const path = normalizePath((request.params as { '*'?: string })['*'] ?? '');
+    return respond(reply, () => ctx.webhooks.handleWaiting(executionId, incomingOf(request, path)));
   };
 
   app.all('/webhook/:tenantSlug/*', handle('production'));

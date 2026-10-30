@@ -53,8 +53,22 @@ export interface WebhookReply {
 export interface IncomingWebhook {
   method: string;
   path: string;
+  /** reads and parses the body; called only once the webhook is found, so unknown paths are never parsed */
+  read(): Promise<WebhookRequest>;
+}
+
+/** an incoming webhook whose body has been read */
+interface ReceivedWebhook {
+  method: string;
+  path: string;
   request: WebhookRequest;
 }
+
+const receive = async (incoming: IncomingWebhook): Promise<ReceivedWebhook> => ({
+  method: incoming.method,
+  path: incoming.path,
+  request: await incoming.read(),
+});
 
 const IDEMPOTENCY_MAX_BINARY = 1024 * 1024;
 
@@ -85,7 +99,7 @@ interface RunInput {
   node: WorkflowNode;
   hook: NodeWebhook;
   mode: 'webhook' | 'manual';
-  incoming: IncomingWebhook;
+  incoming: ReceivedWebhook;
   params: Record<string, string>;
   userId?: string;
   onStarted?: (executionId: string) => void;
@@ -112,8 +126,9 @@ export class WebhookService {
     if (!node) return notRegistered(incoming.method, incoming.path);
     const hook = this.hookOf(definition, node, found.webhookName);
     if (!hook) return notRegistered(incoming.method, incoming.path);
+    const received = await receive(incoming);
 
-    const key = header(incoming.request.headers, 'idempotency-key');
+    const key = header(received.request.headers, 'idempotency-key');
     if (key) {
       if (key.length > 255)
         return json(400, errorBody('bad_request', 'The Idempotency-Key header is too long'));
@@ -135,7 +150,7 @@ export class WebhookService {
           node,
           hook,
           mode: 'webhook',
-          incoming,
+          incoming: received,
           params: found.params,
           onStarted: (id) => {
             executionId = id;
@@ -157,7 +172,7 @@ export class WebhookService {
       node,
       hook,
       mode: 'webhook',
-      incoming,
+      incoming: received,
       params: found.params,
     });
   }
@@ -233,6 +248,8 @@ export class WebhookService {
         ),
       );
     }
+    // a body that cannot be read (too large, malformed) leaves the registration in place
+    const received = await receive(incoming);
     // one-shot: the first call consumes the registration
     if (!(await testWebhooks.remove(found.registration)))
       return notRegistered(incoming.method, incoming.path);
@@ -254,7 +271,7 @@ export class WebhookService {
       node,
       hook,
       mode: 'manual',
-      incoming,
+      incoming: received,
       params: found.params,
       userId: registration.userId,
       onStarted: (executionId) =>
@@ -286,6 +303,7 @@ export class WebhookService {
     if (hook && hook.method !== incoming.method) {
       return json(404, errorBody('not_found', `This execution resumes on ${hook.method} requests`));
     }
+    const { request } = await receive(incoming);
 
     let output: Item[][];
     if (node && type?.webhook && hook) {
@@ -297,14 +315,14 @@ export class WebhookService {
       });
       const ctx = createWebhookContext(
         { workflow, node, services, evaluator: this.evaluator, signal: AbortSignal.timeout(60_000) },
-        incoming.request,
+        request,
         hook.webhookName,
       );
       const result = await type.webhook(ctx);
       if (!result.workflowData) return fromWebhookResponse(result.webhookResponse ?? { statusCode: 200 });
       output = result.workflowData;
     } else {
-      const body = incoming.request.body;
+      const body = request.body;
       output = [[{ json: isPlainObject(body) ? body : body === undefined || body === '' ? {} : { body } }]];
     }
 
@@ -333,6 +351,7 @@ export class WebhookService {
     const request: WebhookRequest = { ...incoming.request, params: { ...input.params } };
 
     let reply: WebhookReply;
+    let executionStarted = false;
     try {
       const services = await executions.buildServices({
         tenant,
@@ -391,6 +410,7 @@ export class WebhookService {
           }
           throw error;
         }
+        executionStarted = true;
         input.onStarted?.(execution.executionId);
         if (streaming) {
           reply = streaming.attach(execution);
@@ -413,6 +433,9 @@ export class WebhookService {
           ? (error as Error).message || 'The webhook failed'
           : 'The webhook could not be processed';
       reply = json(500, errorBody('webhook_error', message));
+    } finally {
+      // uploads the node stored for an execution that never started belong to no row and would never be pruned
+      if (!executionStarted) await executions.removeBinaryData(tenant.id, executionId);
     }
     metrics.webhookDuration.observe({ status: String(reply.statusCode) }, (Date.now() - started) / 1000);
     return this.decorate(reply, workflow, node, incoming);
@@ -579,7 +602,7 @@ export class WebhookService {
   }
 
   /** response headers and CORS from the node's options */
-  private decorate(reply: WebhookReply, workflow: Workflow, node: WorkflowNode, incoming: IncomingWebhook) {
+  private decorate(reply: WebhookReply, workflow: Workflow, node: WorkflowNode, incoming: ReceivedWebhook) {
     const parameters = getResolvedParameters(workflow, node) as DataObject;
     const options = (parameters.options ?? {}) as DataObject;
     const headers = { ...reply.headers };

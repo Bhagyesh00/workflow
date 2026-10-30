@@ -7,26 +7,51 @@ import { isUuid, now } from './util';
 
 export type ExecutionInsert = Omit<typeof executions.$inferInsert, 'tenantId'>;
 
+/** a JSON-escaped U+0000, unless its backslash is itself escaped (the text "\u0000" in the data) */
+const ESCAPED_NUL = /(?<!\\)((?:\\\\)*)\\u0000/g;
+const NUL = '\0';
+const REPLACEMENT = String.fromCodePoint(0xfffd);
+
+/**
+ * Postgres text and jsonb reject U+0000. Run data comes from untrusted payloads (webhook bodies,
+ * HTTP responses), so every NUL, in keys and values alike, is replaced with U+FFFD before writing.
+ */
+export function withoutNul<T>(value: T): T {
+  if (typeof value === 'string')
+    return (value.includes(NUL) ? value.replaceAll(NUL, REPLACEMENT) : value) as T;
+  if (value === null || typeof value !== 'object' || value instanceof Date) return value;
+  const json = JSON.stringify(value);
+  const cleaned = json.replace(ESCAPED_NUL, `$1${REPLACEMENT}`);
+  return cleaned === json ? value : (JSON.parse(cleaned) as T);
+}
+
+function withoutNulFields<T extends Partial<ExecutionInsert>>(patch: T): T {
+  return Object.fromEntries(Object.entries(patch).map(([key, value]) => [key, withoutNul(value)])) as T;
+}
+
 export class ExecutionRepository {
   constructor(private readonly db: DbOrTx) {}
 
+  /** the row and its data are written together, so a failed data insert leaves no orphan 'new' row */
   async create(
     tenantId: string,
     execution: ExecutionInsert,
     data: { workflowData: Record<string, unknown>; runOptions: Record<string, unknown> },
   ): Promise<ExecutionRow> {
-    const [row] = await this.db
-      .insert(executions)
-      .values({ ...execution, tenantId, createdAt: now() })
-      .returning();
-    await this.db.insert(executionData).values({
-      executionId: row.id,
-      tenantId,
-      workflowData: data.workflowData,
-      runOptions: data.runOptions,
-      state: null,
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(executions)
+        .values({ ...withoutNulFields(execution), tenantId, createdAt: now() })
+        .returning();
+      await tx.insert(executionData).values({
+        executionId: row.id,
+        tenantId,
+        workflowData: withoutNul(data.workflowData),
+        runOptions: withoutNul(data.runOptions),
+        state: null,
+      });
+      return row;
     });
-    return row;
   }
 
   async get(tenantId: string, id: string): Promise<ExecutionRow | undefined> {
@@ -87,7 +112,7 @@ export class ExecutionRepository {
   async update(tenantId: string, id: string, patch: Partial<ExecutionInsert>): Promise<void> {
     await this.db
       .update(executions)
-      .set(patch)
+      .set(withoutNulFields(patch))
       .where(and(eq(executions.tenantId, tenantId), eq(executions.id, id)));
   }
 
@@ -101,7 +126,7 @@ export class ExecutionRepository {
     if (!isUuid(id)) return false;
     const rows = await this.db
       .update(executions)
-      .set(patch)
+      .set(withoutNulFields(patch))
       .where(and(eq(executions.tenantId, tenantId), eq(executions.id, id), inArray(executions.status, from)))
       .returning({ id: executions.id });
     return rows.length > 0;
@@ -110,14 +135,14 @@ export class ExecutionRepository {
   async saveState(tenantId: string, id: string, state: unknown): Promise<void> {
     await this.db
       .update(executionData)
-      .set({ state: state as Record<string, unknown> })
+      .set({ state: withoutNul(state as Record<string, unknown>) })
       .where(and(eq(executionData.tenantId, tenantId), eq(executionData.executionId, id)));
   }
 
   async updateRunOptions(tenantId: string, id: string, runOptions: Record<string, unknown>): Promise<void> {
     await this.db
       .update(executionData)
-      .set({ runOptions })
+      .set({ runOptions: withoutNul(runOptions) })
       .where(and(eq(executionData.tenantId, tenantId), eq(executionData.executionId, id)));
   }
 
