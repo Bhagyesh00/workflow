@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-router';
 import { errorMessage, isApiError } from '../api/client';
 import { executionsApi, workflowsApi } from '../api/endpoints';
-import { queryKeys, useNodeTypes } from '../api/queries';
+import { queryKeys, useMe, useNodeTypes } from '../api/queries';
 import type { CanvasActions } from '../components/canvas/actions';
 import { FlowCanvas } from '../components/canvas/FlowCanvas';
 import { NodeCreator } from '../components/canvas/NodeCreator';
@@ -19,7 +19,7 @@ import { DoctorPanel } from '../components/workflow/DoctorPanel';
 import { LogPanel } from '../components/workflow/LogPanel';
 import { VersionsPanel } from '../components/workflow/VersionsPanel';
 import { WorkflowSettingsModal } from '../components/workflow/WorkflowSettingsModal';
-import { EditorTopBar } from '../features/editor/EditorTopBar';
+import { EditorTopBar, ShortcutsDialog } from '../features/editor/EditorTopBar';
 import { ExecuteBar } from '../features/editor/ExecuteBar';
 import {
   type EditorDeps,
@@ -386,6 +386,7 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
           onListen={readOnly ? undefined : (name) => void listenForTestEvent(deps, name)}
         />
       )}
+      <ShortcutsDialog />
       <WorkflowSettingsModal
         open={ui.settingsOpen}
         onClose={() => ui.setSettingsOpen(false)}
@@ -531,6 +532,8 @@ export function WorkflowEditorPage() {
   const queryClient = useQueryClient();
   const isNew = id === 'new';
   const alreadyOpen = useWorkflowStore.getState().meta.id === id;
+  // viewers can open and inspect workflows but not change them
+  const viewer = useMe().data?.role === 'viewer';
 
   const query = useQuery({
     queryKey: queryKeys.workflow(id),
@@ -543,11 +546,11 @@ export function WorkflowEditorPage() {
 
   useEffect(() => {
     if (!query.data) return;
-    useWorkflowStore.getState().load(query.data);
+    useWorkflowStore.getState().load(query.data, { readOnly: viewer });
     useRunStore.getState().reset();
     const debug = search.get('debug');
-    if (debug) void loadExecutionAsPinnedData(debug);
-  }, [query.data, search]);
+    if (debug && !viewer) void loadExecutionAsPinnedData(debug);
+  }, [query.data, search, viewer]);
 
   useEffect(() => {
     if (!isNew) return;

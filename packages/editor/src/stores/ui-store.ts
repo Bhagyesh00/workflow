@@ -27,6 +27,7 @@ export interface UiState {
   ndvNode: string | null;
   logPanelOpen: boolean;
   settingsOpen: boolean;
+  shortcutsOpen: boolean;
   /** PATCH answered 409: someone saved a newer version */
   saveConflict: boolean;
   /** activation was refused with these per-node problems */
@@ -39,6 +40,7 @@ export interface UiState {
   openNdv(nodeName: string | null): void;
   setLogPanel(open: boolean): void;
   setSettingsOpen(open: boolean): void;
+  setShortcutsOpen(open: boolean): void;
   setSaveConflict(open: boolean): void;
   setActivationErrors(errors: ActivationErrorDetail[] | null): void;
 }
@@ -54,6 +56,7 @@ export const useUiStore = create<UiState>()((set) => {
     ndvNode: null,
     logPanelOpen: false,
     settingsOpen: false,
+    shortcutsOpen: false,
     saveConflict: false,
     activationErrors: null,
 
@@ -78,6 +81,9 @@ export const useUiStore = create<UiState>()((set) => {
     },
     setSettingsOpen(open) {
       set({ settingsOpen: open });
+    },
+    setShortcutsOpen(open) {
+      set({ shortcutsOpen: open });
     },
     setSaveConflict(open) {
       set({ saveConflict: open });

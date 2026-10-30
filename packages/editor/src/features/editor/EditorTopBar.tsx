@@ -4,6 +4,7 @@ import {
   Copy,
   Download,
   History,
+  Keyboard,
   MoreHorizontal,
   Settings2,
   Stethoscope,
@@ -13,13 +14,16 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { Button, IconButton } from '../../components/ui/Button';
 import { cx } from '../../components/ui/cx';
+import { Dialog } from '../../components/ui/Dialog';
 import { Switch } from '../../components/ui/Field';
 import { Menu } from '../../components/ui/Menu';
+import { Kbd } from '../../components/ui/misc';
 import { TagsEditor } from '../../components/workflow/TagsEditor';
 import type { DoctorIssue } from '../../lib/doctor';
 import { downloadJson, safeFileName } from '../../lib/format';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
+import { SHORTCUTS } from './useEditorShortcuts';
 
 export function EditorTopBar({
   issues,
@@ -146,6 +150,13 @@ export function EditorTopBar({
             onSelect: exportWorkflow,
           },
           {
+            key: 'shortcuts',
+            label: 'Keyboard shortcuts',
+            icon: <Keyboard size={14} />,
+            hint: '?',
+            onSelect: () => useUiStore.getState().setShortcutsOpen(true),
+          },
+          {
             key: 'duplicate',
             label: 'Duplicate',
             icon: <Copy size={14} />,
@@ -184,5 +195,26 @@ export function EditorTopBar({
         {dirty || !meta.id ? 'Save' : 'Saved'}
       </Button>
     </header>
+  );
+}
+
+export function ShortcutsDialog() {
+  const open = useUiStore((s) => s.shortcutsOpen);
+  const setOpen = useUiStore((s) => s.setShortcutsOpen);
+  return (
+    <Dialog open={open} onClose={() => setOpen(false)} title="Keyboard shortcuts" size="sm">
+      <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-sm">
+        {SHORTCUTS.map((shortcut) => (
+          <div key={shortcut.label} className="contents">
+            <dt className="text-ink-2">{shortcut.label}</dt>
+            <dd className="flex justify-end gap-1">
+              {shortcut.keys.split(' ').map((key) => (
+                <Kbd key={key}>{key === 'Ctrl' && /Mac/i.test(navigator.platform) ? '⌘' : key}</Kbd>
+              ))}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </Dialog>
   );
 }

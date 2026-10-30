@@ -21,13 +21,14 @@ export const SHORTCUTS: Array<{ keys: string; label: string }> = [
   { keys: '0', label: 'Reset zoom' },
   { keys: '+ / -', label: 'Zoom in, out' },
   { keys: 'L', label: 'Show or hide logs' },
+  { keys: '?', label: 'Show these shortcuts' },
 ];
 
 let memoryClipboard = '';
 
 function isEditable(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  if (!el) return false;
+  if (!(target instanceof Element)) return false;
+  const el = target;
   return Boolean(el.closest('input, textarea, select, [contenteditable="true"], .cm-editor'));
 }
 
@@ -106,6 +107,8 @@ export function useEditorShortcuts(handlers: {
         void flow.zoomIn({ duration: 150 });
       } else if (key === '-') {
         void flow.zoomOut({ duration: 150 });
+      } else if (event.key === '?') {
+        ui.setShortcutsOpen(true);
       } else if (key === 'l') {
         ui.setLogPanel(!ui.logPanelOpen);
       } else if (key === 'escape') {
