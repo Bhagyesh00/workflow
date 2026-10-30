@@ -120,6 +120,8 @@ export interface WorkflowNode {
   maxTries?: number;
   /** milliseconds */
   waitBetweenTries?: number;
+  /** `exponential` doubles the wait each attempt (with jitter) and honours `Retry-After` */
+  retryBackoff?: 'fixed' | 'exponential';
   alwaysOutputData?: boolean;
   executeOnce?: boolean;
   onError?: OnErrorBehavior;
@@ -521,7 +523,16 @@ export interface ExecutionErrorShape {
   name: string;
   message: string;
   description?: string;
+  /** stable machine-readable code from the error catalogue, e.g. `HTTP_401`, `EXPRESSION_REFERENCE` */
+  code?: string;
+  /** plain-language suggestion for fixing the error */
+  hint?: string;
   node?: string;
+  itemIndex?: number;
+  parameter?: string;
+  /** summary of the failing HTTP call (no query string, no secrets) */
+  request?: { method: string; url: string };
+  response?: { statusCode?: number; body?: string };
   httpCode?: string;
   stack?: string;
   timestamp?: number;
@@ -583,6 +594,8 @@ export interface ExecutionState {
     waitingExecutionSource: WaitingExecutionSource;
     /** per-node context data (e.g. Loop Over Items progress) */
     contextData: Record<string, DataObject>;
+    /** inputs of the node that stopped the execution; enables "retry from failed node" */
+    failedExecuteData?: ExecuteData;
   };
   /** ISO date when a waiting execution should resume */
   waitTill?: string;

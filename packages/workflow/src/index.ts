@@ -1,4 +1,5 @@
 export * from './ai-types';
+export * from './diff';
 export * from './errors';
 export * from './expression/data-proxy';
 export * from './expression/expression';

@@ -21,6 +21,7 @@ import {
   isResourceLocatorValue,
   type Logger,
   NodeApiError,
+  type NodeCredentialRef,
   type NodeHelpers,
   NodeOperationError,
   type NodeParameters,
@@ -77,6 +78,8 @@ export function toNodeApiError(node: WorkflowNode, error: unknown): Error {
       httpCode: error.statusCode,
       description: `HTTP ${error.statusCode} ${error.statusMessage}`.trim(),
       responseBody: error.body,
+      request: error.request,
+      retryAfterMs: error.retryAfterMs,
       cause: error,
     });
   }
@@ -180,6 +183,39 @@ function extractResourceLocator(value: unknown, deps: ContextDeps, name: string)
   return value.value;
 }
 
+/**
+ * The credential a node uses for `type`. A reference whose id is an expression
+ * (`={{ $json.customer.credentialId }}`) is a credential slot resolved per item; the
+ * credentials provider still enforces tenant ownership of the resolved id.
+ */
+export function resolveCredentialRef(deps: ContextDeps, type: string, itemIndex = 0): NodeCredentialRef {
+  const { node, evaluator } = deps;
+  const ref = node.credentials?.[type];
+  if (!ref) throw new NodeOperationError(node, `Node does not have credentials of type "${type}" set`);
+  if (typeof ref.id === 'string' && ref.id.startsWith('=')) {
+    let id: unknown;
+    try {
+      id = evaluator.evaluate(ref.id, buildExpressionContext(deps, itemIndex));
+    } catch (error) {
+      throw new NodeOperationError(node, `Credential expression failed: ${(error as Error).message}`, {
+        itemIndex,
+        cause: error,
+      });
+    }
+    if (typeof id !== 'string' || !id.trim()) {
+      throw new NodeOperationError(
+        node,
+        `Credential expression for "${type}" did not resolve to a credential id`,
+        {
+          itemIndex,
+        },
+      );
+    }
+    return { id: id.trim(), name: ref.name };
+  }
+  return ref;
+}
+
 function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCredentials']): NodeHelpers {
   const { services, node } = deps;
   const assertBinaryData = (itemIndex: number, propertyName: string, inputIndex = 0): BinaryData => {
@@ -202,12 +238,13 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
       throw toNodeApiError(node, error);
     }
   };
-  const httpRequestWithAuthentication = async (credentialType: string, options: HttpRequestOptions) => {
-    const ref = node.credentials?.[credentialType];
-    if (!ref) {
-      throw new NodeOperationError(node, `Node does not have credentials of type "${credentialType}" set`);
-    }
-    const data = await getCredentials(credentialType);
+  const httpRequestWithAuthentication = async (
+    credentialType: string,
+    options: HttpRequestOptions,
+    itemIndex = 0,
+  ) => {
+    const ref = resolveCredentialRef(deps, credentialType, itemIndex);
+    const data = await getCredentials(credentialType, itemIndex);
     try {
       if (services.credentialTypes.isA(credentialType, 'oAuth2Api')) {
         return await oauth2Request(
@@ -268,10 +305,11 @@ function nodeLogger(logger: Logger, deps: ContextDeps): Logger {
 
 export function createBaseContext(deps: ContextDeps): BaseContext {
   const { workflow, node, services, evaluator } = deps;
-  const getCredentials = async <T extends DataObject = DataObject>(type: string): Promise<T> => {
-    const ref = node.credentials?.[type];
-    if (!ref) throw new NodeOperationError(node, `Node does not have credentials of type "${type}" set`);
-    return (await services.credentials.get(ref, type)) as T;
+  const getCredentials = async <T extends DataObject = DataObject>(
+    type: string,
+    itemIndex = 0,
+  ): Promise<T> => {
+    return (await services.credentials.get(resolveCredentialRef(deps, type, itemIndex), type)) as T;
   };
 
   const getNodeParameter = (

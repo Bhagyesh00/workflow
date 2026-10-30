@@ -40,6 +40,8 @@ export interface NodeHelpers {
   httpRequestWithAuthentication<T = any>(
     credentialType: string,
     options: HttpRequestOptions,
+    /** item whose data resolves an expression-based credential slot (default 0) */
+    itemIndex?: number,
   ): Promise<T | HttpFullResponse<T>>;
   prepareBinaryData(data: Uint8Array, fileName?: string, mimeType?: string): Promise<BinaryData>;
   getBinaryDataBuffer(itemIndex: number, propertyName: string, inputIndex?: number): Promise<Uint8Array>;

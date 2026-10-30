@@ -95,6 +95,10 @@ export interface ExecutionLimits {
   expressionMaxSteps: number;
   /** max retries the engine allows for a node */
   maxTries: number;
+  /** items a single node output may contain */
+  maxItemsPerOutput: number;
+  /** node runs per execution (loop circuit breaker) */
+  maxNodeRuns: number;
 }
 
 export interface ExecutionServices {

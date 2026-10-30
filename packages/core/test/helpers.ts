@@ -248,6 +248,30 @@ export const testNodes: NodeType[] = [
   },
 ];
 
+testNodes.push({
+  description: {
+    name: 'test.credUser',
+    displayName: 'Credential user',
+    description: '',
+    group: ['transform'],
+    version: 1,
+    defaults: { name: 'Credential user' },
+    inputs: ['main'],
+    outputs: ['main'],
+    credentials: [{ name: 'apiKey', required: true }],
+    properties: [],
+  },
+  async execute(ctx) {
+    const items = ctx.getInputData();
+    const out: Item[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const creds = await ctx.getCredentials<{ key: string }>('apiKey', i);
+      out.push({ json: { key: creds.key }, pairedItem: { item: i } });
+    }
+    return [out];
+  },
+});
+
 export const testCredentialTypes: CredentialType[] = [
   {
     name: 'oAuth2Api',

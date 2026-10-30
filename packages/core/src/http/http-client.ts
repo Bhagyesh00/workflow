@@ -25,9 +25,20 @@ export class HttpError extends Error {
     readonly statusMessage: string,
     readonly body: unknown,
     readonly headers: Record<string, string>,
+    readonly request?: { method: string; url: string },
   ) {
     super(message);
     this.name = 'HttpError';
+  }
+
+  /** `Retry-After` in milliseconds (seconds or HTTP-date form) */
+  get retryAfterMs(): number | undefined {
+    const value = this.headers['retry-after'];
+    if (!value) return undefined;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+    const date = Date.parse(value);
+    return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
   }
 }
 
@@ -279,6 +290,7 @@ export class HttpClient {
           response.statusText,
           parsed,
           responseHeaders,
+          { method, url: `${url.origin}${url.pathname}` },
         );
       }
     }

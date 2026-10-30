@@ -31,6 +31,7 @@ import {
   type NodeType,
   normalizePairedItems,
   portType,
+  QuotaExceededError,
   resolvePorts,
   type SourceData,
   type SupplyDataContext,
@@ -76,6 +77,18 @@ export interface ResumeOptions {
 
 type NodeOutcome = 'continue' | 'stop' | 'wait';
 
+/** wait before the next retry: fixed or exponential with ±20% jitter, honouring Retry-After (capped) */
+export function retryDelay(node: WorkflowNode, attempt: number, error: unknown): number {
+  const base = Math.min(Math.max(node.waitBetweenTries ?? 1000, 0), 5000);
+  let delay =
+    node.retryBackoff === 'exponential'
+      ? Math.min(base * 2 ** (attempt - 1), MAX_RETRY_WAIT_MS) * (0.8 + Math.random() * 0.4)
+      : base;
+  const retryAfter = (error as { retryAfterMs?: number } | null)?.retryAfterMs;
+  if (typeof retryAfter === 'number' && retryAfter > delay) delay = Math.min(retryAfter, MAX_RETRY_WAIT_MS);
+  return Math.round(delay);
+}
+
 export function createInitialState(): ExecutionState {
   return {
     startData: {},
@@ -90,6 +103,8 @@ export function createInitialState(): ExecutionState {
 }
 
 const MAX_NODE_RUNS = 100_000;
+const MAX_ITEMS_PER_OUTPUT = 1_000_000;
+const MAX_RETRY_WAIT_MS = 60_000;
 
 export class WorkflowExecute {
   readonly state: ExecutionState;
@@ -145,6 +160,28 @@ export class WorkflowExecute {
     return this.process(options);
   }
 
+  /**
+   * Re-run the node that stopped this execution with the same inputs, reusing every upstream
+   * output. Works on a new engine built from the persisted state, optionally with a newer
+   * version of the workflow (the node must still exist).
+   */
+  async retryFromFailure(options: ResumeOptions = {}): Promise<ExecutionResult> {
+    const failed = this.state.executionData.failedExecuteData;
+    if (!failed) throw new WorkflowOperationError('This execution has no failed node to retry from');
+    if (!this.workflow.nodes[failed.node]) {
+      throw new WorkflowOperationError(`Node "${failed.node}" no longer exists in the workflow`);
+    }
+    this.state.executionData.failedExecuteData = undefined;
+    this.state.resultData.error = undefined;
+    this.state.executionData.nodeExecutionStack.unshift(failed);
+    return this.process(options);
+  }
+
+  /** Continue from persisted state after a crash (requires `saveExecutionProgress`). */
+  async continueExecution(options: ResumeOptions = {}): Promise<ExecutionResult> {
+    return this.process(options);
+  }
+
   /** Continue an execution that was waiting (Wait node, resume webhook). */
   async resume(options: ResumeOptions = {}): Promise<ExecutionResult> {
     const nodeName = this.state.resultData.lastNodeExecuted;
@@ -195,8 +232,9 @@ export class WorkflowExecute {
         let next = stack.shift();
         if (!next) next = this.takeWaitingNode();
         if (!next) break;
-        if (++this.nodeRuns > MAX_NODE_RUNS) {
-          throw new WorkflowOperationError(`Execution exceeded ${MAX_NODE_RUNS} node runs (infinite loop?)`);
+        const maxNodeRuns = this.services.limits?.maxNodeRuns ?? MAX_NODE_RUNS;
+        if (++this.nodeRuns > maxNodeRuns) {
+          throw new QuotaExceededError(`Execution exceeded ${maxNodeRuns} node runs (infinite loop?)`);
         }
         const outcome = await this.runNode(next, signal);
         if (outcome === 'stop') {
@@ -292,7 +330,6 @@ export class WorkflowExecute {
         const maxTries = node.retryOnFail
           ? Math.min(Math.max(node.maxTries ?? 3, 2), this.services.limits?.maxTries ?? 5)
           : 1;
-        const waitMs = node.retryOnFail ? Math.min(Math.max(node.waitBetweenTries ?? 1000, 0), 5000) : 0;
         for (attempt = 1; attempt <= maxTries; attempt++) {
           try {
             output = await this.executeNode(node, nodeType, exec, runIndex, signal);
@@ -301,12 +338,18 @@ export class WorkflowExecute {
           } catch (e) {
             error = e;
             if (signal.aborted) throw signal.reason;
-            if (attempt < maxTries) await sleep(waitMs, signal);
+            if (attempt < maxTries) await sleep(retryDelay(node, attempt, e), signal);
           }
         }
         if (error) throw error;
       }
       assertValidOutput(node, output);
+      const maxItems = this.services.limits?.maxItemsPerOutput ?? MAX_ITEMS_PER_OUTPUT;
+      if (output?.some((items) => (items?.length ?? 0) > maxItems)) {
+        throw new QuotaExceededError(
+          `Node "${node.name}" returned more than ${maxItems} items in one output`,
+        );
+      }
     } catch (e) {
       if (signal.aborted) throw signal.reason;
       error = e;
@@ -328,6 +371,7 @@ export class WorkflowExecute {
         runs.push(task);
         this.state.resultData.lastNodeExecuted = node.name;
         this.state.resultData.error = serialized;
+        this.state.executionData.failedExecuteData = exec;
         await this.services.hooks?.nodeExecuteAfter?.(node.name, runIndex, task, this.state);
         return 'stop';
       }
