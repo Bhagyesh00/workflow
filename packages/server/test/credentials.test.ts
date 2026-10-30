@@ -11,6 +11,7 @@ import {
   outputOf,
   resetDatabase,
   signup,
+  TestClient,
   type TestServer,
   testConfig,
   waitForExecution,
@@ -255,6 +256,23 @@ describe('credentials', () => {
     );
     expect(after.oauthTokenData).toMatchObject({ access_token: 'access-for-abc' });
     expect(after.scope).toBe('read');
+
+    // the flow is bound to the user who started it: losing edit rights invalidates it
+    const invite = await client.data(
+      client.post('/rest/members/invite', { email: 'ed@example.com', role: 'editor' }),
+    );
+    const editor = new TestClient(server.app);
+    const joined = await editor.data(
+      editor.post(`/rest/invitations/${invite.token}/accept`, { name: 'Ed', password: 'Passw0rd!' }),
+    );
+    const started = await editor.data(editor.get(`/rest/oauth2/authorize?credentialId=${credential.id}`));
+    await client.data(client.patch(`/rest/members/${joined.user.id}`, { role: 'viewer' }));
+    const editorState = new URL(started.url).searchParams.get('state')!;
+    const revoked = await server.app.inject({
+      url: `/rest/oauth2/callback?code=zzz&state=${encodeURIComponent(editorState)}`,
+    });
+    expect(revoked.statusCode).toBe(400);
+    expect(revoked.body).toContain('no longer edit credentials');
 
     const notOauth = await client.data(
       client.post('/rest/credentials', { name: 'k', type: 'testApi', data: {} }),

@@ -34,6 +34,7 @@ function parseJsonBody(_request: unknown, body: string, done: (err: Error | null
 
 export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
   const { config } = ctx;
+  const baseOrigin = new URL(config.baseUrl).origin;
   const app = Fastify({
     loggerInstance: ctx.logger as unknown as FastifyBaseLogger,
     bodyLimit: config.bodyLimitBytes,
@@ -88,9 +89,26 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
   await app.register(
     async (rest) => {
       rest.addHook('onRequest', async (request, reply) => {
+        // an editor served from another allowed origin (CORS_ORIGINS, e.g. a dev server)
+        const origin = request.headers.origin;
+        if (origin && origin !== baseOrigin && config.allowedOrigins.includes(origin)) {
+          reply
+            .header('access-control-allow-origin', origin)
+            .header('access-control-allow-credentials', 'true')
+            .header('vary', 'Origin');
+        }
+        if (request.method === 'OPTIONS') return;
         checkCsrf(request, config);
         await loadSession(request, reply, config, ctx.repos);
       });
+      rest.options('/*', async (_request, reply) =>
+        reply
+          .status(204)
+          .header('access-control-allow-methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS')
+          .header('access-control-allow-headers', 'content-type')
+          .header('access-control-max-age', '600')
+          .send(),
+      );
       registerAuthRoutes(rest, ctx);
       registerSettingsRoutes(rest, ctx);
       registerWorkflowRoutes(rest, ctx);

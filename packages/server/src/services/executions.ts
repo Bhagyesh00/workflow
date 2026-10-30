@@ -293,8 +293,32 @@ export class ExecutionService {
   // running
 
   /** queue worker entry point */
-  async runQueued(job: ExecutionJob): Promise<void> {
-    await this.run(job.tenantId, job.executionId, job.kind, job.notify ? 'bus' : 'none');
+  async runQueued(job: ExecutionJob, meta: { redelivered?: boolean } = {}): Promise<void> {
+    const delivery: Delivery = job.notify ? 'bus' : 'none';
+    if (meta.redelivered) {
+      // the worker that ran this job died mid-execution: do not run it a second time
+      const row = await this.deps.repos.executions.get(job.tenantId, job.executionId);
+      if (row && ['new', 'running'].includes(row.status)) {
+        const message = 'The worker running this execution stopped unexpectedly';
+        await this.deps.repos.executions.update(job.tenantId, job.executionId, {
+          status: 'crashed',
+          stoppedAt: new Date(),
+          errorMessage: message,
+        });
+        this.deps.push.send(job.tenantId, 'executionFinished', {
+          executionId: job.executionId,
+          workflowId: row.workflowId,
+          status: 'crashed',
+          error: { message },
+        });
+        this.emitFinished(
+          { executionId: job.executionId, status: 'crashed', error: { name: 'Error', message } },
+          delivery,
+        );
+        return;
+      }
+    }
+    await this.run(job.tenantId, job.executionId, job.kind, delivery);
   }
 
   private runInBackground(tenantId: string, executionId: string, kind: 'run' | 'resume', delivery: Delivery) {

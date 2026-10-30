@@ -10,6 +10,7 @@ import type { DataObject } from '@workflow/workflow';
 import type { Config } from '../config';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
+import { hasRole } from './auth';
 import type { CredentialService } from './credentials';
 
 const STATE_TTL_MS = 10 * 60_000;
@@ -107,6 +108,10 @@ export class OAuth2Service {
   /** exchange the code and store the tokens; returns the credential id */
   async callback(code: string, state: string): Promise<{ tenantId: string; credentialId: string }> {
     const payload = this.verifyState(state);
+    const membership = await this.repos.memberships.get(payload.t, payload.u);
+    if (!membership || !hasRole(membership.role, 'editor')) {
+      throw ApiError.forbidden('You can no longer edit credentials in this workspace');
+    }
     const { row, data } = await this.loadOAuth2(payload.t, payload.c);
     if (!data.accessTokenUrl) throw ApiError.badRequest('The credential has no access token URL');
     const body: Record<string, string> = {

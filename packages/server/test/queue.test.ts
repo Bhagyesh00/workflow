@@ -171,6 +171,25 @@ describe('queue mode', () => {
     expect(stopped.status).toBe('canceled');
   });
 
+  it('marks executions crashed when their job is redelivered after a worker died', async () => {
+    const { client, tenant } = await signup(main.app);
+    const wf = await createWorkflow(client, { nodes: [node('Start', 'core.manualTrigger')] });
+    const execution = await main.ctx.repos.executions.create(
+      tenant.id,
+      { id: crypto.randomUUID(), workflowId: wf.id, workflowName: 'x', mode: 'trigger', status: 'running' },
+      { workflowData: { name: 'x', nodes: [], connections: {} }, runOptions: {} },
+    );
+    await worker.executions.runQueued(
+      { executionId: execution.id, tenantId: tenant.id, kind: 'run' },
+      { redelivered: true },
+    );
+    const row = await main.ctx.repos.executions.get(tenant.id, execution.id);
+    expect(row).toMatchObject({
+      status: 'crashed',
+      errorMessage: 'The worker running this execution stopped unexpectedly',
+    });
+  });
+
   it('reports queue depth and Redis readiness', async () => {
     const ready = await main.app.inject({ url: '/healthz/readiness' });
     expect(ready.json()).toEqual({ status: 'ok', checks: { database: 'ok', redis: 'ok' } });

@@ -42,11 +42,16 @@ export class ExecutionQueue {
     });
   }
 
-  startWorker(processor: (job: ExecutionJob) => Promise<void>, concurrency: number): void {
+  startWorker(
+    processor: (job: ExecutionJob, meta: { redelivered: boolean }) => Promise<void>,
+    concurrency: number,
+  ): void {
     if (this.worker) return;
     this.worker = new Worker<ExecutionJob>(
       QUEUE_NAME,
-      async (job: Job<ExecutionJob>) => processor(job.data),
+      // a stalled job (its worker died) is handed out again: the processor marks it crashed
+      async (job: Job<ExecutionJob>) =>
+        processor(job.data, { redelivered: job.stalledCounter > 0 || job.attemptsStarted > 1 }),
       {
         connection: this.connection.duplicate(),
         prefix: `${this.prefix}:bull`,

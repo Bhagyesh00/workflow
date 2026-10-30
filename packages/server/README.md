@@ -98,6 +98,7 @@ test/                    integration tests (real Postgres + Redis)
 - `POST /rest/workflows/:id/listen-test-webhook` also accepts `workflowData` to listen with unsaved changes. The first call to the test URL runs in manual mode and emits `testWebhookReceived`.
 - Polling nodes read `parameters.pollTimes`: a cron string or `{ item: [{ mode: 'everyMinute' | 'everyHour' | 'everyDay' | 'everyWeek' | 'everyMonth' | 'everyX' | 'custom', hour?, minute?, weekday?, dayOfMonth?, value?, unit?: 'seconds' | 'minutes' | 'hours', cronExpression? }] }`. Default: every minute.
 - The OAuth2 popup receives `postMessage({ type: 'oauth2-callback', status: 'success' | 'error', credentialId?, message? })` with the `BASE_URL` origin as target.
+- An editor served from another origin (e.g. a Vite dev server) works when that origin is listed in `CORS_ORIGINS`: `/rest` then answers preflights and sends credentialed CORS headers for it.
 - `POST /rest/members/invite` returns the invitation `token` and `inviteUrl` once (there is no mail transport); `GET`/`DELETE /rest/invitations[/:id]` list and revoke pending invitations; `GET /rest/audit-log` (admin) pages through the audit log.
 
 ## Beyond the usual feature set
@@ -107,4 +108,6 @@ test/                    integration tests (real Postgres + Redis)
 - **Activation dry run.** `POST /rest/workflows/:id/validate` (optionally with unsaved `workflowData`) returns the issues activation would report, without activating.
 - **Sandboxed webhook responses.** Webhook responses are tenant-controlled but served from the platform origin, so `Set-Cookie` is dropped, the session cookie is stripped from forwarded request headers, and a `Content-Security-Policy: sandbox` header puts any HTML response into an opaque origin that cannot call the API.
 - **Readable API reference.** `/api/v1/docs` renders the public API (from the same route table as the OpenAPI document) as a script-free HTML page.
+- **Binary data endpoint.** `GET /rest/binary-data?id=<fs:...>&action=view|download&mimeType=&fileName=` serves files referenced from run data, checked against the caller's tenant. Only types that cannot run script are shown inline; everything else downloads, always with `CSP: sandbox`.
+- **Crash detection in queue mode.** A job redelivered after its worker died marks the execution `crashed` instead of running it twice.
 - **Usage in settings.** `GET /rest/settings` returns the tenant's effective limits and this month's production execution count.

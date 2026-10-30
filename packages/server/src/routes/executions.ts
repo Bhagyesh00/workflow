@@ -71,7 +71,44 @@ export async function deleteExecution(ctx: ServerContext, tenantId: string, id: 
   await ctx.executions.removeBinaryData(tenantId, id);
 }
 
+/** inline display is limited to types that cannot run script on this origin */
+const INLINE_SAFE =
+  /^(image\/(png|jpeg|gif|webp|avif|bmp)|audio\/[\w.+-]+|video\/[\w.+-]+|application\/pdf|text\/plain|application\/json)$/i;
+
+const binaryQuery = z.object({
+  id: z.string().min(4).max(1024),
+  action: z.enum(['view', 'download']).default('view'),
+  mimeType: z.string().max(255).optional(),
+  fileName: z.string().max(255).optional(),
+});
+
 export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext): void {
+  // platform extension: binary data referenced from run data (`fs:<tenantId>/...`), tenant-checked
+  app.get('/binary-data', async (request, reply) => {
+    const auth = requireRole(request, 'viewer');
+    const query = parse(binaryQuery, request.query);
+    let data: Uint8Array;
+    try {
+      data = await ctx.executions
+        .binaryStore(auth.tenant.id)
+        .getBuffer({ id: query.id, data: '', mimeType: query.mimeType ?? 'application/octet-stream' });
+    } catch {
+      throw ApiError.notFound('Binary data');
+    }
+    const mimeType = /^[\w.+-]+\/[\w.+-]+$/.test(query.mimeType ?? '')
+      ? query.mimeType!
+      : 'application/octet-stream';
+    const inline = query.action === 'view' && INLINE_SAFE.test(mimeType);
+    const fileName = (query.fileName ?? 'file').replace(/["\\\r\n]/g, '_');
+    return reply
+      .header('content-type', mimeType)
+      .header('content-disposition', `${inline ? 'inline' : 'attachment'}; filename="${fileName}"`)
+      .header('content-security-policy', 'sandbox')
+      .header('x-content-type-options', 'nosniff')
+      .header('cache-control', 'private, max-age=300')
+      .send(Buffer.from(data));
+  });
+
   app.get('/executions', async (request) => {
     const auth = requireRole(request, 'viewer');
     return listExecutions(ctx, auth.tenant.id, parse(executionListQuery, request.query));

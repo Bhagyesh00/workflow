@@ -297,6 +297,45 @@ describe('members and roles', () => {
     expect(revoked.statusCode).toBe(401);
   });
 
+  it('allows an editor served from CORS_ORIGINS', async () => {
+    const devOrigin = 'http://localhost:5173';
+    const cors = await createTestServer({ CORS_ORIGINS: devOrigin }, { startMain: false, reset: false });
+    try {
+      const client = new TestClient(cors.app, devOrigin);
+      const preflight = await cors.app.inject({
+        method: 'OPTIONS',
+        url: '/rest/auth/login',
+        headers: { origin: devOrigin, 'access-control-request-method': 'POST' },
+      });
+      expect(preflight.statusCode).toBe(204);
+      expect(preflight.headers['access-control-allow-origin']).toBe(devOrigin);
+      expect(preflight.headers['access-control-allow-credentials']).toBe('true');
+      const res = await client.post('/rest/auth/signup', {
+        email: 'dev@example.com',
+        password: 'Passw0rd!',
+        name: 'Dev',
+        workspaceName: 'Dev',
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['access-control-allow-origin']).toBe(devOrigin);
+      const evil = await cors.app.inject({
+        method: 'OPTIONS',
+        url: '/rest/auth/login',
+        headers: { origin: 'https://evil.example' },
+      });
+      expect(evil.headers['access-control-allow-origin']).toBeUndefined();
+    } finally {
+      await cors.close();
+    }
+  });
+
+  it('audits failed logins of existing accounts', async () => {
+    const { client, user } = await signup(server.app);
+    await new TestClient(server.app).post('/rest/auth/login', { email: user.email, password: 'wrong-pass1' });
+    const audit = await client.data(client.get('/rest/audit-log'));
+    expect(audit.map((a: { action: string }) => a.action)).toContain('auth.login_failed');
+  });
+
   it('honours SIGNUP_ENABLED=false', async () => {
     const closed = await createTestServer({ SIGNUP_ENABLED: 'false' }, { startMain: false, reset: false });
     try {

@@ -309,7 +309,7 @@ export class WebhookService {
     const handle = this.responseHandle(responseMode);
     const resumed = await executions.resume(tenantId, executionId, output, {
       wait: responseMode !== 'onReceived',
-      observer: handle.observer,
+      observer: responseMode === 'onReceived' ? undefined : handle.observer,
     });
     if (!resumed) return json(409, errorBody('not_waiting', 'The execution is not waiting'));
     if (responseMode === 'onReceived') return json(200, { message: 'Workflow was resumed' });
@@ -374,7 +374,7 @@ export class WebhookService {
             executionId,
             userId: input.userId,
             wait: hook.responseMode !== 'onReceived',
-            observer: handle.observer,
+            observer: hook.responseMode === 'onReceived' ? undefined : handle.observer,
           });
         } catch (error) {
           if (error instanceof ApiError) {
@@ -397,7 +397,12 @@ export class WebhookService {
         { err: error, tenantId: tenant.id, workflowId: input.workflowId, node: node.name },
         'Webhook failed',
       );
-      reply = json(500, errorBody('webhook_error', (error as Error).message || 'The webhook failed'));
+      // details help while testing in the editor; production callers get a generic message
+      const message =
+        input.mode === 'manual'
+          ? (error as Error).message || 'The webhook failed'
+          : 'The webhook could not be processed';
+      reply = json(500, errorBody('webhook_error', message));
     }
     metrics.webhookDuration.observe({ status: String(reply.statusCode) }, (Date.now() - started) / 1000);
     return this.decorate(reply, workflow, node, incoming);

@@ -213,7 +213,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
         started = true;
         await executions.init();
       }
-      queue.startWorker((job) => executions.runQueued(job), config.queue.concurrency);
+      queue.startWorker((job, meta) => executions.runQueued(job, meta), config.queue.concurrency);
       logger.info({ concurrency: config.queue.concurrency }, 'Worker is consuming the execution queue');
     },
 

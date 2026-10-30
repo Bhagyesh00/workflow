@@ -175,7 +175,14 @@ export class AuthService {
     const ok = user
       ? await this.verifyPassword(user.passwordHash, input.password)
       : await this.verifyPassword(await DUMMY_HASH, input.password).then(() => false);
-    if (!user || !ok) throw new ApiError(401, 'invalid_credentials', 'Wrong email or password');
+    if (!user || !ok) {
+      if (user) {
+        const [first] = await this.repos.memberships.listForUser(user.id);
+        if (first)
+          await this.repos.audit.add(first.id, { userId: user.id, action: 'auth.login_failed', ip: meta.ip });
+      }
+      throw new ApiError(401, 'invalid_credentials', 'Wrong email or password');
+    }
     const tenants = await this.repos.memberships.listForUser(user.id);
     if (!tenants.length) throw ApiError.forbidden('This account does not belong to any workspace');
     const first = tenants[0];

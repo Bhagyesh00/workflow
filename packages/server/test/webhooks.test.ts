@@ -250,6 +250,50 @@ describe('production webhooks', () => {
     expect(Buffer.from(item.binary.data.data, 'base64').toString()).toBe('hello world');
   });
 
+  it('stores large uploads on disk and serves them only to the owning tenant', async () => {
+    const { client, tenant } = await signup(server.app);
+    const other = await signup(server.app);
+    await activeWorkflow(client, { nodes: [webhook({ path: 'upload' })] });
+    const boundary = 'B0UNDARY';
+    const big = 'x'.repeat(100_000);
+    const res = await server.app.inject({
+      method: 'POST',
+      url: `/webhook/${tenant.slug}/upload`,
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload: [
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="file"; filename="page.html"',
+        'Content-Type: text/html',
+        '',
+        `<script>alert(1)</script>${big}`,
+        `--${boundary}--`,
+        '',
+      ].join('\r\n'),
+    });
+    expect(res.statusCode).toBe(200);
+    const [execution] = await executionsOf(server.ctx, tenant.id);
+    await waitForExecution(server.ctx, tenant.id, execution.id, ['success']);
+    const data = await client.data(client.get(`/rest/executions/${execution.id}`));
+    const binary = data.state.resultData.runData.Webhook[0].data.main[0][0].binary.data;
+    expect(binary.id).toMatch(new RegExp(`^fs:${tenant.id}/${execution.id}/`));
+    expect(binary.data).toBe('');
+
+    const query = `id=${encodeURIComponent(binary.id)}&mimeType=text/html&fileName=page.html`;
+    const own = await client.get(`/rest/binary-data?${query}`);
+    expect(own.statusCode).toBe(200);
+    expect(own.body.length).toBe(binary.fileSize);
+    // HTML is never rendered inline on the platform origin
+    expect(own.headers['content-disposition']).toMatch(/^attachment/);
+    expect(own.headers['content-security-policy']).toBe('sandbox');
+    expect((await other.client.get(`/rest/binary-data?${query}`)).statusCode).toBe(404);
+    const traversal = `id=${encodeURIComponent(`fs:${tenant.id}/../${other.tenant.id}/x`)}`;
+    expect((await client.get(`/rest/binary-data?${traversal}`)).statusCode).toBe(404);
+
+    // deleting the execution removes its files
+    await client.data(client.delete(`/rest/executions/${execution.id}`));
+    expect((await client.get(`/rest/binary-data?${query}`)).statusCode).toBe(404);
+  });
+
   it('keeps the raw body and rejects malformed JSON', async () => {
     const { client, tenant } = await signup(server.app);
     await activeWorkflow(client, {
