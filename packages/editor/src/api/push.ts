@@ -2,6 +2,7 @@
  * Live events over SSE (`GET /rest/push`). The connection factory is injectable so tests and the
  * demo build can feed events without a server.
  */
+import { confirmTenant, getCurrentTenant } from './client';
 import { PUSH_EVENT_TYPES, type PushEvent, type PushEventType } from './types';
 
 export type PushStatus = 'connecting' | 'open' | 'error';
@@ -33,10 +34,19 @@ export const eventSourceConnector: PushConnector = (onEvent, onStatus) => {
     return { close() {} };
   }
   onStatus('connecting');
-  const source = new EventSource('/rest/push', { withCredentials: true });
+  // EventSource cannot set headers: the URL names the workspace this tab shows, so a reconnect after
+  // a switch in another tab is refused instead of silently streaming the other workspace's events
+  const tenantId = getCurrentTenant();
+  const url = tenantId ? `/rest/push?tenantId=${encodeURIComponent(tenantId)}` : '/rest/push';
+  const source = new EventSource(url, { withCredentials: true });
   source.onopen = () => onStatus('open');
   // EventSource reconnects on its own; we only surface the state
-  source.onerror = () => onStatus(source.readyState === EventSource.CLOSED ? 'error' : 'connecting');
+  source.onerror = () => {
+    if (source.readyState !== EventSource.CLOSED) return onStatus('connecting');
+    onStatus('error');
+    // the server refused the stream; a 409 tenant_changed is not visible here, so ask the session
+    void confirmTenant().catch(() => {});
+  };
   for (const type of PUSH_EVENT_TYPES) {
     source.addEventListener(type, (message) => {
       const event = parsePushMessage(type, (message as MessageEvent<string>).data);

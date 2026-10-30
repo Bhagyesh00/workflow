@@ -159,7 +159,14 @@ export class OAuth2Service {
   }
 }
 
-/** HTML for the OAuth2 popup: notify the opener (same origin only) and close */
+/** same name as OAUTH2_CHANNEL in the editor's CredentialModal */
+const OAUTH2_CHANNEL = 'wf-oauth2';
+
+/**
+ * HTML for the OAuth2 popup: notify the opener (same origin only) and close. The result is also
+ * broadcast on a same-origin BroadcastChannel, because a provider's Cross-Origin-Opener-Policy
+ * can cut the popup off from its opener.
+ */
 export function oauthCallbackPage(
   targetOrigin: string,
   nonce: string,
@@ -172,6 +179,6 @@ export function oauthCallbackPage(
   const origin = JSON.stringify(targetOrigin).replace(/</g, '\\u003c');
   const text = message.status === 'success' ? 'Connected. You can close this window.' : 'Connection failed.';
   return `<!doctype html><html><head><meta charset="utf-8"><title>OAuth2</title></head><body><p>${text}</p><script nonce="${nonce}">
-(function(){var d=${data};try{if(window.opener){window.opener.postMessage(d,${origin});}}catch(e){}setTimeout(function(){window.close();},50);})();
+(function(){var d=${data};try{if(window.opener){window.opener.postMessage(d,${origin});}}catch(e){}try{var c=new BroadcastChannel(${JSON.stringify(OAUTH2_CHANNEL)});c.postMessage(d);c.close();}catch(e){}setTimeout(function(){window.close();},50);})();
 </script></body></html>`;
 }

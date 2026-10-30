@@ -47,6 +47,8 @@ export const routes: RouteObject[] = [
   { path: '/signin', element: <LoginPage />, errorElement: <RouteErrorPage /> },
   { path: '/signup', element: <SignupPage />, errorElement: <RouteErrorPage /> },
   { path: '/invitation/:token', element: <AcceptInvitationPage />, errorElement: <RouteErrorPage /> },
+  // links sent before the server emitted /invitation/:token
+  { path: '/invitations/:token', element: <AcceptInvitationPage />, errorElement: <RouteErrorPage /> },
   {
     path: '/',
     element: <AppShell />,

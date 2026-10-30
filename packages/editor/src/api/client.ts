@@ -14,6 +14,8 @@ export interface ApiRequest {
   query?: Record<string, QueryValue>;
   body?: unknown;
   signal?: AbortSignal;
+  /** the workspace this tab shows; the server rejects the request when the session moved on */
+  tenantId?: string;
 }
 
 export interface ApiResponse {
@@ -49,14 +51,15 @@ export function buildUrl(path: string, query?: Record<string, QueryValue>): URL 
 }
 
 /** Browser transport. Mutating requests always carry a JSON body (CSRF rule: JSON content type). */
-export const fetchTransport: Transport = async ({ method, path, query, body, signal }) => {
+export const fetchTransport: Transport = async ({ method, path, query, body, signal, tenantId }) => {
   const mutating = method !== 'GET';
+  const headers: Record<string, string> = { accept: 'application/json' };
+  if (mutating) headers['content-type'] = 'application/json';
+  if (tenantId) headers['x-tenant-id'] = tenantId;
   const response = await fetch(buildUrl(path, query), {
     method,
     credentials: 'same-origin',
-    headers: mutating
-      ? { 'content-type': 'application/json', accept: 'application/json' }
-      : { accept: 'application/json' },
+    headers,
     body: mutating ? JSON.stringify(body ?? {}) : undefined,
     signal,
   });
@@ -73,9 +76,12 @@ export const fetchTransport: Transport = async ({ method, path, query, body, sig
 };
 
 type UnauthorizedListener = () => void;
+type TenantChangedListener = () => void;
 
 let transport: Transport = fetchTransport;
 const unauthorizedListeners = new Set<UnauthorizedListener>();
+const tenantChangedListeners = new Set<TenantChangedListener>();
+let currentTenantId: string | null = null;
 
 export function setTransport(next: Transport): void {
   transport = next;
@@ -89,6 +95,38 @@ export function getTransport(): Transport {
 export function onUnauthorized(listener: UnauthorizedListener): () => void {
   unauthorizedListeners.add(listener);
   return () => unauthorizedListeners.delete(listener);
+}
+
+/**
+ * The workspace this tab shows (from `/auth/me` or a switch). Every request outside `/auth/*` names
+ * it, so a switch made in another tab cannot redirect this tab's writes into the new workspace.
+ */
+export function setCurrentTenant(tenantId: string | null): void {
+  currentTenantId = tenantId;
+}
+
+export function getCurrentTenant(): string | null {
+  return currentTenantId;
+}
+
+/** Called when the server answers 409 `tenant_changed`: the session now uses another workspace. */
+export function onTenantChanged(listener: TenantChangedListener): () => void {
+  tenantChangedListeners.add(listener);
+  return () => tenantChangedListeners.delete(listener);
+}
+
+/**
+ * For connections that cannot read the 409 themselves (the push stream): asks `/auth/me` which
+ * workspace the session uses and tells the tenant-changed listeners when it is not this tab's.
+ */
+export async function confirmTenant(): Promise<void> {
+  const expected = currentTenantId;
+  if (!expected) return;
+  const { data } = await requestRaw({ method: 'GET', path: '/auth/me' });
+  const actual = (data as { tenant?: { id?: string } } | undefined)?.tenant?.id;
+  if (actual && actual !== expected && currentTenantId === expected) {
+    for (const listener of tenantChangedListeners) listener();
+  }
 }
 
 function toError(status: number, body: unknown): ApiError {
@@ -105,8 +143,9 @@ export async function requestRaw(
   request: ApiRequest,
 ): Promise<{ data: unknown; nextCursor?: string | null }> {
   let response: ApiResponse;
+  const tenantId = request.path.startsWith('/auth/') ? undefined : (currentTenantId ?? undefined);
   try {
-    response = await transport(request);
+    response = await transport(tenantId ? { ...request, tenantId } : request);
   } catch (error) {
     if ((error as Error)?.name === 'AbortError') throw error;
     throw new ApiError(
@@ -118,7 +157,12 @@ export async function requestRaw(
   if (response.status === 401 && !request.path.startsWith('/auth/')) {
     for (const listener of unauthorizedListeners) listener();
   }
-  if (response.status < 200 || response.status >= 300) throw toError(response.status, response.body);
+  const failure =
+    response.status < 200 || response.status >= 300 ? toError(response.status, response.body) : null;
+  if (failure?.status === 409 && failure.code === 'tenant_changed') {
+    for (const listener of tenantChangedListeners) listener();
+  }
+  if (failure) throw failure;
   const body = (response.body ?? {}) as { data?: unknown; nextCursor?: string | null };
   return { data: body.data, nextCursor: body.nextCursor };
 }

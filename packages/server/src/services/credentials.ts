@@ -92,11 +92,15 @@ export class CredentialService {
     return (await this.repos.credentials.update(tenantId, id, update)) ?? row;
   }
 
-  /** browser update: redacted sentinels keep stored values; token data survives a form save */
+  /**
+   * browser update: redacted sentinels keep stored values. Token material always comes from the
+   * stored data: only the OAuth2 callback (`saveData`) writes it, never a form save.
+   */
   merge(stored: DataObject, incoming: DataObject): DataObject {
     const merged = mergeRedacted(stored, incoming);
     for (const key of ALWAYS_SECRET) {
-      if (!(key in incoming) && key in stored) merged[key] = stored[key];
+      if (key in stored) merged[key] = stored[key];
+      else delete merged[key];
     }
     return stripSentinels(merged);
   }

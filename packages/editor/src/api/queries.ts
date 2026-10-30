@@ -1,7 +1,7 @@
 /** TanStack Query hooks for server data shared across pages. */
 import { QueryClient, useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
-import { isApiError } from './client';
+import { isApiError, setCurrentTenant } from './client';
 import {
   authApi,
   credentialsApi,
@@ -59,7 +59,12 @@ export const DEFAULT_SETTINGS: Settings = {
 export function useMe() {
   return useQuery({
     queryKey: queryKeys.me,
-    queryFn: authApi.me,
+    queryFn: async () => {
+      const me = await authApi.me();
+      // bind this tab's requests to the workspace it renders
+      setCurrentTenant(me.tenant.id);
+      return me;
+    },
     retry: false,
     staleTime: 60_000,
   });

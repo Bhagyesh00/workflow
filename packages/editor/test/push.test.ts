@@ -1,6 +1,13 @@
 import type { TaskData } from '@workflow/workflow';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { parsePushMessage } from '../src/api/push';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  fetchTransport,
+  onTenantChanged,
+  setCurrentTenant,
+  setTransport,
+  type Transport,
+} from '../src/api/client';
+import { eventSourceConnector, parsePushMessage } from '../src/api/push';
 import type { PushEvent } from '../src/api/types';
 import { handlePushEvent } from '../src/components/shell/PushBridge';
 import {
@@ -170,5 +177,91 @@ describe('push bridge', () => {
     useRunStore.getState().beginRun('wf1');
     expect(useRunStore.getState().previousRunData?.A).toHaveLength(1);
     expect(useRunStore.getState().runData).toEqual({});
+  });
+});
+
+/** a stand-in for the browser's EventSource that records its URL and lets a test fail it */
+class FakeEventSource {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
+  static last: FakeEventSource | null = null;
+  readyState = FakeEventSource.CONNECTING;
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(readonly url: string) {
+    FakeEventSource.last = this;
+  }
+  addEventListener(): void {}
+  close(): void {
+    this.readyState = FakeEventSource.CLOSED;
+  }
+}
+
+describe('push stream workspace binding', () => {
+  const meTransport =
+    (tenantId: string): Transport =>
+    async ({ path }) =>
+      path === '/auth/me'
+        ? { status: 200, body: { data: { tenant: { id: tenantId, name: tenantId } } } }
+        : { status: 404, body: {} };
+
+  beforeEach(() => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setCurrentTenant(null);
+    setTransport(fetchTransport);
+  });
+
+  it('names the workspace the tab shows in the stream URL', () => {
+    setCurrentTenant('tenant-a');
+    eventSourceConnector(
+      () => {},
+      () => {},
+    );
+    expect(FakeEventSource.last?.url).toBe('/rest/push?tenantId=tenant-a');
+  });
+
+  it('follows a switch made in another tab when the server refuses the stream', async () => {
+    setCurrentTenant('tenant-a');
+    setTransport(meTransport('tenant-b'));
+    const changed = vi.fn();
+    const stop = onTenantChanged(changed);
+    const statuses: string[] = [];
+    eventSourceConnector(
+      () => {},
+      (status) => statuses.push(status),
+    );
+    const source = FakeEventSource.last!;
+    // the 409 tenant_changed answer makes the browser give up on the stream
+    source.readyState = FakeEventSource.CLOSED;
+    source.onerror?.();
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    expect(statuses.at(-1)).toBe('error');
+    stop();
+  });
+
+  it('stays quiet when the stream fails for another reason', async () => {
+    setCurrentTenant('tenant-a');
+    const changed = vi.fn();
+    const stop = onTenantChanged(changed);
+    const me = vi.fn();
+    setTransport(async (request) => {
+      me();
+      return meTransport('tenant-a')(request);
+    });
+    eventSourceConnector(
+      () => {},
+      () => {},
+    );
+    const source = FakeEventSource.last!;
+    source.readyState = FakeEventSource.CLOSED;
+    source.onerror?.();
+    await vi.waitFor(() => expect(me).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(changed).not.toHaveBeenCalled();
+    stop();
   });
 });

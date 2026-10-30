@@ -168,11 +168,15 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
         message: (error as Error).message.slice(0, 300),
       });
     }
-    return reply
-      .status(status)
-      .header('content-type', 'text/html; charset=utf-8')
-      .header('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; base-uri 'none'`)
-      .header('cache-control', 'no-store')
-      .send(body);
+    return (
+      reply
+        .status(status)
+        .header('content-type', 'text/html; charset=utf-8')
+        .header('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; base-uri 'none'`)
+        .header('cache-control', 'no-store')
+        // the page came back from the provider's origin: keep its opener so it can post the result
+        .header('cross-origin-opener-policy', 'unsafe-none')
+        .send(body)
+    );
   });
 }

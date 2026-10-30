@@ -232,6 +232,8 @@ describe('credentials', () => {
     expect(callback.headers['content-security-policy']).toMatch(/script-src 'nonce-/);
     expect(callback.body).toContain('"status":"success"');
     expect(callback.body).toContain('postMessage(d,"http://localhost:5678")');
+    // also announced on the editor's channel, for popups the provider cut off from their opener
+    expect(callback.body).toContain('new BroadcastChannel("wf-oauth2")');
 
     const tokenRequest = new URLSearchParams(received.find((r) => r.url === '/token')!.body);
     expect(tokenRequest.get('grant_type')).toBe('authorization_code');

@@ -4,7 +4,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import type { ServerContext } from './context';
-import { checkCsrf, loadSession } from './http/auth';
+import { checkCsrf, checkTenant, loadSession, TENANT_HEADER } from './http/auth';
 import { handleError } from './http/errors';
 import { registerAuthRoutes } from './routes/auth';
 import { registerCredentialRoutes } from './routes/credentials';
@@ -76,6 +76,8 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       },
     },
     crossOriginEmbedderPolicy: false,
+    // the OAuth2 'Connect account' popup must keep reporting back to the editor that opened it
+    crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
     crossOriginResourcePolicy: { policy: 'same-site' },
     strictTransportSecurity: config.cookieSecure ? { maxAge: 15_552_000, includeSubDomains: true } : false,
   });
@@ -100,12 +102,13 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
         if (request.method === 'OPTIONS') return;
         checkCsrf(request, config);
         await loadSession(request, reply, config, ctx.repos);
+        checkTenant(request);
       });
       rest.options('/*', async (_request, reply) =>
         reply
           .status(204)
           .header('access-control-allow-methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS')
-          .header('access-control-allow-headers', 'content-type')
+          .header('access-control-allow-headers', `content-type, ${TENANT_HEADER}`)
           .header('access-control-max-age', '600')
           .send(),
       );

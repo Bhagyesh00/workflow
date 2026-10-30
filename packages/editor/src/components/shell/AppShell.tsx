@@ -16,7 +16,13 @@ import {
 } from 'lucide-react';
 import { useEffect, useSyncExternalStore } from 'react';
 import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
-import { errorMessage, isApiError, onUnauthorized } from '../../api/client';
+import {
+  errorMessage,
+  isApiError,
+  onTenantChanged,
+  onUnauthorized,
+  setCurrentTenant,
+} from '../../api/client';
 import { authApi } from '../../api/endpoints';
 import { queryKeys, useMe } from '../../api/queries';
 import type { Me } from '../../api/types';
@@ -56,6 +62,7 @@ function TenantSwitcher({ me, collapsed }: { me: Me; collapsed: boolean }) {
   const switchTenant = useMutation({
     mutationFn: authApi.switchTenant,
     onSuccess: async (result) => {
+      setCurrentTenant(result.tenant.id);
       queryClient.clear();
       queryClient.setQueryData(queryKeys.me, { ...me, ...result });
       await queryClient.invalidateQueries({ queryKey: queryKeys.me });
@@ -127,6 +134,7 @@ function UserMenu({ me, collapsed }: { me: Me; collapsed: boolean }) {
     } catch {
       // the session may already be gone
     }
+    setCurrentTenant(null);
     queryClient.clear();
     navigate('/signin');
   };
@@ -207,11 +215,36 @@ export function AppShell() {
   useEffect(
     () =>
       onUnauthorized(() => {
+        setCurrentTenant(null);
         queryClient.removeQueries({ queryKey: queryKeys.me });
         navigate(`/signin?redirect=${encodeURIComponent(location.pathname + location.search)}`);
       }),
     [navigate, location.pathname, location.search, queryClient],
   );
+
+  // another tab switched the session's workspace: follow it instead of writing into it blindly
+  useEffect(() => {
+    let reloading = false;
+    return onTenantChanged(() => {
+      if (reloading) return;
+      reloading = true;
+      void (async () => {
+        try {
+          // /auth/me names the workspace the session uses now (and rebinds this tab to it)
+          await queryClient.refetchQueries({ queryKey: queryKeys.me, exact: true });
+          navigate('/workflows');
+          await queryClient.resetQueries({ predicate: (query) => query.queryKey[0] !== queryKeys.me[0] });
+          const next = queryClient.getQueryData<Me>(queryKeys.me);
+          toast.info(
+            'Workspace switched in another tab',
+            next ? `This tab now shows ${next.tenant.name}.` : undefined,
+          );
+        } finally {
+          reloading = false;
+        }
+      })();
+    });
+  }, [navigate, queryClient]);
 
   if (me.isLoading) return <PageLoader label="Loading your workspace" />;
   if (me.error) {

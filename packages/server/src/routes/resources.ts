@@ -178,7 +178,8 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
         expiresAt: invitation.expiresAt.toISOString(),
         // shown once: deliver it to the invitee (no mail transport is configured)
         token,
-        inviteUrl: `${config.baseUrl}/invitations/${token}`,
+        // the editor's accept page (`/invitation/:token`)
+        inviteUrl: `${config.baseUrl}/invitation/${token}`,
       },
     };
   });

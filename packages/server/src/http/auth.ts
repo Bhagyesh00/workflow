@@ -82,6 +82,27 @@ export async function loadSession(
   }
 }
 
+/** The workspace an editor tab was rendered for; the session's tenant is shared by every tab. */
+export const TENANT_HEADER = 'x-tenant-id';
+
+/**
+ * A tab still showing workspace A must not act on B after the session was switched in another
+ * tab. Auth calls (`/rest/auth/*`) are exempt: they read or change the session itself. The push
+ * stream names the workspace in `?tenantId=`, because EventSource cannot set headers.
+ */
+export function checkTenant(request: FastifyRequest): void {
+  if (!request.auth || request.url.startsWith('/rest/auth/')) return;
+  const fromUrl =
+    request.url.split('?')[0] === '/rest/push'
+      ? (request.query as { tenantId?: string | string[] } | undefined)?.tenantId
+      : undefined;
+  const raw = request.headers[TENANT_HEADER] ?? fromUrl;
+  const expected = Array.isArray(raw) ? raw[0] : raw;
+  if (expected && expected !== request.auth.tenant.id) {
+    throw new ApiError(409, 'tenant_changed', 'The workspace was switched in another tab');
+  }
+}
+
 export async function loadApiKey(request: FastifyRequest, auth: AuthService): Promise<void> {
   const raw = request.headers['x-api-key'];
   const key = Array.isArray(raw) ? raw[0] : raw;

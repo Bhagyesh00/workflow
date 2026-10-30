@@ -31,6 +31,11 @@ export interface CredentialModalProps {
   onSaved?: (credential: { id: string; name: string; type: string }) => void;
 }
 
+/** BroadcastChannel the OAuth2 callback page announces its result on (it shares the editor's origin). */
+export const OAUTH2_CHANNEL = 'wf-oauth2';
+/** how long a sign-in may take before the modal stops listening for its result */
+const OAUTH2_WAIT_MS = 10 * 60_000;
+
 /** Interpret the message the OAuth2 callback page posts to its opener. */
 export function interpretOAuthMessage(data: unknown): { ok: boolean; message?: string } | null {
   if (data === 'success') return { ok: true };
@@ -82,7 +87,16 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
 
   useEffect(() => () => cleanupRef.current?.(), []);
 
-  const payloadData = () => resolveNodeParameters(properties, data);
+  // hidden properties (OAuth2 token data) are written by the server only; the form never sends them
+  const payloadData = () => {
+    const visible = new Set(properties.filter((p) => p.type !== 'hidden').map((p) => p.name));
+    const hidden = new Set(
+      properties.filter((p) => p.type === 'hidden' && !visible.has(p.name)).map((p) => p.name),
+    );
+    return Object.fromEntries(
+      Object.entries(resolveNodeParameters(properties, data)).filter(([key]) => !hidden.has(key)),
+    ) as NodeParameters;
+  };
 
   const save = useMutation({
     mutationFn: async () => {
@@ -109,6 +123,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
 
   const connectOAuth = async () => {
     if (!savedId) return;
+    cleanupRef.current?.();
     try {
       const { url } = await credentialsApi.oauth2Authorize(savedId);
       const target = new URL(url, window.location.origin);
@@ -123,10 +138,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
       } catch {
         // baseUrl may be empty in development
       }
-      const onMessage = (event: MessageEvent) => {
-        if (!allowedOrigins.has(event.origin) || event.source !== popup) return;
-        const result = interpretOAuthMessage(event.data);
-        if (!result) return;
+      const finish = (result: { ok: boolean; message?: string }) => {
         cleanup();
         setOauthState(result.ok ? 'connected' : 'failed');
         if (result.ok) {
@@ -134,15 +146,34 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
           void queryClient.invalidateQueries({ queryKey: queryKeys.credential(savedId) });
         } else toast.error('Connection failed', result.message);
       };
+      const onMessage = (event: MessageEvent) => {
+        if (!allowedOrigins.has(event.origin) || event.source !== popup) return;
+        const result = interpretOAuthMessage(event.data);
+        if (result) finish(result);
+      };
+      // the callback page also announces the result to every editor tab of its origin, which still
+      // works when a provider page with its own opener policy cut the popup off from this window
+      const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(OAUTH2_CHANNEL);
+      if (channel) {
+        channel.onmessage = (event: MessageEvent) => {
+          if ((event.data as { credentialId?: unknown } | null)?.credentialId !== savedId) return;
+          const result = interpretOAuthMessage(event.data);
+          if (result) finish(result);
+        };
+      }
+      // a cut-off popup reads as closed while the user still signs in, so closed is not the end:
+      // go back to idle without an error (closing the popup is how users cancel) and keep listening
       const timer = window.setInterval(() => {
-        if (popup.closed) {
-          cleanup();
-          setOauthState((s) => (s === 'waiting' ? 'idle' : s));
-        }
+        if (!popup.closed) return;
+        window.clearInterval(timer);
+        setOauthState((s) => (s === 'waiting' ? 'idle' : s));
       }, 500);
+      const expiry = window.setTimeout(() => cleanup(), OAUTH2_WAIT_MS);
       const cleanup = () => {
         window.removeEventListener('message', onMessage);
         window.clearInterval(timer);
+        window.clearTimeout(expiry);
+        channel?.close();
         cleanupRef.current = null;
       };
       cleanupRef.current = cleanup;
