@@ -3,7 +3,6 @@
  * Credentials can be created or edited inline.
  */
 import {
-  isParameterDisplayed,
   type NodeCredentialDescription,
   type NodeTypeDescription,
   resolveNodeParameters,
@@ -12,6 +11,7 @@ import {
 import { Pencil, Plus } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 import { useCredentials, useCredentialTypes } from '../../api/queries';
+import { nodeCredentialSlots } from '../../lib/doctor';
 import { ExpressionInput } from '../parameters/ExpressionInput';
 import { IconButton } from '../ui/Button';
 import { Select } from '../ui/Field';
@@ -147,9 +147,7 @@ export function visibleCredentials(
   const params = resolveNodeParameters(description.properties, node.parameters ?? {}, {
     nodeVersion: node.typeVersion,
   });
-  return (description.credentials ?? []).filter((c) =>
-    isParameterDisplayed(c.displayOptions, params, { nodeVersion: node.typeVersion, rootParams: params }),
-  );
+  return nodeCredentialSlots(description, params, node.typeVersion);
 }
 
 export function NodeCredentials({

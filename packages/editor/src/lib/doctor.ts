@@ -8,6 +8,7 @@ import {
   isExpression,
   isParameterDisplayed,
   isResourceLocatorValue,
+  type NodeCredentialDescription,
   type NodeTypeDescription,
   parseExpression,
   resolveNodeParameters,
@@ -24,6 +25,47 @@ export interface DoctorIssue {
   node?: string;
   message: string;
   hint?: string;
+}
+
+/**
+ * Credential slots a node needs beyond `description.credentials`: every displayed `credentialsSelect`
+ * parameter with a value names the credential type to attach (for example HTTP Request with a
+ * predefined credential type).
+ */
+export function selectedCredentialSlots(
+  description: NodeTypeDescription,
+  params: Record<string, unknown>,
+  nodeVersion: number,
+): NodeCredentialDescription[] {
+  const slots: NodeCredentialDescription[] = [];
+  for (const prop of description.properties) {
+    if (prop.type !== 'credentialsSelect') continue;
+    if (!isParameterDisplayed(prop.displayOptions, params, { nodeVersion, rootParams: params })) continue;
+    const value = params[prop.name];
+    if (typeof value !== 'string' || !value || isExpression(value)) continue;
+    if (!slots.some((s) => s.name === value)) slots.push({ name: value, required: true });
+  }
+  return slots;
+}
+
+/**
+ * Credential slots of one node as the editor shows them: the declared credentials that pass their
+ * displayOptions, plus the slots named by displayed `credentialsSelect` parameters. A declared
+ * credential that is hidden (for example a generic auth type while a predefined type is chosen)
+ * does not hide the slot the select asks for.
+ */
+export function nodeCredentialSlots(
+  description: NodeTypeDescription,
+  params: Record<string, unknown>,
+  nodeVersion: number,
+): NodeCredentialDescription[] {
+  const declared = (description.credentials ?? []).filter((c) =>
+    isParameterDisplayed(c.displayOptions, params, { nodeVersion, rootParams: params }),
+  );
+  const dynamic = selectedCredentialSlots(description, params, nodeVersion).filter(
+    (s) => !declared.some((d) => d.name === s.name),
+  );
+  return [...declared, ...dynamic];
 }
 
 export interface DoctorInput extends Pick<WorkflowGraph, 'nodes' | 'connections'> {
@@ -116,16 +158,8 @@ export function lintWorkflow(input: DoctorInput, types: DescriptionLookup): Doct
     }
 
     // credentials
-    for (const cred of description.credentials ?? []) {
+    for (const cred of nodeCredentialSlots(description, params, node.typeVersion)) {
       if (!cred.required) continue;
-      if (
-        !isParameterDisplayed(cred.displayOptions, params, {
-          nodeVersion: node.typeVersion,
-          rootParams: params,
-        })
-      ) {
-        continue;
-      }
       if (!node.credentials?.[cred.name]?.id) {
         push({
           severity: 'error',
