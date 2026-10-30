@@ -9,3 +9,6 @@ coverage/
 .DS_Store
 /data/
 *.tsbuildinfo
+
+# agent worktrees
+.claude/worktrees/
