@@ -1,0 +1,25 @@
+{
+  "name": "@workflow/workflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isomorphic workflow model: types, graph utilities, parameter resolution and the sandboxed expression language",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "acorn": "8.19.0",
+    "jmespath": "0.16.0",
+    "luxon": "3.7.2"
+  },
+  "devDependencies": {
+    "@types/jmespath": "0.15.2",
+    "@types/luxon": "3.7.6",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

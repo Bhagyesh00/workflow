@@ -1,0 +1,27 @@
+{
+  "name": "@workflow/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Execution engine, node contexts, credential crypto, SSRF-safe HTTP and the code sandbox",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@workflow/workflow": "workspace:*",
+    "croner": "11.0.0",
+    "ipaddr.js": "2.5.0",
+    "isolated-vm": "6.2.0",
+    "luxon": "3.7.2",
+    "undici": "8.12.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

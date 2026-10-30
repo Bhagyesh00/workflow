@@ -1,0 +1,25 @@
+{
+  "name": "@workflow/nodes-base",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Built-in core nodes, app integrations and their credential types",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@workflow/workflow": "workspace:*",
+    "luxon": "3.7.2"
+  },
+  "devDependencies": {
+    "@types/luxon": "3.7.6",
+    "@types/node": "24.19.2",
+    "@workflow/core": "workspace:*",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

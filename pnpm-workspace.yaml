@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+
+onlyBuiltDependencies:
+  - isolated-vm
+  - esbuild
+  - "@biomejs/biome"

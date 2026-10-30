@@ -1,0 +1,296 @@
+/**
+ * Outbound HTTP for nodes, with SSRF protection enforced at connect time:
+ * every TCP connection (including redirects and DNS re-resolution) is checked against the
+ * address policy, so DNS-rebinding tricks cannot reach internal services or cloud metadata.
+ */
+import dns from 'node:dns';
+import net from 'node:net';
+import type { HttpFullResponse, HttpRequestOptions } from '@workflow/workflow';
+import ipaddr from 'ipaddr.js';
+import { Agent, type Dispatcher, FormData, fetch } from 'undici';
+
+export class SsrfBlockedError extends Error {
+  constructor(host: string, address: string) {
+    super(
+      `Request to ${host} (${address}) is blocked: private, loopback and link-local addresses are not allowed`,
+    );
+    this.name = 'SsrfBlockedError';
+  }
+}
+
+export class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly statusCode: number,
+    readonly statusMessage: string,
+    readonly body: unknown,
+    readonly headers: Record<string, string>,
+  ) {
+    super(message);
+    this.name = 'HttpError';
+  }
+}
+
+export interface SsrfPolicy {
+  /** disable only for single-tenant self-hosting */
+  enabled: boolean;
+  /** hostnames or CIDRs always allowed (e.g. an internal API a tenant is entitled to) */
+  allow: string[];
+  /** hostnames or CIDRs always denied */
+  deny: string[];
+}
+
+export interface HttpClientOptions {
+  ssrf?: Partial<SsrfPolicy>;
+  /** maximum response size in bytes */
+  maxResponseBytes?: number;
+  defaultTimeoutMs?: number;
+  userAgent?: string;
+}
+
+const DEFAULT_DENY_HOSTS = ['metadata.google.internal', 'metadata.goog', 'metadata', 'instance-data'];
+
+function matchesList(host: string, address: string, list: string[]): boolean {
+  for (const entry of list) {
+    if (entry.includes('/')) {
+      try {
+        const [range, bits] = ipaddr.parseCIDR(entry);
+        const addr = ipaddr.parse(address);
+        if (addr.kind() === range.kind() && addr.match([range, bits] as never)) return true;
+      } catch {
+        /* invalid CIDR entries are ignored */
+      }
+    } else if (entry.toLowerCase() === host.toLowerCase() || entry === address) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isAddressAllowed(host: string, address: string, policy: SsrfPolicy): boolean {
+  if (matchesList(host, address, policy.deny) || DEFAULT_DENY_HOSTS.includes(host.toLowerCase()))
+    return false;
+  if (!policy.enabled) return true;
+  if (matchesList(host, address, policy.allow)) return true;
+  let parsed: ipaddr.IPv4 | ipaddr.IPv6;
+  try {
+    parsed = ipaddr.parse(address);
+  } catch {
+    return false;
+  }
+  if (parsed.kind() === 'ipv6' && (parsed as ipaddr.IPv6).isIPv4MappedAddress()) {
+    parsed = (parsed as ipaddr.IPv6).toIPv4Address();
+  }
+  return parsed.range() === 'unicast';
+}
+
+function createGuardedAgent(policy: SsrfPolicy, rejectUnauthorized = true): Agent {
+  return new Agent({
+    connect: {
+      rejectUnauthorized,
+      lookup(hostname, options, callback) {
+        dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
+          if (err) return callback(err, '', 4);
+          const list = Array.isArray(addresses) ? addresses : [{ address: addresses as string, family: 4 }];
+          for (const a of list) {
+            if (!isAddressAllowed(hostname, a.address, policy)) {
+              return callback(new SsrfBlockedError(hostname, a.address), '', 4);
+            }
+          }
+          if ((options as { all?: boolean }).all) return (callback as any)(null, list);
+          return callback(null, list[0].address, list[0].family);
+        });
+      },
+    },
+  });
+}
+
+function buildUrl(url: string, qs?: Record<string, unknown>): URL {
+  const u = new URL(url);
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`Unsupported protocol "${u.protocol}"`);
+  }
+  for (const [k, v] of Object.entries(qs ?? {})) {
+    if (v === undefined || v === null) continue;
+    if (Array.isArray(v)) for (const entry of v) u.searchParams.append(k, String(entry));
+    else u.searchParams.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+  }
+  return u;
+}
+
+async function readLimited(response: Response, limit: number): Promise<Uint8Array> {
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      throw new Error(`Response exceeds the maximum size of ${limit} bytes`);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
+}
+
+export class HttpClient {
+  private readonly policy: SsrfPolicy;
+  private readonly agent: Agent;
+  private readonly insecureAgent: Agent;
+  private readonly maxResponseBytes: number;
+  private readonly defaultTimeoutMs: number;
+  private readonly userAgent: string;
+
+  constructor(options: HttpClientOptions = {}) {
+    this.policy = { enabled: true, allow: [], deny: [], ...options.ssrf };
+    this.agent = createGuardedAgent(this.policy);
+    this.insecureAgent = createGuardedAgent(this.policy, false);
+    this.maxResponseBytes = options.maxResponseBytes ?? 100 * 1024 * 1024;
+    this.defaultTimeoutMs = options.defaultTimeoutMs ?? 300_000;
+    this.userAgent = options.userAgent ?? 'workflow-platform/0.1';
+  }
+
+  /** synchronous pre-check for literal IPs/hosts (connect-time check is authoritative) */
+  assertUrlAllowed(url: string): void {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    if (net.isIP(host) && !isAddressAllowed(host, host, this.policy)) throw new SsrfBlockedError(host, host);
+    if (DEFAULT_DENY_HOSTS.includes(host.toLowerCase())) throw new SsrfBlockedError(host, host);
+  }
+
+  async request<T = unknown>(
+    options: HttpRequestOptions,
+    signal?: AbortSignal,
+  ): Promise<T | HttpFullResponse<T>> {
+    const url = buildUrl(options.url, options.qs);
+    this.assertUrlAllowed(url.toString());
+    const headers: Record<string, string> = {
+      'user-agent': this.userAgent,
+      ...lowerKeys(options.headers ?? {}),
+    };
+    if (options.auth) {
+      headers.authorization = `Basic ${Buffer.from(`${options.auth.username}:${options.auth.password}`).toString('base64')}`;
+    }
+
+    let body: string | Uint8Array | FormData | URLSearchParams | undefined;
+    const method = options.method ?? 'GET';
+    if (options.body !== undefined && method !== 'GET' && method !== 'HEAD') {
+      const bodyType =
+        options.bodyType ?? (isBinary(options.body) || typeof options.body === 'string' ? 'raw' : 'json');
+      if (bodyType === 'json') {
+        body = JSON.stringify(options.body);
+        headers['content-type'] ??= 'application/json';
+      } else if (bodyType === 'form-urlencoded') {
+        body = new URLSearchParams(
+          Object.entries((options.body ?? {}) as Record<string, unknown>).map(
+            ([k, v]) => [k, String(v)] as [string, string],
+          ),
+        );
+        headers['content-type'] ??= 'application/x-www-form-urlencoded';
+      } else if (bodyType === 'multipart') {
+        const form = new FormData();
+        for (const [k, v] of Object.entries((options.body ?? {}) as Record<string, unknown>)) {
+          if (
+            v &&
+            typeof v === 'object' &&
+            'data' in (v as object) &&
+            isBinary((v as { data: unknown }).data)
+          ) {
+            const file = v as { data: Uint8Array; fileName?: string; mimeType?: string };
+            form.append(
+              k,
+              new Blob([Buffer.from(file.data)], { type: file.mimeType }),
+              file.fileName ?? 'file',
+            );
+          } else {
+            form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+          }
+        }
+        body = form;
+        delete headers['content-type'];
+      } else {
+        body =
+          typeof options.body === 'string' || isBinary(options.body)
+            ? (options.body as string)
+            : String(options.body);
+      }
+    }
+
+    const timeout = AbortSignal.timeout(options.timeout ?? this.defaultTimeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const dispatcher: Dispatcher = options.skipSslCertificateValidation ? this.insecureAgent : this.agent;
+
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: body as any,
+      dispatcher,
+      redirect: options.followRedirects === false ? 'manual' : 'follow',
+      signal: combined,
+    });
+
+    const raw = await readLimited(response as unknown as Response, this.maxResponseBytes);
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((v, k) => {
+      responseHeaders[k] = v;
+    });
+    const contentType = responseHeaders['content-type'] ?? '';
+    const responseType = options.responseType ?? 'auto';
+    let parsed: unknown;
+    if (responseType === 'arraybuffer') parsed = raw;
+    else {
+      const text = new TextDecoder().decode(raw);
+      if (responseType === 'json' || (responseType === 'auto' && /json/i.test(contentType))) {
+        try {
+          parsed = text.length ? JSON.parse(text) : {};
+        } catch {
+          parsed = text;
+        }
+      } else parsed = text;
+    }
+
+    if (!options.ignoreHttpStatusErrors && (response.status < 200 || response.status >= 300)) {
+      const isRedirect = response.status >= 300 && response.status < 400 && options.followRedirects === false;
+      if (!isRedirect) {
+        throw new HttpError(
+          `Request failed with status code ${response.status}`,
+          response.status,
+          response.statusText,
+          parsed,
+          responseHeaders,
+        );
+      }
+    }
+
+    if (options.returnFullResponse) {
+      return {
+        body: parsed as T,
+        headers: responseHeaders,
+        statusCode: response.status,
+        statusMessage: response.statusText,
+      };
+    }
+    return parsed as T;
+  }
+
+  async close(): Promise<void> {
+    await Promise.all([this.agent.close(), this.insecureAgent.close()]);
+  }
+}
+
+function lowerKeys(h: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
+}
+
+function isBinary(v: unknown): v is Uint8Array {
+  return v instanceof Uint8Array;
+}
