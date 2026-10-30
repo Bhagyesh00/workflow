@@ -379,6 +379,7 @@ describe('Google Sheets', () => {
       { email: 'cy@x', name: 'Cy', vip: true, row_number: 4 },
       { email: 'di@x', tags: ['a'], row_number: 5 },
     ]);
+    expect(decodeURIComponent(http.requests[1].url)).toContain("/values/'Bob''s Sheet'!1:1?");
     const header = http.requests.find((q) => q.method === 'PUT')!;
     expect((header.body as DataObject).values).toEqual([['email', 'name', 'status', 'vip', 'tags']]);
     const append = http.requests.filter((q) => q.url.includes(':append'));

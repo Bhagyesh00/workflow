@@ -295,13 +295,28 @@ async function writeRows(ctx: ExecuteContext, operation: string): Promise<Item[]
     try {
       const options = ctx.getNodeParameter('options', first, {}) as DataObject;
       const headerRow = Math.max(1, Number(options.headerRow ?? 1));
-      const sheetData = await readSheet(ctx, group.sheet, first, { headerRow });
+      // appending only needs the header row; matching needs every row
+      const sheetData = await readSheet(ctx, group.sheet, first, {
+        headerRow,
+        ...(operation === 'append' ? { range: `${headerRow}:${headerRow}` } : {}),
+      });
       let headers = sheetData.headers;
       const initialHeaderCount = headers.length;
       for (const entry of group.entries)
         headers = extendHeaders(ctx, entry.index, headers, entry.data).headers;
-      if (headers.length !== initialHeaderCount || !initialHeaderCount)
+      if (headers.length && headers.length !== initialHeaderCount) {
         await writeHeaders(ctx, group.sheet, headers, headerRow, first);
+      }
+      if (!headers.length) {
+        throw new NodeOperationError(
+          ctx.getNode(),
+          'The sheet has no header row and no new columns may be added',
+          {
+            itemIndex: first,
+            description: "Add a header row, or set 'Fields Not in the Sheet' to insert new columns",
+          },
+        );
+      }
 
       const toAppend: Group['entries'] = [];
       const updates: Array<{ range: string; values: unknown[][] }> = [];
