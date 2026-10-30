@@ -1,0 +1,114 @@
+/** /rest/auth/* and invitation acceptance */
+import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { z } from 'zod';
+import type { ServerContext } from '../context';
+import { clearSessionCookie, requireAuth, setSessionCookie } from '../http/auth';
+import { ApiError, parse } from '../http/errors';
+import { type AuthResult, tenantDTO, userDTO } from '../services/auth';
+
+const signupSchema = z.object({
+  email: z.email().max(254),
+  password: z.string().min(1).max(256),
+  name: z.string().trim().min(1).max(128),
+  workspaceName: z.string().trim().min(1).max(128),
+});
+
+const loginSchema = z.object({
+  email: z.string().trim().min(1).max(254),
+  password: z.string().min(1).max(256),
+});
+
+const acceptSchema = z.object({
+  name: z.string().trim().min(1).max(128),
+  password: z.string().min(1).max(256),
+});
+
+const meta = (request: FastifyRequest) => ({ ip: request.ip, userAgent: request.headers['user-agent'] });
+
+export function authResponse(result: Pick<AuthResult, 'user' | 'tenant' | 'role'>) {
+  return { data: { user: userDTO(result.user), tenant: tenantDTO(result.tenant), role: result.role } };
+}
+
+export function registerAuthRoutes(app: FastifyInstance, ctx: ServerContext): void {
+  const { config, auth, repos } = ctx;
+
+  app.post(
+    '/auth/signup',
+    {
+      config: {
+        rateLimit: {
+          max: 20,
+          timeWindow: 3_600_000,
+          keyGenerator: (request: FastifyRequest) => `signup:${request.ip}`,
+        },
+      },
+    },
+    async (request, reply) => {
+      const body = parse(signupSchema, request.body);
+      const result = await auth.signup(body, meta(request));
+      setSessionCookie(reply, config, result.token);
+      return authResponse(result);
+    },
+  );
+
+  app.post(
+    '/auth/login',
+    {
+      config: {
+        rateLimit: {
+          max: config.loginRateLimit.max,
+          timeWindow: config.loginRateLimit.windowMs,
+          hook: 'preHandler',
+          keyGenerator: (request: FastifyRequest) => {
+            const email = String((request.body as { email?: unknown } | undefined)?.email ?? '')
+              .trim()
+              .toLowerCase()
+              .slice(0, 254);
+            return `login:${request.ip}:${email}`;
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const body = parse(loginSchema, request.body);
+      const result = await auth.login(body, meta(request));
+      setSessionCookie(reply, config, result.token);
+      return authResponse(result);
+    },
+  );
+
+  app.post('/auth/logout', async (request, reply) => {
+    const current = request.auth;
+    if (current?.sessionId)
+      await auth.logout(current.sessionId, current.tenant.id, current.user.id, request.ip);
+    clearSessionCookie(reply, config);
+    return { data: { ok: true } };
+  });
+
+  app.get('/auth/me', async (request) => {
+    const current = requireAuth(request);
+    const tenants = await repos.memberships.listForUser(current.user.id);
+    return {
+      data: {
+        ...authResponse(current).data,
+        tenants: tenants.map((t) => ({ id: t.id, name: t.name, slug: t.slug, role: t.role })),
+      },
+    };
+  });
+
+  app.post('/auth/switch-tenant', async (request) => {
+    const current = requireAuth(request);
+    const { tenantId } = parse(z.object({ tenantId: z.uuid() }), request.body);
+    if (!current.sessionId) throw ApiError.unauthorized();
+    const { tenant, role } = await auth.switchTenant(current.sessionId, current.user.id, tenantId);
+    return authResponse({ user: current.user, tenant, role });
+  });
+
+  app.post('/invitations/:token/accept', { logLevel: 'warn' }, async (request, reply) => {
+    const { token } = parse(z.object({ token: z.string().min(16).max(128) }), request.params);
+    const body = parse(acceptSchema, request.body);
+    const result = await auth.acceptInvitation(token, body, meta(request));
+    setSessionCookie(reply, config, result.token);
+    return authResponse(result);
+  });
+}

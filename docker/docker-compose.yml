@@ -1,0 +1,94 @@
+# Queue-mode deployment: Postgres 16 (with pgvector), Redis 7, one main and one worker.
+#
+#   export ENCRYPTION_KEYS="k1:$(openssl rand -base64 32)"
+#   docker compose -f docker/docker-compose.yml up -d --build
+#   docker compose -f docker/docker-compose.yml exec main node --no-node-snapshot --import tsx \
+#     --import ./src/register-hooks.mjs src/cli.ts seed
+#
+# Then open http://localhost:5678. Scale workers with `--scale worker=3`.
+name: workflow
+
+x-app-env: &app-env
+  NODE_ENV: production
+  BASE_URL: ${BASE_URL:-http://localhost:5678}
+  DATABASE_URL: postgres://workflow:${POSTGRES_PASSWORD:-workflow}@postgres:5432/workflow
+  REDIS_URL: redis://redis:6379/0
+  EXECUTIONS_MODE: queue
+  ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:?Set ENCRYPTION_KEYS, e.g. k1:<base64 of 32 random bytes>}
+  BINARY_DATA_MODE: filesystem
+  BINARY_DATA_DIR: /data/binary
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  SIGNUP_ENABLED: ${SIGNUP_ENABLED:-true}
+  BRAND_NAME: ${BRAND_NAME:-Workflow}
+  TRUST_PROXY: ${TRUST_PROXY:-false}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: workflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-workflow}
+      POSTGRES_DB: workflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U workflow -d workflow']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  main:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: workflow-platform:local
+    restart: unless-stopped
+    command: ['start']
+    environment: *app-env
+    ports:
+      - '${PORT:-5678}:5678'
+    volumes:
+      - binary:/data/binary
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: workflow-platform:local
+    restart: unless-stopped
+    command: ['worker']
+    environment:
+      <<: *app-env
+      QUEUE_CONCURRENCY: ${QUEUE_CONCURRENCY:-10}
+    volumes:
+      # binary data written by workers must be readable by mains (webhook responses, downloads)
+      - binary:/data/binary
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      main:
+        condition: service_started
+
+volumes:
+  pgdata:
+  redisdata:
+  binary:
