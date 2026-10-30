@@ -9,3 +9,15 @@ export function isUuid(value: unknown): value is string {
 export function now(): Date {
   return new Date();
 }
+
+/** Postgres error code (drizzle wraps driver errors in `cause`) */
+export function pgErrorCode(error: unknown): string | undefined {
+  let current = error as { code?: unknown; cause?: unknown } | undefined;
+  for (let i = 0; i < 5 && current; i++) {
+    if (typeof current.code === 'string' && /^[0-9A-Z]{5}$/.test(current.code)) return current.code;
+    current = current.cause as typeof current;
+  }
+  return undefined;
+}
+
+export const isUniqueViolation = (error: unknown) => pgErrorCode(error) === '23505';

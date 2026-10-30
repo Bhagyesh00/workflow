@@ -33,7 +33,7 @@ import type { TenantRow, WorkflowRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import type { PinoLogger } from '../logger';
 import { effectiveLimits, type TenantSettings } from '../plans';
-import { createRepositories, type Repositories } from '../repositories';
+import { createRepositories, isUniqueViolation, type Repositories } from '../repositories';
 import type { MessageBus } from './bus';
 import type { ExecutionService } from './executions';
 import type { Leadership } from './queue';
@@ -291,7 +291,7 @@ export class ActiveWorkflowManager {
         await r.workflows.setActive(tenantId, workflowId, true);
       });
     } catch (error) {
-      if ((error as { code?: string }).code === '23505') {
+      if (isUniqueViolation(error)) {
         throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', [
           { node: null, message: 'A webhook path is already used by another active workflow' },
         ]);

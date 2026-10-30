@@ -64,5 +64,5 @@ export function createRepositories(db: DbOrTx): Repositories {
 }
 
 export type { AuditEntry } from './resources';
-export { isUuid } from './util';
+export { isUniqueViolation, isUuid, pgErrorCode } from './util';
 export type { TagRef, WorkflowContent } from './workflows';

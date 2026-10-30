@@ -39,7 +39,6 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
     bodyLimit: config.bodyLimitBytes,
     trustProxy: config.trustProxy,
     routerOptions: { maxParamLength: 1024 },
-    disableRequestLogging: config.logLevel === 'silent',
   });
 
   app.setErrorHandler(handleError);

@@ -7,6 +7,7 @@ import { requireRole } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { page, paginationQuery } from '../http/pagination';
 import { idParams, roleSchema, tagSchema, variableCreateSchema, variableUpdateSchema } from '../http/schemas';
+import { isUniqueViolation } from '../repositories';
 import { hasRole } from '../services/auth';
 
 export const tagDTO = (
@@ -26,8 +27,6 @@ export const variableDTO = (v: VariableRow) => ({
   createdAt: v.createdAt.toISOString(),
   updatedAt: v.updatedAt.toISOString(),
 });
-
-const isUniqueViolation = (error: unknown) => (error as { code?: string })?.code === '23505';
 
 export async function createTag(ctx: ServerContext, tenantId: string, name: string) {
   if (await ctx.repos.tags.getByName(tenantId, name))
