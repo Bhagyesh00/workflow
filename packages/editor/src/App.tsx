@@ -1,17 +1,16 @@
 /** Providers and routes. */
 import { type QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { createBrowserRouter, createHashRouter, Navigate, type RouteObject } from 'react-router';
 import { RouterProvider } from 'react-router/dom';
 import { AppShell } from './components/shell/AppShell';
 import { BrandApplier } from './components/shell/BrandMark';
 import { ConfirmHost } from './components/ui/Dialog';
+import { PageLoader } from './components/ui/misc';
 import { Toaster } from './components/ui/Toaster';
 import { applyTheme } from './lib/brand';
 import { AcceptInvitationPage, LoginPage, SignupPage } from './pages/auth/AuthPages';
-import { CredentialsPage } from './pages/CredentialsPage';
 import { NotFoundPage, RouteErrorPage } from './pages/ErrorPages';
-import { ExecutionDetailPage } from './pages/ExecutionDetailPage';
 import { ExecutionsPage } from './pages/ExecutionsPage';
 import {
   AccountSettingsPage,
@@ -20,9 +19,23 @@ import {
   SettingsLayout,
   VariablesSettingsPage,
 } from './pages/SettingsPages';
-import { WorkflowEditorPage } from './pages/WorkflowEditorPage';
 import { WorkflowsPage } from './pages/WorkflowsPage';
 import { useUiStore } from './stores/ui-store';
+
+// the canvas, node details view and code editors load on demand
+const WorkflowEditorPage = lazy(() =>
+  import('./pages/WorkflowEditorPage').then((m) => ({ default: m.WorkflowEditorPage })),
+);
+const ExecutionDetailPage = lazy(() =>
+  import('./pages/ExecutionDetailPage').then((m) => ({ default: m.ExecutionDetailPage })),
+);
+const CredentialsPage = lazy(() =>
+  import('./pages/CredentialsPage').then((m) => ({ default: m.CredentialsPage })),
+);
+
+function Lazy({ children }: { children: React.ReactNode }) {
+  return <Suspense fallback={<PageLoader />}>{children}</Suspense>;
+}
 
 export const routes: RouteObject[] = [
   { path: '/signin', element: <LoginPage />, errorElement: <RouteErrorPage /> },
@@ -35,10 +48,31 @@ export const routes: RouteObject[] = [
     children: [
       { index: true, element: <Navigate to="/workflows" replace /> },
       { path: 'workflows', element: <WorkflowsPage /> },
-      { path: 'workflow/:id', element: <WorkflowEditorPage /> },
+      {
+        path: 'workflow/:id',
+        element: (
+          <Lazy>
+            <WorkflowEditorPage />
+          </Lazy>
+        ),
+      },
       { path: 'executions', element: <ExecutionsPage /> },
-      { path: 'executions/:id', element: <ExecutionDetailPage /> },
-      { path: 'credentials', element: <CredentialsPage /> },
+      {
+        path: 'executions/:id',
+        element: (
+          <Lazy>
+            <ExecutionDetailPage />
+          </Lazy>
+        ),
+      },
+      {
+        path: 'credentials',
+        element: (
+          <Lazy>
+            <CredentialsPage />
+          </Lazy>
+        ),
+      },
       {
         path: 'settings',
         element: <SettingsLayout />,

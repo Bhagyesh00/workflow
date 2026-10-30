@@ -469,7 +469,9 @@ export function OutputPane({
               size="sm"
               variant="ghost"
               icon={<Pin size={13} />}
-              onClick={() => onPin(items)}
+              onClick={() =>
+                onPin(items.map((i) => (i.binary ? { json: i.json, binary: i.binary } : { json: i.json })))
+              }
               title="Use this output instead of running the node in manual runs"
             >
               Pin
