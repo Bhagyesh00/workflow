@@ -9,6 +9,11 @@ import {
   setByPath,
 } from '@workflow/workflow';
 
+/** pass-through output: point each item at its own position in this node's input, not at upstream pairing */
+export function pairToInput(items: Item[]): Item[] {
+  return items.map((item, i) => ({ ...item, pairedItem: { item: i } }));
+}
+
 export const ManualTriggerNode: NodeType = {
   description: {
     name: 'core.manualTrigger',
@@ -53,7 +58,7 @@ export const NoOpNode: NodeType = {
     properties: [],
   },
   async execute(ctx) {
-    return [ctx.getInputData()];
+    return [pairToInput(ctx.getInputData())];
   },
 };
 
@@ -454,12 +459,12 @@ export const RespondToWebhookNode: NodeType = {
           headers,
           binary: { data, mimeType: binary.mimeType, fileName: binary.fileName },
         });
-        return [items];
+        return [pairToInput(items)];
       }
       default:
         body = undefined;
     }
     ctx.sendResponse({ statusCode, headers, body });
-    return [items];
+    return [pairToInput(items)];
   },
 };

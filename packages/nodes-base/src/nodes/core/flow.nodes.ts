@@ -20,7 +20,7 @@ import {
 import { DateTime } from 'luxon';
 import { parseDate } from '../../utils/filter';
 import { errorItem, parseJsonParameter, withItemIndex } from '../../utils/utilities';
-import { convertFieldValue } from './simple.nodes';
+import { convertFieldValue, pairToInput } from './simple.nodes';
 
 // ---------------------------------------------------------------------------------------------
 // Loop Over Items
@@ -363,7 +363,7 @@ export const WaitNode: NodeType = {
       }
       // webhook resumes always persist the execution, however short the limit
       await ctx.putExecutionToWait(until);
-      return [items];
+      return [pairToInput(items)];
     }
 
     const ms = until.getTime() - Date.now();
@@ -372,7 +372,7 @@ export const WaitNode: NodeType = {
     } else {
       await ctx.putExecutionToWait(until);
     }
-    return [items];
+    return [pairToInput(items)];
   },
 
   async webhook(ctx: WebhookContext): Promise<WebhookResponseData> {

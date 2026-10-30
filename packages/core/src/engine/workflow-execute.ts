@@ -112,6 +112,8 @@ export class WorkflowExecute {
   private readonly evaluator: ExpressionEvaluator;
   private lastNodeOutput: Item[][] | null = null;
   private waitTill?: Date;
+  /** hooks of logged sub-node runs, chained so they land in order and finish before the parent node does */
+  private subNodeHooks: Promise<void> = Promise.resolve();
   private startedAt = Date.now();
   private nodeRuns = 0;
   private runFilter?: Set<string>;
@@ -326,7 +328,9 @@ export class WorkflowExecute {
           })),
         ];
       } else if (node.disabled) {
-        output = exec.data.main?.[0] ? [exec.data.main[0]] : null;
+        output = exec.data.main?.[0]
+          ? [exec.data.main[0].map((item, i) => ({ ...item, pairedItem: { item: i } }))]
+          : null;
       } else {
         const maxTries = node.retryOnFail
           ? Math.min(Math.max(node.maxTries ?? 3, 2), this.services.limits?.maxTries ?? 5)
@@ -514,6 +518,7 @@ export class WorkflowExecute {
     try {
       return await nodeType.execute(ctx);
     } finally {
+      await this.subNodeHooks;
       for (const close of closeFunctions) {
         await close().catch((e) => this.services.logger.warn('Sub-node close failed', { error: String(e) }));
       }
@@ -594,7 +599,15 @@ export class WorkflowExecute {
           source: [{ previousNode: parent.name }],
         };
         runs.push(deepFreeze(task));
-        void this.services.hooks?.nodeExecuteAfter?.(sub.name, runs.length - 1, task, this.state);
+        const subRunIndex = runs.length - 1;
+        this.subNodeHooks = this.subNodeHooks
+          .then(() => this.services.hooks?.nodeExecuteAfter?.(sub.name, subRunIndex, task, this.state))
+          .catch((e) =>
+            this.services.logger.warn('nodeExecuteAfter failed for sub-node', {
+              node: sub.name,
+              error: String(e),
+            }),
+          );
       },
     };
   }
