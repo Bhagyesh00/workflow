@@ -55,6 +55,33 @@ export interface NodeHelpers {
    * non-HTTP connections (databases, SMTP, MCP over TCP) must call this before connecting.
    */
   assertHostAllowed(host: string): Promise<void>;
+  /**
+   * Resolve `host` once and check every address against the SSRF policy. Connect with the returned
+   * `lookup` (keeping `host` as the name, so TLS verifies it), never with a fresh resolution: a
+   * driver that resolves the name again can be sent elsewhere by a DNS rebind.
+   */
+  resolveAllowedHost(host: string): Promise<AllowedHost>;
+}
+
+/** An address as `dns.lookup` reports it. */
+export interface ResolvedAddress {
+  address: string;
+  family: number;
+}
+
+/** A host resolved once, with every address checked against the SSRF policy. */
+export interface AllowedHost {
+  /** every address the name resolved to, in resolver order; all of them passed the policy */
+  addresses: ResolvedAddress[];
+  /**
+   * A `lookup` for `net.connect` / `tls.connect` that answers only from `addresses`. The name is
+   * never resolved again, and Node's dual-stack and multi-address fallback still works.
+   */
+  lookup(
+    hostname: string,
+    options: { all?: boolean; family?: number | string },
+    callback: (error: Error | null, address: string | ResolvedAddress[], family?: number) => void,
+  ): void;
 }
 
 export interface BaseContext {

@@ -1,4 +1,6 @@
 /** Postgres: run queries and insert / update / upsert / delete / select rows (node-postgres). */
+
+import net from 'node:net';
 import type {
   BaseContext,
   DataObject,
@@ -21,7 +23,7 @@ interface PostgresCredentials extends DataObject {
   maxConnections?: number;
 }
 
-/** Build a pool after checking the host against the SSRF policy. */
+/** Build a pool whose connections go only to addresses that passed the SSRF policy. */
 export async function postgresPool(
   ctx: Pick<BaseContext, 'getCredentials' | 'helpers'>,
   options: { connectionTimeoutSeconds?: number } = {},
@@ -29,14 +31,29 @@ export async function postgresPool(
   const creds = await ctx.getCredentials<PostgresCredentials>('postgres');
   const host = String(creds.host ?? '').trim();
   if (!host) throw new Error('The Postgres credential has no host');
-  await ctx.helpers.assertHostAllowed(host);
+  const allowed = await ctx.helpers.resolveAllowedHost(host);
   let ssl: pg.PoolConfig['ssl'] = false;
   if (creds.ssl === 'allow') ssl = { rejectUnauthorized: false };
   if (creds.ssl === 'require')
     ssl = { rejectUnauthorized: true, ...(creds.caCertificate ? { ca: String(creds.caCertificate) } : {}) };
   const pool = new pg.Pool({
+    // pg takes the TLS server name from `host`, so it stays the name the user entered
     host,
     port: Number(creds.port ?? 5432),
+    // pg calls connect(port, host) on this socket itself: every connection goes only to the checked
+    // addresses (pg resolving the name again could be sent elsewhere by a DNS rebind)
+    stream: () => {
+      const socket = new net.Socket();
+      const connect = socket.connect.bind(socket);
+      socket.connect = ((port: number, name: string) =>
+        connect({
+          port,
+          host: name,
+          lookup: allowed.lookup,
+          autoSelectFamily: true,
+        })) as typeof socket.connect;
+      return socket;
+    },
     database: creds.database ? String(creds.database) : undefined,
     user: creds.user ? String(creds.user) : undefined,
     password: creds.password ? String(creds.password) : undefined,

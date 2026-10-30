@@ -1,27 +1,14 @@
 /**
- * Non-HTTP connections (PostgreSQL for memory / PGVector, Redis for memory). Every host passes the
- * SSRF policy through `ctx.helpers.assertHostAllowed` before connecting, and the connection is
- * pinned to an address that passed the policy itself, so a DNS rebind between the check and the
- * connect cannot redirect it. Consequence: a private database must be allow-listed by IP or CIDR
- * (or SSRF protection disabled); a hostname-only allow entry is not enough for these nodes.
+ * Non-HTTP connections (PostgreSQL for memory / PGVector, Redis for memory). Every host is resolved
+ * once and checked against the SSRF policy through `ctx.helpers.resolveAllowedHost`, and the
+ * connection goes only to addresses that passed, so a DNS rebind between the check and the connect
+ * cannot redirect it.
  */
-import dns from 'node:dns';
 import net from 'node:net';
 import type { BaseContext, DataObject } from '@workflow/workflow';
 import { Redis } from 'ioredis';
 import pg from 'pg';
 import { acquireShared, type Shared, sharedKey } from './shared-resource';
-
-export async function resolvePinnedHost(ctx: BaseContext, host: string): Promise<string> {
-  const bare = host.trim().replace(/^\[|\]$/g, '');
-  if (!bare) throw new Error('A host is required');
-  await ctx.helpers.assertHostAllowed(bare);
-  if (net.isIP(bare)) return bare;
-  const addresses = await dns.promises.lookup(bare, { all: true, verbatim: true });
-  if (!addresses.length) throw new Error(`Host "${bare}" did not resolve`);
-  for (const a of addresses) await ctx.helpers.assertHostAllowed(a.address);
-  return addresses[0].address;
-}
 
 export interface PostgresCredentials {
   host: string;
@@ -53,17 +40,29 @@ export function postgresCredentials(data: DataObject): PostgresCredentials {
 }
 
 async function openPostgres(ctx: BaseContext, creds: PostgresCredentials): Promise<pg.Client> {
-  const address = await resolvePinnedHost(ctx, creds.host);
+  const host = creds.host.trim();
+  const allowed = await ctx.helpers.resolveAllowedHost(host);
   const ssl =
     creds.ssl === 'disable'
       ? false
-      : {
-          servername: net.isIP(creds.host) ? undefined : creds.host,
-          rejectUnauthorized: creds.ssl === 'verify-full' && !creds.allowUnauthorizedCerts,
-        };
+      : { rejectUnauthorized: creds.ssl === 'verify-full' && !creds.allowUnauthorizedCerts };
   const client = new pg.Client({
-    host: address,
+    // pg takes the TLS server name from `host`, so it stays the name the user entered
+    host,
     port: creds.port,
+    // pg calls connect(port, host) on this socket itself: route it through the checked addresses only
+    stream: () => {
+      const socket = new net.Socket();
+      const connect = socket.connect.bind(socket);
+      socket.connect = ((port: number, name: string) =>
+        connect({
+          port,
+          host: name,
+          lookup: allowed.lookup,
+          autoSelectFamily: true,
+        })) as typeof socket.connect;
+      return socket;
+    },
     database: creds.database,
     user: creds.user,
     password: creds.password,
@@ -132,9 +131,10 @@ export function redisCredentials(data: DataObject): RedisCredentials {
 }
 
 async function openRedis(ctx: BaseContext, creds: RedisCredentials): Promise<Redis> {
-  const address = await resolvePinnedHost(ctx, creds.host);
+  const allowed = await ctx.helpers.resolveAllowedHost(creds.host);
   const client = new Redis({
-    host: address,
+    // ioredis takes no `lookup`, so it is pinned to the first checked address
+    host: allowed.addresses[0].address,
     port: creds.port,
     password: creds.password,
     username: creds.username,

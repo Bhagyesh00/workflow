@@ -5,9 +5,9 @@
  */
 import dns from 'node:dns';
 import net from 'node:net';
-import type { HttpFullResponse, HttpRequestOptions } from '@workflow/workflow';
+import type { AllowedHost, HttpFullResponse, HttpRequestOptions, ResolvedAddress } from '@workflow/workflow';
 import ipaddr from 'ipaddr.js';
-import { Agent, type Dispatcher, FormData, fetch } from 'undici';
+import { Agent, buildConnector, type Dispatcher, FormData, fetch } from 'undici';
 
 export class SsrfBlockedError extends Error {
   constructor(host: string, address: string) {
@@ -95,23 +95,50 @@ export function isAddressAllowed(host: string, address: string, policy: SsrfPoli
   return parsed.range() === 'unicast';
 }
 
+function guardedLookup(policy: SsrfPolicy): net.LookupFunction {
+  return (hostname, options, callback) => {
+    dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
+      if (err) return callback(err, '', 4);
+      const list = Array.isArray(addresses) ? addresses : [{ address: addresses as string, family: 4 }];
+      for (const a of list) {
+        if (!isAddressAllowed(hostname, a.address, policy)) {
+          return callback(new SsrfBlockedError(hostname, a.address), '', 4);
+        }
+      }
+      if ((options as { all?: boolean }).all) return (callback as any)(null, list);
+      return callback(null, list[0].address, list[0].family);
+    });
+  };
+}
+
+/**
+ * A lookup that answers only from addresses already checked, so the connection never resolves the
+ * name again. It hands back every address, so `autoSelectFamily` can still fall back across them.
+ */
+function pinnedLookup(host: string, addresses: ResolvedAddress[]): AllowedHost['lookup'] {
+  return (_hostname, options, callback) => {
+    const family =
+      options.family === 'IPv4' ? 4 : options.family === 'IPv6' ? 6 : Number(options.family ?? 0);
+    const list = family ? addresses.filter((a) => a.family === family) : addresses;
+    process.nextTick(() => {
+      if (!list.length) callback(new Error(`Host "${host}" has no allowed IPv${family} address`), '', family);
+      else if (options.all) callback(null, list);
+      else callback(null, list[0].address, list[0].family);
+    });
+  };
+}
+
 function createGuardedAgent(policy: SsrfPolicy, rejectUnauthorized = true): Agent {
+  const connector = buildConnector({ rejectUnauthorized, lookup: guardedLookup(policy) });
   return new Agent({
-    connect: {
-      rejectUnauthorized,
-      lookup(hostname, options, callback) {
-        dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
-          if (err) return callback(err, '', 4);
-          const list = Array.isArray(addresses) ? addresses : [{ address: addresses as string, family: 4 }];
-          for (const a of list) {
-            if (!isAddressAllowed(hostname, a.address, policy)) {
-              return callback(new SsrfBlockedError(hostname, a.address), '', 4);
-            }
-          }
-          if ((options as { all?: boolean }).all) return (callback as any)(null, list);
-          return callback(null, list[0].address, list[0].family);
-        });
-      },
+    // runs for every new connection, redirect hops included; IP literals never reach `lookup`, so check them here
+    connect(options, callback) {
+      const host = options.hostname.replace(/^\[|\]$/g, '');
+      if (net.isIP(host) && !isAddressAllowed(host, host, policy)) {
+        callback(new SsrfBlockedError(host, host), null);
+        return;
+      }
+      connector(options, callback);
     },
   });
 }
@@ -180,14 +207,29 @@ export class HttpClient {
 
   /** resolve and check a hostname for non-HTTP connections (databases, SMTP) */
   async assertHostAllowed(host: string): Promise<void> {
-    const bare = host.replace(/^\[|\]$/g, '');
+    await this.resolveAllowedHost(host);
+  }
+
+  /**
+   * Resolve `host` once and check every address against the policy. Non-HTTP drivers must connect
+   * through the returned `lookup`: a driver that resolves the name again could be sent elsewhere by
+   * a DNS rebind between the check and the connect.
+   */
+  async resolveAllowedHost(host: string): Promise<AllowedHost> {
+    const bare = host.trim().replace(/^\[|\]$/g, '');
+    if (!bare) throw new Error('A host is required');
+    // drivers such as pg treat a leading '/' as a Unix socket path on this machine
+    if (this.policy.enabled && bare.startsWith('/')) throw new SsrfBlockedError(bare, 'unix socket');
     if (DEFAULT_DENY_HOSTS.includes(bare.toLowerCase())) throw new SsrfBlockedError(bare, bare);
-    const addresses = net.isIP(bare)
-      ? [{ address: bare }]
+    const resolved = net.isIP(bare)
+      ? [{ address: bare, family: net.isIP(bare) }]
       : await dns.promises.lookup(bare, { all: true, verbatim: true });
-    for (const a of addresses) {
+    if (!resolved.length) throw new Error(`Host "${bare}" did not resolve`);
+    for (const a of resolved) {
       if (!isAddressAllowed(bare, a.address, this.policy)) throw new SsrfBlockedError(bare, a.address);
     }
+    const addresses = resolved.map(({ address, family }) => ({ address, family }));
+    return { addresses, lookup: pinnedLookup(bare, addresses) };
   }
 
   async request<T = unknown>(
@@ -259,6 +301,10 @@ export class HttpClient {
       dispatcher,
       redirect: options.followRedirects === false ? 'manual' : 'follow',
       signal: combined,
+    }).catch((error: unknown) => {
+      // a connect-time block reaches fetch as `TypeError('fetch failed')`; surface the real reason
+      if (error instanceof Error && error.cause instanceof SsrfBlockedError) throw error.cause;
+      throw error;
     });
 
     const raw = await readLimited(response as unknown as Response, this.maxResponseBytes);

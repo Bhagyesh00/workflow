@@ -286,6 +286,13 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
         throw toNodeApiError(node, error);
       }
     },
+    async resolveAllowedHost(host: string) {
+      try {
+        return await services.http.resolveAllowedHost(host);
+      } catch (error) {
+        throw toNodeApiError(node, error);
+      }
+    },
   } as NodeHelpers;
 }
 
@@ -401,7 +408,7 @@ export function createCodeRunnerCall(deps: ContextDeps, base: BaseContext): Exec
     return services.codeRunner.run({
       code: options.code,
       mode: options.mode,
-      items: inputItems(deps),
+      items: inputItems(deps).map((item, index) => ({ ...item, pairedItem: { item: index } })),
       nodeOutputs,
       variables: services.variables,
       workflow: base.getWorkflow(),

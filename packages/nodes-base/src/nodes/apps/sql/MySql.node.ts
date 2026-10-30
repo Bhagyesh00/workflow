@@ -1,4 +1,6 @@
 /** MySQL: run queries and insert / update / upsert / delete / select rows (mysql2). */
+
+import net from 'node:net';
 import type {
   BaseContext,
   DataObject,
@@ -21,7 +23,7 @@ interface MySqlCredentials extends DataObject {
   connectTimeout?: number;
 }
 
-/** Build a pool after checking the host against the SSRF policy. */
+/** Build a pool whose connections go only to addresses that passed the SSRF policy. */
 export async function mysqlPool(
   ctx: Pick<BaseContext, 'getCredentials' | 'helpers'>,
   options: { connectionTimeoutSeconds?: number } = {},
@@ -29,14 +31,24 @@ export async function mysqlPool(
   const creds = await ctx.getCredentials<MySqlCredentials>('mySql');
   const host = String(creds.host ?? '').trim();
   if (!host) throw new Error('The MySQL credential has no host');
-  await ctx.helpers.assertHostAllowed(host);
+  const allowed = await ctx.helpers.resolveAllowedHost(host);
+  const port = Number(creds.port ?? 3306);
   let ssl: mysql.PoolOptions['ssl'];
   if (creds.ssl === 'allow') ssl = { rejectUnauthorized: false };
   if (creds.ssl === 'require')
     ssl = { rejectUnauthorized: true, ...(creds.caCertificate ? { ca: String(creds.caCertificate) } : {}) };
   return mysql.createPool({
+    // mysql2 takes the TLS server name from `host`, so it stays the name the user entered
     host,
-    port: Number(creds.port ?? 3306),
+    port,
+    // every connection goes only to the checked addresses: mysql2 resolving the name again could be
+    // sent elsewhere by a DNS rebind
+    stream: () => {
+      const socket = net.connect({ host, port, lookup: allowed.lookup, autoSelectFamily: true });
+      socket.setNoDelay(true);
+      socket.setKeepAlive(true);
+      return socket;
+    },
     database: creds.database ? String(creds.database) : undefined,
     user: creds.user ? String(creds.user) : undefined,
     password: creds.password ? String(creds.password) : undefined,

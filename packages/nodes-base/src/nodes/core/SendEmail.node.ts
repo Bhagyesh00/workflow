@@ -1,7 +1,8 @@
 /**
- * Send Email over SMTP (nodemailer). SMTP is not HTTP, so the SSRF policy is enforced with
- * `assertHostAllowed` before any connection is opened.
+ * Send Email over SMTP (nodemailer). SMTP is not HTTP, so the host is resolved and checked against
+ * the SSRF policy with `resolveAllowedHost`, and nodemailer connects only to those checked addresses.
  */
+import net from 'node:net';
 import { type DataObject, NodeOperationError, type NodeType } from '@workflow/workflow';
 import nodemailer from 'nodemailer';
 import { fieldList, mapItems } from '../../utils/utilities';
@@ -118,12 +119,20 @@ export const SendEmailNode: NodeType = {
     const creds = await ctx.getCredentials<SmtpCredentials>('smtp');
     const host = String(creds.host ?? '').trim();
     if (!host) throw new NodeOperationError(ctx.getNode(), 'The SMTP credential has no host');
-    await ctx.helpers.assertHostAllowed(host);
+    const allowed = await ctx.helpers.resolveAllowedHost(host);
+    const port = Number(creds.port ?? (creds.secure === false ? 587 : 465));
 
     const insecure = Boolean(ctx.getNodeParameter('options.allowUnauthorizedCerts', 0, false));
     const transport = nodemailer.createTransport({
+      // nodemailer takes the TLS server name from `host`, so it stays the name the user entered
       host,
-      port: Number(creds.port ?? (creds.secure === false ? 587 : 465)),
+      port,
+      // every connection goes only to the checked addresses: nodemailer resolving the name again
+      // could be sent elsewhere by a DNS rebind
+      getSocket: (_options, callback) =>
+        callback(null, {
+          connection: net.connect({ host, port, lookup: allowed.lookup, autoSelectFamily: true }),
+        }),
       secure: creds.secure !== false,
       ignoreTLS: creds.secure === false && Boolean(creds.disableStartTls),
       name: creds.hostName ? String(creds.hostName) : undefined,
