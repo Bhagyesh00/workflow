@@ -13,11 +13,22 @@
   },
   "dependencies": {
     "@workflow/workflow": "workspace:*",
-    "luxon": "3.7.2"
+    "cheerio": "1.2.0",
+    "fast-xml-parser": "5.11.2",
+    "luxon": "3.7.2",
+    "marked": "18.1.1",
+    "mysql2": "3.24.6",
+    "nodemailer": "10.3.1",
+    "papaparse": "5.7.0",
+    "pg": "8.23.1",
+    "turndown": "7.2.4"
   },
   "devDependencies": {
     "@types/luxon": "3.7.6",
     "@types/node": "24.19.2",
+    "@types/papaparse": "5.5.2",
+    "@types/pg": "8.23.1",
+    "@types/turndown": "5.0.6",
     "@workflow/core": "workspace:*",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
