@@ -129,3 +129,21 @@ export const httpCustomAuth: CredentialType = {
     return next;
   },
 };
+
+/** Shared secret used to verify HMAC signatures on incoming webhook deliveries. */
+export const webhookSigningSecret: CredentialType = {
+  name: 'webhookSigningSecret',
+  displayName: 'Webhook Signing Secret',
+  icon: 'lucide:shield-check',
+  properties: [
+    {
+      displayName: 'Signing Secret',
+      name: 'secret',
+      type: 'string',
+      default: '',
+      required: true,
+      typeOptions: { password: true },
+      description: 'The secret the sending service uses to sign its webhook deliveries',
+    },
+  ],
+};

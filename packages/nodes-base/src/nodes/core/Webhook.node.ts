@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { DataObject, Item, NodeType, WebhookContext, WebhookResponseData } from '@workflow/workflow';
+import { type SignaturePreset, verifyWebhookSignature } from '../../utils/webhook-signature';
 
 function safeEqual(a: string, b: string): boolean {
   const x = Buffer.from(a);
@@ -40,6 +41,11 @@ export const WebhookNode: NodeType = {
         required: true,
         displayOptions: { show: { authentication: ['headerAuth'] } },
       },
+      {
+        name: 'webhookSigningSecret',
+        required: true,
+        displayOptions: { show: { authentication: ['signature'] } },
+      },
     ],
     webhooks: [
       {
@@ -77,7 +83,77 @@ export const WebhookNode: NodeType = {
           { name: 'None', value: 'none' },
           { name: 'Basic Auth', value: 'basicAuth' },
           { name: 'Header Auth', value: 'headerAuth' },
+          {
+            name: 'Signature (HMAC)',
+            value: 'signature',
+            description: 'Verify the HMAC signature the sending service puts on every delivery',
+          },
         ],
+      },
+      {
+        displayName: 'Signature Format',
+        name: 'signaturePreset',
+        type: 'options',
+        default: 'generic',
+        displayOptions: { show: { authentication: ['signature'] } },
+        options: [
+          { name: 'GitHub (X-Hub-Signature-256)', value: 'github' },
+          { name: 'Stripe (Stripe-Signature)', value: 'stripe' },
+          { name: 'Slack (X-Slack-Signature)', value: 'slack' },
+          { name: 'Shopify (X-Shopify-Hmac-Sha256)', value: 'shopify' },
+          {
+            name: 'Custom Header',
+            value: 'generic',
+            description: 'HMAC of the raw body in a header you name',
+          },
+        ],
+      },
+      {
+        displayName: 'Signature Header',
+        name: 'signatureHeader',
+        type: 'string',
+        default: 'X-Signature',
+        displayOptions: { show: { authentication: ['signature'], signaturePreset: ['generic'] } },
+      },
+      {
+        displayName: 'Algorithm',
+        name: 'signatureAlgorithm',
+        type: 'options',
+        default: 'sha256',
+        displayOptions: { show: { authentication: ['signature'], signaturePreset: ['generic'] } },
+        options: [
+          { name: 'HMAC-SHA256', value: 'sha256' },
+          { name: 'HMAC-SHA512', value: 'sha512' },
+          { name: 'HMAC-SHA1', value: 'sha1' },
+        ],
+      },
+      {
+        displayName: 'Encoding',
+        name: 'signatureEncoding',
+        type: 'options',
+        default: 'hex',
+        displayOptions: { show: { authentication: ['signature'], signaturePreset: ['generic'] } },
+        options: [
+          { name: 'Hex', value: 'hex' },
+          { name: 'Base64', value: 'base64' },
+        ],
+      },
+      {
+        displayName: 'Signature Prefix',
+        name: 'signaturePrefix',
+        type: 'string',
+        default: '',
+        placeholder: 'sha256=',
+        description: 'Text in front of the signature in the header, if any',
+        displayOptions: { show: { authentication: ['signature'], signaturePreset: ['generic'] } },
+      },
+      {
+        displayName: 'Max Age (Seconds)',
+        name: 'signatureTolerance',
+        type: 'number',
+        default: 300,
+        description: 'Deliveries with an older signed timestamp are rejected to stop replays',
+        displayOptions: { show: { authentication: ['signature'], signaturePreset: ['stripe', 'slack'] } },
       },
       {
         displayName: 'Respond',
@@ -192,6 +268,22 @@ export const WebhookNode: NodeType = {
       const creds = await ctx.getCredentials<{ name: string; value: string }>('httpHeaderAuth');
       const got = header(ctx, creds.name) ?? '';
       if (!safeEqual(got, creds.value)) return unauthorized('Authorization data is wrong', 403);
+    } else if (authentication === 'signature') {
+      const creds = await ctx.getCredentials<{ secret: string }>('webhookSigningSecret');
+      const result = verifyWebhookSignature({
+        preset: ctx.getNodeParameter('signaturePreset', 0, 'generic') as SignaturePreset,
+        secret: String(creds.secret ?? ''),
+        headers: ctx.getHeaderData(),
+        rawBody: req.rawBody,
+        toleranceSeconds: Number(ctx.getNodeParameter('signatureTolerance', 0, 300)),
+        header: ctx.getNodeParameter('signatureHeader', 0, 'X-Signature') as string,
+        algorithm: ctx.getNodeParameter('signatureAlgorithm', 0, 'sha256') as 'sha256',
+        encoding: ctx.getNodeParameter('signatureEncoding', 0, 'hex') as 'hex',
+        prefix: ctx.getNodeParameter('signaturePrefix', 0, '') as string,
+      });
+      if (!result.ok) {
+        return { webhookResponse: { statusCode: 401, headers: {}, body: { message: result.reason } } };
+      }
     }
 
     const item: Item = {

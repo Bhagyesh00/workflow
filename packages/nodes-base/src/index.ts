@@ -14,6 +14,7 @@ import {
   httpCustomAuth,
   httpHeaderAuth,
   httpQueryAuth,
+  webhookSigningSecret,
 } from './credentials/http.credentials';
 import {
   gmailOAuth2,
@@ -108,6 +109,7 @@ export const credentials: CredentialType[] = [
   httpQueryAuth,
   httpBearerAuth,
   httpCustomAuth,
+  webhookSigningSecret,
   oAuth2Api,
   googleOAuth2Api,
   gmailOAuth2,
@@ -133,3 +135,4 @@ export {
   OPERATIONS_BY_TYPE,
   SINGLE_VALUE_OPERATIONS,
 } from './utils/filter';
+export { verifyWebhookSignature } from './utils/webhook-signature';

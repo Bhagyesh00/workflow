@@ -504,7 +504,12 @@ export const XmlNode: NodeType = {
           trimValues: options.trim !== false,
           processEntities: true,
           htmlEntities: false,
-          isArray: explicitArray ? (_name, _path, _isLeaf, isAttribute) => !isAttribute : undefined,
+          ...(explicitArray
+            ? {
+                isArray: (_name: string, _path: unknown, _isLeaf: boolean, isAttribute: boolean) =>
+                  !isAttribute,
+              }
+            : {}),
         });
         let parsed: DataObject;
         try {

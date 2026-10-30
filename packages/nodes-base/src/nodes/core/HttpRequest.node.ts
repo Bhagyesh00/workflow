@@ -809,6 +809,36 @@ async function responseToItems(
   return { parsed, items: [wrap(parsed)] };
 }
 
+function apiMessage(body: unknown): string | undefined {
+  if (typeof body === 'string') return body.trim() ? body.slice(0, 500) : undefined;
+  if (!isPlainObject(body)) return undefined;
+  const b = body as Record<string, any>;
+  const message = b.error?.message ?? b.message ?? b.error_description ?? b.error;
+  return typeof message === 'string' ? message : undefined;
+}
+
+/** Errors from arraybuffer requests carry raw bytes: decode them for a readable message. */
+function readableApiError(error: unknown): unknown {
+  if (!(error instanceof NodeApiError) || !(error.responseBody instanceof Uint8Array)) return error;
+  const text = Buffer.from(error.responseBody).toString('utf8');
+  let body: unknown = text;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    /* keep text */
+  }
+  const better = new NodeApiError(error.node, apiMessage(body) ?? error.message, {
+    httpCode: error.httpCode,
+    description: error.description,
+    responseBody: body,
+    itemIndex: error.itemIndex,
+    request: error.request,
+    retryAfterMs: error.retryAfterMs,
+    cause: error.cause,
+  });
+  return better;
+}
+
 function isEmptyBody(body: unknown): boolean {
   if (body === undefined || body === null) return true;
   if (typeof body === 'string') return body.trim() === '';
@@ -856,7 +886,11 @@ async function requestForItem(ctx: ExecuteContext, i: number, item: Item): Promi
     if (sendIdempotencyKey && !hasHeader(final.headers, 'idempotency-key')) {
       final.headers = { ...(final.headers ?? {}), 'Idempotency-Key': idempotencyKey(ctx, i, page) };
     }
-    return (await authenticatedRequest(ctx, i, final)) as HttpFullResponse<unknown>;
+    try {
+      return (await authenticatedRequest(ctx, i, final)) as HttpFullResponse<unknown>;
+    } catch (error) {
+      throw readableApiError(error);
+    }
   };
 
   const vars = (extra: DataObject) => ({ $json: item.json, ...extra });
@@ -904,11 +938,14 @@ async function requestForItem(ctx: ExecuteContext, i: number, item: Item): Promi
     pageCount++;
     if (completeWhen === 'receiveSpecificStatusCodes' && completeCodes.includes(res.statusCode)) break;
     if (!opts.neverError && (res.statusCode < 200 || res.statusCode >= 300)) {
-      throw new NodeApiError(ctx.getNode(), `Request failed with status code ${res.statusCode}`, {
-        httpCode: res.statusCode,
-        itemIndex: i,
-        request: { method: current.method ?? 'GET', url: current.url.split('?')[0] },
-      });
+      throw readableApiError(
+        new NodeApiError(ctx.getNode(), `Request failed with status code ${res.statusCode}`, {
+          httpCode: res.statusCode,
+          itemIndex: i,
+          responseBody: res.body,
+          request: { method: current.method ?? 'GET', url: current.url.split('?')[0] },
+        }),
+      );
     }
     const { items, parsed } = await responseToItems(ctx, i, res, current.url, opts);
     const $response = {
