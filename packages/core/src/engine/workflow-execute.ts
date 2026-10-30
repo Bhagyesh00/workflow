@@ -311,7 +311,8 @@ export class WorkflowExecute {
 
     let output: NodeOutput = null;
     let error: unknown;
-    let attempt = 1;
+    /** attempts actually made (for metadata) */
+    let attempts = 1;
     let nodeType: NodeType | undefined;
 
     try {
@@ -330,7 +331,8 @@ export class WorkflowExecute {
         const maxTries = node.retryOnFail
           ? Math.min(Math.max(node.maxTries ?? 3, 2), this.services.limits?.maxTries ?? 5)
           : 1;
-        for (attempt = 1; attempt <= maxTries; attempt++) {
+        for (let attempt = 1; attempt <= maxTries; attempt++) {
+          attempts = attempt;
           try {
             output = await this.executeNode(node, nodeType, exec, runIndex, signal);
             error = undefined;
@@ -366,7 +368,7 @@ export class WorkflowExecute {
           executionStatus: 'error',
           error: serialized,
           source,
-          metadata: attempt > 1 ? { attempt: Math.min(attempt, node.maxTries ?? attempt) } : undefined,
+          metadata: attempts > 1 ? { attempt: attempts } : undefined,
         };
         runs.push(task);
         this.state.resultData.lastNodeExecuted = node.name;
@@ -413,7 +415,7 @@ export class WorkflowExecute {
       executionStatus: this.waitTill ? 'waiting' : 'success',
       data: finalOutput ? { main: finalOutput } : undefined,
       source,
-      metadata: attempt > 1 ? { attempt } : undefined,
+      metadata: attempts > 1 ? { attempt: attempts } : undefined,
     };
     if (errorOutputUsed)
       task.hints = [{ message: 'Node failed; items were routed to the error output', level: 'warning' }];

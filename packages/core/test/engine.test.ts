@@ -130,6 +130,15 @@ describe('WorkflowExecute', () => {
     expect(result.state.resultData.runData.After).toBeUndefined();
   });
 
+  it('records no retry metadata for a node that failed without retries', async () => {
+    const result = await execute({
+      name: 'no-retry',
+      nodes: [node('Trigger', 'test.trigger'), node('Fail', 'test.fail', [200, 0])],
+      connections: connect(['Trigger', 'Fail']),
+    }).run();
+    expect(result.state.resultData.runData.Fail[0].metadata).toBeUndefined();
+  });
+
   it('retries a failing node', async () => {
     const result = await execute({
       name: 'retry',

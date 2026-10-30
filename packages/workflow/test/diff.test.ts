@@ -93,3 +93,36 @@ describe('error catalogue', () => {
     ).toBe('TIMEOUT');
   });
 });
+
+describe('port expressions', () => {
+  it('detects sub-nodes whose outputs depend on parameters', async () => {
+    const { Workflow } = await import('../src');
+    const store = {
+      description: {
+        name: 'x.store',
+        displayName: 'Store',
+        description: '',
+        group: ['transform' as const],
+        version: 1,
+        defaults: { name: 'Store' },
+        properties: [],
+        inputs: '={{ $parameter.mode === "retrieve" ? [] : ["main"] }}',
+        outputs: '={{ $parameter.mode === "retrieve" ? ["ai_vectorStore"] : ["main"] }}',
+      },
+    };
+    const types = { get: () => store };
+    const mk = (mode: string) =>
+      new Workflow(
+        {
+          name: 'w',
+          connections: {},
+          nodes: [
+            { id: '1', name: 'S', type: 'x.store', typeVersion: 1, position: [0, 0], parameters: { mode } },
+          ],
+        },
+        types,
+      );
+    expect(mk('retrieve').isSubNode(mk('retrieve').nodes.S)).toBe(true);
+    expect(mk('insert').isSubNode(mk('insert').nodes.S)).toBe(false);
+  });
+});

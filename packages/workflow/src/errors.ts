@@ -161,6 +161,34 @@ interface Classification {
   hint?: string;
 }
 
+const AI_CODES: Array<[RegExp, string, string]> = [
+  [
+    /max(imum)? iterations/i,
+    'AI_MAX_ITERATIONS',
+    'The agent did not finish within its iteration limit. Simplify the task, improve the tool descriptions or raise Max Iterations.',
+  ],
+  [
+    /token budget/i,
+    'AI_TOKEN_BUDGET',
+    'The run used its token budget. Raise the budget or shorten prompts, memory and tool output.',
+  ],
+  [
+    /could not parse|output parser|failed to parse/i,
+    'AI_OUTPUT_PARSE',
+    'The model output did not match the expected format. Add examples to the prompt or use the auto-fixing output parser.',
+  ],
+  [
+    /\brefusal\b|model (refused|declined)/i,
+    'AI_REFUSAL',
+    'The model declined the request. Rephrase the prompt or adjust the system message.',
+  ],
+  [
+    /no session id/i,
+    'AI_NO_SESSION',
+    'Memory needs a session id. Connect a Chat Trigger or set the session key expression.',
+  ],
+];
+
 const HTTP_HINTS: Record<string, string> = {
   '400': 'The service rejected the request. Check the parameters and body against its API documentation.',
   '401':
@@ -263,6 +291,8 @@ export function classifyError(error: ExecutionErrorShape): Classification {
       return { code: 'CODE_MEMORY', hint: 'The code used too much memory. Process fewer items at a time.' };
     return { code: 'CODE_ERROR' };
   }
+  const ai = AI_CODES.find(([re]) => re.test(msg));
+  if (ai) return { code: error.code ?? ai[1], hint: ai[2] };
   if (/does not have credentials of type/.test(msg)) {
     return { code: 'CREDENTIALS_MISSING', hint: 'Select a credential for this node in its parameters.' };
   }

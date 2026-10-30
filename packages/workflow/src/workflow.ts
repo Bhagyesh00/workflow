@@ -1,4 +1,5 @@
 import { WorkflowOperationError } from './errors';
+import { evaluateSimple } from './expression/expression';
 import type {
   Connection,
   Connections,
@@ -147,7 +148,9 @@ export class Workflow {
     const description = this.nodeTypes.get(node.type)?.description;
     const connected = this.getMainInputs(node.name).length;
     if (!description) return Math.max(1, connected);
-    const declared = resolvePorts(description.inputs, node).filter((p) => portType(p) === 'main').length;
+    const declared = resolvePorts(description.inputs, node, evaluatePortExpression).filter(
+      (p) => portType(p) === 'main',
+    ).length;
     return Math.max(declared, connected);
   }
 
@@ -173,8 +176,17 @@ export class Workflow {
   isSubNode(node: WorkflowNode): boolean {
     const description = this.nodeTypes.get(node.type)?.description;
     if (!description) return false;
-    const outputs = resolvePorts(description.outputs, node);
+    const outputs = resolvePorts(description.outputs, node, evaluatePortExpression);
     return outputs.length > 0 && outputs.every((p) => portType(p) !== 'main');
+  }
+}
+
+/** evaluate an inputs/outputs expression against the node's raw parameters */
+export function evaluatePortExpression(expression: string, parameters: DataObject): unknown {
+  try {
+    return evaluateSimple(expression, { $parameter: parameters });
+  } catch {
+    return undefined;
   }
 }
 
