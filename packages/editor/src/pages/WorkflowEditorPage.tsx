@@ -2,7 +2,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { NodeParameters, NodeTypeDescription, WorkflowSettings } from '@workflow/workflow';
 import { ReactFlowProvider, useReactFlow } from '@xyflow/react';
-import { StickyNote } from 'lucide-react';
+import { Plus, StickyNote } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-router';
 import { errorMessage, isApiError } from '../api/client';
@@ -316,8 +316,8 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
             />
             {!readOnly && (
               <div className="absolute top-3 right-3 z-10 flex flex-col gap-1.5">
-                <Button variant="primary" onClick={() => ui.openCreator()} aria-label="Add node">
-                  + Add node
+                <Button variant="primary" icon={<Plus size={15} />} onClick={() => ui.openCreator()}>
+                  Add node
                 </Button>
                 <IconButton
                   label="Add sticky note"

@@ -14,7 +14,7 @@ import {
   Sun,
   Workflow,
 } from 'lucide-react';
-import { useEffect } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { errorMessage, isApiError, onUnauthorized } from '../../api/client';
 import { authApi } from '../../api/endpoints';
@@ -27,6 +27,21 @@ import { Menu } from '../ui/Menu';
 import { EmptyState, PageLoader } from '../ui/misc';
 import { BrandMark } from './BrandMark';
 import { PushBridge } from './PushBridge';
+
+const NARROW = '(max-width: 900px)';
+
+/** Narrow screens get the icon rail so content keeps its width. */
+function useNarrowScreen(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const media = window.matchMedia?.(NARROW);
+      media?.addEventListener?.('change', onChange);
+      return () => media?.removeEventListener?.('change', onChange);
+    },
+    () => Boolean(window.matchMedia?.(NARROW).matches),
+    () => false,
+  );
+}
 
 const NAV = [
   { to: '/workflows', label: 'Workflows', icon: Workflow },
@@ -186,7 +201,8 @@ export function AppShell() {
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   const inEditor =
     location.pathname.startsWith('/workflow/') || /^\/executions\/[^/]+/.test(location.pathname);
-  const collapsed = collapsedPref || inEditor;
+  const narrow = useNarrowScreen();
+  const collapsed = collapsedPref || inEditor || narrow;
 
   useEffect(
     () =>
@@ -264,7 +280,7 @@ export function AppShell() {
           ))}
         </ul>
         <div className="mt-auto flex flex-col gap-2">
-          {collapsedPref && !inEditor && (
+          {collapsedPref && !inEditor && !narrow && (
             <button
               type="button"
               aria-label="Expand sidebar"

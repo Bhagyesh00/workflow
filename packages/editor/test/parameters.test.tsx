@@ -347,12 +347,12 @@ describe('dynamic options', () => {
     await waitFor(() => expect(within(screen.getByRole('listbox')).getAllByRole('option')).toHaveLength(10));
     await user.click(screen.getByRole('button', { name: 'Load more' }));
     await waitFor(() => expect(within(screen.getByRole('listbox')).getAllByRole('option')).toHaveLength(20));
-    await user.type(screen.getByRole('textbox', { name: 'Search resources' }), 'grace');
+    await user.type(screen.getByRole('textbox', { name: 'Search resources' }), 'theo');
     await waitFor(() =>
       expect(
         within(screen.getByRole('listbox'))
           .getAllByRole('option')
-          .every((o) => /Grace/.test(o.textContent ?? '')),
+          .every((o) => /Theo/.test(o.textContent ?? '')),
       ).toBe(true),
     );
     await user.click(within(screen.getByRole('listbox')).getAllByRole('option')[0]);
@@ -360,7 +360,7 @@ describe('dynamic options', () => {
       __rl: true,
       mode: 'list',
       value: 'c_101',
-      cachedResultName: 'Grace Hopper',
+      cachedResultName: 'Theo Lindqvist',
     });
   });
 

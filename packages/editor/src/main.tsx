@@ -15,7 +15,7 @@ async function boot() {
   if (!root) throw new Error('Missing #root element');
   createRoot(root).render(
     <StrictMode>
-      <App queryClient={createQueryClient()} hash={demo} />
+      <App queryClient={createQueryClient()} hash={demo && import.meta.env.VITE_HASH_ROUTER !== 'false'} />
     </StrictMode>,
   );
 }

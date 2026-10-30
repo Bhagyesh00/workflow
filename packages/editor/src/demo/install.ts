@@ -76,7 +76,7 @@ export function seedDemo(backend: MockBackend): void {
                 id: 'a2',
                 name: 'customer',
                 type: 'string',
-                value: '={{ $json.body?.customer?.name ?? "Grace Hopper" }}',
+                value: '={{ $json.body?.customer?.name ?? "Theo Lindqvist" }}',
               },
               { id: 'a3', name: 'total', type: 'number', value: '={{ $json.body?.total ?? 250 }}' },
               { id: 'a4', name: 'region', type: 'string', value: '={{ $vars.region }}' },
@@ -114,7 +114,7 @@ export function seedDemo(backend: MockBackend): void {
         parameters: {
           resource: 'contact',
           operation: 'get',
-          contactId: { __rl: true, mode: 'list', value: 'c_100', cachedResultName: 'Ada Lovelace' },
+          contactId: { __rl: true, mode: 'list', value: 'c_100', cachedResultName: 'Mara Quinn' },
         },
         credentials: { crmApi: { id: 'cred-crm', name: 'Acme CRM (production)' } },
       },

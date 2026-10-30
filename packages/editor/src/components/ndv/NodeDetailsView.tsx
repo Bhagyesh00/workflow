@@ -424,7 +424,6 @@ export function NodeDetailsView({
               </div>
             </section>
             <section aria-label="Output" className="flex min-h-0 flex-col">
-              <h2 className="px-3 pt-3 font-sans text-xs font-semibold text-ink-3">Output</h2>
               <div className="min-h-0 flex-1">
                 <OutputPane
                   node={node}

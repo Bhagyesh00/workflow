@@ -1,18 +1,21 @@
 /** Version history: list, read-only preview of a snapshot, restore. */
 import { useQuery } from '@tanstack/react-query';
+import { diffWorkflows } from '@workflow/workflow';
 import { ReactFlowProvider } from '@xyflow/react';
 import { History, RotateCcw, X } from 'lucide-react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { workflowsApi } from '../../api/endpoints';
 import { queryKeys, useNodeTypes } from '../../api/queries';
 import { formatDateTime, formatRelative } from '../../lib/format';
+import { useWorkflowStore } from '../../stores/workflow-store';
 import { readOnlyActions } from '../canvas/actions';
 import { FlowCanvas } from '../canvas/FlowCanvas';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { Dialog } from '../ui/Dialog';
 import { Callout, EmptyState, PageLoader } from '../ui/misc';
+import { WorkflowDiffSummary } from './WorkflowDiffSummary';
 
 function VersionPreview({
   workflowId,
@@ -30,20 +33,31 @@ function VersionPreview({
     queryKey: [...queryKeys.versions(workflowId), versionId],
     queryFn: () => workflowsApi.version(workflowId, versionId),
   });
+  const nodes = useWorkflowStore((s) => s.nodes);
+  const connections = useWorkflowStore((s) => s.connections);
+  const meta = useWorkflowStore((s) => s.meta);
+  // semantic diff (NF-10): what restoring would change, ignoring layout
+  const diff = useMemo(
+    () =>
+      snapshot.data
+        ? diffWorkflows(
+            { name: meta.name, nodes, connections, settings: meta.settings },
+            {
+              name: snapshot.data.name,
+              nodes: snapshot.data.nodes,
+              connections: snapshot.data.connections,
+              settings: snapshot.data.settings ?? {},
+            },
+          )
+        : null,
+    [snapshot.data, nodes, connections, meta.name, meta.settings],
+  );
   if (snapshot.isLoading) return <PageLoader />;
   if (snapshot.error) return <Callout tone="err">{errorMessage(snapshot.error)}</Callout>;
   const data = snapshot.data!;
   return (
-    <div className="flex h-full flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <p className="flex-1 text-sm text-ink-2">
-          “{data.name}” with {data.nodes.length} node{data.nodes.length === 1 ? '' : 's'}
-        </p>
-        <Button variant="primary" icon={<RotateCcw size={14} />} onClick={onRestore} loading={restoring}>
-          Restore this version
-        </Button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-line">
+    <div className="grid h-full min-h-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="min-h-[50vh] overflow-hidden rounded-xl border border-line">
         <ReactFlowProvider>
           <FlowCanvas
             graph={{ nodes: data.nodes, connections: data.connections, pinData: {}, stickyNotes: [] }}
@@ -58,6 +72,27 @@ function VersionPreview({
           />
         </ReactFlowProvider>
       </div>
+      <aside className="flex min-h-0 flex-col gap-3">
+        <div>
+          <p className="font-display text-md font-semibold">“{data.name}”</p>
+          <p className="text-sm text-ink-2">
+            {data.nodes.length} node{data.nodes.length === 1 ? '' : 's'}
+          </p>
+        </div>
+        <h3 className="font-sans text-sm font-semibold text-ink">Restoring changes the canvas like this</h3>
+        <div className="wf-scroll min-h-0 flex-1 overflow-auto">
+          {diff && <WorkflowDiffSummary diff={diff} />}
+        </div>
+        <Button
+          variant="primary"
+          icon={<RotateCcw size={14} />}
+          onClick={onRestore}
+          loading={restoring}
+          disabled={diff?.isEmpty}
+        >
+          Restore this version
+        </Button>
+      </aside>
     </div>
   );
 }

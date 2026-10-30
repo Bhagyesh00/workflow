@@ -2,25 +2,33 @@
  * Sign-in / sign-up frame. The right side shows a small patch bay: three modules wired with
  * cables and one signal travelling through them, the product's visual idea in one picture.
  */
+import { Globe, MessageSquare, Receipt, Webhook } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { BrandMark } from '../../components/shell/BrandMark';
 
 function PatchBay() {
-  const cable1 = 'M 168 120 C 250 120, 250 250, 330 250';
-  const cable2 = 'M 448 250 C 520 250, 520 120, 600 120';
-  const cable3 = 'M 448 266 C 530 266, 520 380, 600 380';
+  const W = 168;
   const modules = [
-    { x: 40, y: 88, label: 'New order', sub: 'Webhook', trigger: true },
-    { x: 330, y: 218, label: 'Check stock', sub: 'HTTP request' },
-    { x: 600, y: 88, label: 'Notify team', sub: 'Send message' },
-    { x: 600, y: 348, label: 'Create invoice', sub: 'Accounting' },
+    { x: 20, y: 88, label: 'New order', sub: 'Webhook', icon: Webhook, trigger: true },
+    { x: 300, y: 218, label: 'Check stock', sub: 'HTTP request', icon: Globe },
+    { x: 572, y: 88, label: 'Notify team', sub: 'Send message', icon: MessageSquare },
+    { x: 572, y: 348, label: 'Create invoice', sub: 'Accounting', icon: Receipt },
   ];
+  const out = (m: (typeof modules)[number]) => [m.x + W, m.y + 32];
+  const inp = (m: (typeof modules)[number]) => [m.x, m.y + 32];
+  const cable = (a: number[], b: number[]) => {
+    const dx = Math.max(60, (b[0] - a[0]) / 2);
+    return `M ${a[0]} ${a[1]} C ${a[0] + dx} ${a[1]}, ${b[0] - dx} ${b[1]}, ${b[0]} ${b[1]}`;
+  };
+  const cable1 = cable(out(modules[0]), inp(modules[1]));
+  const cable2 = cable(out(modules[1]), inp(modules[2]));
+  const cable3 = cable(out(modules[1]), inp(modules[3]));
   return (
     <svg
       viewBox="0 0 760 470"
-      className="h-auto w-full max-w-[640px]"
+      className="h-auto w-full max-w-[680px]"
       role="img"
-      aria-label="Three connected workflow steps"
+      aria-label="Connected workflow steps"
     >
       <defs>
         <pattern id="wf-dots" width="22" height="22" patternUnits="userSpaceOnUse">
@@ -35,7 +43,7 @@ function PatchBay() {
         d={cable1}
         fill="none"
         stroke="var(--wf-brand)"
-        strokeWidth="2.5"
+        strokeWidth="3"
         strokeLinecap="round"
         className="wf-auth-signal"
         pathLength={100}
@@ -44,63 +52,82 @@ function PatchBay() {
         d={cable2}
         fill="none"
         stroke="var(--wf-brand)"
-        strokeWidth="2.5"
+        strokeWidth="3"
         strokeLinecap="round"
         className="wf-auth-signal wf-auth-signal-2"
         pathLength={100}
       />
-      {modules.map((m) => (
-        <g key={m.label} transform={`translate(${m.x} ${m.y})`}>
-          <rect
-            width="128"
-            height="64"
-            rx="12"
-            fill="var(--wf-surface)"
-            stroke="var(--wf-line-strong)"
-            strokeWidth="1.5"
-          />
-          {m.trigger && <rect width="6" height="64" rx="3" fill="var(--wf-brand)" />}
-          <rect
-            x="14"
-            y="14"
-            width="36"
-            height="36"
-            rx="9"
-            fill="color-mix(in oklab, var(--wf-brand) 14%, var(--wf-surface))"
-          />
-          <text
-            x="58"
-            y="30"
-            fontSize="12"
-            fontWeight="650"
-            fill="var(--wf-ink)"
-            fontFamily="var(--font-sans)"
-          >
-            {m.label}
-          </text>
-          <text x="58" y="46" fontSize="10.5" fill="var(--wf-ink-2)" fontFamily="var(--font-sans)">
-            {m.sub}
-          </text>
-          {!m.trigger && (
+      {modules.map((m) => {
+        const Icon = m.icon;
+        return (
+          <g key={m.label} transform={`translate(${m.x} ${m.y})`}>
+            <rect
+              width={W}
+              height="64"
+              rx="12"
+              fill="var(--wf-surface)"
+              stroke="var(--wf-line-strong)"
+              strokeWidth="1.5"
+            />
+            {m.trigger && (
+              <path d="M 12 0 H 6 a 6 6 0 0 0 -6 6 V 58 a 6 6 0 0 0 6 6 H 12 Z" fill="var(--wf-brand)" />
+            )}
+            <rect
+              x={m.trigger ? 20 : 12}
+              y="12"
+              width="40"
+              height="40"
+              rx="10"
+              fill="color-mix(in oklab, var(--wf-brand) 13%, var(--wf-surface))"
+            />
+            <Icon
+              x={m.trigger ? 30 : 22}
+              y={22}
+              width={20}
+              height={20}
+              color="var(--wf-brand)"
+              strokeWidth={1.9}
+            />
+            <text
+              x={m.trigger ? 72 : 64}
+              y="29"
+              fontSize="13"
+              fontWeight="650"
+              fill="var(--wf-ink)"
+              fontFamily="var(--font-sans)"
+            >
+              {m.label}
+            </text>
+            <text
+              x={m.trigger ? 72 : 64}
+              y="46"
+              fontSize="11.5"
+              fill="var(--wf-ink-2)"
+              fontFamily="var(--font-sans)"
+            >
+              {m.sub}
+            </text>
+            {!m.trigger && (
+              <circle
+                cx="0"
+                cy="32"
+                r="6"
+                fill="var(--wf-surface)"
+                stroke="var(--wf-line-strong)"
+                strokeWidth="2"
+              />
+            )}
             <circle
-              cx="0"
+              cx={W}
               cy="32"
               r="6"
               fill="var(--wf-surface)"
               stroke="var(--wf-line-strong)"
               strokeWidth="2"
             />
-          )}
-          <circle
-            cx="128"
-            cy="32"
-            r="6"
-            fill="var(--wf-surface)"
-            stroke="var(--wf-line-strong)"
-            strokeWidth="2"
-          />
-        </g>
-      ))}
+          </g>
+        );
+      })}
     </svg>
   );
 }

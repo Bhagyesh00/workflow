@@ -160,14 +160,44 @@ export function InputPane({
 // Output
 // ---------------------------------------------------------------------------------------------
 
-function ErrorPanel({ error }: { error: ExecutionErrorShape }) {
+/** Structured, actionable errors (NF-15): code, hint, item, parameter and the failing HTTP call. */
+export function ErrorPanel({ error }: { error: ExecutionErrorShape }) {
   const [showStack, setShowStack] = useState(false);
+  const facts: Array<[string, string]> = [];
+  if (error.itemIndex !== undefined) facts.push(['Item', String(error.itemIndex + 1)]);
+  if (error.parameter) facts.push(['Parameter', error.parameter]);
+  if (error.request) facts.push(['Request', `${error.request.method} ${error.request.url}`]);
+  const status = error.response?.statusCode ?? error.httpCode;
+  if (status !== undefined) facts.push(['Status', String(status)]);
   return (
-    <div className="flex flex-col gap-2 p-3">
+    <div className="flex flex-col gap-2 p-3" data-testid="node-error">
       <Callout tone="err" title={error.message}>
         {error.description && <p className="mt-1">{error.description}</p>}
-        {error.httpCode && <p className="mt-1">HTTP status {error.httpCode}</p>}
+        {error.code && <p className="mt-1 font-mono text-xs">{error.code}</p>}
       </Callout>
+      {error.hint && (
+        <Callout tone="info" title="How to fix it">
+          {error.hint}
+        </Callout>
+      )}
+      {facts.length > 0 && (
+        <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-1 rounded-lg border border-line bg-surface px-3 py-2 text-xs">
+          {facts.map(([label, value]) => (
+            <div key={label} className="contents">
+              <dt className="text-ink-3">{label}</dt>
+              <dd className="font-mono break-all text-ink">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {error.response?.body && (
+        <details className="text-xs">
+          <summary className="cursor-pointer font-semibold text-ink-2">Response body</summary>
+          <pre className="wf-scroll mt-1 max-h-48 overflow-auto rounded-lg bg-surface-2 p-2 whitespace-pre-wrap text-ink-2">
+            {error.response.body}
+          </pre>
+        </details>
+      )}
       {error.stack && (
         <div>
           <button

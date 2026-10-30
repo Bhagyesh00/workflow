@@ -3,6 +3,7 @@ import { BaseEdge, EdgeLabelRenderer, type EdgeProps, getBezierPath } from '@xyf
 import { Plus, Trash2 } from 'lucide-react';
 import { memo } from 'react';
 import { plural } from '../../lib/format';
+import { cx } from '../ui/cx';
 import { useCanvasActions } from './actions';
 import type { CableEdge } from './flow-elements';
 
@@ -44,7 +45,10 @@ export const CanvasEdge = memo(function CanvasEdge({
         >
           {data?.count !== undefined && (
             <span
-              className="rounded-full border border-ok/40 bg-surface px-1.5 py-px text-2xs font-semibold text-ok shadow-card"
+              className={cx(
+                'rounded-full border bg-surface px-1.5 py-px text-2xs font-semibold shadow-card',
+                data.count > 0 ? 'border-ok/40 text-ok' : 'border-line text-ink-3',
+              )}
               data-testid="edge-count"
             >
               {plural(data.count, 'item')}

@@ -180,9 +180,9 @@ export async function simulateExecution(input: SimulationInput): Promise<Simulat
                 query: {},
                 body: {
                   orderId: 1042,
-                  total: 99.5,
+                  total: 249.5,
                   currency: 'EUR',
-                  customer: { name: 'Ada Lovelace', email: 'ada@example.com' },
+                  customer: { name: 'Mara Quinn', email: 'mara@example.com' },
                 },
               },
             },

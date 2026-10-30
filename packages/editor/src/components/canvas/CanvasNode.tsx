@@ -330,19 +330,6 @@ export const CanvasNode = memo(function CanvasNode({ data, selected }: NodeProps
                 style={{ right: -40, top: `calc(${spread(mainOut.indexOf(port), mainOut.length)} - 10px)` }}
               />
             ))}
-        {aiIn.map((port, i) => (
-          <Handle
-            key={port.id}
-            id={port.id}
-            type="target"
-            position={Position.Bottom}
-            className="wf-port"
-            data-kind="ai"
-            data-required={port.required && !connectedInputs.includes(port.id) ? 'true' : undefined}
-            isConnectable={!readOnly}
-            style={{ left: spread(i, aiIn.length) }}
-          />
-        ))}
         {aiOut.map((port, i) => (
           <Handle
             key={port.id}
@@ -358,37 +345,52 @@ export const CanvasNode = memo(function CanvasNode({ data, selected }: NodeProps
         <StatusBadge status={status} pinned={pinned} errors={errors} />
       </div>
       {isRoot && (
-        <div className="relative mt-2 h-10">
-          {aiIn.map((port, i) => (
-            <div
-              key={port.id}
-              className="absolute flex -translate-x-1/2 flex-col items-center gap-1"
-              style={{ left: spread(i, aiIn.length) }}
-            >
-              <span
-                className={cx(
-                  'text-2xs whitespace-nowrap',
-                  port.required ? 'font-semibold text-ink-2' : 'text-ink-3',
-                )}
+        // AI inputs hang below the module: label, "+" to add a sub-node, then the port itself,
+        // so cables from sub-nodes arrive underneath the labels instead of crossing them
+        <div className="relative mt-1.5 h-[60px]">
+          {aiIn.map((port, i) => {
+            const used = connectedInputs.filter((id) => id === port.id).length;
+            const full = port.maxConnections !== undefined && used >= port.maxConnections;
+            return (
+              <div
+                key={port.id}
+                className="absolute top-0 bottom-0 flex w-24 -translate-x-1/2 flex-col items-center gap-1"
+                style={{ left: spread(i, aiIn.length) }}
               >
-                {port.label}
-                {port.required && '*'}
-              </span>
-              {!readOnly && (
-                <button
-                  type="button"
-                  className="nodrag nopan grid size-5 place-items-center rounded-md border border-dashed border-line-strong bg-surface text-ink-3 hover:border-brand hover:text-brand"
-                  aria-label={`Add ${port.label ?? port.type} to ${node.name}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    actions.addSubNode(node.name, port.type, port.index);
-                  }}
+                <span
+                  className={cx(
+                    'text-2xs whitespace-nowrap',
+                    port.required ? 'font-semibold text-ink-2' : 'text-ink-3',
+                  )}
                 >
-                  <Plus size={11} />
-                </button>
-              )}
-            </div>
-          ))}
+                  {port.label}
+                  {port.required && '*'}
+                </span>
+                {!readOnly && !full && (
+                  <button
+                    type="button"
+                    className="nodrag nopan grid size-5 place-items-center rounded-md border border-dashed border-line-strong bg-surface text-ink-3 hover:border-brand hover:text-brand"
+                    aria-label={`Add ${port.label ?? port.type} to ${node.name}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      actions.addSubNode(node.name, port.type, port.index);
+                    }}
+                  >
+                    <Plus size={11} />
+                  </button>
+                )}
+                <Handle
+                  id={port.id}
+                  type="target"
+                  position={Position.Bottom}
+                  className="wf-port"
+                  data-kind="ai"
+                  data-required={port.required && !used ? 'true' : undefined}
+                  isConnectable={!readOnly}
+                />
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

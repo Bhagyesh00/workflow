@@ -892,9 +892,8 @@ export const demoLoadOptions: Record<
 
 export const demoContacts = Array.from({ length: 34 }, (_, i) => ({
   name:
-    ['Ada Lovelace', 'Grace Hopper', 'Alan Turing', 'Katherine Johnson', 'Edsger Dijkstra', 'Barbara Liskov'][
-      i % 6
-    ] + (i >= 6 ? ` ${Math.floor(i / 6) + 1}` : ''),
+    ['Mara Quinn', 'Theo Lindqvist', 'Ines Okafor', 'Ravi Mendes', 'Lena Varga', 'Jonah Pike'][i % 6] +
+    (i >= 6 ? ` ${Math.floor(i / 6) + 1}` : ''),
   value: `c_${100 + i}`,
   url: `https://crm.example.com/contacts/c_${100 + i}`,
 }));

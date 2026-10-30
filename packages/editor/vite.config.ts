@@ -42,7 +42,7 @@ export default defineConfig(({ mode }) => ({
     },
   },
   build: {
-    outDir: mode === 'demo' ? 'dist-demo' : 'dist',
+    outDir: mode === 'demo' ? 'dist/demo' : 'dist',
     sourcemap: mode !== 'demo',
     chunkSizeWarningLimit: 1600,
   },

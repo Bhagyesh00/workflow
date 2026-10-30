@@ -109,7 +109,7 @@ export function NodeSettingsForm({
         disabled={readOnly}
       />
       {node.retryOnFail && (
-        <div className="grid grid-cols-2 gap-3 rounded-xl border border-line bg-surface-2 p-3">
+        <div className="grid grid-cols-2 gap-3 rounded-xl border border-line bg-surface-2 p-3 [&>*:nth-child(3)]:col-span-2">
           <Row label="Max tries" hint="Between 2 and 5">
             {(id) => (
               <input
@@ -141,6 +141,21 @@ export function NodeSettingsForm({
                   onChange({ waitBetweenTries: Math.min(5000, Math.max(0, Number(e.target.value) || 0)) })
                 }
               />
+            )}
+          </Row>
+          <Row label="Backoff" hint="Exponential doubles the wait each attempt and honours Retry-After">
+            {(id) => (
+              <Select
+                id={id}
+                value={node.retryBackoff ?? 'fixed'}
+                disabled={readOnly}
+                onChange={(e) =>
+                  onChange({ retryBackoff: e.target.value === 'exponential' ? 'exponential' : undefined })
+                }
+              >
+                <option value="fixed">Fixed wait</option>
+                <option value="exponential">Exponential with jitter</option>
+              </Select>
             )}
           </Row>
         </div>
