@@ -4,7 +4,17 @@ import { Redis } from 'ioredis';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fromStoredMessage, toStoredMessage } from '../src/nodes/memory/memory.nodes';
-import { connect, node, PG_CREDENTIALS, REDIS_CREDENTIALS, run, scriptModel, services } from './harness';
+import { sharedResourceCount } from '../src/shared/shared-resource';
+import {
+  connect,
+  node,
+  PG_CREDENTIALS,
+  REDIS_CREDENTIALS,
+  reply,
+  run,
+  scriptModel,
+  services,
+} from './harness';
 
 const suffix = `${process.pid}_${Date.now()}`;
 
@@ -69,6 +79,27 @@ describe('Postgres chat memory', () => {
     });
     // AI logs record loads and saves
     expect(fourth.r.runData.Memory.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('uses one connection for all items and releases it', async () => {
+    scriptModel('Model', (request) => reply(`seen ${request.messages.length}`));
+    const r = await run(
+      [
+        node('Trigger', 'test.trigger'),
+        node('Agent', 'ai.agent', { promptType: 'define', text: '={{ $json.q }}' }),
+        node('Model', 'test.fakeChatModel'),
+        memory,
+      ],
+      connect(['Trigger', 'Agent'], ['Model', 'Agent', 'ai_languageModel'], ['Memory', 'Agent', 'ai_memory']),
+      {
+        triggerItems: ['a', 'b', 'c'].map((q) => ({ json: { q, sessionId: 'batch' } })),
+        services: services({ creds, http: new HttpClient({ ssrf: { allow: ['127.0.0.1'] } }) }),
+      },
+    );
+    expect(r.status, JSON.stringify(r.error)).toBe('success');
+    // items share the session: each sees the exchanges of the items before it
+    expect(r.output('Agent').map((o) => o.output)).toEqual(['seen 2', 'seen 4', 'seen 6']);
+    expect(sharedResourceCount()).toBe(0);
   });
 
   it('scopes history by tenant and session', async () => {

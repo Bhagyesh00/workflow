@@ -13,7 +13,18 @@ import {
   wrapToolCode,
 } from '../src/nodes/tools/tools.nodes';
 import { clearMemoryVectorStores } from '../src/nodes/vector-stores/vector-stores.nodes';
-import { connect, type Link, modelRequests, node, run, scriptModel, services, toolCalls } from './harness';
+import { sharedResourceCount } from '../src/shared/shared-resource';
+import {
+  connect,
+  type Link,
+  modelRequests,
+  node,
+  reply,
+  run,
+  scriptModel,
+  services,
+  toolCalls,
+} from './harness';
 
 /** Agent driven by a scripted model, with the given tool nodes attached. */
 async function agentWith(
@@ -560,6 +571,31 @@ describe('MCP Client tool', () => {
       'initialize',
       'notifications/initialized',
     ]);
+  });
+
+  it('shares one session across the items of an execution', async () => {
+    scriptModel('Model', (request) =>
+      request.messages.at(-1)?.role === 'tool' ? reply('done') : toolCalls(['get_time', { zone: 'UTC' }]),
+    );
+    const r = await run(
+      [
+        node('Trigger', 'test.trigger'),
+        node('Agent', 'ai.agent', { promptType: 'define', text: '={{ $json.q }}' }),
+        node('Model', 'test.fakeChatModel'),
+        mcpNode(),
+      ],
+      connect(['Trigger', 'Agent'], ['Model', 'Agent', 'ai_languageModel'], ['MCP', 'Agent', 'ai_tool']),
+      {
+        triggerItems: [{ json: { q: 'a' } }, { json: { q: 'b' } }, { json: { q: 'c' } }],
+        services: services({ http: new HttpClient({ ssrf: { allow: ['127.0.0.1'] } }) }),
+      },
+    );
+    expect(r.output('Agent')).toHaveLength(3);
+    const calls = log.map((l) => l.rpc ?? l.method);
+    expect(calls.filter((c) => c === 'initialize')).toHaveLength(1);
+    expect(calls.filter((c) => c === 'tools/call')).toHaveLength(3);
+    expect(calls.at(-1)).toBe('DELETE');
+    expect(sharedResourceCount()).toBe(0);
   });
 
   it('is blocked by the SSRF policy without an allow-list entry', async () => {

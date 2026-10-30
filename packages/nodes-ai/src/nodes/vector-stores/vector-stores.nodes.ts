@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AiDocument, BaseContext, DataObject, NodeType } from '@workflow/workflow';
 import { NodeOperationError } from '@workflow/workflow';
-import { connectPostgres, quoteTableName } from '../../shared/connections';
+import { quoteTableName, sharedPostgres } from '../../shared/connections';
 import { TenantStore } from '../../shared/tenant-store';
 import {
   clearStoreOption,
@@ -121,7 +121,7 @@ export const VectorStorePGVectorNode = createVectorStoreNode({
   insertOptions: [clearStoreOption],
   async open(ctx, itemIndex) {
     const table = quoteTableName(String(ctx.getNodeParameter('tableName', itemIndex, 'ai_vectors')));
-    const client = await connectPostgres(ctx);
+    const { value: client, release } = await sharedPostgres(ctx, itemIndex);
     let ensured = false;
     const ensureTable = async (dimensions: number) => {
       if (ensured) return;
@@ -204,7 +204,7 @@ export const VectorStorePGVectorNode = createVectorStoreNode({
         }
       },
     };
-    return { backend, close: () => client.end() };
+    return { backend, close: release };
   },
 });
 

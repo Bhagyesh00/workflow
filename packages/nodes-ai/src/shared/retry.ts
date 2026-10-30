@@ -25,7 +25,7 @@ export function isRetryable(error: unknown): boolean {
   const status = httpStatusOf(error);
   if (status !== undefined) return RETRYABLE_STATUS.has(status) || status >= 500;
   const message = `${(error as Error)?.name ?? ''} ${(error as Error)?.message ?? ''}`;
-  return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|other side closed/i.test(
+  return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|other side closed|timed out/i.test(
     message,
   );
 }

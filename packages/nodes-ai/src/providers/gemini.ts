@@ -19,6 +19,8 @@ import { messageText } from '../shared/utils';
 
 export const GEMINI_DEFAULT_HOST = 'https://generativelanguage.googleapis.com';
 export const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash';
+/** ids we invent for calls the API returned without one; never echoed back */
+const GENERATED_ID_PREFIX = 'gemini_call_';
 
 export interface GeminiChatConfig {
   host: string;
@@ -87,6 +89,7 @@ export function toGeminiContents(messages: AiChatMessage[], cache?: RawContentCa
         [
           {
             functionResponse: {
+              ...(m.toolCallId && !m.toolCallId.startsWith(GENERATED_ID_PREFIX) ? { id: m.toolCallId } : {}),
               name,
               response:
                 response && typeof response === 'object' && !Array.isArray(response)
@@ -173,7 +176,9 @@ export function parseGeminiResponse(body: unknown, cache?: RawContentCache<Part[
     .map((p, i) => {
       const call = p.functionCall as DataObject;
       return {
-        id: String(call.id ?? `call_${i}_${Math.random().toString(36).slice(2, 10)}`),
+        id: call.id
+          ? String(call.id)
+          : `${GENERATED_ID_PREFIX}${i}_${Math.random().toString(36).slice(2, 10)}`,
         name: String(call.name),
         arguments: (call.args && typeof call.args === 'object' ? call.args : {}) as DataObject,
       };

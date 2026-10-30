@@ -13,7 +13,7 @@ import {
   type SupplyDataContext,
 } from '@workflow/workflow';
 import type { SessionMemory } from '../../shared/ai-inputs';
-import { connectPostgres, connectRedis, quoteTableName } from '../../shared/connections';
+import { quoteTableName, sharedPostgres, sharedRedis } from '../../shared/connections';
 import { TenantStore } from '../../shared/tenant-store';
 import { messageText, truncate } from '../../shared/utils';
 
@@ -144,7 +144,7 @@ export const MemoryBufferWindowNode: NodeType = {
     [
       {
         displayName:
-          'Stored in the memory of the process that runs the workflow: history is lost on restart and is not shared between queue workers. Use Postgres or Redis memory in production.',
+          'Stored in the memory of the process that runs the workflow: history is lost on restart, is not shared between queue workers, and only the 1,000 most recent conversations per workspace are kept. Use Postgres or Redis memory in production.',
         name: 'notice',
         type: 'notice',
         default: '',
@@ -213,11 +213,11 @@ export const MemoryPostgresChatNode: NodeType = {
     const k = windowSize(ctx, itemIndex);
     const table = quoteTableName(String(ctx.getNodeParameter('tableName', itemIndex, 'ai_chat_histories')));
     const tenantId = ctx.getTenantId();
-    const client = await connectPostgres(ctx);
+    const { value: client, release } = await sharedPostgres(ctx, itemIndex);
     try {
       await ensureChatTable(client, table);
     } catch (error) {
-      await client.end().catch(() => {});
+      await release();
       throw error;
     }
     const memory: SessionMemory = {
@@ -252,7 +252,7 @@ export const MemoryPostgresChatNode: NodeType = {
         ]);
       },
     };
-    return { response: logged(ctx, memory), closeFunction: () => client.end() };
+    return { response: logged(ctx, memory), closeFunction: release };
   },
 };
 
@@ -314,7 +314,7 @@ export const MemoryRedisChatNode: NodeType = {
     const ttl = Math.max(0, Number(ctx.getNodeParameter('sessionTTL', itemIndex, 0)) || 0);
     const tenantId = ctx.getTenantId();
     const keyOf = (sessionId: string) => `wf:ai:chat:${tenantId}:${sessionId}`;
-    const client = await connectRedis(ctx);
+    const { value: client, release } = await sharedRedis(ctx, itemIndex);
     const memory: SessionMemory = {
       kind: 'memory',
       sessionId: sessionKey,
@@ -336,12 +336,7 @@ export const MemoryRedisChatNode: NodeType = {
         await client.del(keyOf(sessionId));
       },
     };
-    return {
-      response: logged(ctx, memory),
-      closeFunction: async () => {
-        await client.quit().catch(() => client.disconnect());
-      },
-    };
+    return { response: logged(ctx, memory), closeFunction: release };
   },
 };
 

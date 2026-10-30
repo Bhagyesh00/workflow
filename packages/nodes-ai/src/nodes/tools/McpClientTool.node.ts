@@ -11,20 +11,22 @@ import {
   NodeOperationError,
   type NodeType,
 } from '@workflow/workflow';
-import { McpClient, mcpResultText } from '../../shared/mcp-client';
+import { McpClient, type McpTool, mcpResultText } from '../../shared/mcp-client';
+import { acquireShared, type Shared, sharedKey } from '../../shared/shared-resource';
 import { createTool } from '../../shared/tools';
 import { errorMessage, toToolName } from '../../shared/utils';
 
 async function authHeaders(
   ctx: Pick<BaseContext, 'getCredentials'>,
   authentication: string,
+  itemIndex = 0,
 ): Promise<Record<string, string>> {
   if (authentication === 'bearerAuth') {
-    const creds = await ctx.getCredentials('httpBearerAuth');
+    const creds = await ctx.getCredentials('httpBearerAuth', itemIndex);
     return { authorization: `Bearer ${String(creds.token ?? creds.value ?? '')}` };
   }
   if (authentication === 'headerAuth') {
-    const creds = await ctx.getCredentials('httpHeaderAuth');
+    const creds = await ctx.getCredentials('httpHeaderAuth', itemIndex);
     if (!creds.name) throw new Error('The header auth credential has no header name');
     return { [String(creds.name).toLowerCase()]: String(creds.value ?? '') };
   }
@@ -169,17 +171,20 @@ export const McpClientToolNode: NodeType = {
           : [],
     );
     const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
-    let client: McpClient;
-    let serverTools: Awaited<ReturnType<McpClient['listTools']>>;
+    let shared: Shared<{ client: McpClient; tools: McpTool[] }>;
     try {
-      client = createClient(
-        ctx,
-        endpoint,
-        await authHeaders(ctx, authentication),
-        Number(options.timeout ?? 60_000),
+      const headers = await authHeaders(ctx, authentication, itemIndex);
+      const timeout = Number(options.timeout ?? 60_000);
+      // one session per node and execution, shared by every item the agent processes
+      shared = await acquireShared(
+        sharedKey(ctx, 'mcp', endpoint, headers, timeout),
+        async () => {
+          const client = createClient(ctx, endpoint, headers, timeout);
+          await client.connect();
+          return { client, tools: await client.listTools() };
+        },
+        ({ client }) => client.close(),
       );
-      await client.connect();
-      serverTools = selectTools(await client.listTools(), include, selected);
     } catch (error) {
       throw new NodeOperationError(
         ctx.getNode(),
@@ -190,6 +195,8 @@ export const McpClientToolNode: NodeType = {
         },
       );
     }
+    const { client } = shared.value;
+    const serverTools = selectTools(shared.value.tools, include, selected);
     const tools = serverTools.map((tool) => {
       const parameters: JsonSchema = { type: 'object', properties: {}, ...(tool.inputSchema ?? {}) };
       return createTool(
@@ -203,7 +210,7 @@ export const McpClientToolNode: NodeType = {
         },
       );
     });
-    return { response: tools, closeFunction: () => client.close() };
+    return { response: tools, closeFunction: shared.release };
   },
 
   methods: {

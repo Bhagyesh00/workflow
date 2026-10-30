@@ -10,6 +10,7 @@ import net from 'node:net';
 import type { BaseContext, DataObject } from '@workflow/workflow';
 import { Redis } from 'ioredis';
 import pg from 'pg';
+import { acquireShared, type Shared, sharedKey } from './shared-resource';
 
 export async function resolvePinnedHost(ctx: BaseContext, host: string): Promise<string> {
   const bare = host.trim().replace(/^\[|\]$/g, '');
@@ -51,8 +52,7 @@ export function postgresCredentials(data: DataObject): PostgresCredentials {
   };
 }
 
-export async function connectPostgres(ctx: BaseContext, credentialType = 'postgres'): Promise<pg.Client> {
-  const creds = postgresCredentials(await ctx.getCredentials(credentialType));
+async function openPostgres(ctx: BaseContext, creds: PostgresCredentials): Promise<pg.Client> {
   const address = await resolvePinnedHost(ctx, creds.host);
   const ssl =
     creds.ssl === 'disable'
@@ -74,8 +74,30 @@ export async function connectPostgres(ctx: BaseContext, credentialType = 'postgr
   });
   // connection-level errors after connect must not crash the process
   client.on('error', (error) => ctx.logger.warn('Postgres connection error', { error: error.message }));
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (error) {
+    await client.end().catch(() => {});
+    throw error;
+  }
   return client;
+}
+
+/**
+ * A Postgres client for this node in this execution, shared by all items. Release it in the
+ * node's close function; the connection ends when the last user releases it.
+ */
+export async function sharedPostgres(
+  ctx: BaseContext,
+  itemIndex: number,
+  credentialType = 'postgres',
+): Promise<Shared<pg.Client>> {
+  const creds = postgresCredentials(await ctx.getCredentials(credentialType, itemIndex));
+  return acquireShared(
+    sharedKey(ctx, 'postgres', creds),
+    () => openPostgres(ctx, creds),
+    (client) => client.end(),
+  );
 }
 
 /** `schema.table` or `table`, letters/digits/underscore only; returned quoted. */
@@ -109,8 +131,7 @@ export function redisCredentials(data: DataObject): RedisCredentials {
   };
 }
 
-export async function connectRedis(ctx: BaseContext, credentialType = 'redis'): Promise<Redis> {
-  const creds = redisCredentials(await ctx.getCredentials(credentialType));
+async function openRedis(ctx: BaseContext, creds: RedisCredentials): Promise<Redis> {
   const address = await resolvePinnedHost(ctx, creds.host);
   const client = new Redis({
     host: address,
@@ -125,6 +146,27 @@ export async function connectRedis(ctx: BaseContext, credentialType = 'redis'): 
     enableReadyCheck: true,
   });
   client.on('error', (error) => ctx.logger.warn('Redis connection error', { error: error.message }));
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (error) {
+    client.disconnect();
+    throw error;
+  }
   return client;
+}
+
+/** A Redis client for this node in this execution, shared by all items (see `sharedPostgres`). */
+export async function sharedRedis(
+  ctx: BaseContext,
+  itemIndex: number,
+  credentialType = 'redis',
+): Promise<Shared<Redis>> {
+  const creds = redisCredentials(await ctx.getCredentials(credentialType, itemIndex));
+  return acquireShared(
+    sharedKey(ctx, 'redis', creds),
+    () => openRedis(ctx, creds),
+    async (client) => {
+      await client.quit().catch(() => client.disconnect());
+    },
+  );
 }
