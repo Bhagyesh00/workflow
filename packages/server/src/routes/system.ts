@@ -75,7 +75,7 @@ li{margin:.3rem 0}
 <p><span class="dot"></span>The API server is running (${esc(ctx.config.executionsMode)} mode).</p>
 <p>The editor is not built yet. Run <code>pnpm --filter @workflow/editor build</code> and reload, or set <code>EDITOR_DIST</code>.</p>
 <ul>
-<li><a href="/api/v1/openapi.json">Public API (OpenAPI 3.1)</a></li>
+<li><a href="/api/v1/docs">Public API reference</a> (<a href="/api/v1/openapi.json">OpenAPI 3.1</a>)</li>
 <li><a href="/healthz/readiness">Readiness</a></li>
 <li><a href="/rest/settings">Instance settings</a></li>
 </ul>

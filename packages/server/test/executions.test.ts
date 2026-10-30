@@ -286,8 +286,9 @@ describe('manual executions', () => {
     await server.ctx.repos.executions.update(tenant.id, first.executionId, { status: 'running' });
     const blocked = await client.post(`/rest/workflows/${wf.id}/run`, {});
     expect(blocked.statusCode).toBe(429);
+    // manual test runs do not count towards the monthly quota
     const usage = (await client.data(client.get('/rest/settings'))).usage;
-    expect(usage.executions).toBe(1);
+    expect(usage.executions).toBe(0);
   });
 });
 

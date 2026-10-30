@@ -207,7 +207,8 @@ export class ExecutionService {
         runOptions: JSON.parse(JSON.stringify(runOptions)),
       },
     );
-    await repos.usage.increment(tenant.id, currentPeriod(), 1, 0);
+    // only production executions count towards the monthly quota
+    if (BILLABLE_MODES.has(input.mode)) await repos.usage.increment(tenant.id, currentPeriod(), 1, 0);
     this.deps.push.send(tenant.id, 'executionStarted', {
       executionId,
       workflowId: input.workflowId ?? input.workflow.id ?? null,
@@ -262,6 +263,11 @@ export class ExecutionService {
   /** wait for an execution started elsewhere (e.g. a resumed one) */
   waitFor(executionId: string, observer?: ExecutionObserver): Promise<ExecutionOutcome> {
     return this.addWaiter(executionId, observer);
+  }
+
+  /** stop waiting for an execution (e.g. the HTTP request that waited for it timed out) */
+  discardWaiter(executionId: string): void {
+    this.waiters.delete(executionId);
   }
 
   private deliverResponse(executionId: string, response: WebhookResponse): void {

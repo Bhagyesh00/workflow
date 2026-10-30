@@ -160,6 +160,12 @@ describe('public API', () => {
       in: 'path',
       required: true,
     });
+
+    const docs = await server.app.inject({ url: '/api/v1/docs' });
+    expect(docs.statusCode).toBe(200);
+    expect(docs.headers['content-type']).toContain('text/html');
+    expect(docs.body).toContain('/workflows/:id/activate');
+    expect(docs.body).not.toContain('<script');
   });
 });
 

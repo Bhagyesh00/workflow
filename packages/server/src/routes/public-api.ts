@@ -592,12 +592,73 @@ export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown
   };
 }
 
+const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** A readable, script-free reference of the public API (rendered from the route table). */
+export function renderApiDocs(ctx: ServerContext): string {
+  const brand = escapeHtml(ctx.config.brand.name);
+  const base = escapeHtml(`${ctx.config.baseUrl}/api/v1`);
+  const groups = [...new Set(PUBLIC_ROUTES.map((r) => r.tag))];
+  const describe = (schema: z.ZodType | undefined) => {
+    if (!schema) return '';
+    const json = toJsonSchema(schema) as {
+      properties?: Record<string, { type?: unknown }>;
+      required?: string[];
+    };
+    const fields = Object.entries(json.properties ?? {}).map(([name, s]) => {
+      const type = Array.isArray(s.type) ? s.type.join(' | ') : (s.type ?? 'any');
+      const required = (json.required ?? []).includes(name) ? '' : '?';
+      return `<code>${escapeHtml(name)}${required}: ${escapeHtml(String(type))}</code>`;
+    });
+    return fields.join(' ');
+  };
+  const sections = groups
+    .map((group) => {
+      const rows = PUBLIC_ROUTES.filter((r) => r.tag === group)
+        .map(
+          (r) => `<li class="op">
+  <div class="sig"><span class="m m-${r.method.toLowerCase()}">${r.method}</span><code class="path">${escapeHtml(r.path)}</code><span class="role">${r.role}+</span></div>
+  <p>${escapeHtml(r.summary)}</p>
+  ${r.query ? `<p class="fields"><span>Query</span> ${describe(r.query)}</p>` : ''}
+  ${r.body ? `<p class="fields"><span>Body</span> ${describe(r.body)}</p>` : ''}
+</li>`,
+        )
+        .join('\n');
+      return `<section><h2>${escapeHtml(group)}</h2><ul>${rows}</ul></section>`;
+    })
+    .join('\n');
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${brand} API reference</title>
+<style>
+:root{--bg:#fafafa;--fg:#18181b;--muted:#52525b;--line:#e4e4e7;--card:#fff;--get:#0369a1;--post:#15803d;--put:#a16207;--delete:#b91c1c}
+@media (prefers-color-scheme:dark){:root{--bg:#09090b;--fg:#f4f4f5;--muted:#a1a1aa;--line:#27272a;--card:#18181b;--get:#38bdf8;--post:#4ade80;--put:#facc15;--delete:#f87171}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,sans-serif}
+main{max-width:860px;margin:0 auto;padding:32px 16px 64px}h1{font-size:1.6rem;margin:0}h2{font-size:1.1rem;margin:32px 0 8px}
+.lead{color:var(--muted)}ul{list-style:none;padding:0;margin:0}.op{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:8px 0}
+.op p{margin:6px 0 0;color:var(--muted)}.sig{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.path{font-weight:600;overflow-wrap:anywhere}
+.m{font:600 12px/1 ui-monospace,monospace;padding:4px 6px;border-radius:4px;border:1px solid currentColor;min-width:56px;text-align:center}
+.m-get{color:var(--get)}.m-post{color:var(--post)}.m-put{color:var(--put)}.m-delete{color:var(--delete)}
+.role{margin-left:auto;font-size:12px;color:var(--muted)}.fields span{font-weight:600;color:var(--fg);margin-right:4px}
+code{font-family:ui-monospace,monospace;font-size:13px}.fields code{margin-right:8px}a{color:var(--get)}
+</style></head><body><main>
+<h1>${brand} API reference</h1>
+<p class="lead">Base URL <code>${base}</code>. Send an API key (Settings, API keys) in the <code>X-API-KEY</code> header. Responses are <code>{ "data": ... }</code>; lists add <code>nextCursor</code>, errors are <code>{ "error": { "code", "message" } }</code>. Machine-readable: <a href="openapi.json">openapi.json</a> (OpenAPI 3.1).</p>
+${sections}
+</main></body></html>`;
+}
+
 export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerContext }): Promise<void> {
   const { ctx } = opts;
   let document: Record<string, unknown> | undefined;
   app.get('/openapi.json', async () => {
     document ??= buildOpenApiDocument(ctx);
     return document;
+  });
+  let docs: string | undefined;
+  app.get('/docs', async (_request, reply) => {
+    docs ??= renderApiDocs(ctx);
+    return reply.header('content-type', 'text/html; charset=utf-8').send(docs);
   });
 
   for (const route of PUBLIC_ROUTES) {

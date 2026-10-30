@@ -427,6 +427,34 @@ export class WebhookService {
     execution: StartedExecution,
     handle: { response: Promise<WebhookResponse> },
   ): Promise<WebhookReply> {
+    // a held request never outlives the longest possible execution (e.g. a worker crashed)
+    const limitMs = (this.deps.config.executionTimeout.maxS + 30) * 1000;
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), limitMs);
+      timer.unref();
+    });
+    try {
+      const result = await Promise.race([
+        this.awaitOutcome(tenant, workflow, node, hook, execution, handle),
+        timeout,
+      ]);
+      if (result !== 'timeout') return result;
+      this.deps.executions.discardWaiter(execution.executionId);
+      return json(504, errorBody('timeout', 'The workflow did not respond in time'));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async awaitOutcome(
+    tenant: TenantRow,
+    workflow: Workflow,
+    node: WorkflowNode,
+    hook: NodeWebhook,
+    execution: StartedExecution,
+    handle: { response: Promise<WebhookResponse> },
+  ): Promise<WebhookReply> {
     const finished = execution.finished!;
     if (hook.responseMode === 'responseNode') {
       const first = await Promise.race([

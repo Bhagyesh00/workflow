@@ -463,6 +463,25 @@ describe('activation', () => {
     expect(outputOf(data.state, 'Poller')[0].count).toBe(executions.length);
   });
 
+  it('enforces the monthly execution quota for production executions', async () => {
+    const { client, tenant } = await signup(server.app);
+    await server.ctx.repos.tenants.updateSettings(tenant.id, { limits: { executionsPerMonth: 1 } });
+    const wf = await activeWorkflow(client, { nodes: [webhook({ path: 'quota' })] });
+    expect(
+      (await server.app.inject({ method: 'POST', url: `/webhook/${tenant.slug}/quota` })).statusCode,
+    ).toBe(200);
+    const over = await server.app.inject({ method: 'POST', url: `/webhook/${tenant.slug}/quota` });
+    expect(over.statusCode).toBe(403);
+    expect(over.json().error.code).toBe('plan_limit');
+    expect(await executionsOf(server.ctx, tenant.id, wf.id)).toHaveLength(1);
+    // manual runs stay available for building workflows
+    const manual = await client.post(`/rest/workflows/${wf.id}/run`, {});
+    expect(manual.statusCode).toBe(200);
+    const settings = await client.data(client.get('/rest/settings'));
+    expect(settings.usage.executions).toBe(1);
+    expect(settings.limits.executionsPerMonth).toBe(1);
+  });
+
   it('enforces the active workflow plan limit', async () => {
     const { client, tenant } = await signup(server.app);
     await server.ctx.repos.tenants.updateSettings(tenant.id, { limits: { activeWorkflows: 1 } });

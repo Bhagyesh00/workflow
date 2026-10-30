@@ -8,7 +8,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "dev": "node --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts start",
+    "dev": "node --watch-path=./src --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts start",
     "start": "node --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts start",
     "worker": "node --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts worker",
     "migrate": "node --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts migrate",
