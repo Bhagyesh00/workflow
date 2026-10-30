@@ -1,0 +1,106 @@
+/**
+ * Leader-only background jobs: the wait tracker (resumes executions whose `wait_till` passed)
+ * and pruning (old executions, their binary data, expired sessions and idempotency keys).
+ */
+import type { Config } from '../config';
+import type { PinoLogger } from '../logger';
+import { effectiveLimits, type TenantSettings } from '../plans';
+import type { Repositories } from '../repositories';
+import type { ExecutionService } from './executions';
+
+export class WaitTracker {
+  private timer?: NodeJS.Timeout;
+  private busy = false;
+
+  constructor(
+    private readonly repos: Repositories,
+    private readonly executions: ExecutionService,
+    private readonly logger: PinoLogger,
+    private readonly intervalMs: number,
+  ) {}
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => void this.check(), this.intervalMs);
+    this.timer.unref();
+  }
+
+  stop(): void {
+    clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  /** resume every waiting execution that is due; returns how many were resumed */
+  async check(): Promise<number> {
+    if (this.busy) return 0;
+    this.busy = true;
+    let resumed = 0;
+    try {
+      const due = await this.repos.executions.listDueWaiting(new Date());
+      for (const { id, tenantId } of due) {
+        try {
+          if (await this.executions.resume(tenantId, id)) resumed++;
+        } catch (error) {
+          this.logger.warn({ err: error, tenantId, executionId: id }, 'Could not resume execution');
+        }
+      }
+    } catch (error) {
+      this.logger.warn({ err: error }, 'Wait tracker check failed');
+    } finally {
+      this.busy = false;
+    }
+    return resumed;
+  }
+}
+
+const DAY = 86_400_000;
+
+export class Pruner {
+  private timer?: NodeJS.Timeout;
+
+  constructor(
+    private readonly config: Config,
+    private readonly repos: Repositories,
+    private readonly executions: ExecutionService,
+    private readonly logger: PinoLogger,
+    private readonly intervalMs = 3_600_000,
+  ) {}
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => void this.prune().catch(() => {}), this.intervalMs);
+    this.timer.unref();
+  }
+
+  stop(): void {
+    clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  /** delete finished executions older than the retention period (per-plan override) */
+  async prune(now = new Date()): Promise<number> {
+    let total = 0;
+    // a plan may shorten retention below the instance default, but never below one day
+    const tenantIds = await this.repos.executions.tenantsWithFinishedBefore(new Date(now.getTime() - DAY));
+    for (const tenantId of tenantIds) {
+      const tenant = await this.repos.tenants.get(tenantId);
+      if (!tenant) continue;
+      const limits = effectiveLimits(tenant.plan, tenant.settings as TenantSettings);
+      const days = Math.max(1, limits.pruneDays ?? this.config.pruneDays);
+      const cutoff = new Date(now.getTime() - days * DAY);
+      for (;;) {
+        const batch = await this.repos.executions.listPrunable(cutoff, 500, tenantId);
+        if (!batch.length) break;
+        const ids = batch.map((r) => r.id);
+        await this.repos.executions.deleteMany(tenantId, ids);
+        for (const id of ids) await this.executions.removeBinaryData(tenantId, id);
+        total += ids.length;
+        if (batch.length < 500) break;
+      }
+    }
+    await this.repos.sessions.deleteExpired();
+    await this.repos.idempotency.prune(new Date(now.getTime() - DAY));
+    if (total) this.logger.info({ deleted: total }, 'Pruned old executions');
+    return total;
+  }
+}
