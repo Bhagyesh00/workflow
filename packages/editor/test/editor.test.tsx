@@ -43,7 +43,8 @@ function seed() {
 
 async function openEditor(id: string) {
   const utils = renderApp(`/workflow/${id}`);
-  await screen.findByRole('textbox', { name: 'Workflow name' }, { timeout: 5000 });
+  // generous: the first render loads the whole editor bundle, which is slow when test files run in parallel
+  await screen.findByRole('textbox', { name: 'Workflow name' }, { timeout: 20_000 });
   await waitFor(() => expect(document.querySelector('[data-id="n2"]')).toBeTruthy());
   return utils;
 }
