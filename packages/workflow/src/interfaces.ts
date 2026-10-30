@@ -309,6 +309,71 @@ export interface WebhookDescription {
   ndvHideUrl?: boolean;
 }
 
+/** value of a `filter` parameter (IF / Filter / Switch conditions) */
+export type FilterOperatorType = 'string' | 'number' | 'boolean' | 'dateTime' | 'array' | 'object' | 'any';
+
+export type FilterOperation =
+  | 'exists'
+  | 'notExists'
+  | 'empty'
+  | 'notEmpty'
+  | 'equals'
+  | 'notEquals'
+  | 'contains'
+  | 'notContains'
+  | 'startsWith'
+  | 'notStartsWith'
+  | 'endsWith'
+  | 'notEndsWith'
+  | 'regex'
+  | 'notRegex'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'after'
+  | 'afterOrEquals'
+  | 'before'
+  | 'beforeOrEquals'
+  | 'true'
+  | 'false'
+  | 'lengthEquals'
+  | 'lengthNotEquals'
+  | 'lengthGt'
+  | 'lengthGte'
+  | 'lengthLt'
+  | 'lengthLte';
+
+export interface FilterCondition {
+  id: string;
+  leftValue: unknown;
+  rightValue?: unknown;
+  operator: {
+    type: FilterOperatorType;
+    operation: FilterOperation;
+    /** operation takes no right value (exists, empty, true, ...) */
+    singleValue?: boolean;
+  };
+}
+
+export interface FilterValue {
+  conditions: FilterCondition[];
+  combinator: 'and' | 'or';
+  options?: { caseSensitive?: boolean; typeValidation?: 'strict' | 'loose' };
+}
+
+/** value of an `assignmentCollection` parameter (Edit Fields) */
+export interface AssignmentValue {
+  id: string;
+  name: string;
+  value: unknown;
+  type: 'string' | 'number' | 'boolean' | 'array' | 'object';
+}
+
+export interface AssignmentCollectionValue {
+  assignments: AssignmentValue[];
+}
+
 export interface NodeTypeDescription {
   /** globally unique type id, e.g. `core.httpRequest`, `slack.slack` */
   name: string;

@@ -242,6 +242,13 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
     assertBinaryData,
     returnJsonArray: (data) => toItems(data),
     constructExecutionMetaData: (items, { itemData }) => items.map((i) => ({ ...i, pairedItem: itemData })),
+    async assertHostAllowed(host: string) {
+      try {
+        await services.http.assertHostAllowed(host);
+      } catch (error) {
+        throw toNodeApiError(node, error);
+      }
+    },
   } as NodeHelpers;
 }
 
@@ -322,6 +329,55 @@ export interface ExecuteContextCallbacks {
   continueOnFail(): boolean;
 }
 
+/** `executeWorkflow` shared by execute and supply-data contexts */
+export function createSubWorkflowCaller(deps: ContextDeps): ExecuteContext['executeWorkflow'] {
+  const { services, node } = deps;
+  return async (source, items, options) => {
+    if (!services.executeSubWorkflow) {
+      throw new NodeOperationError(node, 'Sub-workflow execution is not available in this environment');
+    }
+    return services.executeSubWorkflow({
+      source,
+      items,
+      options,
+      parent: {
+        executionId: services.executionId,
+        workflowId: deps.workflow.id,
+        nodeName: node.name,
+        tenantId: services.tenantId,
+      },
+    });
+  };
+}
+
+/** `runCode` shared by execute and supply-data contexts */
+export function createCodeRunnerCall(deps: ContextDeps, base: BaseContext): ExecuteContext['runCode'] {
+  const { services, node, state } = deps;
+  return async (options) => {
+    const nodeOutputs: Record<string, Item[]> = {};
+    for (const [name, runs] of Object.entries(state?.resultData.runData ?? {})) {
+      const last = runs[runs.length - 1];
+      const main = last?.data?.main?.[0];
+      if (main) nodeOutputs[name] = main;
+    }
+    return services.codeRunner.run({
+      code: options.code,
+      mode: options.mode,
+      items: inputItems(deps),
+      nodeOutputs,
+      variables: services.variables,
+      workflow: base.getWorkflow(),
+      execution: { id: services.executionId, mode: services.mode === 'manual' ? 'test' : 'production' },
+      nodeName: node.name,
+      timezone: base.getTimezone(),
+      onConsole: (_level, args) => {
+        if (services.mode === 'manual') services.hooks?.sendMessageToUI?.(node.name, args);
+      },
+      signal: deps.signal,
+    });
+  };
+}
+
 export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContextCallbacks): ExecuteContext {
   const base = createBaseContext(deps);
   const { services, node, state } = deps;
@@ -331,22 +387,7 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
     getInputConnectionData: (type, itemIndex) => callbacks.getInputConnectionData(type, itemIndex),
     continueOnFail: () => callbacks.continueOnFail(),
     getRunIndex: () => deps.runIndex ?? 0,
-    async executeWorkflow(source, items, options) {
-      if (!services.executeSubWorkflow) {
-        throw new NodeOperationError(node, 'Sub-workflow execution is not available in this environment');
-      }
-      return services.executeSubWorkflow({
-        source,
-        items,
-        options,
-        parent: {
-          executionId: services.executionId,
-          workflowId: deps.workflow.id,
-          nodeName: node.name,
-          tenantId: services.tenantId,
-        },
-      });
-    },
+    executeWorkflow: createSubWorkflowCaller(deps),
     async putExecutionToWait(waitTill: Date) {
       callbacks.putExecutionToWait(waitTill);
     },
@@ -363,30 +404,7 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
     setCustomData: (key, value) => {
       if (state) setCustomData(state, key, value);
     },
-    async runCode(options) {
-      const nodeOutputs: Record<string, Item[]> = {};
-      for (const [name, runs] of Object.entries(state?.resultData.runData ?? {})) {
-        const last = runs[runs.length - 1];
-        const main = last?.data?.main?.[0];
-        if (main) nodeOutputs[name] = main;
-      }
-      const items = inputItems(deps);
-      return services.codeRunner.run({
-        code: options.code,
-        mode: options.mode,
-        items,
-        nodeOutputs,
-        variables: services.variables,
-        workflow: base.getWorkflow(),
-        execution: { id: services.executionId, mode: services.mode === 'manual' ? 'test' : 'production' },
-        nodeName: node.name,
-        timezone: base.getTimezone(),
-        onConsole: (_level, args) => {
-          if (services.mode === 'manual') services.hooks?.sendMessageToUI?.(node.name, args);
-        },
-        signal: deps.signal,
-      });
-    },
+    runCode: createCodeRunnerCall(deps, base),
   };
 }
 

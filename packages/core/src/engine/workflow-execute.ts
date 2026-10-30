@@ -46,7 +46,9 @@ import {
   assertValidOutput,
   type ContextDeps,
   createBaseContext,
+  createCodeRunnerCall,
   createExecuteContext,
+  createSubWorkflowCaller,
   getResolvedParameters,
 } from './node-context';
 import type { ExecutionServices } from './services';
@@ -529,6 +531,8 @@ export class WorkflowExecute {
     const closeFunctions: Array<() => Promise<void>> = [];
     return {
       ...base,
+      runCode: createCodeRunnerCall(deps, base),
+      executeWorkflow: createSubWorkflowCaller(deps),
       getInputData: (inputIndex = 0) => (parentExec.data.main?.[inputIndex] ?? []) as Item[],
       getInputConnectionData: (subType2, itemIndex) =>
         this.supplySubNodes(sub, subType, subType2, itemIndex, exec, signal, closeFunctions),

@@ -48,6 +48,11 @@ export interface NodeHelpers {
   returnJsonArray(data: DataObject | DataObject[]): Item[];
   /** sets pairedItem on every item */
   constructExecutionMetaData(items: Item[], options: { itemData: PairedItem | PairedItem[] }): Item[];
+  /**
+   * Resolve `host` and throw if any address is blocked by the SSRF policy. Nodes that open
+   * non-HTTP connections (databases, SMTP, MCP over TCP) must call this before connecting.
+   */
+  assertHostAllowed(host: string): Promise<void>;
 }
 
 export interface BaseContext {
@@ -192,6 +197,14 @@ export interface WebhookLifecycleMethods {
 export interface SupplyDataContext extends BaseContext {
   getInputData(inputIndex?: number): Item[];
   getInputConnectionData(type: ConnectionType, itemIndex: number): Promise<unknown>;
+  /** run user JS in the isolated sandbox (Code tool) */
+  runCode(options: RunCodeOptions): Promise<unknown>;
+  /** call another workflow (Call Workflow tool) */
+  executeWorkflow(
+    source: ExecuteWorkflowSource,
+    items: Item[],
+    options?: ExecuteWorkflowOptions,
+  ): Promise<{ executionId: string; data: Item[][] | null }>;
   /** record what the sub-node received/returned so the editor can show AI logs */
   logSubNodeRun(input: DataObject, output: DataObject, error?: Error): void;
 }

@@ -167,6 +167,18 @@ export class HttpClient {
     if (DEFAULT_DENY_HOSTS.includes(host.toLowerCase())) throw new SsrfBlockedError(host, host);
   }
 
+  /** resolve and check a hostname for non-HTTP connections (databases, SMTP) */
+  async assertHostAllowed(host: string): Promise<void> {
+    const bare = host.replace(/^\[|\]$/g, '');
+    if (DEFAULT_DENY_HOSTS.includes(bare.toLowerCase())) throw new SsrfBlockedError(bare, bare);
+    const addresses = net.isIP(bare)
+      ? [{ address: bare }]
+      : await dns.promises.lookup(bare, { all: true, verbatim: true });
+    for (const a of addresses) {
+      if (!isAddressAllowed(bare, a.address, this.policy)) throw new SsrfBlockedError(bare, a.address);
+    }
+  }
+
   async request<T = unknown>(
     options: HttpRequestOptions,
     signal?: AbortSignal,
