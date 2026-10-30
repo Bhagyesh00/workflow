@@ -72,7 +72,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     const auth = requireRole(request, 'viewer');
     const { type } = parse(z.object({ type: z.string().max(128).optional() }), request.query);
     const rows = await repos.credentials.list(auth.tenant.id, type);
-    return { data: rows.map(credentialSummary) };
+    return { data: rows.map(credentialSummary), nextCursor: null };
   });
 
   app.post('/credentials', async (request) => {

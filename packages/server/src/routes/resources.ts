@@ -81,7 +81,7 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
   // tags --------------------------------------------------------------------------------------
   app.get('/tags', async (request) => {
     const auth = requireRole(request, 'viewer');
-    return { data: (await repos.tags.list(auth.tenant.id)).map(tagDTO) };
+    return { data: (await repos.tags.list(auth.tenant.id)).map(tagDTO), nextCursor: null };
   });
   app.get('/tags/:id', async (request) => {
     const auth = requireRole(request, 'viewer');
@@ -111,7 +111,7 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
   // variables ---------------------------------------------------------------------------------
   app.get('/variables', async (request) => {
     const auth = requireRole(request, 'viewer');
-    return { data: (await repos.variables.list(auth.tenant.id)).map(variableDTO) };
+    return { data: (await repos.variables.list(auth.tenant.id)).map(variableDTO), nextCursor: null };
   });
   app.get('/variables/:id', async (request) => {
     const auth = requireRole(request, 'viewer');
@@ -149,6 +149,7 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
         role: m.role,
         joinedAt: m.joinedAt.toISOString(),
       })),
+      nextCursor: null,
     };
   });
 
@@ -244,6 +245,7 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
         expiresAt: r.expiresAt.toISOString(),
         createdAt: r.createdAt.toISOString(),
       })),
+      nextCursor: null,
     };
   });
 
@@ -266,6 +268,7 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
         lastUsedAt: r.lastUsedAt?.toISOString() ?? null,
         createdAt: r.createdAt.toISOString(),
       })),
+      nextCursor: null,
     };
   });
 

@@ -92,7 +92,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
   app.get('/workflows/:id/webhook-urls', async (request) => {
     const auth = requireRole(request, 'viewer');
     const { id } = parse(idParams, request.params);
-    return { data: await workflows.webhookUrls(auth.tenant, id) };
+    return { data: await workflows.webhookUrls(auth.tenant, id), nextCursor: null };
   });
 
   // platform extension: activation checks without activating

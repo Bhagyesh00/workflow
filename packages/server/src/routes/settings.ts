@@ -124,7 +124,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
   app.get('/node-types', async (request) => {
     requireAuth(request);
     nodeTypesCache ??= plain(registries.nodeTypes.list().map((t) => t.description));
-    return { data: nodeTypesCache };
+    return { data: nodeTypesCache, nextCursor: null };
   });
 
   let credentialTypesCache: CredentialTypeDescription[] | undefined;
@@ -140,7 +140,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         isOAuth2: registries.credentialTypes.isA(type.name, 'oAuth2Api'),
       }) as CredentialTypeDescription;
     });
-    return { data: credentialTypesCache };
+    return { data: credentialTypesCache, nextCursor: null };
   });
 
   app.post('/node-types/options', async (request) => {

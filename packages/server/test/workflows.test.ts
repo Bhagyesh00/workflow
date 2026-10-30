@@ -191,6 +191,19 @@ describe('workflows', () => {
     expect((await client.post('/rest/tags', { name: 'ops' })).statusCode).toBe(409);
     const renamed = await client.data(client.patch(`/rest/tags/${tag.id}`, { name: 'operations' }));
     expect(renamed.name).toBe('operations');
+    // every list response carries nextCursor
+    for (const url of [
+      '/rest/tags',
+      '/rest/variables',
+      '/rest/credentials',
+      '/rest/members',
+      '/rest/api-keys',
+    ]) {
+      expect({ url, nextCursor: (await client.get(url)).json().nextCursor }).toEqual({
+        url,
+        nextCursor: null,
+      });
+    }
     const tags = await client.data(client.get('/rest/tags'));
     expect(tags).toMatchObject([{ id: tag.id, name: 'operations', usageCount: 0 }]);
     await client.data(client.delete(`/rest/tags/${tag.id}`));
