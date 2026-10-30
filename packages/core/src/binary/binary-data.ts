@@ -74,8 +74,9 @@ export class FileSystemBinaryDataStore implements BinaryDataStore {
     if (data.byteLength <= this.inlineThreshold) {
       return { ...describe(data, meta), data: Buffer.from(data).toString('base64') };
     }
-    const rel = path.join(this.tenantId, meta.executionId, randomUUID());
-    const abs = path.join(this.baseDir, rel);
+    // ids always use '/' so they are the same on every platform
+    const rel = path.posix.join(this.tenantId, meta.executionId, randomUUID());
+    const abs = path.join(this.baseDir, ...rel.split('/'));
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, data);
     return { ...describe(data, meta), data: '', id: `fs:${rel}` };
@@ -84,11 +85,11 @@ export class FileSystemBinaryDataStore implements BinaryDataStore {
   async getBuffer(binary: BinaryData): Promise<Uint8Array> {
     if (!binary.id) return Buffer.from(binary.data, 'base64');
     if (!binary.id.startsWith('fs:')) throw new Error(`Unsupported binary reference "${binary.id}"`);
-    const rel = binary.id.slice(3);
-    const normalized = path.normalize(rel);
-    if (!normalized.startsWith(`${this.tenantId}${path.sep}`) || normalized.includes('..')) {
+    const parts = binary.id.slice(3).split('/');
+    const unsafe = (part: string) => !part || part === '.' || part === '..' || /[\\:]/.test(part);
+    if (parts.length < 2 || parts[0] !== this.tenantId || parts.some(unsafe)) {
       throw new Error('Binary reference does not belong to this tenant');
     }
-    return readFile(path.join(this.baseDir, normalized));
+    return readFile(path.join(this.baseDir, ...parts));
   }
 }
