@@ -25,6 +25,7 @@
     "@fastify/static": "10.1.8",
     "@node-rs/argon2": "2.2.2",
     "@workflow/core": "workspace:*",
+    "@workflow/nodes-ai": "workspace:*",
     "@workflow/nodes-base": "workspace:*",
     "@workflow/workflow": "workspace:*",
     "bullmq": "6.5.1",

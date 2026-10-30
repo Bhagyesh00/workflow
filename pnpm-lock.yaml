@@ -264,6 +264,9 @@ importers:
       '@workflow/core':
         specifier: workspace:*
         version: link:../core
+      '@workflow/nodes-ai':
+        specifier: workspace:*
+        version: link:../nodes-ai
       '@workflow/nodes-base':
         specifier: workspace:*
         version: link:../nodes-base

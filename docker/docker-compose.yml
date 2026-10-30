@@ -33,7 +33,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U workflow -d workflow']
+      test: ["CMD-SHELL", "pg_isready -U workflow -d workflow"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -41,11 +41,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ['redis-server', '--appendonly', 'yes']
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -56,10 +56,10 @@ services:
       dockerfile: docker/Dockerfile
     image: workflow-platform:local
     restart: unless-stopped
-    command: ['start']
+    command: ["start"]
     environment: *app-env
     ports:
-      - '${PORT:-5678}:5678'
+      - "${PORT:-5678}:5678"
     volumes:
       - binary:/data/binary
     depends_on:
@@ -71,7 +71,7 @@ services:
   worker:
     image: workflow-platform:local
     restart: unless-stopped
-    command: ['worker']
+    command: ["worker"]
     environment:
       <<: *app-env
       QUEUE_CONCURRENCY: ${QUEUE_CONCURRENCY:-10}
