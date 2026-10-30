@@ -1,0 +1,258 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/base.css";
+@import "@fontsource-variable/hanken-grotesk";
+@import "@fontsource-variable/bricolage-grotesque";
+@import "@fontsource-variable/red-hat-mono";
+@import "./canvas.css";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/*
+ * Design tokens. Everything colour-related goes through `--wf-*` custom properties so that the
+ * white-label brand colour (GET /rest/settings) and the light/dark theme can be swapped at runtime.
+ * The palette is a cool mineral grey with an ultramarine default brand; status colours are tuned
+ * per theme for contrast against the node surfaces.
+ */
+:root {
+  --wf-brand: #3346d3;
+  --wf-on-brand: #ffffff;
+
+  --wf-paper: #edf0f3;
+  --wf-surface: #ffffff;
+  --wf-surface-2: #f5f7f9;
+  --wf-surface-3: #e7ebef;
+  --wf-ink: #17212b;
+  --wf-ink-2: #4f5e6c;
+  --wf-ink-3: #7d8a97;
+  --wf-line: #d6dde4;
+  --wf-line-strong: #b6c0ca;
+  --wf-cable: #8e9aa6;
+  --wf-grid: #c9d1d9;
+
+  --wf-run: #d98200;
+  --wf-ok: #18865a;
+  --wf-err: #c9372f;
+  --wf-pin: #0e7f9e;
+  --wf-warn: #a86a00;
+
+  --wf-shadow: 0 1px 2px rgb(23 33 43 / 0.06), 0 4px 14px -6px rgb(23 33 43 / 0.16);
+  --wf-shadow-lift: 0 2px 4px rgb(23 33 43 / 0.06), 0 18px 40px -12px rgb(23 33 43 / 0.28);
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --wf-paper: #151b22;
+  --wf-surface: #1c232c;
+  --wf-surface-2: #222a34;
+  --wf-surface-3: #2b3540;
+  --wf-ink: #e4eaf0;
+  --wf-ink-2: #a3b0bd;
+  --wf-ink-3: #74818e;
+  --wf-line: #303a46;
+  --wf-line-strong: #46535f;
+  --wf-cable: #6f7d8b;
+  --wf-grid: #2a333d;
+
+  --wf-run: #f2a93b;
+  --wf-ok: #3cbd83;
+  --wf-err: #f06359;
+  --wf-pin: #3cb4d4;
+  --wf-warn: #e0a640;
+
+  --wf-shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 18px -8px rgb(0 0 0 / 0.5);
+  --wf-shadow-lift: 0 2px 6px rgb(0 0 0 / 0.35), 0 22px 48px -16px rgb(0 0 0 / 0.7);
+
+  color-scheme: dark;
+}
+
+/* before the app sets data-theme (first paint), follow the OS unless light was chosen */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --wf-paper: #151b22;
+    --wf-surface: #1c232c;
+    --wf-surface-2: #222a34;
+    --wf-surface-3: #2b3540;
+    --wf-ink: #e4eaf0;
+    --wf-ink-2: #a3b0bd;
+    --wf-ink-3: #74818e;
+    --wf-line: #303a46;
+    --wf-line-strong: #46535f;
+    --wf-cable: #6f7d8b;
+    --wf-grid: #2a333d;
+
+    --wf-run: #f2a93b;
+    --wf-ok: #3cbd83;
+    --wf-err: #f06359;
+    --wf-pin: #3cb4d4;
+    --wf-warn: #e0a640;
+
+    --wf-shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 18px -8px rgb(0 0 0 / 0.5);
+    --wf-shadow-lift: 0 2px 6px rgb(0 0 0 / 0.35), 0 22px 48px -16px rgb(0 0 0 / 0.7);
+
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --font-sans: "Hanken Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque Variable", "Hanken Grotesk Variable", ui-sans-serif, sans-serif;
+  --font-mono: "Red Hat Mono Variable", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --color-brand: var(--wf-brand);
+  --color-on-brand: var(--wf-on-brand);
+  --color-brand-soft: color-mix(in oklab, var(--wf-brand) 12%, var(--wf-surface));
+  --color-brand-line: color-mix(in oklab, var(--wf-brand) 45%, var(--wf-line));
+  --color-paper: var(--wf-paper);
+  --color-surface: var(--wf-surface);
+  --color-surface-2: var(--wf-surface-2);
+  --color-surface-3: var(--wf-surface-3);
+  --color-ink: var(--wf-ink);
+  --color-ink-2: var(--wf-ink-2);
+  --color-ink-3: var(--wf-ink-3);
+  --color-line: var(--wf-line);
+  --color-line-strong: var(--wf-line-strong);
+  --color-run: var(--wf-run);
+  --color-ok: var(--wf-ok);
+  --color-err: var(--wf-err);
+  --color-pin: var(--wf-pin);
+  --color-warn: var(--wf-warn);
+  --color-ok-soft: color-mix(in oklab, var(--wf-ok) 13%, var(--wf-surface));
+  --color-err-soft: color-mix(in oklab, var(--wf-err) 12%, var(--wf-surface));
+  --color-run-soft: color-mix(in oklab, var(--wf-run) 14%, var(--wf-surface));
+  --color-pin-soft: color-mix(in oklab, var(--wf-pin) 13%, var(--wf-surface));
+  --color-warn-soft: color-mix(in oklab, var(--wf-warn) 14%, var(--wf-surface));
+
+  --shadow-card: var(--wf-shadow);
+  --shadow-lift: var(--wf-shadow-lift);
+
+  /* type scale (minor third from a 14px UI base) */
+  --text-2xs: 11px;
+  --text-2xs--line-height: 14px;
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 13px;
+  --text-sm--line-height: 18px;
+  --text-base: 14px;
+  --text-base--line-height: 20px;
+  --text-md: 16px;
+  --text-md--line-height: 22px;
+  --text-lg: 20px;
+  --text-lg--line-height: 26px;
+  --text-xl: 26px;
+  --text-xl--line-height: 32px;
+  --text-2xl: 34px;
+  --text-2xl--line-height: 38px;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--wf-paper);
+    color: var(--wf-ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 20px;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings:
+      "ss01",
+      "tnum" 0;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--wf-brand) 28%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--wf-brand);
+    outline-offset: 2px;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    font-optical-sizing: auto;
+    letter-spacing: -0.01em;
+  }
+
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+  }
+}
+
+@layer components {
+  .wf-field {
+    width: 100%;
+    min-height: 34px;
+    border-radius: 8px;
+    border: 1px solid var(--wf-line);
+    background: var(--wf-surface);
+    padding: 6px 10px;
+    font-size: 13px;
+    line-height: 20px;
+    transition: border-color 120ms ease;
+  }
+  .wf-field:hover {
+    border-color: var(--wf-line-strong);
+  }
+  .wf-field:focus,
+  .wf-field:focus-within {
+    outline: none;
+    border-color: var(--wf-brand);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--wf-brand) 18%, transparent);
+  }
+  .wf-field::placeholder {
+    color: var(--wf-ink-3);
+  }
+  .wf-field[aria-invalid="true"] {
+    border-color: var(--wf-err);
+  }
+  .wf-field:disabled,
+  .wf-field[aria-readonly="true"] {
+    background: var(--wf-surface-2);
+    color: var(--wf-ink-2);
+  }
+
+  .wf-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: var(--wf-line-strong) transparent;
+  }
+
+  /* expression fields get a tinted gutter so they read differently from fixed values */
+  .wf-expression {
+    border-color: color-mix(in oklab, var(--wf-brand) 40%, var(--wf-line));
+    background: color-mix(in oklab, var(--wf-brand) 4%, var(--wf-surface));
+  }
+
+  .wf-spinner {
+    animation: wf-spin 0.9s linear infinite;
+  }
+}
+
+@keyframes wf-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-spinner {
+    animation-duration: 2.4s;
+  }
+}

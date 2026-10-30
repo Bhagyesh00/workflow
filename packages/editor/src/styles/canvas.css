@@ -1,0 +1,374 @@
+/*
+ * Canvas: nodes are "modules" with jack-style ports and edges are patch cables. The only
+ * ambient motion in the product is the sweep around a node that is currently running.
+ */
+
+.react-flow {
+  --xy-background-color: var(--wf-paper);
+  --xy-node-boxshadow-selected: none;
+  --xy-selection-background-color: color-mix(in oklab, var(--wf-brand) 8%, transparent);
+  --xy-selection-border: 1px solid color-mix(in oklab, var(--wf-brand) 55%, transparent);
+  --xy-minimap-background-color: var(--wf-surface);
+  --xy-minimap-mask-background-color: color-mix(in oklab, var(--wf-paper) 70%, transparent);
+  --xy-minimap-node-background-color: var(--wf-line-strong);
+  --xy-controls-button-background-color: var(--wf-surface);
+  --xy-controls-button-background-color-hover: var(--wf-surface-3);
+  --xy-controls-button-color: var(--wf-ink-2);
+  --xy-controls-button-border-color: var(--wf-line);
+  --xy-edge-stroke: var(--wf-cable);
+  --xy-edge-stroke-width: 2;
+  --xy-connectionline-stroke: var(--wf-brand);
+  --xy-connectionline-stroke-width: 2;
+}
+
+.react-flow__minimap {
+  border-radius: 10px;
+  border: 1px solid var(--wf-line);
+  overflow: hidden;
+  box-shadow: var(--wf-shadow);
+}
+
+@media (max-width: 640px) {
+  .react-flow__minimap {
+    display: none;
+  }
+}
+
+.react-flow__controls {
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: var(--wf-shadow);
+  border: 1px solid var(--wf-line);
+}
+
+.react-flow__node {
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------------------------------- */
+/* Module node                                                                              */
+/* ---------------------------------------------------------------------------------------- */
+
+.wf-node {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 64px;
+  padding: 10px 14px 10px 10px;
+  border-radius: 12px;
+  border: 1.5px solid var(--wf-line-strong);
+  background: var(--wf-surface);
+  box-shadow: var(--wf-shadow);
+  color: var(--wf-ink);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.wf-node:hover {
+  border-color: color-mix(in oklab, var(--wf-brand) 40%, var(--wf-line-strong));
+}
+
+.react-flow__node.selected > .wf-node,
+.wf-node[data-selected="true"] {
+  border-color: var(--wf-brand);
+  box-shadow:
+    0 0 0 4px color-mix(in oklab, var(--wf-brand) 16%, transparent),
+    var(--wf-shadow);
+}
+
+.wf-node[data-trigger="true"] {
+  padding-left: 16px;
+}
+.wf-node[data-trigger="true"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  border-radius: 10px 0 0 10px;
+  background: var(--wf-brand);
+}
+
+.wf-node[data-status="success"] {
+  border-color: color-mix(in oklab, var(--wf-ok) 70%, var(--wf-line-strong));
+}
+.wf-node[data-status="error"] {
+  border-color: var(--wf-err);
+  background: color-mix(in oklab, var(--wf-err) 5%, var(--wf-surface));
+}
+.wf-node[data-disabled="true"] {
+  border-style: dashed;
+  opacity: 0.62;
+}
+.wf-node[data-disabled="true"] .wf-node-title {
+  text-decoration: line-through;
+  text-decoration-color: var(--wf-ink-3);
+}
+
+/* the running sweep: a conic gradient masked to the border ring */
+.wf-node[data-status="running"]::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 14px;
+  padding: 2.5px;
+  background: conic-gradient(
+    from var(--wf-sweep, 0deg),
+    transparent 0deg,
+    var(--wf-run) 90deg,
+    transparent 180deg
+  );
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: wf-sweep 1.1s linear infinite;
+  pointer-events: none;
+}
+
+@property --wf-sweep {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes wf-sweep {
+  to {
+    --wf-sweep: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-node[data-status="running"]::before {
+    animation: none;
+    background: var(--wf-run);
+  }
+}
+
+.wf-node-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--wf-node-color, var(--wf-ink-2)) 13%, var(--wf-surface));
+  color: var(--wf-node-color, var(--wf-ink-2));
+}
+
+.wf-node-badge {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 2px solid var(--wf-paper);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ---------------------------------------------------------------------------------------- */
+/* Sub-node (AI cluster): round module, output on top                                       */
+/* ---------------------------------------------------------------------------------------- */
+
+.wf-subnode {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 999px;
+  border: 1.5px solid var(--wf-line-strong);
+  background: var(--wf-surface);
+  box-shadow: var(--wf-shadow);
+}
+.react-flow__node.selected > .wf-subnode-wrap > .wf-subnode {
+  border-color: var(--wf-brand);
+  box-shadow:
+    0 0 0 4px color-mix(in oklab, var(--wf-brand) 16%, transparent),
+    var(--wf-shadow);
+}
+.wf-subnode[data-status="success"] {
+  border-color: color-mix(in oklab, var(--wf-ok) 70%, var(--wf-line-strong));
+}
+.wf-subnode[data-status="error"] {
+  border-color: var(--wf-err);
+}
+.wf-subnode[data-status="running"] {
+  border-color: var(--wf-run);
+}
+.wf-subnode[data-disabled="true"] {
+  border-style: dashed;
+  opacity: 0.62;
+}
+
+/* ---------------------------------------------------------------------------------------- */
+/* Ports (jacks)                                                                            */
+/* ---------------------------------------------------------------------------------------- */
+
+.react-flow__handle.wf-port {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  min-height: 14px;
+  border-radius: 999px;
+  border: 2px solid var(--wf-line-strong);
+  background: var(--wf-surface);
+  transition:
+    transform 100ms ease,
+    border-color 100ms ease;
+}
+.react-flow__handle.wf-port::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 999px;
+  background: var(--wf-line-strong);
+}
+.react-flow__handle.wf-port:hover,
+.react-flow__handle.wf-port.connectingto,
+.react-flow__handle.wf-port.valid {
+  border-color: var(--wf-brand);
+  transform: translate(var(--wf-port-tx, 0), var(--wf-port-ty, 0)) scale(1.2);
+}
+.react-flow__handle.wf-port:hover::after {
+  background: var(--wf-brand);
+}
+.react-flow__handle.wf-port[data-kind="ai"] {
+  border-radius: 4px;
+  transform: rotate(45deg);
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  min-height: 12px;
+}
+.react-flow__handle.wf-port[data-kind="ai"]::after {
+  border-radius: 1px;
+}
+.react-flow__handle.wf-port[data-category="error"] {
+  border-color: var(--wf-err);
+}
+.react-flow__handle.wf-port[data-category="error"]::after {
+  background: var(--wf-err);
+}
+.react-flow__handle.wf-port[data-required="true"]::after {
+  background: var(--wf-err);
+}
+
+.wf-port-label {
+  position: absolute;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--wf-ink-2);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------------------------------- */
+/* Edges (cables)                                                                            */
+/* ---------------------------------------------------------------------------------------- */
+
+.react-flow__edge .wf-cable {
+  stroke: var(--wf-cable);
+  stroke-width: 2;
+  fill: none;
+  stroke-linecap: round;
+}
+.react-flow__edge[data-has-data="true"] .wf-cable {
+  stroke: var(--wf-ok);
+}
+.react-flow__edge[data-kind="ai"] .wf-cable {
+  stroke-dasharray: 6 5;
+}
+.react-flow__edge[data-category="error"] .wf-cable {
+  stroke: var(--wf-err);
+}
+.react-flow__edge.selected .wf-cable,
+.react-flow__edge:hover .wf-cable {
+  stroke: var(--wf-brand);
+}
+
+.wf-edge-toolbar {
+  pointer-events: all;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+.wf-edge-toolbar[data-visible="true"],
+.wf-edge-toolbar:focus-within {
+  opacity: 1;
+}
+
+/* ---------------------------------------------------------------------------------------- */
+/* Sticky notes                                                                              */
+/* ---------------------------------------------------------------------------------------- */
+
+.wf-sticky {
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklab, var(--wf-sticky, #f2c94c) 60%, var(--wf-line-strong));
+  background: color-mix(in oklab, var(--wf-sticky, #f2c94c) 22%, var(--wf-surface));
+  color: var(--wf-ink);
+  overflow: hidden;
+}
+.react-flow__node.selected .wf-sticky {
+  border-color: var(--wf-brand);
+}
+.wf-sticky .wf-md h1 {
+  font-size: 20px;
+  line-height: 26px;
+  margin: 0 0 6px;
+}
+.wf-sticky .wf-md h2 {
+  font-size: 16px;
+  line-height: 22px;
+  margin: 0 0 6px;
+}
+.wf-sticky .wf-md h3 {
+  font-size: 14px;
+  margin: 0 0 4px;
+}
+.wf-md p {
+  margin: 0 0 8px;
+}
+.wf-md ul,
+.wf-md ol {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+.wf-md ul {
+  list-style: disc;
+}
+.wf-md ol {
+  list-style: decimal;
+}
+.wf-md code {
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--wf-ink) 8%, transparent);
+}
+.wf-md a {
+  color: var(--wf-brand);
+  text-decoration: underline;
+}
+
+.react-flow__resize-control.handle {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--wf-brand);
+  border: 1px solid var(--wf-surface);
+}
+.react-flow__resize-control.line {
+  border-color: transparent;
+}
