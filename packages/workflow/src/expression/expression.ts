@@ -11,7 +11,7 @@ import { ExpressionError } from '../errors';
 import { createDataProxy, type ExpressionDataContext } from './data-proxy';
 import { findExtension } from './extensions';
 import { baseGlobals } from './globals';
-import { Interpreter, type InterpreterOptions } from './interpreter';
+import { Interpreter, type InterpreterOptions, LIMITS } from './interpreter';
 
 export type TemplateSegment = { type: 'text'; value: string } | { type: 'code'; value: string };
 
@@ -85,6 +85,28 @@ export function stringifyValue(value: unknown): string {
   return String(value);
 }
 
+/**
+ * The text of a mixed template. Each piece is charged to the evaluation's budget, so segments that
+ * return the same large value (input data costs the evaluation nothing) cannot build a huge string.
+ */
+function joinSegments(
+  interpreter: Interpreter,
+  segments: TemplateSegment[],
+  run: (code: string) => unknown,
+): string {
+  let length = 0;
+  const pieces: string[] = [];
+  for (const s of segments) {
+    const text = s.type === 'text' ? s.value : stringifyValue(run(s.value));
+    length += text.length;
+    if (length > LIMITS.maxStringLength)
+      throw new ExpressionError('String exceeds the maximum allowed length');
+    interpreter.chargeOutput(text.length);
+    pieces.push(text);
+  }
+  return pieces.join('');
+}
+
 export interface ResolveOptions extends InterpreterOptions {
   /** return a string even when the template is a single `{{ }}` segment */
   forceString?: boolean;
@@ -99,15 +121,21 @@ export class ExpressionEvaluator {
     const segments = splitTemplate(template);
     if (segments.length === 0) return '';
 
+    const data = createDataProxy(ctx);
     const interpreter = new Interpreter(
-      { ...baseGlobals, ...createDataProxy(ctx) },
-      { ...this.options, ...options, extensions: findExtension },
+      { ...baseGlobals, ...data },
+      // item and parameter data belong to this execution: expressions may change them, as in n8n
+      { ...this.options, ...options, extensions: findExtension, dataGlobals: Object.keys(data) },
     );
 
+    let started = false;
     const run = (code: string) => {
       if (!code.trim()) return undefined;
       try {
-        return interpreter.evaluate(code);
+        // the segments of one template share one budget
+        const continued = started;
+        started = true;
+        return interpreter.evaluate(code, continued);
       } catch (error) {
         if (error instanceof ExpressionError) {
           error.context.expression = code.trim();
@@ -124,7 +152,7 @@ export class ExpressionEvaluator {
     if (segments.length === 1 && segments[0].type === 'code' && !options.forceString) {
       return run(segments[0].value);
     }
-    return segments.map((s) => (s.type === 'text' ? s.value : stringifyValue(run(s.value)))).join('');
+    return joinSegments(interpreter, segments, run);
   }
 
   /** Resolve a parameter value recursively (objects/arrays may contain expressions). */
@@ -153,7 +181,10 @@ export function evaluateSimple(
     { ...options, extensions: findExtension },
   );
   if (segments.length === 1 && segments[0].type === 'code') return interpreter.evaluate(segments[0].value);
-  return segments
-    .map((s) => (s.type === 'text' ? s.value : stringifyValue(interpreter.evaluate(s.value))))
-    .join('');
+  let started = false;
+  return joinSegments(interpreter, segments, (code) => {
+    const continued = started;
+    started = true;
+    return interpreter.evaluate(code, continued);
+  });
 }

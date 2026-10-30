@@ -5,21 +5,143 @@
  * They are resolved by the interpreter only when the native method does not exist, so they
  * never patch built-in prototypes.
  */
-import { DateTime, Duration } from 'luxon';
+import { DateTime, type DateTimeOptions, Duration } from 'luxon';
 import { ExpressionError } from '../errors';
-import { LIMITS } from './interpreter';
+import { isPlainArray, jsonLength, type NativeBudget, stringifyBounded } from './bounded';
+import { LIMITS, type NativeGuard, registerGuardedFunction } from './interpreter';
+import { assertSafeRegExp } from './regex';
 
 type Fn = (target: any, ...args: any[]) => unknown;
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/*
+ * The scans below run on input of any length in one native call the deadline cannot interrupt, so
+ * each is linear: no unanchored pattern that rescans the rest of the input from every position.
+ */
+const EMAIL_PARTS = /^[^\s@]+@[^\s@]+$/;
 const URL_RE = /^https?:\/\/[^\s/$.?#].[^\s]*$/i;
 const DOMAIN_RE = /^(?!-)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
+const EMAIL_LOCAL_CHAR = /[^\s@<>"']/;
+const EMAIL_DOMAIN = /[^\s@<>"']+\.[^\s@<>"',;]+/y;
+
+/** same result as /^[^\s@]+@[^\s@]+\.[^\s@]+$/ without backtracking over runs of dots */
+function isEmail(s: string): boolean {
+  if (!EMAIL_PARTS.test(s)) return false;
+  const domain = s.slice(s.indexOf('@') + 1);
+  return domain.lastIndexOf('.', domain.length - 2) >= 1;
+}
+
+/** first match of /[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"',;]+/, found from each '@' instead of each position */
+function extractEmail(s: string): string | undefined {
+  for (let at = s.indexOf('@'); at !== -1; at = s.indexOf('@', at + 1)) {
+    let start = at;
+    while (start > 0 && EMAIL_LOCAL_CHAR.test(s[start - 1])) start--;
+    if (start === at) continue;
+    EMAIL_DOMAIN.lastIndex = at + 1;
+    const domain = EMAIL_DOMAIN.exec(s);
+    if (domain) return s.slice(start, at + 1) + domain[0];
+  }
+  return undefined;
+}
+
+/** s.replace(/<[^>]*>/g, '') in one pass */
+function removeTags(s: string): string {
+  const parts: string[] = [];
+  let from = 0;
+  for (;;) {
+    const open = s.indexOf('<', from);
+    if (open === -1) break;
+    const close = s.indexOf('>', open + 1);
+    if (close === -1) break;
+    parts.push(s.slice(from, open));
+    from = close + 1;
+  }
+  parts.push(s.slice(from));
+  return parts.join('');
+}
+
+/**
+ * s.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1'), or the image form /!\[([^\]]*)\]\([^)]*\)/g, in one
+ * pass: every opening bracket before the same `]` shares its outcome, so the scan never goes back.
+ */
+function replaceLinks(s: string, image: boolean): string {
+  const opener = image ? '![' : '[';
+  const parts: string[] = [];
+  let copied = 0;
+  let from = 0;
+  for (;;) {
+    const start = s.indexOf(opener, from);
+    if (start === -1) break;
+    const textStart = start + opener.length;
+    const close = s.indexOf(']', textStart);
+    if (close === -1) break;
+    if ((!image && close === textStart) || s[close + 1] !== '(') {
+      from = close + 1;
+      continue;
+    }
+    const end = s.indexOf(')', close + 2);
+    if (end === -1) break;
+    parts.push(s.slice(copied, start), s.slice(textStart, close));
+    copied = from = end + 1;
+  }
+  parts.push(s.slice(copied));
+  return parts.join('');
+}
+
+/** longest format luxon is asked to parse with or expand; real formats are a few dozen characters */
+const MAX_DATE_FORMAT_LENGTH = 256;
+
+/** the regex luxon built for a format parser must pass the policy for user patterns */
+export function assertSafeFormatParser(parser: unknown): void {
+  const regex = (parser as { regex?: unknown } | null | undefined)?.regex;
+  if (regex instanceof RegExp) assertSafeRegExp(regex.source, regex.flags);
+}
+
+/** luxon expands a format token by token (objects, Intl calls, one regex group each): keep it short */
+export function assertDateFormatLength(format: unknown): string {
+  const text = String(format);
+  if (text.length > MAX_DATE_FORMAT_LENGTH) {
+    throw new ExpressionError(`Date format is longer than ${MAX_DATE_FORMAT_LENGTH} characters`);
+  }
+  return text;
+}
+
+/** luxon turns a parse format into one regex (`dH` becomes `(\d{1,2})(\d{1,2})`): check it before parsing */
+export function assertSafeDateFormat(format: unknown, options?: unknown): void {
+  const text = assertDateFormatLength(format);
+  const opts = options !== null && typeof options === 'object' ? (options as DateTimeOptions) : {};
+  assertSafeFormatParser(DateTime.buildFormatParser(text, opts));
+}
 
 function words(s: string): string[] {
   return s
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .split(/[\s_\-./]+/)
     .filter(Boolean);
+}
+
+function smartJoin(a: unknown[], keyField: string, valueField: string, text: (value: unknown) => string) {
+  return Object.fromEntries(a.map((v) => [text((v as any)?.[keyField]), (v as any)?.[valueField]]));
+}
+
+/** sorted copy by one field, undefined items last; `key` turns a field value into what is compared */
+function sortBy(a: unknown[], field: string, direction: string, key: (value: unknown) => unknown): unknown[] {
+  const keyed: [any, unknown][] = [];
+  let undefinedCount = 0;
+  for (const v of a) {
+    if (v === undefined) undefinedCount++;
+    else keyed.push([key((v as any)?.[field]), v]);
+  }
+  keyed.sort(([x], [y]) => {
+    const c = x < y ? -1 : x > y ? 1 : 0;
+    return direction === 'desc' ? -c : c;
+  });
+  const out = keyed.map(([, v]) => v);
+  for (let i = 0; i < undefinedCount; i++) out.push(undefined);
+  return out;
+}
+
+function urlEncodeObject(o: Record<string, unknown>, text: (value: unknown) => string): string {
+  return new URLSearchParams(Object.entries(o).map(([k, v]) => [k, text(v)] as [string, string])).toString();
 }
 
 function toDateTime(value: unknown, format?: string): DateTime {
@@ -30,6 +152,7 @@ function toDateTime(value: unknown, format?: string): DateTime {
     return value < 1e11 ? DateTime.fromSeconds(value) : DateTime.fromMillis(value);
   }
   const s = String(value);
+  if (format) assertSafeDateFormat(format);
   const dt = format
     ? DateTime.fromFormat(s, format)
     : ([DateTime.fromISO(s), DateTime.fromRFC2822(s), DateTime.fromHTTP(s), DateTime.fromSQL(s)].find(
@@ -56,7 +179,7 @@ const stringExtensions: Record<string, Fn> = {
   isEmpty: (s: string) => s.length === 0,
   isNotEmpty: (s: string) => s.length > 0,
   isBlank: (s: string) => s.trim().length === 0,
-  isEmail: (s: string) => EMAIL_RE.test(s),
+  isEmail: (s: string) => isEmail(s),
   isUrl: (s: string) => URL_RE.test(s),
   isDomain: (s: string) => DOMAIN_RE.test(s),
   isNumeric: (s: string) => s.trim() !== '' && !Number.isNaN(Number(s)),
@@ -85,7 +208,7 @@ const stringExtensions: Record<string, Fn> = {
       .map((w, i) => (i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()))
       .join(''),
   capitalize: (s: string) => s.charAt(0).toUpperCase() + s.slice(1),
-  extractEmail: (s: string) => s.match(/[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"',;]+/)?.[0],
+  extractEmail: (s: string) => extractEmail(s),
   extractDomain: (s: string) => {
     const email = s.match(/@([^\s@>]+)/);
     if (email) return email[1];
@@ -103,13 +226,9 @@ const stringExtensions: Record<string, Fn> = {
       return undefined;
     }
   },
-  removeTags: (s: string) => s.replace(/<[^>]*>/g, ''),
+  removeTags: (s: string) => removeTags(s),
   removeMarkdown: (s: string) =>
-    s
-      .replace(/```[\s\S]*?```/g, '')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    replaceLinks(replaceLinks(s.replace(/```[\s\S]*?```/g, '').replace(/`([^`]+)`/g, '$1'), true), false)
       .replace(/^#{1,6}\s+/gm, '')
       .replace(/(\*\*|__)(.*?)\1/g, '$2')
       .replace(/(\*|_)(.*?)\1/g, '$2'),
@@ -183,9 +302,11 @@ const arrayExtensions: Record<string, Fn> = {
   removeDuplicates: (a: unknown[], ...fields: string[]) => arrayExtensions.unique(a, ...fields),
   compact: (a: unknown[]) => a.filter((v) => v !== null && v !== undefined && v !== ''),
   chunk: (a: unknown[], size: number) => {
-    if (!(size > 0)) throw new ExpressionError('chunk size must be > 0');
+    // a fractional size would loop (and allocate) far more often than there are elements
+    const step = Math.floor(Number(size));
+    if (!(step >= 1)) throw new ExpressionError('chunk size must be a positive integer');
     const out: unknown[][] = [];
-    for (let i = 0; i < a.length; i += size) out.push(a.slice(i, i + size));
+    for (let i = 0; i < a.length; i += step) out.push(a.slice(i, i + step));
     return out;
   },
   pluck: (a: unknown[], ...fields: string[]) =>
@@ -205,14 +326,9 @@ const arrayExtensions: Record<string, Fn> = {
   append: (a: unknown[], ...values: unknown[]) => [...a, ...values],
   randomItem: (a: unknown[]) => a[Math.floor(Math.random() * a.length)],
   smartJoin: (a: unknown[], keyField: string, valueField: string) =>
-    Object.fromEntries(a.map((v) => [String((v as any)?.[keyField]), (v as any)?.[valueField]])),
+    smartJoin(a, keyField, valueField, String),
   sortBy: (a: unknown[], field: string, direction: 'asc' | 'desc' = 'asc') =>
-    [...a].sort((x, y) => {
-      const vx = (x as any)?.[field];
-      const vy = (y as any)?.[field];
-      const c = vx < vy ? -1 : vx > vy ? 1 : 0;
-      return direction === 'desc' ? -c : c;
-    }),
+    sortBy(a, field, direction, (v) => v),
   toJsonString: (a: unknown[]) => JSON.stringify(a),
   renameKeys: (a: unknown[], from: string, to: string) =>
     a.map((v) => {
@@ -241,8 +357,7 @@ const objectExtensions: Record<string, Fn> = {
     Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined && v !== '')),
   merge: (o: Record<string, unknown>, other: Record<string, unknown>) => ({ ...other, ...o }),
   toJsonString: (o: object) => JSON.stringify(o),
-  urlEncode: (o: Record<string, unknown>) =>
-    new URLSearchParams(Object.entries(o).map(([k, v]) => [k, String(v)] as [string, string])).toString(),
+  urlEncode: (o: Record<string, unknown>) => urlEncodeObject(o, String),
 };
 
 const booleanExtensions: Record<string, Fn> = {
@@ -251,7 +366,10 @@ const booleanExtensions: Record<string, Fn> = {
 };
 
 const dateExtensions: Record<string, Fn> = {
-  format: (d: DateTime, fmt: string) => d.toFormat(fmt),
+  format: (d: DateTime, fmt: string) => {
+    assertDateFormatLength(fmt);
+    return d.toFormat(fmt);
+  },
   toDateTime: (d: DateTime) => d,
   beginningOf: (d: DateTime, unit: Parameters<DateTime['startOf']>[0] = 'day') => d.startOf(unit),
   endOfMonth: (d: DateTime) => d.endOf('month'),
@@ -270,6 +388,127 @@ const dateExtensions: Record<string, Fn> = {
     d >= DateTime.now().minus(Duration.fromObject({ [unit]: n })) && d <= DateTime.now(),
 };
 
+// extensions that build a new array or object: the expression may change the result (not its elements)
+for (const fn of [
+  ...['unique', 'removeDuplicates', 'compact', 'chunk', 'pluck', 'difference', 'intersection', 'union'].map(
+    (name) => arrayExtensions[name],
+  ),
+  ...['append', 'smartJoin', 'sortBy', 'renameKeys'].map((name) => arrayExtensions[name]),
+  ...['keys', 'values', 'entries', 'removeField', 'removeFieldsContaining', 'keepFieldsContaining'].map(
+    (name) => objectExtensions[name],
+  ),
+  objectExtensions.compact,
+  objectExtensions.merge,
+]) {
+  registerGuardedFunction(fn, { fresh: 'shallow' });
+}
+// JSON.parse without a reviver: every nested object is new as well
+registerGuardedFunction(stringExtensions.parseJson, { fresh: 'deep' });
+
+/*
+ * Extensions run natively, so conversions they make (Number(), String(), comparisons, property keys,
+ * JSON.stringify) would turn a nested or repeated array into a huge string outside the budget. Their
+ * guards convert plain arrays under the budget first (`textArgs` for arguments, `run` for the target's
+ * items) and charge JSON output before it is built.
+ */
+
+/** plain arrays among the items become their text under the budget, as Number() or `<` would */
+function textItems(budget: NativeBudget, items: unknown[]): unknown[] {
+  return items.some(isPlainArray) ? items.map((v) => (isPlainArray(v) ? budget.text(v) : v)) : items;
+}
+
+function textKey(budget: NativeBudget): (value: unknown) => unknown {
+  return (value) => (isPlainArray(value) ? budget.text(value) : value);
+}
+
+/** the extension calls JSON.stringify on these values (or their items): charge the output first */
+function chargingJson(fn: Fn, jsonArgs: number): NativeGuard['run'] {
+  return (budget, target, args) => {
+    const length = jsonLength(budget, [target, ...args.slice(0, jsonArgs)], { callToJSON: true });
+    if (length) budget.charge(length.total);
+    return fn(target, ...args);
+  };
+}
+
+function numericItems(fn: Fn): NativeGuard['run'] {
+  return (budget, target, args) => fn(textItems(budget, target as unknown[]), ...args);
+}
+
+const toJsonGuard: NativeGuard = {
+  run: (budget, target) => stringifyBounded(budget, target, undefined, undefined),
+};
+
+for (const fn of Object.values(stringExtensions)) registerGuardedFunction(fn, { textArgs: true });
+registerGuardedFunction(stringExtensions.toJsonString, toJsonGuard);
+registerGuardedFunction(numberExtensions.round, { textArgs: true });
+registerGuardedFunction(numberExtensions.toDateTime, { textArgs: true });
+
+for (const name of ['unique', 'removeDuplicates']) {
+  registerGuardedFunction(arrayExtensions[name], {
+    textArgs: true,
+    charge: true,
+    run: chargingJson(arrayExtensions[name], 0),
+  });
+}
+for (const name of ['difference', 'intersection', 'union']) {
+  registerGuardedFunction(arrayExtensions[name], {
+    charge: true,
+    run: chargingJson(arrayExtensions[name], 1),
+  });
+}
+for (const name of ['sum', 'min', 'max', 'average']) {
+  registerGuardedFunction(arrayExtensions[name], { run: numericItems(arrayExtensions[name]) });
+}
+for (const name of ['chunk', 'pluck', 'renameKeys'])
+  registerGuardedFunction(arrayExtensions[name], { textArgs: true });
+registerGuardedFunction(arrayExtensions.smartJoin, {
+  textArgs: true,
+  run: (budget, a, [keyField, valueField]) =>
+    smartJoin(a as unknown[], keyField as string, valueField as string, (v) => budget.text(v)),
+});
+registerGuardedFunction(arrayExtensions.sortBy, {
+  textArgs: true,
+  charge: true,
+  run: (budget, a, [field, direction]) =>
+    sortBy(a as unknown[], field as string, direction as string, textKey(budget)),
+});
+registerGuardedFunction(arrayExtensions.toJsonString, toJsonGuard);
+
+for (const name of ['hasField', 'removeField', 'removeFieldsContaining', 'keepFieldsContaining']) {
+  registerGuardedFunction(objectExtensions[name], { textArgs: true });
+}
+registerGuardedFunction(objectExtensions.toJsonString, toJsonGuard);
+registerGuardedFunction(objectExtensions.urlEncode, {
+  charge: true,
+  run: (budget, o) => urlEncodeObject(o as Record<string, unknown>, (v) => budget.text(v)),
+});
+
+const dateGuards: Record<string, NativeGuard> = {
+  format: { textArgs: true },
+  beginningOf: { textArgs: true },
+  isBetween: { textArgs: true },
+  extract: { textArgs: true },
+  isInLast: { textArgs: true },
+  // the unit may be a list of units; only the other date is converted
+  diffTo: {
+    run: (budget, d, [other, unit]) => dateExtensions.diffTo(d, textKey(budget)(other), unit),
+  },
+};
+/** the date extensions for JS Date values, guarded the same way */
+const jsDateExtensions: Record<string, Fn> = {};
+const toLuxon = (t: unknown) => DateTime.fromJSDate(t as Date);
+for (const [name, fn] of Object.entries(dateExtensions)) {
+  jsDateExtensions[name] = (t: unknown, ...args: unknown[]) => fn(toLuxon(t), ...args);
+  const guard = dateGuards[name];
+  if (!guard) continue;
+  registerGuardedFunction(fn, guard);
+  const run = guard.run;
+  registerGuardedFunction(jsDateExtensions[name], {
+    ...guard,
+    run: run && ((budget, t, args) => run(budget, toLuxon(t), args)),
+  });
+}
+
 /** Extension lookup used by the interpreter for calls the value does not support natively. */
 export function findExtension(target: unknown, name: string): ((...args: unknown[]) => unknown) | undefined {
   let table: Record<string, Fn> | undefined;
@@ -278,10 +517,8 @@ export function findExtension(target: unknown, name: string): ((...args: unknown
   else if (typeof target === 'boolean') table = booleanExtensions;
   else if (Array.isArray(target)) table = arrayExtensions;
   else if (DateTime.isDateTime(target)) table = dateExtensions;
-  else if (target instanceof Date) {
-    const fn = dateExtensions[name];
-    return fn ? (t: unknown, ...args: unknown[]) => fn(DateTime.fromJSDate(t as Date), ...args) : undefined;
-  } else if (target && typeof target === 'object') {
+  else if (target instanceof Date) table = jsDateExtensions;
+  else if (target && typeof target === 'object') {
     const proto = Object.getPrototypeOf(target);
     if (proto === Object.prototype || proto === null) table = objectExtensions;
   }

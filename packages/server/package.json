@@ -8,11 +8,11 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "dev": "node --watch-path=./src --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts start",
-    "start": "node --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts start",
-    "worker": "node --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts worker",
-    "migrate": "node --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts migrate",
-    "seed": "node --no-node-snapshot --import tsx --import ./src/register-hooks.mjs src/cli.ts seed",
+    "dev": "node --watch-path=./src --no-node-snapshot --enable-experimental-regexp-engine-on-excessive-backtracks --regexp-backtracks-before-fallback=1000 --import tsx --import ./src/register-hooks.mjs src/cli.ts start",
+    "start": "node --no-node-snapshot --enable-experimental-regexp-engine-on-excessive-backtracks --regexp-backtracks-before-fallback=1000 --import tsx --import ./src/register-hooks.mjs src/cli.ts start",
+    "worker": "node --no-node-snapshot --enable-experimental-regexp-engine-on-excessive-backtracks --regexp-backtracks-before-fallback=1000 --import tsx --import ./src/register-hooks.mjs src/cli.ts worker",
+    "migrate": "node --no-node-snapshot --enable-experimental-regexp-engine-on-excessive-backtracks --regexp-backtracks-before-fallback=1000 --import tsx --import ./src/register-hooks.mjs src/cli.ts migrate",
+    "seed": "node --no-node-snapshot --enable-experimental-regexp-engine-on-excessive-backtracks --regexp-backtracks-before-fallback=1000 --import tsx --import ./src/register-hooks.mjs src/cli.ts seed",
     "db:generate": "drizzle-kit generate",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json"

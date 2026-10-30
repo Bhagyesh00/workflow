@@ -54,6 +54,7 @@ VOLUME ["/data/binary"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||5678)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# --no-node-snapshot is required by isolated-vm (Code node sandbox)
-ENTRYPOINT ["node", "--no-node-snapshot", "--import", "tsx", "--import", "./src/register-hooks.mjs", "src/cli.ts"]
+# --no-node-snapshot is required by isolated-vm (Code node sandbox); the regexp flags make V8 switch
+# to its linear-time engine when a user regex backtracks too much (expressions, Filter node)
+ENTRYPOINT ["node", "--no-node-snapshot", "--enable-experimental-regexp-engine-on-excessive-backtracks", "--regexp-backtracks-before-fallback=1000", "--import", "tsx", "--import", "./src/register-hooks.mjs", "src/cli.ts"]
 CMD ["start"]

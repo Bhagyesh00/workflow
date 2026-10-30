@@ -12,6 +12,7 @@ export {
   LIMITS,
   parseExpression,
 } from './expression/interpreter';
+export { createSafeRegExp } from './expression/regex';
 export * from './interfaces';
 export * from './node-types';
 export * from './parameters';
