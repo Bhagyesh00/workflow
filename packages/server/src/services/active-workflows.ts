@@ -115,6 +115,8 @@ export interface ActiveWorkflowDeps {
 
 export class ActiveWorkflowManager {
   private readonly running = new Map<string, RunningTriggers>();
+  /** tail of the start/stop chain per workflow: starts and stops of one workflow never overlap */
+  private readonly locks = new Map<string, Promise<void>>();
   private unsubscribe?: () => void;
   private readonly evaluator = new ExpressionEvaluator({ timeoutMs: 1000 });
 
@@ -421,6 +423,8 @@ export class ActiveWorkflowManager {
   async startAll(): Promise<void> {
     const active = await this.deps.repos.workflows.listActiveAcrossTenants();
     for (const { id, tenantId } of active) {
+      // demoted part-way: the new leader starts the rest, and stopAll() has already run here
+      if (!this.deps.leadership.isLeader) return;
       await this.startTriggers(tenantId, id, 'init').catch((error) =>
         this.deps.logger.warn(
           { err: error, tenantId, workflowId: id },
@@ -431,7 +435,9 @@ export class ActiveWorkflowManager {
   }
 
   async stopAll(): Promise<void> {
-    await Promise.all([...this.running.keys()].map((id) => this.stopTriggers(id)));
+    // a workflow whose start is still queued or in progress is stopped once that start is done
+    const ids = new Set([...this.running.keys(), ...this.locks.keys()]);
+    await Promise.all([...ids].map((id) => this.stopTriggers(id)));
   }
 
   async close(): Promise<void> {
@@ -445,7 +451,35 @@ export class ActiveWorkflowManager {
     mode: ActivationMode,
     rethrow = false,
   ): Promise<void> {
-    await this.stopTriggers(workflowId);
+    return this.serialize(workflowId, () => this.startTriggersNow(tenantId, workflowId, mode, rethrow));
+  }
+
+  async stopTriggers(workflowId: string): Promise<void> {
+    return this.serialize(workflowId, () => this.stopTriggersNow(workflowId));
+  }
+
+  /** run `task` after every start/stop of this workflow queued before it has settled */
+  private serialize<T>(workflowId: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.locks.get(workflowId) ?? Promise.resolve();
+    const result = previous.then(task);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.locks.set(workflowId, tail);
+    void tail.then(() => {
+      if (this.locks.get(workflowId) === tail) this.locks.delete(workflowId);
+    });
+    return result;
+  }
+
+  private async startTriggersNow(
+    tenantId: string,
+    workflowId: string,
+    mode: ActivationMode,
+    rethrow: boolean,
+  ): Promise<void> {
+    await this.stopTriggersNow(workflowId);
     const { repos, nodeTypes, logger } = this.deps;
     const row = await repos.workflows.get(tenantId, workflowId);
     if (!row?.active) return;
@@ -453,6 +487,8 @@ export class ActiveWorkflowManager {
     if (!tenant) return;
     const workflow = new Workflow(toDefinition(row), nodeTypes);
     const entry: RunningTriggers = { tenantId, workflow, abort: new AbortController(), closers: [] };
+    // only serialized starts and stops touch this workflow's entry, so nothing can replace or
+    // abort it before this start returns: every closer pushed below stays reachable for a stop
     this.running.set(workflowId, entry);
     try {
       for (const node of Object.values(workflow.nodes)) {
@@ -462,13 +498,13 @@ export class ActiveWorkflowManager {
         if (type?.poll) this.startPoller(tenant, entry, node, type, mode);
       }
     } catch (error) {
-      await this.stopTriggers(workflowId);
+      await this.stopTriggersNow(workflowId);
       if (rethrow) throw error;
       logger.warn({ err: error, tenantId, workflowId }, 'Trigger failed to start');
     }
   }
 
-  async stopTriggers(workflowId: string): Promise<void> {
+  private async stopTriggersNow(workflowId: string): Promise<void> {
     const entry = this.running.get(workflowId);
     if (!entry) return;
     this.running.delete(workflowId);
