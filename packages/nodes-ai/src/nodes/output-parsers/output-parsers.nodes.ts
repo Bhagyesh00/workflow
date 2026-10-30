@@ -32,7 +32,11 @@ function parserDescription(
   };
 }
 
-export function structuredParser(schema: JsonSchema): AiOutputParser {
+/** `normalize` may repair harmless deviations (e.g. letter case) before validation. */
+export function structuredParser(
+  schema: JsonSchema,
+  normalize?: (value: unknown) => unknown,
+): AiOutputParser {
   const schemaText = JSON.stringify(schema);
   return {
     kind: 'outputParser',
@@ -40,7 +44,8 @@ export function structuredParser(schema: JsonSchema): AiOutputParser {
     getFormatInstructions: () =>
       `Respond only with a JSON value that matches this JSON schema, with no extra text:\n\`\`\`json\n${schemaText}\n\`\`\``,
     async parse(text) {
-      const value = extractJson(text);
+      const raw = extractJson(text);
+      const value = normalize ? normalize(raw) : raw;
       const errors = validateJsonSchema(value, schema);
       if (errors.length)
         throw new Error(`The output does not match the schema: ${formatSchemaErrors(errors)}`);

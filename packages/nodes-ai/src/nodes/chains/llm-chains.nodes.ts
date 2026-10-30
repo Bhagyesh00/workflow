@@ -600,7 +600,13 @@ export const SentimentAnalysisNode: NodeType = {
         },
         required: detailed ? ['sentiment', 'strength', 'confidence'] : ['sentiment'],
       };
-      const parser = structuredParser(schema);
+      // the model may change the letter case of a category; map it back before validation
+      const parser = structuredParser(schema, (value) => {
+        const v = value as { sentiment?: unknown };
+        if (!v || typeof v !== 'object' || typeof v.sentiment !== 'string') return value;
+        const match = categories.find((c) => c.toLowerCase() === String(v.sentiment).trim().toLowerCase());
+        return match ? { ...v, sentiment: match } : value;
+      });
       const model = await getChatModel(ctx, i);
       const result = await completeWithParser(
         model,
@@ -620,7 +626,7 @@ export const SentimentAnalysisNode: NodeType = {
         { node: ctx.getNode(), itemIndex: i, signal: ctx.signal },
       );
       const parsed = result.output as { sentiment: string; strength?: number; confidence?: number };
-      const output = categories.findIndex((c) => c.toLowerCase() === parsed.sentiment.toLowerCase());
+      const output = categories.indexOf(parsed.sentiment);
       const sentimentAnalysis: DataObject = { category: categories[output] };
       if (detailed) {
         sentimentAnalysis.strength = parsed.strength;

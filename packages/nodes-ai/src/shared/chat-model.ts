@@ -91,7 +91,7 @@ export class HttpChatModel implements AiChatModel {
         { maxRetries: this.options.maxRetries, signal: request.signal ?? this.ctx.signal },
       );
       const response = streaming
-        ? this.adapter.parseStream!(String(body), onDelta!)
+        ? parseStreamedBody(this.adapter, body, onDelta!)
         : this.adapter.parseResponse(body);
       this.ctx.logSubNodeRun(input, logOutput(response));
       return response;
@@ -106,6 +106,24 @@ export class HttpChatModel implements AiChatModel {
       throw error;
     }
   }
+}
+
+/**
+ * Gateways and compatible servers sometimes ignore `stream: true` and answer with plain JSON;
+ * treat that as one complete delta instead of failing.
+ */
+function parseStreamedBody(
+  adapter: ChatAdapter,
+  body: unknown,
+  onDelta: (text: string) => void,
+): AiChatResponse {
+  if (typeof body === 'string' && /^(event|data):/m.test(body)) return adapter.parseStream!(body, onDelta);
+  const parsed = typeof body === 'string' ? JSON.parse(body) : body;
+  const response = adapter.parseResponse(parsed);
+  const content = response.message.content;
+  const full = typeof content === 'string' ? content : '';
+  if (full) onDelta(full);
+  return response;
 }
 
 /** Model capabilities; objects not created by this package are assumed to support nothing extra. */

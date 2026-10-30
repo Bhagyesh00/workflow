@@ -1,7 +1,7 @@
 import type { DataObject } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { clearBufferMemory } from '../src/nodes/memory/memory.nodes';
-import { connect, modelRequests, node, reply, run, scriptModel, services, toolCalls } from './harness';
+import { connect, modelRequests, node, run, scriptModel, services, toolCalls } from './harness';
 
 const chat = (chatInput: string, sessionId = 's1') => [
   { json: { sessionId, chatInput, action: 'sendMessage' } },

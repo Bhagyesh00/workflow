@@ -93,6 +93,8 @@ export type ModelScript = (request: AiChatRequest, call: number) => AiChatRespon
 /** scripts and recorded requests by model node name */
 export const modelScripts = new Map<string, ModelScript>();
 export const modelRequests = new Map<string, AiChatRequest[]>();
+/** calls per model node name: a model is supplied per item, its script spans all of them */
+const modelCalls = new Map<string, number>();
 
 export function scriptModel(
   nodeName: string,
@@ -100,6 +102,7 @@ export function scriptModel(
 ): AiChatRequest[] {
   const requests: AiChatRequest[] = [];
   modelRequests.set(nodeName, requests);
+  modelCalls.set(nodeName, 0);
   if (Array.isArray(script)) {
     modelScripts.set(nodeName, (_req, call) => {
       const step = script[call];
@@ -149,13 +152,14 @@ const fakeChatModelNode: NodeType = {
   async supplyData(ctx, itemIndex) {
     const name = ctx.getNode().name;
     const structured = Boolean(ctx.getNodeParameter('structured', itemIndex, true));
-    let calls = 0;
     const run = async (request: AiChatRequest) => {
       const script = modelScripts.get(name);
       if (!script) throw new Error(`No script for fake model "${name}"`);
       // record a deep copy: the agent keeps appending to the same messages array
       modelRequests.get(name)?.push(structuredClone({ ...request, signal: undefined }));
-      const response = await script(request, calls++);
+      const call = modelCalls.get(name) ?? 0;
+      modelCalls.set(name, call + 1);
+      const response = await script(request, call);
       ctx.logSubNodeRun({ messages: request.messages.length }, { content: String(response.message.content) });
       return response;
     };
