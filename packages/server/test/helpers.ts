@@ -26,8 +26,10 @@ import { createContext, type ServerContext } from '../src/context';
 
 export const BASE_URL = 'http://localhost:5678';
 export const ORIGIN = 'http://localhost:5678';
-export const TEST_DB = 'postgres://postgres:postgres@127.0.0.1:5432/workflow_test';
-export const TEST_REDIS = 'redis://127.0.0.1:6379/1';
+// overridable so separate test runs can each use their own database and Redis db
+export const TEST_DB =
+  process.env.TEST_DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/workflow_test';
+export const TEST_REDIS = process.env.TEST_REDIS_URL ?? 'redis://127.0.0.1:6379/1';
 export const TEST_KEY = `test:${Buffer.alloc(32, 7).toString('base64')}`;
 
 // ---------------------------------------------------------------------------------------------
