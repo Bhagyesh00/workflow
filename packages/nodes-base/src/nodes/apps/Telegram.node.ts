@@ -753,7 +753,7 @@ export const TelegramTriggerNode: NodeType = {
     if (chatIds.length && !(chat && chatIds.includes(String(chat.id)))) {
       return { webhookResponse: { statusCode: 200, body: { ok: true } } };
     }
-    const item: Item = { json: update };
+    const item: Item = { json: update, pairedItem: { item: 0 } };
     if (fields.download && message) {
       const file = fileOf(message);
       if (file) {
