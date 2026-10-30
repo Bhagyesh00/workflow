@@ -244,6 +244,26 @@ const testNodes: NodeType[] = [
       return [ctx.getInputData()];
     },
   },
+  {
+    description: {
+      name: 'test.chunks',
+      displayName: 'Stream chunks',
+      description: '',
+      group: ['transform'],
+      version: 1,
+      defaults: { name: 'Stream' },
+      inputs: ['main'],
+      outputs: ['main'],
+      properties: [{ displayName: 'Text', name: 'text', type: 'string', default: 'Hello' }],
+    },
+    async execute(ctx) {
+      for (const part of String(ctx.getNodeParameter('text', 0)).split(' ')) {
+        ctx.sendChunk(part);
+        await sleep(5, ctx.signal);
+      }
+      return [ctx.getInputData()];
+    },
+  },
   trigger('core.executeWorkflowTrigger'),
   trigger('core.errorTrigger'),
 ];

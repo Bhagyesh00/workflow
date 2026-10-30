@@ -111,6 +111,7 @@ test/                    integration tests (real Postgres + Redis)
 ## Beyond the usual feature set
 
 - **Webhook idempotency keys.** Production webhook calls with an `Idempotency-Key` header are deduplicated per workflow for 24 hours: a repeat replays the first response (`Idempotency-Replayed: true`) without running the workflow again; a repeat while the first is still running gets 409.
+- **Streaming webhook responses.** With `responseMode: 'streaming'` the request is held open and every `ctx.sendChunk(x)` of a node is written as an NDJSON line `{"type":"item","content":x}` (also across processes in queue mode); the stream ends with `{"type":"end"}` or `{"type":"error","message":...}`. Useful for chat/agent workflows.
 - **Version diffs.** `GET /rest/workflows/:id/versions/:versionId/diff?against=<versionId|current>` returns added, removed and changed nodes (with the changed fields), connection changes and changed settings.
 - **Activation dry run.** `POST /rest/workflows/:id/validate` (optionally with unsaved `workflowData`) returns the issues activation would report, without activating.
 - **Sandboxed webhook responses.** Webhook responses are tenant-controlled but served from the platform origin, so `Set-Cookie` is dropped, the session cookie is stripped from forwarded request headers, and a `Content-Security-Policy: sandbox` header puts any HTML response into an opaque origin that cannot call the API.

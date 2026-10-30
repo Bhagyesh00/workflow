@@ -173,6 +173,34 @@ describe('production webhooks', () => {
     expect(failed.json().error.details[0].message).toMatch(/Respond to Webhook/);
   });
 
+  it('streams chunks sent by nodes as NDJSON in streaming mode', async () => {
+    const { client, tenant } = await signup(server.app);
+    await activeWorkflow(client, {
+      nodes: [
+        webhook({ path: 'chat', responseMode: 'streaming' }),
+        node('Stream', 'test.chunks', { text: '={{ $json.body.text }}' }, [200, 0]),
+      ],
+      connections: chain('Webhook', 'Stream'),
+    });
+    const res = await server.app.inject({
+      method: 'POST',
+      url: `/webhook/${tenant.slug}/chat`,
+      payload: { text: 'one two three' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('application/x-ndjson');
+    const lines = res.body
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(lines).toEqual([
+      { type: 'item', content: 'one' },
+      { type: 'item', content: 'two' },
+      { type: 'item', content: 'three' },
+      { type: 'end' },
+    ]);
+  });
+
   it('matches dynamic paths after static ones and passes route params', async () => {
     const { client, tenant } = await signup(server.app);
     await activeWorkflow(client, {

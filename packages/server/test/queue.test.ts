@@ -128,6 +128,37 @@ describe('queue mode', () => {
     expect(pong.statusCode).toBe(200);
     expect(pong.body).toBe('pong');
     expect(pong.headers['content-type']).toContain('text/plain');
+
+    // chunks travel from the worker to the main over Redis, in order
+    const streaming = await createWorkflow(client, {
+      nodes: [
+        node(
+          'Webhook',
+          'core.webhook',
+          { httpMethod: 'POST', path: 'q-stream', responseMode: 'streaming' },
+          [0, 0],
+          {
+            webhookId: 'c',
+          },
+        ),
+        node('Stream', 'test.chunks', { text: 'a b c d' }, [200, 0]),
+      ],
+      connections: chain('Webhook', 'Stream'),
+    });
+    await client.data(client.post(`/rest/workflows/${streaming.id}/activate`));
+    const stream = await main.app.inject({ method: 'POST', url: `/webhook/${tenant.slug}/q-stream` });
+    expect(
+      stream.body
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l)),
+    ).toEqual([
+      { type: 'item', content: 'a' },
+      { type: 'item', content: 'b' },
+      { type: 'item', content: 'c' },
+      { type: 'item', content: 'd' },
+      { type: 'end' },
+    ]);
   });
 
   it('resumes waiting executions and runs sub-workflows on the worker', async () => {

@@ -77,6 +77,8 @@ export interface ExecutionOutcome {
 export interface ExecutionObserver {
   /** `Respond to Webhook` node output (responseNode mode) */
   onResponse?(response: WebhookResponse): void;
+  /** `ctx.sendChunk()` output (streaming response mode) */
+  onChunk?(chunk: unknown): void;
   onFinished?(outcome: ExecutionOutcome): void;
 }
 
@@ -282,6 +284,10 @@ export class ExecutionService {
     this.waiters.delete(executionId);
   }
 
+  private deliverChunk(executionId: string, chunk: unknown): void {
+    for (const o of this.waiters.get(executionId)?.observers ?? []) o.onChunk?.(chunk);
+  }
+
   private deliverResponse(executionId: string, response: WebhookResponse): void {
     for (const o of this.waiters.get(executionId)?.observers ?? []) o.onResponse?.(response);
   }
@@ -298,6 +304,7 @@ export class ExecutionService {
     if (!message?.executionId || !this.waiters.has(message.executionId)) return;
     if (message.type === 'response')
       this.deliverResponse(message.executionId, decodeResponse(message.response));
+    else if (message.type === 'chunk') this.deliverChunk(message.executionId, message.chunk);
     else if (message.type === 'finished') this.deliverFinished(message.outcome);
   }
 
@@ -458,6 +465,12 @@ export class ExecutionService {
           void this.deps.bus
             .publish('exec-events', { type: 'response', executionId, response: encodeResponse(response) })
             .catch(() => {});
+        }
+      },
+      sendChunk: (chunk) => {
+        if (delivery === 'local') this.deliverChunk(executionId, chunk);
+        else if (delivery === 'bus') {
+          void this.deps.bus.publish('exec-events', { type: 'chunk', executionId, chunk }).catch(() => {});
         }
       },
       sendMessageToUI: (nodeName, args) => {
@@ -833,7 +846,12 @@ interface ExecEventFinished {
   executionId: string;
   outcome: ExecutionOutcome;
 }
-type ExecEvent = ExecEventResponse | ExecEventFinished;
+interface ExecEventChunk {
+  type: 'chunk';
+  executionId: string;
+  chunk: unknown;
+}
+type ExecEvent = ExecEventResponse | ExecEventChunk | ExecEventFinished;
 
 type EncodedResponse = Omit<WebhookResponse, 'binary'> & {
   binary?: { data: string; mimeType: string; fileName?: string };

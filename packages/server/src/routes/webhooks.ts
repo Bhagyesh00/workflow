@@ -121,6 +121,7 @@ function send(reply: FastifyReply, result: WebhookReply) {
   }
   reply.header('content-security-policy', SANDBOX_CSP);
   reply.header('x-content-type-options', 'nosniff');
+  if (result.stream) return reply.send(result.stream);
   if (result.binary) {
     reply.header('content-type', result.binary.mimeType || 'application/octet-stream');
     if (result.binary.fileName) {

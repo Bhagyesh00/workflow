@@ -9,6 +9,7 @@
  * per workflow for 24 hours; repeats replay the first response without running the workflow again.
  */
 import { randomUUID } from 'node:crypto';
+import { PassThrough, type Readable } from 'node:stream';
 import { createWebhookContext, getResolvedParameters, type NodeTypes } from '@workflow/core';
 import {
   type DataObject,
@@ -45,6 +46,8 @@ export interface WebhookReply {
   headers: Record<string, string>;
   body?: unknown;
   binary?: { data: Uint8Array; mimeType: string; fileName?: string };
+  /** streaming response mode: NDJSON lines written while the workflow runs */
+  stream?: Readable;
 }
 
 export interface IncomingWebhook {
@@ -305,7 +308,8 @@ export class WebhookService {
       output = [[{ json: isPlainObject(body) ? body : body === undefined || body === '' ? {} : { body } }]];
     }
 
-    const responseMode = hook?.responseMode ?? 'onReceived';
+    const responseMode =
+      hook?.responseMode === 'streaming' ? 'lastNode' : (hook?.responseMode ?? 'onReceived');
     const handle = this.responseHandle(responseMode);
     const resumed = await executions.resume(tenantId, executionId, output, {
       wait: responseMode !== 'onReceived',
@@ -361,6 +365,7 @@ export class WebhookService {
       if (!result.workflowData) {
         reply = fromWebhookResponse(result.webhookResponse ?? { statusCode: 200, body: {} });
       } else {
+        const streaming = hook.responseMode === 'streaming' ? this.streamHandle() : undefined;
         const handle = this.responseHandle(hook.responseMode);
         let execution: StartedExecution;
         try {
@@ -374,7 +379,8 @@ export class WebhookService {
             executionId,
             userId: input.userId,
             wait: hook.responseMode !== 'onReceived',
-            observer: hook.responseMode === 'onReceived' ? undefined : handle.observer,
+            observer:
+              streaming?.observer ?? (hook.responseMode === 'onReceived' ? undefined : handle.observer),
           });
         } catch (error) {
           if (error instanceof ApiError) {
@@ -384,7 +390,9 @@ export class WebhookService {
           throw error;
         }
         input.onStarted?.(execution.executionId);
-        if (hook.responseMode === 'onReceived') {
+        if (streaming) {
+          reply = streaming.attach(execution);
+        } else if (hook.responseMode === 'onReceived') {
           reply = result.webhookResponse
             ? fromWebhookResponse(result.webhookResponse)
             : json(this.responseCode(workflow, node), { message: 'Workflow was started' });
@@ -406,6 +414,43 @@ export class WebhookService {
     }
     metrics.webhookDuration.observe({ status: String(reply.statusCode) }, (Date.now() - started) / 1000);
     return this.decorate(reply, workflow, node, incoming);
+  }
+
+  /**
+   * Streaming mode: every `ctx.sendChunk(x)` becomes a line `{"type":"item","content":x}`; the
+   * stream ends with `{"type":"end"}` (or `{"type":"error","message":...}`).
+   */
+  private streamHandle() {
+    const stream = new PassThrough();
+    const write = (line: unknown) => {
+      if (!stream.writableEnded) stream.write(`${JSON.stringify(line)}\n`);
+    };
+    const observer: ExecutionObserver = { onChunk: (content) => write({ type: 'item', content }) };
+    const attach = (execution: StartedExecution): WebhookReply => {
+      const limitMs = (this.deps.config.executionTimeout.maxS + 30) * 1000;
+      const timer = setTimeout(() => {
+        this.deps.executions.discardWaiter(execution.executionId);
+        write({ type: 'error', message: 'The workflow did not finish in time' });
+        stream.end();
+      }, limitMs);
+      timer.unref();
+      void execution.finished?.then((outcome) => {
+        clearTimeout(timer);
+        if (outcome.status === 'success' || outcome.status === 'waiting') write({ type: 'end' });
+        else write({ type: 'error', message: 'Error in workflow' });
+        stream.end();
+      });
+      return {
+        statusCode: 200,
+        headers: {
+          'content-type': 'application/x-ndjson; charset=utf-8',
+          'cache-control': 'no-cache',
+          'x-accel-buffering': 'no',
+        },
+        stream,
+      };
+    };
+    return { observer, attach };
   }
 
   private responseHandle(mode: string) {
@@ -594,7 +639,11 @@ export function fromWebhookResponse(response: WebhookResponse): WebhookReply {
 
 function storeReply(reply: WebhookReply): Record<string, unknown> {
   const stored: Record<string, unknown> = { statusCode: reply.statusCode, headers: reply.headers };
-  if (reply.binary) {
+  if (reply.stream) {
+    // a stream cannot be replayed: repeats get the status only
+    stored.body = null;
+    stored.headers = { 'content-type': 'application/json; charset=utf-8' };
+  } else if (reply.binary) {
     if (reply.binary.data.byteLength <= IDEMPOTENCY_MAX_BINARY) {
       stored.binary = { ...reply.binary, data: Buffer.from(reply.binary.data).toString('base64') };
     }
