@@ -1,0 +1,26 @@
+{
+  "name": "@workflow/nodes-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI cluster nodes: agent, chains, chat models, memory, tools, embeddings, vector stores, loaders, splitters and output parsers",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@workflow/workflow": "workspace:*",
+    "ioredis": "6.0.0",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/pg": "8.23.1",
+    "@workflow/core": "workspace:*",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

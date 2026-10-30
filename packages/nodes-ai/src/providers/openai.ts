@@ -1,0 +1,237 @@
+/**
+ * OpenAI Chat Completions wire format. Used by the OpenAI node and by every OpenAI-compatible
+ * endpoint (OpenRouter, Groq, Mistral, DeepSeek, xAI, Together, LM Studio, vLLM, ...).
+ */
+import type {
+  AiChatMessage,
+  AiChatRequest,
+  AiChatResponse,
+  AiToolCall,
+  DataObject,
+} from '@workflow/workflow';
+import {
+  type ChatAdapter,
+  type ChatModelCapabilities,
+  ModelRefusalError,
+  trimSlash,
+} from '../shared/chat-model';
+import { isObjectSchema } from '../shared/json-schema';
+import { sseJson } from '../shared/sse';
+import { messageText } from '../shared/utils';
+
+export type ResponseFormatMode = 'jsonSchema' | 'jsonObject' | 'none';
+
+export interface OpenAiChatConfig {
+  baseUrl: string;
+  model: string;
+  credentialType: string;
+  provider?: string;
+  /** `max_completion_tokens` (OpenAI) or `max_tokens` (most compatible servers) */
+  maxTokensField: 'max_completion_tokens' | 'max_tokens';
+  responseFormatMode: ResponseFormatMode;
+  temperature?: number;
+  topP?: number;
+  maxTokens?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  reasoningEffort?: string;
+  extraHeaders?: Record<string, string>;
+}
+
+export function toOpenAiMessages(messages: AiChatMessage[]): DataObject[] {
+  return messages.map((m): DataObject => {
+    switch (m.role) {
+      case 'system':
+        return { role: 'system', content: messageText(m.content) };
+      case 'user':
+        if (typeof m.content === 'string') return { role: 'user', content: m.content };
+        return {
+          role: 'user',
+          content: m.content.map((p) =>
+            p.type === 'text'
+              ? { type: 'text', text: p.text }
+              : { type: 'image_url', image_url: { url: `data:${p.mimeType};base64,${p.data}` } },
+          ),
+        };
+      case 'assistant': {
+        const text = messageText(m.content);
+        return {
+          role: 'assistant',
+          content: text || (m.toolCalls?.length ? null : ''),
+          ...(m.toolCalls?.length
+            ? {
+                tool_calls: m.toolCalls.map((c) => ({
+                  id: c.id,
+                  type: 'function',
+                  function: { name: c.name, arguments: JSON.stringify(c.arguments ?? {}) },
+                })),
+              }
+            : {}),
+        };
+      }
+      case 'tool':
+        return { role: 'tool', tool_call_id: m.toolCallId ?? '', content: messageText(m.content) };
+      default:
+        throw new Error(`Unsupported message role "${String((m as AiChatMessage).role)}"`);
+    }
+  });
+}
+
+export function openAiChatBody(
+  request: AiChatRequest,
+  config: OpenAiChatConfig,
+  stream: boolean,
+): DataObject {
+  const body: DataObject = {
+    model: config.model,
+    messages: toOpenAiMessages(request.messages),
+  };
+  if (request.tools?.length) {
+    body.tools = request.tools.map((t) => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    }));
+  }
+  const format = request.responseFormat;
+  if (format?.type === 'json' && config.responseFormatMode !== 'none') {
+    if (config.responseFormatMode === 'jsonSchema' && format.schema && isObjectSchema(format.schema)) {
+      body.response_format = {
+        type: 'json_schema',
+        json_schema: { name: 'response', schema: format.schema, strict: false },
+      };
+    } else {
+      body.response_format = { type: 'json_object' };
+    }
+  }
+  const temperature = request.temperature ?? config.temperature;
+  if (temperature !== undefined) body.temperature = temperature;
+  if (config.topP !== undefined) body.top_p = config.topP;
+  const maxTokens = request.maxTokens ?? config.maxTokens;
+  if (maxTokens !== undefined) body[config.maxTokensField] = maxTokens;
+  if (config.frequencyPenalty !== undefined) body.frequency_penalty = config.frequencyPenalty;
+  if (config.presencePenalty !== undefined) body.presence_penalty = config.presencePenalty;
+  if (config.reasoningEffort) body.reasoning_effort = config.reasoningEffort;
+  if (stream) {
+    body.stream = true;
+    body.stream_options = { include_usage: true };
+  }
+  return body;
+}
+
+function parseArguments(raw: unknown): DataObject {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as DataObject;
+  if (typeof raw !== 'string' || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { input: parsed };
+  } catch {
+    return { _rawArguments: raw };
+  }
+}
+
+function stopReason(finish: unknown, hasToolCalls: boolean): AiChatResponse['stopReason'] {
+  if (hasToolCalls || finish === 'tool_calls' || finish === 'function_call') return 'tool_calls';
+  if (finish === 'stop') return 'end';
+  if (finish === 'length') return 'max_tokens';
+  return 'other';
+}
+
+export function parseOpenAiResponse(body: unknown): AiChatResponse {
+  const b = (body ?? {}) as Record<string, any>;
+  const choice = b.choices?.[0];
+  if (!choice)
+    throw new Error(`The model returned no choices${b.error?.message ? `: ${b.error.message}` : ''}`);
+  if (choice.finish_reason === 'content_filter' && !choice.message?.content) {
+    throw new ModelRefusalError('The model provider blocked the response (content filter)');
+  }
+  const message = choice.message ?? {};
+  if (message.refusal) throw new ModelRefusalError(`The model declined to answer: ${message.refusal}`);
+  const toolCalls: AiToolCall[] = (message.tool_calls ?? [])
+    .filter((c: any) => c?.function?.name)
+    .map((c: any, i: number) => ({
+      id: String(c.id ?? `call_${i}`),
+      name: String(c.function.name),
+      arguments: parseArguments(c.function.arguments),
+    }));
+  return {
+    message: {
+      role: 'assistant',
+      content: typeof message.content === 'string' ? message.content : '',
+      ...(toolCalls.length ? { toolCalls } : {}),
+    },
+    usage: b.usage
+      ? {
+          inputTokens: Number(b.usage.prompt_tokens ?? 0),
+          outputTokens: Number(b.usage.completion_tokens ?? 0),
+        }
+      : undefined,
+    stopReason: stopReason(choice.finish_reason, toolCalls.length > 0),
+    model: b.model,
+  };
+}
+
+/** Rebuild a response from `stream: true` chunks. */
+export function parseOpenAiStream(text: string, onDelta: (text: string) => void): AiChatResponse {
+  let content = '';
+  let finish: unknown;
+  let model: string | undefined;
+  let usage: AiChatResponse['usage'];
+  const calls = new Map<number, { id: string; name: string; args: string }>();
+  for (const { json } of sseJson(text)) {
+    if (json.error) throw new Error(json.error.message ?? 'The model stream reported an error');
+    model ??= json.model;
+    if (json.usage) {
+      usage = {
+        inputTokens: Number(json.usage.prompt_tokens ?? 0),
+        outputTokens: Number(json.usage.completion_tokens ?? 0),
+      };
+    }
+    const choice = json.choices?.[0];
+    if (!choice) continue;
+    const delta = choice.delta ?? {};
+    if (typeof delta.content === 'string' && delta.content) {
+      content += delta.content;
+      onDelta(delta.content);
+    }
+    for (const tc of delta.tool_calls ?? []) {
+      const index = Number(tc.index ?? 0);
+      const entry = calls.get(index) ?? { id: '', name: '', args: '' };
+      if (tc.id) entry.id = tc.id;
+      if (tc.function?.name) entry.name += tc.function.name;
+      if (tc.function?.arguments) entry.args += tc.function.arguments;
+      calls.set(index, entry);
+    }
+    if (choice.finish_reason) finish = choice.finish_reason;
+  }
+  const toolCalls = [...calls.entries()]
+    .sort(([a], [b]) => a - b)
+    .filter(([, c]) => c.name)
+    .map(([i, c]) => ({ id: c.id || `call_${i}`, name: c.name, arguments: parseArguments(c.args) }));
+  return {
+    message: { role: 'assistant', content, ...(toolCalls.length ? { toolCalls } : {}) },
+    usage,
+    stopReason: stopReason(finish, toolCalls.length > 0),
+    model,
+  };
+}
+
+export function openAiAdapter(config: OpenAiChatConfig): ChatAdapter {
+  const capabilities: ChatModelCapabilities = {
+    structuredOutput: config.responseFormatMode !== 'none',
+    structuredOutputWithTools: config.responseFormatMode !== 'none',
+  };
+  return {
+    provider: config.provider ?? 'openai',
+    model: config.model,
+    credentialType: config.credentialType,
+    capabilities,
+    buildRequest: (request, stream) => ({
+      url: `${trimSlash(config.baseUrl)}/chat/completions`,
+      method: 'POST',
+      headers: { accept: stream ? 'text/event-stream' : 'application/json', ...(config.extraHeaders ?? {}) },
+      body: openAiChatBody(request, config, stream),
+    }),
+    parseResponse: parseOpenAiResponse,
+    parseStream: parseOpenAiStream,
+  };
+}

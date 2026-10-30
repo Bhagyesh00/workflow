@@ -12,3 +12,4 @@ coverage/
 
 # agent worktrees
 .claude/worktrees/
+dump.rdb
