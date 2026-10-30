@@ -1,0 +1,226 @@
+# Remaining plan
+
+**Snapshot:** branch `claude/dazzling-wozniak-o0huxu`, commit `807548a` (2026-10-30). Everything listed as done is on GitHub.
+**Read first:** [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) (binding contracts) and [`docs/SPEC.md`](../docs/SPEC.md) (parity matrix, new features, security rules S1–S18). The user research behind the new features is in [`docs/research/USER-RESEARCH.md`](../docs/research/USER-RESEARCH.md).
+
+Work through the phases in order. Each task has an acceptance check. Do not mark a task done until its tests pass.
+
+---
+
+## 0. Where things stand
+
+| Package               | What it is                                                                                                                                                                                                                                                                                                                                                                                                   | Tests  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
+| `packages/workflow`   | Isomorphic model, sandboxed expression interpreter (no eval), semantic diff, error catalogue                                                                                                                                                                                                                                                                                                                 | 48 ✅  |
+| `packages/core`       | Execution engine (depth-first, merges, loops, retries with backoff, error outputs, wait/resume, retry-from-failed-node, quotas, AI sub-nodes), isolated-vm Code sandbox, SSRF-guarded HTTP, AES-256-GCM per-tenant credentials, OAuth2 refresh                                                                                                                                                               | 48 ✅  |
+| `packages/nodes-base` | 36 core nodes + Slack, Gmail (+trigger), Google Sheets, Postgres, MySQL, Notion, Airtable, Telegram (+trigger); 20 credential types                                                                                                                                                                                                                                                                          | 348 ✅ |
+| `packages/nodes-ai`   | AI Agent, LLM chain, extractor, classifier, sentiment, summarization, retrieval QA, chat trigger; OpenAI/Anthropic/Gemini/Ollama/OpenAI-compatible models; memory (window/Postgres/Redis); tools (calculator, code, HTTP, workflow, think, vector store, MCP client); embeddings; vector stores (in-memory, PGVector, Qdrant); loaders, splitters, output parsers                                            | 131 ✅ |
+| `packages/server`     | Fastify API (all of ARCHITECTURE §14), Postgres + Drizzle migrations + RLS, auth/sessions/CSRF/roles/invites/API keys/audit, credentials + OAuth2, executions (regular + BullMQ queue), SSE push, activation, webhooks (onReceived/lastNode/responseNode/streaming, CSP sandbox, idempotency), wait tracker, sub-workflows, error workflows, pruning, public API + OpenAPI, health and metrics, Docker files | 77 ✅  |
+| `packages/editor`     | React SPA: canvas, node creator, node details view (every parameter type, expression editor with live preview), executions, credentials (OAuth popup), settings, version history, white-label theming, dark mode                                                                                                                                                                                             | 114 ✅ |
+
+**Verified end to end** against a running server:
+- A Playwright smoke test: sign up, build a workflow on the canvas, run it and read the output.
+- A production webhook flow with a Respond node.
+- CSP sandbox headers on webhook responses.
+- "Data is never code" (runtime values are never evaluated).
+- Cross-tenant 404s, CSRF 403, credential redaction.
+
+**Not done yet:** this file.
+
+---
+
+## 1. Set up a new session or account
+
+1. Clone and install:
+
+   ```bash
+   git clone -b claude/dazzling-wozniak-o0huxu https://github.com/Bhagyesh00/workflow.git && cd workflow
+   pnpm install          # Node 22.19+ (24 LTS recommended), pnpm 10
+   ```
+2. Services: PostgreSQL 16 with **pgvector** and Redis 7. On Ubuntu:
+
+   ```bash
+   apt-get update && apt-get install -y postgresql-16-pgvector && service postgresql start && redis-server --daemonize yes
+   su postgres -c "psql -c \"ALTER USER postgres PASSWORD 'postgres';\""
+   for db in workflow_dev workflow_test nodes_test ai_test; do su postgres -c "psql -c 'CREATE DATABASE $db;'"; done
+   for db in workflow_test ai_test; do su postgres -c "psql -d $db -c 'CREATE EXTENSION IF NOT EXISTS vector;'"; done
+   ```
+
+   Or use `docker/docker-compose.yml`.
+3. Verify everything is green. Server tests must not run concurrently with another server test run, because they share `workflow_test`.
+
+   ```bash
+   for p in workflow core nodes-base nodes-ai server editor; do (cd packages/$p && npx vitest run && npx tsc -p tsconfig.json); done
+   npx biome check .
+   ```
+4. Run the app:
+
+   ```bash
+   cd packages/editor && npx vite build && cd ../server
+   pnpm seed     # prints a demo login
+   pnpm dev      # http://localhost:5678
+   ```
+
+   E2E: `cd packages/editor && E2E_BASE_URL=http://localhost:5678 CHROMIUM_PATH=<chrome binary> npx playwright test`.
+5. Network: in Claude Code cloud sessions, add `docs.n8n.io` to the environment's allowed domains if you want agents to check parity against n8n's documentation.
+6. The process must run with `node --no-node-snapshot` (isolated-vm). The server scripts already do this.
+
+---
+
+## 2. Phase A — verify and fix the review findings (highest priority)
+
+The review was stopped before verification. [`review-findings.md`](review-findings.md) lists **65 unverified findings: 20 high, 30 medium, 15 low**, each with file:line, scenario, evidence and proposed fix. Process for each one:
+1. Reproduce it with a failing test. If you can't reproduce it, mark it refuted in that file with the reason.
+2. Fix it and keep the test.
+3. Run the package tests, `tsc` and `biome check`.
+
+Suggested order:
+1. **Security highs:**
+   - SSRF through redirect to a literal IP (core `http-client.ts`).
+   - DNS rebinding in Postgres/MySQL/SMTP: pin the connection to the checked IP.
+   - Luxon global state mutable from expressions: freeze or wrap `Settings`, and block static setters on `DateTime`/`Duration`/`Interval` from user code.
+   - Native work inside expressions not bounded (regex/JSON/sort on huge inputs): run expressions on a worker thread with a hard timeout, or cap input sizes.
+   - Unauthenticated multipart buffered before the webhook path lookup.
+   - Cross-tab tenant switch writing into the wrong tenant: bind the request tenant to an explicit header and reject on mismatch.
+   - Push streams surviving logout or member removal.
+   - In-memory AI stores capped by count rather than bytes.
+2. **Data-loss and correctness highs:**
+   - Orphaned triggers after concurrent `startTriggers`.
+   - Error-workflow loops.
+   - NUL bytes in webhook payloads leaving `new` rows (strip `\u0000` before JSONB insert).
+   - `logSubNodeRun` not awaiting hooks.
+   - Webhook upload leak.
+   - OAuth popup blocked by COOP: use `same-origin-allow-popups` on the editor page.
+   - OAuth tokens wiped on modal re-save.
+   - Invitation link route mismatch (`/invitations/` vs `/invitation/`).
+   - Predefined credential picker in HTTP Request/GraphQL.
+   - Filter strict type validation rejecting numbers typed in UI fields: coerce numeric strings from fixed UI inputs.
+   - Pass-through nodes keeping upstream pairedItem.
+   - Google Sheets update overwriting formulas: only write changed columns.
+3. Then the mediums and lows.
+
+**Known integration items** from the build notes. They are not in `review-findings.md`, so do them in this phase too:
+
+| ID  | Package           | Task                                                                                                                                                             | Acceptance                                                              |
+| --- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| K1  | server            | Retry-from-failed-node uses `WorkflowExecute.retryFromFailure()` (state has `failedExecuteData`); fall back to the current pinning approach for older executions | Test: a node fails, the retry re-runs only that node and its successors |
+| K2  | server            | `CredentialsProvider` loads strictly by tenant and checks that the stored type equals, or extends, the requested type; expression credential ids (NF-05) work    | Tests: cross-tenant id → error; wrong type → error                      |
+| K3  | server            | Merge credential type property defaults (including hidden fixed Google URLs and scopes) into decrypted data before nodes, OAuth and tests use it                 | Google OAuth2 credential with only client id/secret can connect         |
+| K4  | server            | Credential test resolves `={{$credentials.x}}` templates in `test.request`                                                                                       | The OpenAI/Anthropic test hits `{baseUrl}/models`                       |
+| K5  | server            | Chat Trigger responses produced by the server: CORS from `allowedOrigins`, OPTIONS preflight, S8 headers kept                                                    | Browser chat widget on another origin works                             |
+| K6  | server + nodes-ai | One streaming protocol: AI `sendChunk({type:begin\|item\|end})` must not be double-wrapped in NDJSON (see the review finding on double wrapping)                 | Streaming test with an AI agent                                         |
+| K7  | server            | `listSearch: searchWorkflows` for the Execute Workflow resource locator                                                                                          | Picker lists the tenant's workflows                                     |
+| K8  | docs              | ARCHITECTURE §11/§14: add the server's extra endpoints, cookie `Path=/rest`, Idempotency-Key, streaming mode, `pollTimes` format                                 | Docs match the code                                                     |
+| K9  | nodes-base        | Add a `redis` credential type; align the `postgres` and `httpBearerAuth` fields with what nodes-ai reads                                                         | Redis memory node works with a saved credential                         |
+| K10 | editor            | Expression preview: show a neutral "no input data yet" state instead of a red error; show error `code` and `hint`                                                | Visual check plus a unit test                                           |
+| K11 | editor            | Version history shows the semantic diff before restore; execution detail shows code and hint plus "Retry from failed node"                                       | E2E                                                                     |
+
+**Exit criteria for Phase A:** every high finding fixed or refuted, all package tests green, the E2E smoke test green, and a second short review pass (security-only) finds no new high.
+
+---
+
+## 3. Phase B — M1 new features, second wave (server + editor wiring)
+
+The engine parts are already built (see SPEC §2.1). This phase wires them through the server and the UI.
+
+| ID    | Feature                             | Work                                                                                                                                                   | Acceptance                                     |
+| ----- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| NF-01 | Retry from failed node              | Server endpoint (K1) + editor button; crash recovery: on startup, executions stuck in `running` with `saveExecutionProgress` use `continueExecution()` | Kill the worker mid-run; the execution resumes |
+| NF-02 | Backoff + idempotency               | Settings UI for `retryBackoff`; Idempotency-Key on public API POSTs                                                                                    | UI test; API test                              |
+| NF-04 | Cost metering and guardrails        | Meter execution ms per tenant/workflow and LLM tokens per model (nodes-ai already reports usage); budgets with warn/pause/stop; usage page             | Exceeding the budget pauses the workflow       |
+| NF-05 | Credential slots                    | Editor: allow an expression in the credential selector; docs                                                                                           | E2E with two customers                         |
+| NF-08 | Per-workflow concurrency + priority | Workflow setting `maxConcurrency`, BullMQ priority                                                                                                     | Third concurrent run queues                    |
+| NF-10 | Versions                            | Named versions, diff UI (K11), executions show the version they ran                                                                                    | E2E                                            |
+| NF-15 | Structured errors                   | Error panel with code, hint, request/response excerpt, item index                                                                                      | Visual check                                   |
+| NF-18 | Alerts and heartbeats               | Alert rules (failure, failure rate, no success in N hours) → email/Slack/webhook with dedup and mute; tenant default error workflow                    | Rule fires once per incident                   |
+| NF-19 | Retention per outcome               | Settings + pruning job by outcome; storage use per workflow                                                                                            | Pruning test                                   |
+| NF-20 | Quotas                              | Expose `limits` per plan (items per output, node runs, run-data bytes); fail cleanly                                                                   | Test                                           |
+| NF-21 | Async webhook jobs                  | Response mode `async`: 202 + job id, status/result endpoints, optional callback                                                                        | Test                                           |
+
+---
+
+## 4. Phase C — production readiness
+
+1. **CI:** a GitHub Actions workflow with Postgres+pgvector and Redis services that runs install, lint, typecheck, all tests, and the E2E smoke test against a built server.
+2. **Docker:** build and run `docker/Dockerfile` and `docker/docker-compose.yml` (never built so far; no daemon was available) in regular and queue mode.
+3. **Bundle the server** (tsdown/esbuild) instead of running TS through tsx in production; remove `register-hooks.mjs` by using explicit `.ts`-free import paths in nodes-base.
+4. **S3-compatible binary data store** (`BINARY_DATA_MODE=s3`); config currently refuses s3.
+5. **Security hardening from SPEC §4:**
+   - S3: run the Code sandbox in a separate unprivileged runner process.
+   - S7: split public ingress (webhooks/forms/chat) into its own service without DB keys.
+   - S10: KMS-wrapped tenant keys.
+   - S16: Postgres `SKIP LOCKED` leases instead of Redis leader election for triggers, timers and waits.
+6. **Email transport** (SMTP) for invitations, password reset and alerts; add **password reset** and **TOTP 2FA**.
+7. **Load test:** 1k webhook requests per second in queue mode with 4 workers; record p95 latency and memory.
+8. **Update `docs/SPEC.md` status columns.** Many 🔨 rows are now ✅ (see the build notes in this file's history).
+9. **README:** quick start, screenshots, deploy guide.
+
+---
+
+## 5. Phase D — M2 (differentiators and depth)
+
+From SPEC §2.2. Suggested order by user impact:
+1. NF-14 step debugger.
+2. NF-12 workflow test suites + HTTP record/replay.
+3. NF-11 workflow-as-code SDK + Git sync.
+4. NF-03 bulk replay.
+5. NF-22 webhook inbox.
+6. NF-23/24 approvals and wait-for-event.
+7. NF-25 reliable agent runtime.
+8. NF-26 AI copilot (drafts + diff + dry run).
+9. NF-27 parallel branches + loop containers.
+10. NF-29 component library.
+11. NF-30 state store.
+12. NF-31 schedule centre.
+13. NF-17 credential health.
+14. NF-16 guided mapping / simple mode.
+15. NF-06/07 white-label kit, embed SDK, agency portal.
+16. NF-08 keyed flow control (full).
+17. NF-09 shared rate limiter.
+18. NF-35 health panel.
+19. NF-36 hybrid runners.
+20. NF-37 snapshots.
+21. NF-38 connector factory (OpenAPI/Postman/cURL → connector). This is the route to n8n's 400+ integrations.
+22. NF-39 execution search.
+23. NF-41 reseller policy hooks.
+
+Parity items also in M2:
+- Form Trigger + Form node.
+- Data tables.
+- Python in the sandbox.
+- External secret vaults.
+- SSO (SAML/OIDC) + SCIM.
+- Projects and custom roles.
+- Event triggers (Kafka, RabbitMQ, MQTT, IMAP, Postgres LISTEN).
+- Hosted chat widget.
+- Any node as an AI tool + `$fromAI()`.
+- Guardrails node, evaluations, MCP server trigger.
+- Insights dashboard, OpenTelemetry, log streaming.
+- Command bar, canvas groups, folders.
+- Templates gallery and n8n JSON import.
+- The next 30 integrations listed in SPEC §1.10.
+
+## 6. Phase E — M3
+
+From SPEC §2.3:
+- NF-13 workspace forks.
+- NF-32 package-enabled code.
+- NF-33 multiplayer editing.
+- NF-34 upgrade shadow runs.
+- NF-40 data residency.
+- Signed community node marketplace (S11).
+- Helm chart.
+- Workflow reviews before publish.
+- UI localisation.
+
+---
+
+## 7. How to continue with Claude Code
+
+Paste one of these into a new session on this branch.
+
+- **Phase A:**
+  > Read plan/REMAINING-PLAN.md and plan/review-findings.md. Do Phase A: for every high finding, reproduce it with a failing test, fix it or mark it refuted, then do K1–K11. Run all package tests, tsc and biome; run the E2E smoke test; commit after each package and push to `claude/dazzling-wozniak-o0huxu`.
+- **Phase B:**
+  > Do Phase B of plan/REMAINING-PLAN.md, one feature per commit, with tests, and update docs/SPEC.md statuses.
+Cost tip: Phase A is the most valuable per credit. Parallel agents (one per package, each in its own git worktree) worked well for building. Run at most two at a time on a 4-CPU machine.
