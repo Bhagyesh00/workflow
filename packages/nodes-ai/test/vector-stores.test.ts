@@ -164,6 +164,34 @@ describe('In-memory vector store', () => {
     expect(requests[0].messages[1]).toEqual({ role: 'user', content: 'what about the engine of a car?' });
   });
 
+  it('serves chains through the vector store retriever', async () => {
+    await insert(store('insert'));
+    const requests = scriptModel('Model', ['From the retriever']);
+    const r = await run(
+      [
+        node('Trigger', 'test.trigger'),
+        node('QA', 'ai.chainRetrievalQa', { promptType: 'define', text: 'pizza or pasta?' }),
+        node('Model', 'test.fakeChatModel'),
+        node('Retriever', 'ai.retrieverVectorStore', { topK: 2 }),
+        store('retrieve'),
+        node('Embeddings', 'test.fakeEmbeddings'),
+      ],
+      connect(
+        ['Trigger', 'QA'],
+        ['Model', 'QA', 'ai_languageModel'],
+        ['Retriever', 'QA', 'ai_retriever'],
+        ['Store', 'Retriever', 'ai_vectorStore'],
+        ['Embeddings', 'Store', 'ai_embedding'],
+      ),
+    );
+    expect(r.status, JSON.stringify(r.error)).toBe('success');
+    expect(r.output('QA')).toEqual([{ response: 'From the retriever' }]);
+    const context = String(requests[0].messages[0].content);
+    expect(context).toContain('Pizza and pasta are food');
+    expect(context.match(/\n\n/g)?.length).toBeGreaterThanOrEqual(1); // two documents
+    expect(r.runData.Retriever).toHaveLength(1);
+  });
+
   it('is scoped to the tenant', async () => {
     await insert(store('insert'), services({ tenantId: 'tenant-a' }));
     const r = await load(store('load'), 'dog', services({ tenantId: 'tenant-b' }));
