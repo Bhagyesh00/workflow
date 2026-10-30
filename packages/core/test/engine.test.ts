@@ -28,6 +28,23 @@ describe('WorkflowExecute', () => {
     expect(Object.isFrozen(result.state.resultData.runData.Set[0].data!.main![0]![0].json)).toBe(true);
   });
 
+  it('never evaluates runtime data as an expression (data is never code)', async () => {
+    const payload = '={{ (() => { throw new Error("evaluated!") })() }}';
+    const result = await execute({
+      name: 'data-not-code',
+      nodes: [
+        node('Trigger', 'test.trigger'),
+        node('Set', 'test.set', [200, 0], { parameters: { field: 'copy', value: '={{ $json.text }}' } }),
+        node('Set2', 'test.set', [400, 0], {
+          parameters: { field: 'copy2', value: '=prefix {{ $json.copy }}' },
+        }),
+      ],
+      connections: connect(['Trigger', 'Set'], ['Set', 'Set2']),
+    }).run({ triggerItems: [{ json: { text: payload } }] });
+    expect(result.status).toBe('success');
+    expect(json(result, 'Set2')).toEqual([{ text: payload, copy: payload, copy2: `prefix ${payload}` }]);
+  });
+
   it('runs branches depth-first ordered by canvas position', async () => {
     const order: string[] = [];
     const result = await execute(
