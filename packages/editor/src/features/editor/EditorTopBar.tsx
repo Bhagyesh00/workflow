@@ -79,7 +79,7 @@ export function EditorTopBar({
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <input
           aria-label="Workflow name"
-          className="min-w-0 max-w-[40ch] flex-shrink rounded-md border border-transparent bg-transparent px-1.5 py-0.5 font-display text-lg font-semibold hover:border-line focus:border-brand focus:outline-none"
+          className="min-w-24 max-w-[40ch] flex-shrink rounded-md border border-transparent bg-transparent px-1.5 py-0.5 font-display text-lg font-semibold hover:border-line focus:border-brand focus:outline-none"
           style={{ width: `${Math.max(8, name.length + 2)}ch` }}
           value={name}
           readOnly={readOnly}
@@ -94,7 +94,9 @@ export function EditorTopBar({
             if (e.key === 'Escape') setDraftName(meta.name);
           }}
         />
-        <TagsEditor value={meta.tags} onChange={setTags} readOnly={readOnly} />
+        <div className="hidden min-w-0 sm:flex">
+          <TagsEditor value={meta.tags} onChange={setTags} readOnly={readOnly} />
+        </div>
       </div>
       <span className={cx('hidden text-xs md:inline', dirty ? 'text-warn' : 'text-ink-3')} aria-live="polite">
         {saving ? 'Saving…' : dirty ? 'Unsaved changes' : meta.id ? 'Saved' : 'Not saved yet'}
@@ -123,12 +125,13 @@ export function EditorTopBar({
       </button>
       <IconButton
         label="Version history"
+        className="max-sm:hidden"
         active={sidePanel === 'versions'}
         onClick={() => setSidePanel(sidePanel === 'versions' ? null : 'versions')}
       >
         <History size={16} />
       </IconButton>
-      <IconButton label="Workflow settings" onClick={() => setSettingsOpen(true)}>
+      <IconButton label="Workflow settings" className="max-sm:hidden" onClick={() => setSettingsOpen(true)}>
         <Settings2 size={16} />
       </IconButton>
       <Menu
@@ -148,6 +151,18 @@ export function EditorTopBar({
             label: 'Download as JSON',
             icon: <Download size={14} />,
             onSelect: exportWorkflow,
+          },
+          {
+            key: 'history',
+            label: 'Version history',
+            icon: <History size={14} />,
+            onSelect: () => setSidePanel('versions'),
+          },
+          {
+            key: 'settings',
+            label: 'Workflow settings',
+            icon: <Settings2 size={14} />,
+            onSelect: () => setSettingsOpen(true),
           },
           {
             key: 'shortcuts',
@@ -182,7 +197,7 @@ export function EditorTopBar({
           disabled={readOnly || activating}
           onChange={onToggleActive}
         />
-        <span className={meta.active ? 'text-ok' : undefined} aria-hidden="true">
+        <span className={cx('max-sm:hidden', meta.active && 'text-ok')} aria-hidden="true">
           {meta.active ? 'Active' : 'Inactive'}
         </span>
       </span>

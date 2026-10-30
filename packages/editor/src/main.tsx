@@ -1,8 +1,14 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './App';
+import { App, type RouterMode } from './App';
 import { createQueryClient } from './api/queries';
 import './styles/index.css';
+
+function routerMode(demo: boolean): RouterMode {
+  const requested = import.meta.env.VITE_DEMO_ROUTER;
+  if (!demo) return 'browser';
+  return requested === 'browser' || requested === 'hash' ? requested : 'memory';
+}
 
 async function boot() {
   const demo = import.meta.env.MODE === 'demo';
@@ -15,7 +21,7 @@ async function boot() {
   if (!root) throw new Error('Missing #root element');
   createRoot(root).render(
     <StrictMode>
-      <App queryClient={createQueryClient()} hash={demo && import.meta.env.VITE_HASH_ROUTER !== 'false'} />
+      <App queryClient={createQueryClient()} router={routerMode(demo)} />
     </StrictMode>,
   );
 }

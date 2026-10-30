@@ -1,7 +1,13 @@
 /** Providers and routes. */
 import { type QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { createBrowserRouter, createHashRouter, Navigate, type RouteObject } from 'react-router';
+import {
+  createBrowserRouter,
+  createHashRouter,
+  createMemoryRouter,
+  Navigate,
+  type RouteObject,
+} from 'react-router';
 import { RouterProvider } from 'react-router/dom';
 import { AppShell } from './components/shell/AppShell';
 import { BrandApplier } from './components/shell/BrandMark';
@@ -121,9 +127,26 @@ export function AppProviders({
   );
 }
 
-/** `hash` routing is used by the self-contained demo build, which may be served from any path. */
-export function App({ queryClient, hash = false }: { queryClient: QueryClient; hash?: boolean }) {
-  const [router] = useState(() => (hash ? createHashRouter(routes) : createBrowserRouter(routes)));
+export type RouterMode = 'browser' | 'hash' | 'memory';
+
+function createRouter(mode: RouterMode) {
+  if (mode === 'hash') return createHashRouter(routes);
+  if (mode === 'memory') return createMemoryRouter(routes, { initialEntries: ['/workflows'] });
+  return createBrowserRouter(routes);
+}
+
+/**
+ * The server-backed app uses browser history. The self-contained demo build may be embedded or
+ * served from any path, so it keeps its location in memory (or the hash) instead.
+ */
+export function App({
+  queryClient,
+  router: mode = 'browser',
+}: {
+  queryClient: QueryClient;
+  router?: RouterMode;
+}) {
+  const [router] = useState(() => createRouter(mode));
   return (
     <AppProviders queryClient={queryClient}>
       <RouterProvider router={router} />

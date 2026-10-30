@@ -28,6 +28,12 @@
   box-shadow: var(--wf-shadow);
 }
 
+@media (max-width: 640px) {
+  .react-flow__minimap {
+    display: none;
+  }
+}
+
 .react-flow__controls {
   border-radius: 10px;
   overflow: hidden;

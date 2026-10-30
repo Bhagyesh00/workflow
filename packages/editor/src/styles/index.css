@@ -66,6 +66,34 @@
   color-scheme: dark;
 }
 
+/* before the app sets data-theme (first paint), follow the OS unless light was chosen */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --wf-paper: #151b22;
+    --wf-surface: #1c232c;
+    --wf-surface-2: #222a34;
+    --wf-surface-3: #2b3540;
+    --wf-ink: #e4eaf0;
+    --wf-ink-2: #a3b0bd;
+    --wf-ink-3: #74818e;
+    --wf-line: #303a46;
+    --wf-line-strong: #46535f;
+    --wf-cable: #6f7d8b;
+    --wf-grid: #2a333d;
+
+    --wf-run: #f2a93b;
+    --wf-ok: #3cbd83;
+    --wf-err: #f06359;
+    --wf-pin: #3cb4d4;
+    --wf-warn: #e0a640;
+
+    --wf-shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 18px -8px rgb(0 0 0 / 0.5);
+    --wf-shadow-lift: 0 2px 6px rgb(0 0 0 / 0.35), 0 22px 48px -16px rgb(0 0 0 / 0.7);
+
+    color-scheme: dark;
+  }
+}
+
 @theme inline {
   --font-sans: "Hanken Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Bricolage Grotesque Variable", "Hanken Grotesk Variable", ui-sans-serif, sans-serif;

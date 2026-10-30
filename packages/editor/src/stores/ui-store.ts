@@ -45,8 +45,16 @@ export interface UiState {
   setActivationErrors(errors: ActivationErrorDetail[] | null): void;
 }
 
+/** A stored choice wins; otherwise an explicit theme set on <html> by an embedding page. */
+function initialTheme(): ThemePreference {
+  const stored = readThemePreference();
+  if (stored !== 'system') return stored;
+  const host = document.documentElement.dataset.theme;
+  return host === 'light' || host === 'dark' ? host : 'system';
+}
+
 export const useUiStore = create<UiState>()((set) => {
-  const theme = typeof window === 'undefined' ? 'system' : readThemePreference();
+  const theme = typeof window === 'undefined' ? 'system' : initialTheme();
   return {
     theme,
     resolvedTheme: 'light',
