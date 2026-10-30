@@ -1,9 +1,170 @@
 # Remaining plan
 
-**Snapshot:** branch `claude/dazzling-wozniak-o0huxu`, commit `807548a` (2026-10-30). Everything listed as done is on GitHub.
+**Branch:** `main` (the only branch; push every commit there). **Baseline:** commit `bcaef40` (2026-10-30).
 **Read first:** [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) (binding contracts) and [`docs/SPEC.md`](../docs/SPEC.md) (parity matrix, new features, security rules S1–S18). The user research behind the new features is in [`docs/research/USER-RESEARCH.md`](../docs/research/USER-RESEARCH.md).
 
 Work through the phases in order. Each task has an acceptance check. Do not mark a task done until its tests pass.
+
+---
+
+## ▶ RESUME POINT (read this first in every session)
+
+> **Every session starts here and ends by updating this block.** It is the single source of truth for where work stopped.
+
+| Field                | Value                                                                                                                                                                                                                                                                                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Current phase**    | A — verify and fix the review findings                                                                                                                                                                                                                                                                                                    |
+| **Next action**      | Start A1 with **R02**: SSRF guard bypassed by an HTTP redirect to a literal IP (`packages/core/src/http/http-client.ts`). Write a failing test (redirect from an allowed host to `http://169.254.169.254/` and `http://127.0.0.1/`), then fix by validating every redirect hop or following redirects manually through the guarded agent. |
+| **Last completed**   | Plan created; review stopped before verification (no fixes applied yet)                                                                                                                                                                                                                                                                   |
+| **Last commit**      | `bcaef40` + the commit that added this resume point                                                                                                                                                                                                                                                                                       |
+| **Updated**          | 2026-10-30                                                                                                                                                                                                                                                                                                                                |
+| **Blockers / notes** | None. Postgres (pgvector) and Redis are required for server, nodes-base and nodes-ai tests (see §1).                                                                                                                                                                                                                                      |
+
+### Resume protocol
+
+**At the start of a session:**
+1. `git pull origin main`, then set up the environment as in §1 if needed.
+2. Read this RESUME POINT. Do exactly the **Next action**, then continue down the progress checklist from the first unchecked `[ ]` item.
+
+**After finishing each checklist item:**
+1. Run the affected package's `npx vitest run`, `npx tsc -p tsconfig.json` and `npx biome check`.
+2. Tick the item (`[x]`) and append the short commit hash.
+3. For an `R..` item, set its Status in [`review-findings.md`](review-findings.md) to `fixed (<hash>)` or `refuted (<reason>)`.
+4. Update the RESUME POINT table: **Next action** = the next unchecked item, written as a concrete instruction; also **Last completed**, **Last commit** and **Updated**.
+5. Commit the code and the plan together, push to `main`: `git push origin main`.
+
+**If a session must stop mid-item** (credits, time): commit work in progress with a `WIP:` prefix, write the exact stopping point and the next step into **Next action** and **Blockers / notes**, then push.
+
+**Generic resume prompt for any session or account:**
+> Read plan/REMAINING-PLAN.md, follow its Resume protocol, and continue from the RESUME POINT. After each checklist item, update the plan and push to main.
+
+### Progress checklist
+
+#### Phase A — verify and fix review findings (§2)
+
+**A1. High-severity findings (security first)**
+
+- [ ] R02 (high, core): SSRF guard bypassed by an HTTP redirect to a literal IP address (metadata, loopback, private network)
+- [ ] R04 (high, nodes-ai): In-memory stores (Simple Vector Store, Simple Memory) cap entry counts, not bytes, so one tenant can fill a sh
+- [ ] R06 (high, nodes-base): Postgres, MySQL and SMTP nodes resolve the host again after the SSRF check (DNS rebinding reaches the platform
+- [ ] R07 (high, nodes-base): Postgres, MySQL and Send Email SSRF check is bypassable by DNS rebinding: the host is resolved for the check a
+- [ ] R11 (high, server): A tab still showing workspace A writes into workspace B after the tenant is switched in another tab (secrets l
+- [ ] R14 (high, server): Unauthenticated multipart bodies bypass BODY_LIMIT and are buffered before the webhook path is looked up
+- [ ] R19 (high, workflow): Expression time and memory budgets do not bound native work: a viewer can freeze or crash the shared server pr
+- [ ] R20 (high, workflow): Expressions can mutate luxon's process-wide state and change other tenants' date math (Duration matrix, week i
+- [ ] R01 (high, core): logSubNodeRun fires nodeExecuteAfter without awaiting or catching it; a failed progress save crashes the proce
+- [ ] R03 (high, editor): HTTP Request / GraphQL 'Predefined Credential Type' never shows a credential picker, so the option is unusable
+- [ ] R05 (high, nodes-base): Google Sheets Update / Append-or-Update rewrites every column of the matched row, replacing formulas with thei
+- [ ] R08 (high, nodes-base): Pass-through nodes (No Op, Wait, Respond to Webhook, Code returning $input.all()) keep upstream pairedItem, so
+- [ ] R09 (high, nodes-base): IF/Filter/Switch: strict type validation (the default) rejects every number or boolean comparison value typed
+- [ ] R10 (high, server): OAuth2 'Connect account' never reports success or failure: COOP same-origin cuts the popup off from its opener
+- [ ] R12 (high, server): A NUL character in a webhook payload leaves permanent 'new' execution rows that use up the concurrency limit
+- [ ] R13 (high, server): Invitation links point to /invitations/<token> but the editor only routes /invitation/:token, so invitees cann
+- [ ] R15 (high, server): Concurrent startTriggers calls orphan a running trigger that keeps firing after deactivation
+- [ ] R16 (high, server): Saving the OAuth2 credential modal again after connecting wipes the stored tokens (modal sends oauthTokenData:
+- [ ] R17 (high, server): Error workflows that name each other loop forever with no plan limits applied
+- [ ] R18 (high, server): Files uploaded to a webhook are left on disk forever when the execution cannot be created
+
+**A2. Known integration items**
+
+- [ ] K1 server: retry uses engine retryFromFailure
+- [ ] K2 server: credentials provider checks tenant + type
+- [ ] K3 server: merge credential type defaults (hidden OAuth URLs/scopes)
+- [ ] K4 server: credential test resolves $credentials templates
+- [ ] K5 server: Chat Trigger CORS + preflight on server responses
+- [ ] K6 server + nodes-ai: single streaming protocol (no double wrapping)
+- [ ] K7 server: listSearch searchWorkflows
+- [ ] K8 docs: ARCHITECTURE §11/§14 updated with server additions
+- [ ] K9 nodes-base: redis credential, postgres/httpBearerAuth field alignment
+- [ ] K10 editor: neutral expression preview without input, show code + hint
+- [ ] K11 editor: version diff before restore, retry-from-failed-node button
+
+**A3. Medium-severity findings**
+
+- [ ] R21 (medium, core): Binary data from pollers and manual trigger runs is stored under '<tenant>/activation' and never pruned
+- [ ] R22 (medium, editor): Resource locator in 'From List' mode cannot be switched to an expression: toggling 'Expression' shows an unusa
+- [ ] R23 (medium, editor): Saving or restoring an active workflow can silently deactivate it: the editor ignores the server's activationE
+- [ ] R24 (medium, editor): Expression preview shows a red error for normal expressions when the node has no input data yet
+- [ ] R25 (medium, editor): Duplicate and Import keep the nodes' webhookId, so copies collide on webhook paths (activation fails, test lis
+- [ ] R26 (medium, editor): While starting a run or listening for a test event, the editor adopts any execution of the workflow, including
+- [ ] R27 (medium, nodes-ai): Streaming response mode with a model that cannot stream (Ollama, or agent 'Enable Streaming' off) delivers no
+- [ ] R28 (medium, nodes-ai): Agent stream chunks are wrapped twice: the server's NDJSON stream carries `{type:'item', content:{type:'begin'
+- [ ] R29 (medium, nodes-ai): Agent output-parser retry drops `tools` while the history still holds tool_use/tool_result (and thinking) bloc
+- [ ] R30 (medium, nodes-ai): Postgres chat-memory table cache is process-global and keyed only by host:database:table, so a dropped table,
+- [ ] R31 (medium, nodes-ai): In-process AI stores cap entry counts, not bytes, so one tenant can exhaust a shared worker's heap
+- [ ] R32 (medium, nodes-ai): Mid-stream provider errors (Anthropic `overloaded_error` SSE event, OpenAI/Gemini stream `error`) bypass maxRe
+- [ ] R33 (medium, nodes-base): HTTP Request pagination sends the first request without the pagination parameters, silently skipping records
+- [ ] R34 (medium, nodes-base): Schedule Trigger ignores 'Weeks Between Triggers' (every N weeks runs every week)
+- [ ] R35 (medium, nodes-base): Loop Over Items: $('Node before the loop').item fails from the second batch onward, and on the done output
+- [ ] R36 (medium, nodes-base): Wait node accepts resume webhooks while waiting for a time interval or date: early resume with attacker-suppli
+- [ ] R37 (medium, nodes-base): Edit Fields (Set) fails when an assignment writes into an object taken from input data
+- [ ] R38 (medium, nodes-base): IF/Filter/Switch date comparisons ignore the workflow timezone for dates without an offset
+- [ ] R39 (medium, server): Push (SSE) streams outlive logout and member removal: an ex-member keeps receiving the tenant's live run data
+- [ ] R40 (medium, server): Invitation link generated by the server points to a route the editor does not have
+- [ ] R41 (medium, server): Saving an active workflow never unregisters third-party webhooks of the previous version
+- [ ] R42 (medium, server): Executions marked 'crashed' after a worker dies do not run the error workflow
+- [ ] R43 (medium, server): An execution whose result cannot be persisted stays 'running' forever
+- [ ] R44 (medium, server): lastNode 'First Entry Binary' responses and sub-workflow binary outputs fail when the execution is not saved
+- [ ] R45 (medium, server): Stopping or timing out a parent does not stop a sub-workflow it is waiting for, and the stop request blocks un
+- [ ] R46 (medium, server): Retrying a timed-out or stopped execution re-runs the last node that already succeeded
+- [ ] R47 (medium, server): Webhook CORS preflight answers `Access-Control-Allow-Headers: *`, which never covers `Authorization`, so a bro
+- [ ] R48 (medium, server): Anyone holding an execution id can resume time-based Wait executions early with their own data (and public web
+- [ ] R49 (medium, server): Listen for test event on app triggers with webhookMethods (Telegram Trigger) never registers the test URL with
+- [ ] R50 (medium, workflow): Integrations: choosing a non-first resource without explicitly re-selecting the operation hides and drops that
+
+**A4. Low-severity findings**
+
+- [ ] R51 (low, editor): Version history shows only the newest 50 versions (no pagination in the editor)
+- [ ] R52 (low, editor): listSearch results are cached without the parameters they depend on, so the list is stale after changing the p
+- [ ] R53 (low, editor): 'Stop listening' only clears editor state; the server-side test webhook stays registered for up to 2 minutes
+- [ ] R54 (low, editor): Vector store nodes are not offered in 'What happens next?' because the catalog evaluates dynamic ports with em
+- [ ] R55 (low, editor): Execution detail hides Retry for stopped (canceled) executions although the server allows retrying them
+- [ ] R56 (low, nodes-ai): OpenAI streaming parser ignores `delta.refusal` and `finish_reason: content_filter`, so a refusal becomes an e
+- [ ] R57 (low, nodes-ai): Model 'streaming' is fully buffered: no delta is emitted until the whole provider response has downloaded
+- [ ] R58 (low, nodes-base): HTTP Request multipart body fields are dropped when a JSON 'Specify Body' choice is still stored
+- [ ] R59 (low, nodes-base): Merge 'Always Add Input Number to Field Names' suffixes only clashing keys, using the wrong input number
+- [ ] R60 (low, nodes-base): Merge 'Keep Non-Matches of Input 2' / outer join with 'Include First Match Only' report matched input-2 items
+- [ ] R61 (low, nodes-base): Split Out fails the whole node when any single item lacks the list field
+- [ ] R62 (low, nodes-base): HTTP Request: query parameters with the same name collapse to the last value
+- [ ] R63 (low, server): Invitation tokens are written to request logs when the invite link is opened
+- [ ] R64 (low, server): Queue mode: activation on a non-leader main reports success when the trigger fails to start
+- [ ] R65 (low, server): Allowed-origin trailing slash is normalized by Chat Trigger but not by the server's CORS decoration, so the re
+
+**A5. Phase A exit:** all package tests + E2E smoke green; short security re-review finds no new high
+
+- [ ] A5 done
+
+#### Phase B — M1 new features, second wave (§3)
+
+- [ ] NF-01 retry-from-failed-node endpoint + editor button + crash recovery on startup
+- [ ] NF-02 retryBackoff setting in UI; Idempotency-Key on public API POSTs
+- [ ] NF-04 cost metering + budgets
+- [ ] NF-05 credential slots in the editor
+- [ ] NF-08 per-workflow concurrency + priority
+- [ ] NF-10 named versions + diff UI + version shown on executions
+- [ ] NF-15 structured error panel
+- [ ] NF-18 alert rules, heartbeats, tenant default error workflow
+- [ ] NF-19 retention per outcome
+- [ ] NF-20 plan quotas exposed
+- [ ] NF-21 async webhook jobs
+- [ ] Update docs/SPEC.md status columns for Phase B
+
+#### Phase C — production readiness (§4)
+
+- [ ] C1 GitHub Actions CI (lint, typecheck, tests with Postgres+pgvector and Redis, E2E)
+- [ ] C2 Docker image + compose verified (regular and queue mode)
+- [ ] C3 bundle the server; remove register-hooks.mjs
+- [ ] C4 S3 binary data store
+- [ ] C5 security hardening: S3 runner process, S7 ingress split, S10 KMS, S16 Postgres leases
+- [ ] C6 email transport, password reset, TOTP 2FA
+- [ ] C7 load test (1k webhooks per second, queue mode)
+- [ ] C8 SPEC status columns brought up to date
+- [ ] C9 README quick start + deploy guide
+
+#### Phase D — M2 (§5) and Phase E — M3 (§6)
+
+- [ ] D: work through the §5 list in order, ticking each NF / parity item here as `- [x] NF-xx (<hash>)`
+- [ ] E: work through the §6 list in order
 
 ---
 
@@ -34,7 +195,7 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 1. Clone and install:
 
    ```bash
-   git clone -b claude/dazzling-wozniak-o0huxu https://github.com/Bhagyesh00/workflow.git && cd workflow
+   git clone https://github.com/Bhagyesh00/workflow.git && cd workflow
    pnpm install          # Node 22.19+ (24 LTS recommended), pnpm 10
    ```
 2. Services: PostgreSQL 16 with **pgvector** and Redis 7. On Ubuntu:
@@ -217,10 +378,10 @@ From SPEC §2.3:
 
 ## 7. How to continue with Claude Code
 
-Paste one of these into a new session on this branch.
+Paste one of these into a new session on `main`. The generic resume prompt in the RESUME POINT section works for any phase.
 
 - **Phase A:**
-  > Read plan/REMAINING-PLAN.md and plan/review-findings.md. Do Phase A: for every high finding, reproduce it with a failing test, fix it or mark it refuted, then do K1–K11. Run all package tests, tsc and biome; run the E2E smoke test; commit after each package and push to `claude/dazzling-wozniak-o0huxu`.
+  > Read plan/REMAINING-PLAN.md and plan/review-findings.md. Do Phase A: for every high finding, reproduce it with a failing test, fix it or mark it refuted, then do K1–K11. Run all package tests, tsc and biome; run the E2E smoke test; commit after each item and push to `main`.
 - **Phase B:**
   > Do Phase B of plan/REMAINING-PLAN.md, one feature per commit, with tests, and update docs/SPEC.md statuses.
-Cost tip: Phase A is the most valuable per credit. Parallel agents (one per package, each in its own git worktree) worked well for building. Run at most two at a time on a 4-CPU machine.
+  > Cost tip: Phase A is the most valuable per credit. Parallel agents (one per package, each in its own git worktree) worked well for building. Run at most two at a time on a 4-CPU machine.
