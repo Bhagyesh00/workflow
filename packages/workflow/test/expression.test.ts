@@ -74,6 +74,16 @@ describe('expression evaluation', () => {
     expect(run('={{ typeof notDefinedAnywhere }}')).toBe('undefined');
   });
 
+  it('accepts fully parenthesized expressions', () => {
+    expect(run('={{ (2 + 3) }}')).toBe(5);
+    expect(run('={{ ($json.missing || "x") }}')).toBe('x');
+    expect(run('={{ ((1)) * (2) }}')).toBe(2);
+    expect(run('={{ ({ a: 1 }).a }}')).toBe(1);
+    expect(run('={{ ($json.tags.join)(",") }}')).toBe('a,b,a');
+    expect(run('={{ typeof (notDefinedAnywhere) }}')).toBe('undefined');
+    expect(() => run('={{ ("".constructor) }}')).toThrow();
+  });
+
   it('provides data transformation extensions', () => {
     expect(run('={{ $json.tags.unique() }}')).toEqual(['a', 'b']);
     expect(run('={{ "hello world".toTitleCase() }}')).toBe('Hello World');

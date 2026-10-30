@@ -139,7 +139,12 @@ export function parseExpression(code: string): AcornNode {
   if (cached) return cached;
   let ast: AcornNode;
   try {
-    ast = parseExpressionAt(code, 0, { ecmaVersion: 2023, sourceType: 'script', allowReserved: true });
+    ast = parseExpressionAt(code, 0, {
+      ecmaVersion: 2023,
+      sourceType: 'script',
+      allowReserved: true,
+      preserveParens: true,
+    });
   } catch (error) {
     throw new ExpressionError(`Invalid syntax: ${(error as Error).message}`, { cause: error });
   }
@@ -378,7 +383,7 @@ export class Interpreter {
   }
 
   private call(node: N, scope: Scope): unknown {
-    const callee = node.callee;
+    const callee = unwrap(node.callee);
     let fn: unknown;
     let thisArg: unknown;
     if (callee.type === 'MemberExpression') {
@@ -428,18 +433,17 @@ export class Interpreter {
   }
 
   private unary(node: N, scope: Scope): unknown {
-    if (node.operator === 'typeof' && node.argument.type === 'Identifier') {
-      const binding = scope.find(node.argument.name);
+    const argument = unwrap(node.argument);
+    if (node.operator === 'typeof' && argument.type === 'Identifier') {
+      const binding = scope.find(argument.name);
       if (binding) return typeof binding.value;
-      if (Object.hasOwn(this.globals, node.argument.name)) return typeof this.globals[node.argument.name];
+      if (Object.hasOwn(this.globals, argument.name)) return typeof this.globals[argument.name];
       return 'undefined';
     }
     if (node.operator === 'delete') {
-      if (node.argument.type !== 'MemberExpression') return true;
-      const object = this.expr(node.argument.object, scope);
-      const key = assertKey(
-        node.argument.computed ? this.expr(node.argument.property, scope) : node.argument.property.name,
-      );
+      if (argument.type !== 'MemberExpression') return true;
+      const object = this.expr(argument.object, scope);
+      const key = assertKey(argument.computed ? this.expr(argument.property, scope) : argument.property.name);
       if (!isPlainMutable(object)) throw new ExpressionError('Cannot delete properties of this value');
       return delete (object as any)[key];
     }
@@ -540,6 +544,7 @@ export class Interpreter {
   }
 
   private readTarget(target: N, scope: Scope): unknown {
+    target = unwrap(target);
     if (target.type === 'Identifier') return this.lookup(target.name, scope);
     if (target.type === 'MemberExpression') {
       const object = this.expr(target.object, scope);
@@ -550,6 +555,7 @@ export class Interpreter {
   }
 
   private writeTarget(target: N, value: unknown, scope: Scope): unknown {
+    target = unwrap(target);
     if (target.type === 'Identifier') {
       const binding = scope.find(target.name);
       if (!binding) throw new ExpressionError(`Cannot assign to undeclared variable ${target.name}`);
@@ -835,6 +841,12 @@ export class Interpreter {
     }
     return completion;
   }
+}
+
+/** strip redundant parentheses (acorn runs with preserveParens) */
+function unwrap(node: N): N {
+  while (node?.type === 'ParenthesizedExpression') node = node.expression;
+  return node;
 }
 
 function describe(node: N): string {
