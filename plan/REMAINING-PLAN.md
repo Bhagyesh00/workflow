@@ -13,12 +13,12 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 
 | Field                | Value                                                                                                                                                                                                                                                                                                                                     |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Current phase**    | A — verify and fix the review findings                                                                                                                                                                                                                                                                                                    |
-| **Next action**      | Start A1 with **R02**: SSRF guard bypassed by an HTTP redirect to a literal IP (`packages/core/src/http/http-client.ts`). Write a failing test (redirect from an allowed host to `http://169.254.169.254/` and `http://127.0.0.1/`), then fix by validating every redirect hop or following redirects manually through the guarded agent. |
-| **Last completed**   | Plan created; review stopped before verification (no fixes applied yet)                                                                                                                                                                                                                                                                   |
-| **Last commit**      | `bcaef40` + the commit that added this resume point                                                                                                                                                                                                                                                                                       |
-| **Updated**          | 2026-10-30                                                                                                                                                                                                                                                                                                                                |
-| **Blockers / notes** | None. Postgres (pgvector) and Redis are required for server, nodes-base and nodes-ai tests (see §1).                                                                                                                                                                                                                                      |
+| **Current phase**    | A — verify and fix the review findings (A1 done; next A2) |
+| **Next action**      | Start A2 with **K1**: make retry-from-failed-node in the server use `WorkflowExecute.retryFromFailure()` when the saved state has `failedExecuteData`, and keep the current pinning approach for older executions. Write the test first: a node fails, the retry re-runs only that node and its successors. |
+| **Last completed**   | A1: all 20 high findings plus their duplicates R31 and R40 verified by failing tests and fixed. A second review of those fixes confirmed 15 issues; all were fixed in the same commits. All six packages: tsc clean, tests green (workflow 129, core 60, nodes-base 365, nodes-ai 149, server 101, editor 128), biome clean on the changed files. |
+| **Last commit**      | `b0e119d` (A1 fixes `a70c840`..`b0e119d`) + the plan commit after it |
+| **Updated**          | 2026-10-31 |
+| **Blockers / notes** | (1) R19 is only partly closed: expressions still run on the server event loop, so a regex the policy accepts can cost O(n²) inside one native call; V8 `--enable-experimental-regexp-engine-on-excessive-backtracks` is on for server processes, and a preemptive worker/isolate timeout is added to C5. (2) R10 (OAuth popup) needs one live check with a real provider. (3) Behaviour changes: expressions cannot store the same object twice in input data, the regex policy rejects backreferences and ambiguous nested repeats, `chunk()` needs an integer ≥ 1, formats are capped at 256 chars. (4) Binary ids written on Windows before `ea6b56f` (backslashes) are no longer readable (dev data only). (5) Dev services: `make db-migrate`; parallel server test runs set `TEST_DATABASE_URL`/`TEST_REDIS_URL`. (6) On Windows the checkout is CRLF (autocrlf), so `biome check .` reports format errors on untouched files: check changed files after converting them to LF. |
 
 ### Resume protocol
 
@@ -44,26 +44,26 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 
 **A1. High-severity findings (security first)**
 
-- [ ] R02 (high, core): SSRF guard bypassed by an HTTP redirect to a literal IP address (metadata, loopback, private network)
-- [ ] R04 (high, nodes-ai): In-memory stores (Simple Vector Store, Simple Memory) cap entry counts, not bytes, so one tenant can fill a sh
-- [ ] R06 (high, nodes-base): Postgres, MySQL and SMTP nodes resolve the host again after the SSRF check (DNS rebinding reaches the platform
-- [ ] R07 (high, nodes-base): Postgres, MySQL and Send Email SSRF check is bypassable by DNS rebinding: the host is resolved for the check a
-- [ ] R11 (high, server): A tab still showing workspace A writes into workspace B after the tenant is switched in another tab (secrets l
-- [ ] R14 (high, server): Unauthenticated multipart bodies bypass BODY_LIMIT and are buffered before the webhook path is looked up
-- [ ] R19 (high, workflow): Expression time and memory budgets do not bound native work: a viewer can freeze or crash the shared server pr
-- [ ] R20 (high, workflow): Expressions can mutate luxon's process-wide state and change other tenants' date math (Duration matrix, week i
-- [ ] R01 (high, core): logSubNodeRun fires nodeExecuteAfter without awaiting or catching it; a failed progress save crashes the proce
-- [ ] R03 (high, editor): HTTP Request / GraphQL 'Predefined Credential Type' never shows a credential picker, so the option is unusable
-- [ ] R05 (high, nodes-base): Google Sheets Update / Append-or-Update rewrites every column of the matched row, replacing formulas with thei
-- [ ] R08 (high, nodes-base): Pass-through nodes (No Op, Wait, Respond to Webhook, Code returning $input.all()) keep upstream pairedItem, so
-- [ ] R09 (high, nodes-base): IF/Filter/Switch: strict type validation (the default) rejects every number or boolean comparison value typed
-- [ ] R10 (high, server): OAuth2 'Connect account' never reports success or failure: COOP same-origin cuts the popup off from its opener
-- [ ] R12 (high, server): A NUL character in a webhook payload leaves permanent 'new' execution rows that use up the concurrency limit
-- [ ] R13 (high, server): Invitation links point to /invitations/<token> but the editor only routes /invitation/:token, so invitees cann
-- [ ] R15 (high, server): Concurrent startTriggers calls orphan a running trigger that keeps firing after deactivation
-- [ ] R16 (high, server): Saving the OAuth2 credential modal again after connecting wipes the stored tokens (modal sends oauthTokenData:
-- [ ] R17 (high, server): Error workflows that name each other loop forever with no plan limits applied
-- [ ] R18 (high, server): Files uploaded to a webhook are left on disk forever when the execution cannot be created
+- [x] R02 (high, core): SSRF guard bypassed by an HTTP redirect to a literal IP address (metadata, loopback, private network) (1be1956)
+- [x] R04 (high, nodes-ai): In-memory stores (Simple Vector Store, Simple Memory) cap entry counts, not bytes, so one tenant can fill a sh (45325da)
+- [x] R06 (high, nodes-base): Postgres, MySQL and SMTP nodes resolve the host again after the SSRF check (DNS rebinding reaches the platform (1be1956)
+- [x] R07 (high, nodes-base): Postgres, MySQL and Send Email SSRF check is bypassable by DNS rebinding: the host is resolved for the check a (1be1956)
+- [x] R11 (high, server): A tab still showing workspace A writes into workspace B after the tenant is switched in another tab (secrets l (cc30a76)
+- [x] R14 (high, server): Unauthenticated multipart bodies bypass BODY_LIMIT and are buffered before the webhook path is looked up (00546a2)
+- [x] R19 (high, workflow): Expression time and memory budgets do not bound native work: a viewer can freeze or crash the shared server pr (dadfde2)
+- [x] R20 (high, workflow): Expressions can mutate luxon's process-wide state and change other tenants' date math (Duration matrix, week i (dadfde2)
+- [x] R01 (high, core): logSubNodeRun fires nodeExecuteAfter without awaiting or catching it; a failed progress save crashes the proce (c30e9ac)
+- [x] R03 (high, editor): HTTP Request / GraphQL 'Predefined Credential Type' never shows a credential picker, so the option is unusable (763658e)
+- [x] R05 (high, nodes-base): Google Sheets Update / Append-or-Update rewrites every column of the matched row, replacing formulas with thei (2b37982)
+- [x] R08 (high, nodes-base): Pass-through nodes (No Op, Wait, Respond to Webhook, Code returning $input.all()) keep upstream pairedItem, so (c30e9ac)
+- [x] R09 (high, nodes-base): IF/Filter/Switch: strict type validation (the default) rejects every number or boolean comparison value typed (2b37982)
+- [x] R10 (high, server): OAuth2 'Connect account' never reports success or failure: COOP same-origin cuts the popup off from its opener (cc30a76)
+- [x] R12 (high, server): A NUL character in a webhook payload leaves permanent 'new' execution rows that use up the concurrency limit (00546a2)
+- [x] R13 (high, server): Invitation links point to /invitations/<token> but the editor only routes /invitation/:token, so invitees cann (cc30a76)
+- [x] R15 (high, server): Concurrent startTriggers calls orphan a running trigger that keeps firing after deactivation (6389cad)
+- [x] R16 (high, server): Saving the OAuth2 credential modal again after connecting wipes the stored tokens (modal sends oauthTokenData: (cc30a76)
+- [x] R17 (high, server): Error workflows that name each other loop forever with no plan limits applied (00546a2)
+- [x] R18 (high, server): Files uploaded to a webhook are left on disk forever when the execution cannot be created (00546a2)
 
 **A2. Known integration items**
 
@@ -91,7 +91,7 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 - [ ] R28 (medium, nodes-ai): Agent stream chunks are wrapped twice: the server's NDJSON stream carries `{type:'item', content:{type:'begin'
 - [ ] R29 (medium, nodes-ai): Agent output-parser retry drops `tools` while the history still holds tool_use/tool_result (and thinking) bloc
 - [ ] R30 (medium, nodes-ai): Postgres chat-memory table cache is process-global and keyed only by host:database:table, so a dropped table,
-- [ ] R31 (medium, nodes-ai): In-process AI stores cap entry counts, not bytes, so one tenant can exhaust a shared worker's heap
+- [x] R31 (medium, nodes-ai): In-process AI stores cap entry counts, not bytes, so one tenant can exhaust a shared worker's heap (45325da)
 - [ ] R32 (medium, nodes-ai): Mid-stream provider errors (Anthropic `overloaded_error` SSE event, OpenAI/Gemini stream `error`) bypass maxRe
 - [ ] R33 (medium, nodes-base): HTTP Request pagination sends the first request without the pagination parameters, silently skipping records
 - [ ] R34 (medium, nodes-base): Schedule Trigger ignores 'Weeks Between Triggers' (every N weeks runs every week)
@@ -100,7 +100,7 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 - [ ] R37 (medium, nodes-base): Edit Fields (Set) fails when an assignment writes into an object taken from input data
 - [ ] R38 (medium, nodes-base): IF/Filter/Switch date comparisons ignore the workflow timezone for dates without an offset
 - [ ] R39 (medium, server): Push (SSE) streams outlive logout and member removal: an ex-member keeps receiving the tenant's live run data
-- [ ] R40 (medium, server): Invitation link generated by the server points to a route the editor does not have
+- [x] R40 (medium, server): Invitation link generated by the server points to a route the editor does not have (cc30a76)
 - [ ] R41 (medium, server): Saving an active workflow never unregisters third-party webhooks of the previous version
 - [ ] R42 (medium, server): Executions marked 'crashed' after a worker dies do not run the error workflow
 - [ ] R43 (medium, server): An execution whose result cannot be persisted stays 'running' forever
@@ -308,6 +308,7 @@ The engine parts are already built (see SPEC §2.1). This phase wires them throu
 4. **S3-compatible binary data store** (`BINARY_DATA_MODE=s3`); config currently refuses s3.
 5. **Security hardening from SPEC §4:**
    - S3: run the Code sandbox in a separate unprivileged runner process.
+   - R19 residual: evaluate expressions under a preemptive limit (worker thread or isolate that can be terminated) for executions, validate, webhook-path resolution and loadOptions.
    - S7: split public ingress (webhooks/forms/chat) into its own service without DB keys.
    - S10: KMS-wrapped tenant keys.
    - S16: Postgres `SKIP LOCKED` leases instead of Redis leader election for triggers, timers and waits.
