@@ -4,11 +4,14 @@ import { defineConfig } from 'vite';
 
 const SERVER = process.env.WORKFLOW_SERVER_URL ?? 'http://localhost:5678';
 const PORT = Number(process.env.EDITOR_PORT ?? 8080);
+// the origin the server accepts as its own: its BASE_URL (`make start` sets it to this dev server)
+const SERVER_ORIGIN = new URL(process.env.BASE_URL ?? SERVER).origin;
 
 /**
  * The server checks that the Origin of mutating requests matches its BASE_URL (CSRF rule). In
  * development the editor runs on its own port, so requests that come from the dev server's own
- * origin are presented to the API as same-origin. Requests from any other origin pass unchanged.
+ * origin are presented to the API with the server's BASE_URL origin. Requests from any other
+ * origin pass unchanged.
  */
 const proxyTarget = {
   target: SERVER,
@@ -22,7 +25,7 @@ const proxyTarget = {
     proxy.on('proxyReq', (req) => {
       const origin = req.getHeader('origin');
       if (origin === `http://localhost:${PORT}` || origin === `http://127.0.0.1:${PORT}`)
-        req.setHeader('origin', SERVER);
+        req.setHeader('origin', SERVER_ORIGIN);
     });
   },
 };
@@ -33,6 +36,8 @@ export default defineConfig(({ mode }) => ({
   base: mode === 'demo' ? './' : '/',
   server: {
     port: PORT,
+    // the server's BASE_URL and the Origin rewrite name this port, so never move to another one
+    strictPort: true,
     proxy: {
       '/rest': proxyTarget,
       '/api': proxyTarget,
