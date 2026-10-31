@@ -53,9 +53,14 @@ function isProperty(option: unknown): option is NodeProperty {
 /** sibling values with defaults filled in, for displayOptions evaluation */
 export function withDefaults(properties: NodeProperty[], values: NodeParameters): NodeParameters {
   const merged: NodeParameters = { ...values };
+  const defaulted = (prop: NodeProperty) => prop.type !== 'notice' && prop.type !== 'button';
+  // several properties may share a name (one `operation` per resource): the default comes from the one shown (R50)
   for (const prop of properties) {
-    if (!(prop.name in merged) && prop.type !== 'notice' && prop.type !== 'button')
+    if (!(prop.name in merged) && defaulted(prop) && isParameterDisplayed(prop.displayOptions, merged))
       merged[prop.name] = prop.default;
+  }
+  for (const prop of properties) {
+    if (!(prop.name in merged) && defaulted(prop)) merged[prop.name] = prop.default;
   }
   return merged;
 }

@@ -99,10 +99,20 @@ export function resolveNodeParameters(
   const rootParams = options.rootParams ?? values;
   // two passes so that a property's visibility can depend on defaults of earlier properties
   const merged: NodeParameters = { ...values };
+  const defaulted = (prop: NodeProperty): boolean => prop.type !== 'notice' && prop.type !== 'button';
+  // several properties may share a name (one `operation` per resource): the default comes from the one shown
   for (const prop of properties) {
-    if (!(prop.name in merged) && prop.type !== 'notice' && prop.type !== 'button') {
+    if (
+      !(prop.name in merged) &&
+      defaulted(prop) &&
+      isParameterDisplayed(prop.displayOptions, merged, { ...options, rootParams })
+    ) {
       merged[prop.name] = prop.default;
     }
+  }
+  // a property whose visibility depends on a later one still gets its first default
+  for (const prop of properties) {
+    if (!(prop.name in merged) && defaulted(prop)) merged[prop.name] = prop.default;
   }
   for (const prop of properties) {
     if (prop.type === 'notice' || prop.type === 'button') continue;
