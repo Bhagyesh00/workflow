@@ -427,6 +427,11 @@ export function parseClipboard(text: string): ClipboardPayload | null {
   };
 }
 
+/** Copies of a workflow must not share webhook paths: every node that has a webhookId gets a new one. */
+export function withFreshWebhookIds<T extends { webhookId?: string }>(nodes: T[]): T[] {
+  return nodes.map((n) => (n.webhookId ? { ...n, webhookId: newId() } : n));
+}
+
 /**
  * Paste a clipboard payload: nodes get fresh ids, names that clash are made unique (and every
  * reference inside the pasted nodes follows), positions are shifted by `offset`.

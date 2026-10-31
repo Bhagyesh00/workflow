@@ -57,6 +57,7 @@ async function doSave(deps: EditorDeps): Promise<WorkflowDTO | null> {
     }
     const dto = await workflowsApi.update(store.meta.id, patchBody());
     useWorkflowStore.getState().markSaved(dto, revision);
+    reportDeactivation(dto);
     deps.onSaved?.(dto);
     return dto;
   } catch (error) {
@@ -67,6 +68,18 @@ async function doSave(deps: EditorDeps): Promise<WorkflowDTO | null> {
     toast.error('Could not save the workflow', errorMessage(error));
     return null;
   }
+}
+
+/** A save or restore of an active workflow can come back deactivated; say so and show which nodes failed. */
+export function reportDeactivation(dto: WorkflowDTO): void {
+  const failure = dto.activationError;
+  if (!failure) return;
+  useUiStore
+    .getState()
+    .setActivationErrors(
+      failure.details?.length ? failure.details : [{ node: '', message: failure.message }],
+    );
+  toast.error('Saved, but the workflow was deactivated', failure.message);
 }
 
 /** 409 resolution: drop local changes and load the latest saved version. */

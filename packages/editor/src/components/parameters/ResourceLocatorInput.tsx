@@ -220,9 +220,7 @@ export function ResourceLocatorInput({ prop, value, onChange, id }: InputProps) 
             </option>
           ))}
         </Select>
-        {mode.type === 'list' ? (
-          <ListMode mode={mode} value={current} onChange={onChange} id={id} />
-        ) : isExpressionValue(current.value) && ctx.allowExpressions ? (
+        {isExpressionValue(current.value) && ctx.allowExpressions ? (
           <div className="min-w-0 flex-1">
             <ExpressionInput
               value={current.value}
@@ -230,6 +228,8 @@ export function ResourceLocatorInput({ prop, value, onChange, id }: InputProps) 
               ariaLabel={prop.displayName}
             />
           </div>
+        ) : mode.type === 'list' ? (
+          <ListMode mode={mode} value={current} onChange={onChange} id={id} />
         ) : (
           <input
             id={id}

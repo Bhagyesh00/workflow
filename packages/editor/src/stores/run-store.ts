@@ -37,10 +37,13 @@ export interface RunSnapshot {
   testWebhook: TestWebhookState | null;
   /** events for executions not adopted yet (the run request may resolve after the first events) */
   pending: Record<string, PushEvent[]>;
+  /** production executions seen while waiting, whose later events must not be buffered */
+  ignored: string[];
 }
 
 export const MAX_LOG_ENTRIES = 1000;
 const MAX_PENDING_EVENTS = 500;
+const MAX_IGNORED_EXECUTIONS = 200;
 let logSeq = 0;
 
 export const initialRunSnapshot = (): RunSnapshot => ({
@@ -56,6 +59,7 @@ export const initialRunSnapshot = (): RunSnapshot => ({
   finishedAt: null,
   testWebhook: null,
   pending: {},
+  ignored: [],
 });
 
 function eventExecutionId(event: PushEvent): string | undefined {
@@ -116,6 +120,7 @@ export function adoptExecution(state: RunSnapshot, executionId: string): RunSnap
     status: state.status === 'starting' || state.status === 'listening' ? 'running' : state.status,
     testWebhook: null,
     pending: {},
+    ignored: [],
   };
   for (const event of state.pending[executionId] ?? []) next = applyOwnEvent(next, event);
   return next;
@@ -123,8 +128,8 @@ export function adoptExecution(state: RunSnapshot, executionId: string): RunSnap
 
 /**
  * Fold one push event into the run state. `openWorkflowId` is the workflow in the editor; events
- * for other executions are ignored, except that a starting/listening editor adopts the execution
- * announced for its workflow.
+ * for other executions are ignored, except that a starting editor adopts the manual execution
+ * announced for its workflow and a listening editor adopts the one a test webhook call started.
  */
 export function reduceRunEvent(
   state: RunSnapshot,
@@ -139,7 +144,9 @@ export function reduceRunEvent(
     return adoptExecution(state, event.data.executionId);
   }
   if (event.type === 'executionStarted' && event.data.executionId !== state.executionId) {
-    if (waiting && event.data.workflowId === openWorkflowId && !state.executionId) {
+    if (waiting && event.data.mode !== 'manual') return ignoreExecution(state, event.data.executionId);
+    // a manual run request adopts its own execution; a listening editor waits for testWebhookReceived
+    if (state.status === 'starting' && event.data.workflowId === openWorkflowId && !state.executionId) {
       return applyOwnEvent(adoptExecution(state, event.data.executionId), event);
     }
     return bufferEvent(state, event);
@@ -148,8 +155,15 @@ export function reduceRunEvent(
   const executionId = eventExecutionId(event);
   if (!executionId) return state;
   if (executionId === state.executionId) return applyOwnEvent(state, event);
-  if (waiting) return bufferEvent(state, event);
+  if (waiting) return state.ignored.includes(executionId) ? state : bufferEvent(state, event);
   return state;
+}
+
+/** Forget an execution the editor must not follow (a production run): drop its buffer and skip its later events. */
+function ignoreExecution(state: RunSnapshot, executionId: string): RunSnapshot {
+  if (state.ignored.includes(executionId)) return state;
+  const { [executionId]: _dropped, ...pending } = state.pending;
+  return { ...state, pending, ignored: [...state.ignored, executionId].slice(-MAX_IGNORED_EXECUTIONS) };
 }
 
 function bufferEvent(state: RunSnapshot, event: PushEvent): RunSnapshot {
@@ -225,7 +239,7 @@ export const useRunStore = create<RunState>()((set, get) => ({
     set({ status: 'error', error, runningNodes: [], finishedAt: Date.now(), testWebhook: null });
   },
   stopListening() {
-    set({ status: 'idle', testWebhook: null, pending: {} });
+    set({ status: 'idle', testWebhook: null, pending: {}, ignored: [] });
   },
   loadExecution(detail) {
     set({

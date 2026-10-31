@@ -90,6 +90,8 @@ export interface WorkflowDTO {
   tags: Tag[];
   createdAt: string;
   updatedAt: string;
+  /** set when a save or restore of an active workflow failed to re-register it and the server deactivated it */
+  activationError?: { message: string; details?: ActivationErrorDetail[] };
 }
 
 export interface WorkflowCreateBody {

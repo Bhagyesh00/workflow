@@ -26,6 +26,7 @@ import {
   listenForTestEvent,
   overwriteLatest,
   reloadLatest,
+  reportDeactivation,
   runWorkflow,
   saveWorkflow,
   setWorkflowActive,
@@ -36,7 +37,7 @@ import { useEditorShortcuts } from '../features/editor/useEditorShortcuts';
 import { issuesByNode, lintWorkflow } from '../lib/doctor';
 import { createNodeFromDescription } from '../lib/node-catalog';
 import { deriveNodePorts, isTriggerDescription } from '../lib/ports';
-import { getMainParents, getNode } from '../lib/workflow-ops';
+import { getMainParents, getNode, withFreshWebhookIds } from '../lib/workflow-ops';
 import { useRunStore } from '../stores/run-store';
 import { toast, useUiStore } from '../stores/ui-store';
 import { toWorkflowBody, useWorkflowStore } from '../stores/workflow-store';
@@ -231,7 +232,12 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
         onDuplicate={async () => {
           try {
             const s = store();
-            const dto = await workflowsApi.create({ ...toWorkflowBody(s), name: `${s.meta.name} copy` });
+            const body = toWorkflowBody(s);
+            const dto = await workflowsApi.create({
+              ...body,
+              nodes: withFreshWebhookIds(body.nodes),
+              name: `${s.meta.name} copy`,
+            });
             toast.success('Workflow duplicated', dto.name);
             deps.navigate(`/workflow/${encodeURIComponent(dto.id)}`);
           } catch (error) {
@@ -361,6 +367,7 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
                 const dto = await workflowsApi.restoreVersion(meta.id!, versionId);
                 store().load(dto);
                 toast.success('Version restored');
+                reportDeactivation(dto);
               } catch (error) {
                 toast.error('Could not restore the version', errorMessage(error));
               }

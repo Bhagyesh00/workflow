@@ -17,7 +17,7 @@ import { Segmented } from '../components/ui/Tabs';
 import { TagChip } from '../components/workflow/TagsEditor';
 import { activationDetails } from '../features/editor/editor-actions';
 import { downloadJson, formatRelative, safeFileName } from '../lib/format';
-import { parseClipboard } from '../lib/workflow-ops';
+import { parseClipboard, withFreshWebhookIds } from '../lib/workflow-ops';
 import { toast } from '../stores/ui-store';
 
 export interface ImportedWorkflow {
@@ -44,7 +44,7 @@ export function parseWorkflowImport(
   }
   return {
     name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : fallbackName,
-    nodes: payload.nodes,
+    nodes: withFreshWebhookIds(payload.nodes),
     connections: payload.connections,
     settings:
       raw.settings && typeof raw.settings === 'object'
@@ -194,7 +194,7 @@ function WorkflowRow({ workflow }: { workflow: WorkflowSummary }) {
       const full = await workflowsApi.get(workflow.id);
       const copy = await workflowsApi.create({
         name: `${full.name} copy`,
-        nodes: full.nodes,
+        nodes: withFreshWebhookIds(full.nodes),
         connections: full.connections,
         settings: full.settings,
         pinData: full.pinData,
