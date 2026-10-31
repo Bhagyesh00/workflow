@@ -13,10 +13,10 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 
 | Field                | Value                                                                                                                                                                                                                                                                                                                                     |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Current phase**    | A — A2 in progress (stopped by the owner 2026-10-31 ~10:20 IST) |
-| **Next action**      | Finish A2. All K1–K11 lanes are done and in the WIP commit (with R24, R27, R28, R46, R47, R51, R55, R65). A review of A2 confirmed 8 problems: 6 are fixed, the fixer of one area was stopped mid-work. Same Claude session: resume Workflow run `wf_e2a5d3f1-179` (resumeFromRunId) so only that fixer reruns. Another session: re-review the A2 diff (`git show <WIP commit>`) for the remaining issues and fix them. Then: tsc + all suites on a quiet machine, tick K1–K11 and the R items, set statuses in review-findings.md, push. |
-| **Last completed**   | A1 done (a70c840..9687db1). A2 lanes done and grep-checked; review fixes partly applied (see Next action). |
-| **Last commit**      | the `WIP: A2` commit after `9687db1` |
+| **Current phase**    | A — A1 and A2 done; next A3 (medium findings) |
+| **Next action**      | Start A3 with **R21**: binary data from pollers and manual trigger runs is stored under `<tenant>/activation` and never pruned (`packages/core/src/engine/node-context.ts:273`). Write the failing test first, then continue down the A3 list (R24, R27, R28, R46, R47 and R51/R55/R65 are already done). |
+| **Last completed**   | A2: K1–K11 plus R24, R27, R28, R46, R47, R51, R55, R65. A review of A2 confirmed 8 problems, all fixed. All six packages: tsc clean, tests green (workflow 129, core 60, nodes-base 366, nodes-ai 160, server 141, editor 143), biome clean on the changed files. |
+| **Last commit**      | `512dab1` (A2: `2c5ddc7` + `512dab1`) + the plan commit after it |
 | **Updated**          | 2026-10-31 |
 | **Blockers / notes** | (1) R19 is only partly closed: expressions still run on the server event loop, so a regex the policy accepts can cost O(n²) inside one native call; V8 `--enable-experimental-regexp-engine-on-excessive-backtracks` is on for server processes, and a preemptive worker/isolate timeout is added to C5. (2) R10 (OAuth popup) needs one live check with a real provider. (3) Behaviour changes: expressions cannot store the same object twice in input data, the regex policy rejects backreferences and ambiguous nested repeats, `chunk()` needs an integer ≥ 1, formats are capped at 256 chars. (4) Binary ids written on Windows before `ea6b56f` (backslashes) are no longer readable (dev data only). (5) Dev services: `make db-migrate`; parallel server test runs set `TEST_DATABASE_URL`/`TEST_REDIS_URL`. (6) On Windows the checkout is CRLF (autocrlf), so `biome check .` reports format errors on untouched files: check changed files after converting them to LF. |
 
@@ -67,28 +67,28 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 
 **A2. Known integration items**
 
-- [ ] K1 server: retry uses engine retryFromFailure
-- [ ] K2 server: credentials provider checks tenant + type
-- [ ] K3 server: merge credential type defaults (hidden OAuth URLs/scopes)
-- [ ] K4 server: credential test resolves $credentials templates
-- [ ] K5 server: Chat Trigger CORS + preflight on server responses
-- [ ] K6 server + nodes-ai: single streaming protocol (no double wrapping)
-- [ ] K7 server: listSearch searchWorkflows
-- [ ] K8 docs: ARCHITECTURE §11/§14 updated with server additions
-- [ ] K9 nodes-base: redis credential, postgres/httpBearerAuth field alignment
-- [ ] K10 editor: neutral expression preview without input, show code + hint
-- [ ] K11 editor: version diff before restore, retry-from-failed-node button
+- [x] K1 server: retry uses engine retryFromFailure (2c5ddc7, 512dab1)
+- [x] K2 server: credentials provider checks tenant + type (2c5ddc7, 512dab1)
+- [x] K3 server: merge credential type defaults (hidden OAuth URLs/scopes) (2c5ddc7, 512dab1)
+- [x] K4 server: credential test resolves $credentials templates (2c5ddc7, 512dab1)
+- [x] K5 server: Chat Trigger CORS + preflight on server responses (2c5ddc7, 512dab1)
+- [x] K6 server + nodes-ai: single streaming protocol (no double wrapping) (2c5ddc7, 512dab1)
+- [x] K7 server: listSearch searchWorkflows (2c5ddc7, 512dab1)
+- [x] K8 docs: ARCHITECTURE §11/§14 updated with server additions (2c5ddc7, 512dab1)
+- [x] K9 nodes-base: redis credential, postgres/httpBearerAuth field alignment (2c5ddc7, 512dab1)
+- [x] K10 editor: neutral expression preview without input, show code + hint (2c5ddc7, 512dab1)
+- [x] K11 editor: version diff before restore, retry-from-failed-node button (2c5ddc7, 512dab1)
 
 **A3. Medium-severity findings**
 
 - [ ] R21 (medium, core): Binary data from pollers and manual trigger runs is stored under '<tenant>/activation' and never pruned
 - [ ] R22 (medium, editor): Resource locator in 'From List' mode cannot be switched to an expression: toggling 'Expression' shows an unusa
 - [ ] R23 (medium, editor): Saving or restoring an active workflow can silently deactivate it: the editor ignores the server's activationE
-- [ ] R24 (medium, editor): Expression preview shows a red error for normal expressions when the node has no input data yet
+- [x] R24 (medium, editor): Expression preview shows a red error for normal expressions when the node has no input data yet (2c5ddc7, 512dab1)
 - [ ] R25 (medium, editor): Duplicate and Import keep the nodes' webhookId, so copies collide on webhook paths (activation fails, test lis
 - [ ] R26 (medium, editor): While starting a run or listening for a test event, the editor adopts any execution of the workflow, including
-- [ ] R27 (medium, nodes-ai): Streaming response mode with a model that cannot stream (Ollama, or agent 'Enable Streaming' off) delivers no
-- [ ] R28 (medium, nodes-ai): Agent stream chunks are wrapped twice: the server's NDJSON stream carries `{type:'item', content:{type:'begin'
+- [x] R27 (medium, nodes-ai): Streaming response mode with a model that cannot stream (Ollama, or agent 'Enable Streaming' off) delivers no (2c5ddc7, 512dab1)
+- [x] R28 (medium, nodes-ai): Agent stream chunks are wrapped twice: the server's NDJSON stream carries `{type:'item', content:{type:'begin' (2c5ddc7, 512dab1)
 - [ ] R29 (medium, nodes-ai): Agent output-parser retry drops `tools` while the history still holds tool_use/tool_result (and thinking) bloc
 - [ ] R30 (medium, nodes-ai): Postgres chat-memory table cache is process-global and keyed only by host:database:table, so a dropped table,
 - [x] R31 (medium, nodes-ai): In-process AI stores cap entry counts, not bytes, so one tenant can exhaust a shared worker's heap (45325da)
@@ -106,19 +106,19 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 - [ ] R43 (medium, server): An execution whose result cannot be persisted stays 'running' forever
 - [ ] R44 (medium, server): lastNode 'First Entry Binary' responses and sub-workflow binary outputs fail when the execution is not saved
 - [ ] R45 (medium, server): Stopping or timing out a parent does not stop a sub-workflow it is waiting for, and the stop request blocks un
-- [ ] R46 (medium, server): Retrying a timed-out or stopped execution re-runs the last node that already succeeded
-- [ ] R47 (medium, server): Webhook CORS preflight answers `Access-Control-Allow-Headers: *`, which never covers `Authorization`, so a bro
+- [x] R46 (medium, server): Retrying a timed-out or stopped execution re-runs the last node that already succeeded (2c5ddc7, 512dab1)
+- [x] R47 (medium, server): Webhook CORS preflight answers `Access-Control-Allow-Headers: *`, which never covers `Authorization`, so a bro (2c5ddc7, 512dab1)
 - [ ] R48 (medium, server): Anyone holding an execution id can resume time-based Wait executions early with their own data (and public web
 - [ ] R49 (medium, server): Listen for test event on app triggers with webhookMethods (Telegram Trigger) never registers the test URL with
 - [ ] R50 (medium, workflow): Integrations: choosing a non-first resource without explicitly re-selecting the operation hides and drops that
 
 **A4. Low-severity findings**
 
-- [ ] R51 (low, editor): Version history shows only the newest 50 versions (no pagination in the editor)
+- [x] R51 (low, editor): Version history shows only the newest 50 versions (no pagination in the editor) (2c5ddc7, 512dab1)
 - [ ] R52 (low, editor): listSearch results are cached without the parameters they depend on, so the list is stale after changing the p
 - [ ] R53 (low, editor): 'Stop listening' only clears editor state; the server-side test webhook stays registered for up to 2 minutes
 - [ ] R54 (low, editor): Vector store nodes are not offered in 'What happens next?' because the catalog evaluates dynamic ports with em
-- [ ] R55 (low, editor): Execution detail hides Retry for stopped (canceled) executions although the server allows retrying them
+- [x] R55 (low, editor): Execution detail hides Retry for stopped (canceled) executions although the server allows retrying them (2c5ddc7, 512dab1)
 - [ ] R56 (low, nodes-ai): OpenAI streaming parser ignores `delta.refusal` and `finish_reason: content_filter`, so a refusal becomes an e
 - [ ] R57 (low, nodes-ai): Model 'streaming' is fully buffered: no delta is emitted until the whole provider response has downloaded
 - [ ] R58 (low, nodes-base): HTTP Request multipart body fields are dropped when a JSON 'Specify Body' choice is still stored
@@ -128,7 +128,7 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 - [ ] R62 (low, nodes-base): HTTP Request: query parameters with the same name collapse to the last value
 - [ ] R63 (low, server): Invitation tokens are written to request logs when the invite link is opened
 - [ ] R64 (low, server): Queue mode: activation on a non-leader main reports success when the trigger fails to start
-- [ ] R65 (low, server): Allowed-origin trailing slash is normalized by Chat Trigger but not by the server's CORS decoration, so the re
+- [x] R65 (low, server): Allowed-origin trailing slash is normalized by Chat Trigger but not by the server's CORS decoration, so the re (2c5ddc7, 512dab1)
 
 **A5. Phase A exit:** all package tests + E2E smoke green; short security re-review finds no new high
 
