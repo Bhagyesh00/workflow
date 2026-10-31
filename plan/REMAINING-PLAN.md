@@ -13,12 +13,12 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 
 | Field                | Value                                                                                                                                                                                                                                                                                                                                     |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Current phase**    | A — A1 and A2 done; next A3 (medium findings) |
-| **Next action**      | Start A3 with **R21**: binary data from pollers and manual trigger runs is stored under `<tenant>/activation` and never pruned (`packages/core/src/engine/node-context.ts:273`). Write the failing test first, then continue down the A3 list (R24, R27, R28, R46, R47 and R51/R55/R65 are already done). |
-| **Last completed**   | A2: K1–K11 plus R24, R27, R28, R46, R47, R51, R55, R65. A review of A2 confirmed 8 problems, all fixed. All six packages: tsc clean, tests green (workflow 129, core 60, nodes-base 366, nodes-ai 160, server 141, editor 143), biome clean on the changed files. |
-| **Last commit**      | `512dab1` (A2: `2c5ddc7` + `512dab1`) + the plan commit after it |
+| **Current phase**    | A — A1, A2, A3 done (R35 partial); next A4 (low findings) |
+| **Next action**      | Start A4 with **R52**: listSearch results are cached without the parameters they depend on (`packages/editor/src/components/parameters/ResourceLocatorInput.tsx`, the useInfiniteQuery key). Failing test first, then continue down the A4 list (R51, R55, R65 are already done). Then A5 exit. |
+| **Last completed**   | A3: 22 of 23 medium findings fixed, R35 partial; the A3 review confirmed 8 more problems, all fixed. All six packages: tsc clean, tests green (workflow 132, core 60, nodes-base 378, nodes-ai 164, server 170, editor 153). |
+| **Last commit**      | `01895a8` (A3: `c05504b`..`01895a8`) + the plan commit after it |
 | **Updated**          | 2026-10-31 |
-| **Blockers / notes** | (1) R19 is only partly closed: expressions still run on the server event loop, so a regex the policy accepts can cost O(n²) inside one native call; V8 `--enable-experimental-regexp-engine-on-excessive-backtracks` is on for server processes, and a preemptive worker/isolate timeout is added to C5. (2) R10 (OAuth popup) needs one live check with a real provider. (3) Behaviour changes: expressions cannot store the same object twice in input data, the regex policy rejects backreferences and ambiguous nested repeats, `chunk()` needs an integer ≥ 1, formats are capped at 256 chars. (4) Binary ids written on Windows before `ea6b56f` (backslashes) are no longer readable (dev data only). (5) Dev services: `make db-migrate`; parallel server test runs set `TEST_DATABASE_URL`/`TEST_REDIS_URL`. (6) On Windows the checkout is CRLF (autocrlf), so `biome check .` reports format errors on untouched files: check changed files after converting them to LF. |
+| **Blockers / notes** | (1) R19 is only partly closed: expressions still run on the server event loop, so a regex the policy accepts can cost O(n²) inside one native call; V8 `--enable-experimental-regexp-engine-on-excessive-backtracks` is on for server processes, and a preemptive worker/isolate timeout is added to C5. (2) R10 (OAuth popup) needs one live check with a real provider. (3) Behaviour changes: expressions cannot store the same object twice in input data, the regex policy rejects backreferences and ambiguous nested repeats, `chunk()` needs an integer ≥ 1, formats are capped at 256 chars. (4) Binary ids written on Windows before `ea6b56f` (backslashes) are no longer readable (dev data only). (5) Dev services: `make db-migrate`; parallel server test runs set `TEST_DATABASE_URL`/`TEST_REDIS_URL`. (6) On Windows the checkout is CRLF (autocrlf), so `biome check .` reports format errors on untouched files: check changed files after converting them to LF. (7) R35 partial: `$("Node").item` inside Loop Over Items needs `sourceOverwrite` on PairedItem (workflow interfaces, core node-context getInputSourceData, data-proxy resolvePairedItem). (8) Resuming a Wait now needs the signed resume URL (`$execution.resumeUrl`); a bare execution id gets 404. |
 
 ### Resume protocol
 
@@ -81,36 +81,36 @@ Work through the phases in order. Each task has an acceptance check. Do not mark
 
 **A3. Medium-severity findings**
 
-- [ ] R21 (medium, core): Binary data from pollers and manual trigger runs is stored under '<tenant>/activation' and never pruned
-- [ ] R22 (medium, editor): Resource locator in 'From List' mode cannot be switched to an expression: toggling 'Expression' shows an unusa
-- [ ] R23 (medium, editor): Saving or restoring an active workflow can silently deactivate it: the editor ignores the server's activationE
+- [x] R21 (medium, core): Binary data from pollers and manual trigger runs is stored under '<tenant>/activation' and never pruned (01895a8)
+- [x] R22 (medium, editor): Resource locator in 'From List' mode cannot be switched to an expression: toggling 'Expression' shows an unusa (c05504b)
+- [x] R23 (medium, editor): Saving or restoring an active workflow can silently deactivate it: the editor ignores the server's activationE (c05504b)
 - [x] R24 (medium, editor): Expression preview shows a red error for normal expressions when the node has no input data yet (2c5ddc7, 512dab1)
-- [ ] R25 (medium, editor): Duplicate and Import keep the nodes' webhookId, so copies collide on webhook paths (activation fails, test lis
-- [ ] R26 (medium, editor): While starting a run or listening for a test event, the editor adopts any execution of the workflow, including
+- [x] R25 (medium, editor): Duplicate and Import keep the nodes' webhookId, so copies collide on webhook paths (activation fails, test lis (c05504b)
+- [x] R26 (medium, editor): While starting a run or listening for a test event, the editor adopts any execution of the workflow, including (c05504b)
 - [x] R27 (medium, nodes-ai): Streaming response mode with a model that cannot stream (Ollama, or agent 'Enable Streaming' off) delivers no (2c5ddc7, 512dab1)
 - [x] R28 (medium, nodes-ai): Agent stream chunks are wrapped twice: the server's NDJSON stream carries `{type:'item', content:{type:'begin' (2c5ddc7, 512dab1)
-- [ ] R29 (medium, nodes-ai): Agent output-parser retry drops `tools` while the history still holds tool_use/tool_result (and thinking) bloc
-- [ ] R30 (medium, nodes-ai): Postgres chat-memory table cache is process-global and keyed only by host:database:table, so a dropped table,
+- [x] R29 (medium, nodes-ai): Agent output-parser retry drops `tools` while the history still holds tool_use/tool_result (and thinking) bloc (103c8e2)
+- [x] R30 (medium, nodes-ai): Postgres chat-memory table cache is process-global and keyed only by host:database:table, so a dropped table, (103c8e2)
 - [x] R31 (medium, nodes-ai): In-process AI stores cap entry counts, not bytes, so one tenant can exhaust a shared worker's heap (45325da)
-- [ ] R32 (medium, nodes-ai): Mid-stream provider errors (Anthropic `overloaded_error` SSE event, OpenAI/Gemini stream `error`) bypass maxRe
-- [ ] R33 (medium, nodes-base): HTTP Request pagination sends the first request without the pagination parameters, silently skipping records
-- [ ] R34 (medium, nodes-base): Schedule Trigger ignores 'Weeks Between Triggers' (every N weeks runs every week)
-- [ ] R35 (medium, nodes-base): Loop Over Items: $('Node before the loop').item fails from the second batch onward, and on the done output
-- [ ] R36 (medium, nodes-base): Wait node accepts resume webhooks while waiting for a time interval or date: early resume with attacker-suppli
-- [ ] R37 (medium, nodes-base): Edit Fields (Set) fails when an assignment writes into an object taken from input data
-- [ ] R38 (medium, nodes-base): IF/Filter/Switch date comparisons ignore the workflow timezone for dates without an offset
-- [ ] R39 (medium, server): Push (SSE) streams outlive logout and member removal: an ex-member keeps receiving the tenant's live run data
+- [x] R32 (medium, nodes-ai): Mid-stream provider errors (Anthropic `overloaded_error` SSE event, OpenAI/Gemini stream `error`) bypass maxRe (103c8e2)
+- [x] R33 (medium, nodes-base): HTTP Request pagination sends the first request without the pagination parameters, silently skipping records (af12609)
+- [x] R34 (medium, nodes-base): Schedule Trigger ignores 'Weeks Between Triggers' (every N weeks runs every week) (af12609)
+- [ ] R35 (medium, nodes-base): Loop Over Items: $('Node before the loop').item fails from the second batch onward, and on the done output — partial (23a3435), see notes
+- [x] R36 (medium, nodes-base): Wait node accepts resume webhooks while waiting for a time interval or date: early resume with attacker-suppli (23a3435)
+- [x] R37 (medium, nodes-base): Edit Fields (Set) fails when an assignment writes into an object taken from input data (af12609)
+- [x] R38 (medium, nodes-base): IF/Filter/Switch date comparisons ignore the workflow timezone for dates without an offset (af12609)
+- [x] R39 (medium, server): Push (SSE) streams outlive logout and member removal: an ex-member keeps receiving the tenant's live run data (01895a8)
 - [x] R40 (medium, server): Invitation link generated by the server points to a route the editor does not have (cc30a76)
-- [ ] R41 (medium, server): Saving an active workflow never unregisters third-party webhooks of the previous version
-- [ ] R42 (medium, server): Executions marked 'crashed' after a worker dies do not run the error workflow
-- [ ] R43 (medium, server): An execution whose result cannot be persisted stays 'running' forever
-- [ ] R44 (medium, server): lastNode 'First Entry Binary' responses and sub-workflow binary outputs fail when the execution is not saved
-- [ ] R45 (medium, server): Stopping or timing out a parent does not stop a sub-workflow it is waiting for, and the stop request blocks un
+- [x] R41 (medium, server): Saving an active workflow never unregisters third-party webhooks of the previous version (01895a8)
+- [x] R42 (medium, server): Executions marked 'crashed' after a worker dies do not run the error workflow (042dca8)
+- [x] R43 (medium, server): An execution whose result cannot be persisted stays 'running' forever (042dca8)
+- [x] R44 (medium, server): lastNode 'First Entry Binary' responses and sub-workflow binary outputs fail when the execution is not saved (042dca8)
+- [x] R45 (medium, server): Stopping or timing out a parent does not stop a sub-workflow it is waiting for, and the stop request blocks un (042dca8)
 - [x] R46 (medium, server): Retrying a timed-out or stopped execution re-runs the last node that already succeeded (2c5ddc7, 512dab1)
 - [x] R47 (medium, server): Webhook CORS preflight answers `Access-Control-Allow-Headers: *`, which never covers `Authorization`, so a bro (2c5ddc7, 512dab1)
-- [ ] R48 (medium, server): Anyone holding an execution id can resume time-based Wait executions early with their own data (and public web
-- [ ] R49 (medium, server): Listen for test event on app triggers with webhookMethods (Telegram Trigger) never registers the test URL with
-- [ ] R50 (medium, workflow): Integrations: choosing a non-first resource without explicitly re-selecting the operation hides and drops that
+- [x] R48 (medium, server): Anyone holding an execution id can resume time-based Wait executions early with their own data (and public web (23a3435)
+- [x] R49 (medium, server): Listen for test event on app triggers with webhookMethods (Telegram Trigger) never registers the test URL with (01895a8)
+- [x] R50 (medium, workflow): Integrations: choosing a non-first resource without explicitly re-selecting the operation hides and drops that (869f77a)
 
 **A4. Low-severity findings**
 
