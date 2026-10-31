@@ -14,8 +14,10 @@ import { z } from 'zod';
 import type { ServerContext } from '../context';
 import { clearSessionCookie, requireAuth, requireRole } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
+import { decodeCursor, encodeCursor } from '../http/pagination';
 import { nodeSchema } from '../http/schemas';
 import { currentPeriod, effectiveLimits, PLANS, type TenantSettings } from '../plans';
+import { isUuid } from '../repositories/util';
 
 const settingsPatch = z.object({
   brand: z
@@ -49,7 +51,25 @@ const optionsSchema = z.object({
   node: nodeSchema,
   filter: z.string().max(1000).optional(),
   paginationToken: z.string().max(2000).optional(),
+  /** the workflow open in the editor (left out of workflow pickers) */
+  workflowId: z.string().uuid().optional(),
 });
+
+const WORKFLOW_PAGE_SIZE = 50;
+
+const isIsoDate = (value: string) => {
+  const time = new Date(value).getTime();
+  return !Number.isNaN(time) && new Date(time).toISOString() === value;
+};
+
+/** a workflow cursor is [updatedAt, id]: both reach the query, so both must be what the query expects */
+function decodeWorkflowCursor(token: string | undefined) {
+  const cursor = decodeCursor(token);
+  if (cursor && (!isIsoDate(cursor.value) || !isUuid(cursor.id))) {
+    throw ApiError.badRequest('Invalid cursor');
+  }
+  return cursor;
+}
 
 /** JSON copy without functions (descriptions are data by contract; this enforces it) */
 function plain<T>(value: T): T {
@@ -175,7 +195,10 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
     if (!method)
       throw ApiError.badRequest(`Node type "${body.nodeType}" has no ${body.kind} method "${body.method}"`);
     const node = { ...body.node, type: body.nodeType } as WorkflowNode;
-    const workflow = new Workflow({ name: 'options', nodes: [node], connections: {} }, registries.nodeTypes);
+    const workflow = new Workflow(
+      { id: body.workflowId, name: 'options', nodes: [node], connections: {} },
+      registries.nodeTypes,
+    );
     const services = await ctx.executions.buildServices({
       tenant: auth.tenant,
       executionId: '',
@@ -197,6 +220,22 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         } catch {
           return undefined;
         }
+      },
+      listWorkflows: async ({ filter, paginationToken, excludeId }) => {
+        // one row more than a page tells whether another page follows; one more again covers the excluded row
+        const rows = await repos.workflows.list(auth.tenant.id, {
+          search: filter,
+          limit: WORKFLOW_PAGE_SIZE + (excludeId ? 1 : 0),
+          cursor: decodeWorkflowCursor(paginationToken),
+        });
+        const visible = rows.filter((row) => row.id !== excludeId);
+        const page = visible.slice(0, WORKFLOW_PAGE_SIZE);
+        const last = page[page.length - 1];
+        return {
+          workflows: page.map((row) => ({ id: row.id, name: row.name })),
+          paginationToken:
+            visible.length > WORKFLOW_PAGE_SIZE && last ? encodeCursor(last.updatedAt, last.id) : undefined,
+        };
       },
     };
     try {

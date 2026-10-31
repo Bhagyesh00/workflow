@@ -23,7 +23,7 @@ async function authHeaders(
 ): Promise<Record<string, string>> {
   if (authentication === 'bearerAuth') {
     const creds = await ctx.getCredentials('httpBearerAuth', itemIndex);
-    return { authorization: `Bearer ${String(creds.token ?? creds.value ?? '')}` };
+    return { authorization: `Bearer ${String(creds.token ?? '')}` };
   }
   if (authentication === 'headerAuth') {
     const creds = await ctx.getCredentials('httpHeaderAuth', itemIndex);

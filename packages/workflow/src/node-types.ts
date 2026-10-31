@@ -243,9 +243,26 @@ export interface SupplyData {
   closeFunction?: () => Promise<void>;
 }
 
+export interface WorkflowListQuery {
+  /** case-insensitive name filter */
+  filter?: string;
+  /** `paginationToken` of the previous page */
+  paginationToken?: string;
+  /** leave this workflow out (the one being edited) */
+  excludeId?: string;
+}
+
+export interface WorkflowListPage {
+  workflows: Array<{ id: string; name: string }>;
+  /** set when more workflows follow */
+  paginationToken?: string;
+}
+
 export interface LoadOptionsContext extends Omit<BaseContext, 'getNodeParameter'> {
   /** current (unsaved) parameter value from the editor */
   getCurrentNodeParameter(name: string): unknown;
+  /** the current tenant's workflows, newest first (only where the host stores workflows) */
+  listWorkflows?(query: WorkflowListQuery): Promise<WorkflowListPage>;
 }
 
 export interface ListSearchResult {

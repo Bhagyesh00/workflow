@@ -238,7 +238,7 @@ export function NodeDetailsView({
       preview: (expression: string) =>
         expressionContext
           ? previewExpression(expression, expressionContext)
-          : { ok: false, error: 'No context' },
+          : { ok: false, error: 'No context', noInput: false },
       completions,
       onButton: onExecuteNode ? (_prop: NodeProperty) => onExecuteNode(node.name) : undefined,
     };

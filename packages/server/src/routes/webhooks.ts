@@ -1,19 +1,21 @@
 /**
- * Webhook HTTP endpoints. Bodies are read raw (kept as `rawBody`) and parsed here; multipart
- * uploads become `WebhookRequest.files`.
+ * Webhook HTTP endpoints. Bodies are read raw (kept as `rawBody`) and parsed here, only once the
+ * service has found the webhook, so that every unreadable body (too large, malformed) is answered
+ * with the node's CORS headers; multipart uploads become `WebhookRequest.files`.
  *
  * Responses are produced by tenant workflows but served from the platform origin, so they are
  * sandboxed: `Set-Cookie` is dropped and a `CSP: sandbox` header puts any HTML into an opaque
  * origin that cannot call the authenticated API.
  */
+import { Readable } from 'node:stream';
 import multipart from '@fastify/multipart';
 import type { WebhookRequest } from '@workflow/workflow';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerContext } from '../context';
-import { ApiError, errorBody } from '../http/errors';
+import { errorBody } from '../http/errors';
 import { SESSION_COOKIE } from '../services/auth';
 import { normalizePath } from '../services/webhook-paths';
-import type { IncomingWebhook, WebhookReply } from '../services/webhooks';
+import { type IncomingWebhook, WebhookBodyError, type WebhookReply } from '../services/webhooks';
 
 const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const SANDBOX_CSP =
@@ -26,14 +28,12 @@ const DROPPED_HEADERS = new Set([
   'connection',
 ]);
 
-class BadBodyError extends Error {}
-
 function parseJson(text: string): unknown {
   if (!text.trim()) return {};
   try {
     return JSON.parse(text, (key, value) => (BLOCKED_KEYS.has(key) ? undefined : value));
   } catch {
-    throw new BadBodyError('The request body is not valid JSON');
+    throw new WebhookBodyError(400, 'bad_request', 'The request body is not valid JSON');
   }
 }
 
@@ -74,7 +74,30 @@ function withoutSessionCookie(headers: FastifyRequest['headers']): WebhookReques
 }
 
 const tooLarge = (bodyLimit: number) =>
-  new ApiError(413, 'payload_too_large', `The request body is larger than ${bodyLimit} bytes`);
+  new WebhookBodyError(413, 'payload_too_large', `The request body is larger than ${bodyLimit} bytes`);
+
+/** the multipart limits (file size, file and field counts) reject with their own 413 errors */
+function asBodyError(error: unknown): never {
+  if (!(error instanceof WebhookBodyError) && (error as { statusCode?: number }).statusCode === 413)
+    throw new WebhookBodyError(413, 'payload_too_large', (error as Error).message);
+  throw error;
+}
+
+/**
+ * Reads a body stream up to `bodyLimit` bytes. The stream is not destroyed when the limit is hit,
+ * so the connection stays open for the 413 answer.
+ */
+async function readBody(stream: Readable, declaredLength: unknown, bodyLimit: number): Promise<Buffer> {
+  if (Number(declaredLength) > bodyLimit) throw tooLarge(bodyLimit);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stream.iterator({ destroyOnReturn: false }) as AsyncIterable<Buffer>) {
+    total += chunk.length;
+    if (total > bodyLimit) throw tooLarge(bodyLimit);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
 
 async function toWebhookRequest(request: FastifyRequest, bodyLimit: number): Promise<WebhookRequest> {
   const headers = withoutSessionCookie(request.headers);
@@ -115,9 +138,10 @@ async function toWebhookRequest(request: FastifyRequest, bodyLimit: number): Pro
       }
     }
     body = fields;
-  } else if (Buffer.isBuffer(request.body)) {
-    rawBody = new Uint8Array(request.body);
-    body = parseBody(String(request.headers['content-type'] ?? ''), request.body);
+  } else if (request.body instanceof Readable) {
+    const raw = await readBody(request.body, request.headers['content-length'], bodyLimit);
+    rawBody = new Uint8Array(raw);
+    body = parseBody(String(request.headers['content-type'] ?? ''), raw);
   }
   const query: Record<string, unknown> = {};
   for (const [k, v] of Object.entries((request.query ?? {}) as Record<string, unknown>)) {
@@ -165,7 +189,8 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
   const { ctx } = opts;
   const bodyLimit = ctx.config.bodyLimitBytes;
   app.removeAllContentTypeParsers();
-  app.addContentTypeParser('*', { parseAs: 'buffer', bodyLimit }, (_req, body, done) => done(null, body));
+  // the body stays a stream until toWebhookRequest reads it within bodyLimit
+  app.addContentTypeParser('*', (_req, payload, done) => done(null, payload));
   // per-part limits; toWebhookRequest also holds all parts of one request to bodyLimit bytes in total
   const files = 50;
   const fields = 500;
@@ -184,19 +209,18 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
   const incomingOf = (request: FastifyRequest, path: string): IncomingWebhook => ({
     method: request.method,
     path,
-    read: () => toWebhookRequest(request, bodyLimit),
+    headers: withoutSessionCookie(request.headers),
+    read: () => toWebhookRequest(request, bodyLimit).catch(asBodyError),
   });
 
   const respond = async (reply: FastifyReply, result: () => Promise<WebhookReply>) => {
     try {
       return send(reply, await result());
     } catch (error) {
-      if (error instanceof BadBodyError)
-        return send(reply, { statusCode: 400, headers: {}, body: errorBody('bad_request', error.message) });
-      // the total body budget and the multipart limits (file size, file and field counts)
-      if ((error as { statusCode?: number }).statusCode === 413) {
-        const body = errorBody('payload_too_large', (error as Error).message);
-        return send(reply, { statusCode: 413, headers: {}, body });
+      // production and test webhooks answer unreadable bodies themselves (with the node's CORS headers)
+      if (error instanceof WebhookBodyError) {
+        const body = errorBody(error.code, error.message);
+        return send(reply, { statusCode: error.statusCode, headers: {}, body });
       }
       throw error;
     }
@@ -208,7 +232,7 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
     if (request.method === 'OPTIONS') {
       return send(
         reply,
-        await ctx.webhooks.handlePreflight(params.tenantSlug, path, request.headers.origin, kind === 'test'),
+        await ctx.webhooks.handlePreflight(params.tenantSlug, path, request.headers, kind === 'test'),
       );
     }
     const incoming = incomingOf(request, path);

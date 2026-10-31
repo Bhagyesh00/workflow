@@ -13,17 +13,31 @@ export function ExpressionPreview({ expression }: { expression: string }) {
   const deferred = useDeferredValue(expression);
   const result = useMemo(() => ctx.preview?.(deferred), [ctx, deferred]);
   if (!result) return null;
+  const waiting = !result.ok && result.noInput;
   return (
     <div
       className={cx(
         'mt-1 rounded-md border px-2 py-1.5 font-mono text-xs break-words whitespace-pre-wrap',
-        result.ok ? 'border-line bg-surface-2 text-ink-2' : 'border-err/30 bg-err-soft text-err',
+        result.ok || waiting ? 'border-line bg-surface-2' : 'border-err/30 bg-err-soft',
+        result.ok ? 'text-ink-2' : waiting ? 'text-ink-3' : 'text-err',
       )}
       data-testid="expression-preview"
+      data-state={result.ok ? 'result' : waiting ? 'waiting' : 'error'}
       aria-live="polite"
     >
-      <span className="mr-1.5 font-sans font-semibold text-ink-3">{result.ok ? 'Result' : 'Error'}</span>
-      <span className="max-h-40 overflow-auto">{result.ok ? result.text : result.error}</span>
+      <span className="mr-1.5 font-sans font-semibold text-ink-3">
+        {result.ok ? 'Result' : waiting ? 'Preview' : 'Error'}
+      </span>
+      <span className="max-h-40 overflow-auto">
+        {result.ok ? result.text : waiting ? 'Execute previous nodes to preview' : result.error}
+      </span>
+      {waiting && <div className="mt-1 font-sans text-ink-3">{result.error}</div>}
+      {!result.ok && !waiting && (result.code || result.hint) && (
+        <div className="mt-1 font-sans text-ink-3">
+          {result.code && <span className="mr-1.5 font-mono">{result.code}</span>}
+          {result.hint}
+        </div>
+      )}
     </div>
   );
 }

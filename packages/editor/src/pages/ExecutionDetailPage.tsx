@@ -125,7 +125,7 @@ export function ExecutionDetailPage() {
   }
   const data = execution.data;
   const finished = !['running', 'waiting', 'new'].includes(data.status);
-  const failed = data.status === 'error' || data.status === 'crashed';
+  const retryable = ['error', 'crashed', 'canceled'].includes(data.status);
   const error = data.state?.resultData?.error;
   const canResume = Boolean(data.state?.executionData?.failedExecuteData);
 
@@ -163,7 +163,7 @@ export function ExecutionDetailPage() {
         >
           Debug in editor
         </Button>
-        {failed && (
+        {retryable && (
           <Menu
             trigger={(t) => (
               <Button
@@ -175,7 +175,7 @@ export function ExecutionDetailPage() {
                 aria-haspopup="menu"
                 loading={retry.isPending}
               >
-                {canResume ? 'Retry from failed step' : 'Retry'}
+                {canResume ? 'Retry from failed node' : 'Retry'}
               </Button>
             )}
             items={[

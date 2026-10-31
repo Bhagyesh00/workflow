@@ -136,7 +136,7 @@ describe('executions', () => {
     expect(useWorkflowStore.getState().readOnly).toBe(true);
     await waitFor(() => expect(document.querySelector('[data-id="c"] [title="Failed"]')).toBeTruthy());
 
-    await user.click(screen.getByRole('button', { name: 'Retry from failed step' }));
+    await user.click(screen.getByRole('button', { name: 'Retry from failed node' }));
     await user.click(screen.getByRole('menuitem', { name: 'With the current saved workflow' }));
     await waitFor(() => expect(backend().executions.filter((e) => e.mode === 'retry')).toHaveLength(1));
     await waitFor(() =>

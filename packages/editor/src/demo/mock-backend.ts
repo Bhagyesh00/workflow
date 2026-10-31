@@ -654,9 +654,9 @@ export class MockBackend {
           };
         });
     });
-    this.on('GET', '/workflows/:id/versions', ({ params }): VersionSummary[] => {
+    this.on('GET', '/workflows/:id/versions', ({ params, query }) => {
       const wf = this.workflow(params[0]);
-      return this.versions
+      const list: VersionSummary[] = this.versions
         .filter((v) => v.workflowId === wf.id)
         .map(({ versionId, authorName, message, createdAt }) => ({
           versionId,
@@ -664,6 +664,7 @@ export class MockBackend {
           message,
           createdAt,
         }));
+      return { __list: true, ...page(list, query) };
     });
     this.on('GET', '/workflows/:id/versions/:versionId', ({ params }) => {
       const wf = this.workflow(params[0]);
@@ -716,6 +717,9 @@ export class MockBackend {
     });
     this.on('POST', '/executions/:id/retry', ({ params, body }) => {
       const e = execution(params[0]);
+      if (!['error', 'crashed', 'canceled'].includes(e.status)) {
+        throw new HttpError(409, 'conflict', 'Only failed or stopped executions can be retried');
+      }
       const wf = this.workflow(e.workflowId);
       const data = body.useCurrentWorkflow ? wf : { ...wf, ...e.workflowData, name: e.workflowData.name };
       return { executionId: this.startExecution(wf, data, { mode: 'retry', retryOf: e.id }) };

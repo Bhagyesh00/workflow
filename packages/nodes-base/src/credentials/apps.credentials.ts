@@ -1,4 +1,4 @@
-/** Credentials for app integrations: Slack, Notion, Airtable, Telegram, Postgres, MySQL, SMTP. */
+/** Credentials for app integrations: Slack, Notion, Airtable, Telegram, Postgres, Redis, MySQL, SMTP. */
 import type { CredentialType } from '@workflow/workflow';
 
 export const slackApi: CredentialType = {
@@ -149,6 +149,26 @@ export const postgres: CredentialType = {
       default: 5,
       typeOptions: { minValue: 1, maxValue: 50 },
     },
+  ],
+};
+
+export const redis: CredentialType = {
+  name: 'redis',
+  displayName: 'Redis',
+  icon: 'simple:redis',
+  properties: [
+    { displayName: 'Host', name: 'host', type: 'string', default: 'localhost', required: true },
+    { displayName: 'Port', name: 'port', type: 'number', default: 6379 },
+    { displayName: 'User', name: 'user', type: 'string', default: '', description: 'Redis 6+ ACL user (optional)' },
+    {
+      displayName: 'Password',
+      name: 'password',
+      type: 'string',
+      default: '',
+      typeOptions: { password: true },
+    },
+    { displayName: 'Database', name: 'database', type: 'number', default: 0 },
+    { displayName: 'SSL', name: 'ssl', type: 'boolean', default: false },
   ],
 };
 

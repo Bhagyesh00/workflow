@@ -7,7 +7,7 @@
  * `runQueued`. Sub-workflows always run inline in the process running their parent.
  */
 import { randomUUID } from 'node:crypto';
-import { rm } from 'node:fs/promises';
+import { copyFile, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import {
   type BinaryDataStore,
@@ -66,6 +66,8 @@ export interface StoredRunOptions {
   userId?: string;
   /** the execution is an error workflow or runs below one: its failure never starts another error workflow */
   errorChain?: boolean;
+  /** the execution continues at the node that failed, from the state it was started with */
+  retryFromFailure?: boolean;
 }
 
 export interface ExecutionOutcome {
@@ -96,6 +98,8 @@ export interface StartExecutionInput {
   pinData?: Record<string, Item[]>;
   executionId?: string;
   retryOf?: string;
+  /** retry only: the state of the failed execution; the run continues at its `failedExecuteData` */
+  retryState?: ExecutionState;
   parentExecutionId?: string;
   depth?: number;
   userId?: string;
@@ -209,6 +213,7 @@ export class ExecutionService {
       depth: input.depth ?? 0,
       userId: input.userId,
       errorChain: input.mode === 'error' || input.errorChain === true ? true : undefined,
+      retryFromFailure: input.retryState ? true : undefined,
     };
     const workflowId = input.workflowId ?? input.workflow.id ?? null;
     try {
@@ -239,6 +244,8 @@ export class ExecutionService {
     // start() rejects only while the execution cannot run, so callers may clean up after a rejection
     const finished = input.wait || input.observer ? this.addWaiter(executionId, input.observer) : undefined;
     try {
+      // saved before the run is scheduled so that a worker never starts without it
+      if (input.retryState) await repos.executions.saveState(tenant.id, executionId, input.retryState);
       // only production executions count towards the monthly quota
       if (BILLABLE_MODES.has(input.mode)) await repos.usage.increment(tenant.id, currentPeriod(), 1, 0);
       if (this.deps.queue && !input.inline) {
@@ -421,7 +428,9 @@ export class ExecutionService {
       engine = new WorkflowExecute(
         workflow,
         services,
-        kind === 'resume' ? ((data.state as unknown as ExecutionState) ?? undefined) : undefined,
+        kind === 'resume' || options.retryFromFailure
+          ? ((data.state as unknown as ExecutionState) ?? undefined)
+          : undefined,
       );
     } catch (error) {
       const state = createInitialState();
@@ -447,16 +456,19 @@ export class ExecutionService {
     try {
       let result: ExecutionResult;
       try {
-        result =
-          kind === 'run'
-            ? await engine.run({
-                startNode: options.startNode,
-                triggerItems: options.triggerItems,
-                destinationNode: options.destinationNode,
-                pinData: options.pinData,
-                timeoutMs,
-              })
-            : await engine.resume({ output: options.resumeOutput ?? undefined, timeoutMs });
+        if (kind === 'run' && options.retryFromFailure) {
+          result = await engine.retryFromFailure({ timeoutMs });
+        } else if (kind === 'run') {
+          result = await engine.run({
+            startNode: options.startNode,
+            triggerItems: options.triggerItems,
+            destinationNode: options.destinationNode,
+            pinData: options.pinData,
+            timeoutMs,
+          });
+        } else {
+          result = await engine.resume({ output: options.resumeOutput ?? undefined, timeoutMs });
+        }
       } catch (error) {
         // run()/resume() reject only before processing starts (no start node, not waiting...)
         engine.state.resultData.error = serializeError(error);
@@ -850,35 +862,98 @@ export class ExecutionService {
     }
     const runOptions = (data.runOptions ?? {}) as StoredRunOptions;
     const state = data.state as unknown as ExecutionState | null;
-    // nodes that already succeeded are pinned so the retry continues at the failed node without
-    // repeating side effects; multi-output and looping nodes re-run to keep routing correct
-    const pinData: Record<string, Item[]> = { ...(runOptions.pinData ?? {}) };
     const names = new Set(definition.nodes.map((n) => n.name));
-    const failedNode = state?.resultData.error?.node ?? state?.resultData.lastNodeExecuted;
+    // the retry owns copies of every binary file it references: the original may be pruned or deleted
+    const retryId = randomUUID();
+    const clone = <T>(value: T): T => (value === undefined ? value : JSON.parse(JSON.stringify(value)));
+    const launch = async (input: Partial<StartExecutionInput>, ...owned: unknown[]): Promise<StartedExecution> => {
+      try {
+        for (const value of owned) await this.adoptBinaryData(tenantId, retryId, value);
+        return await this.start({
+          tenantId,
+          workflow: definition,
+          workflowId,
+          mode: 'retry',
+          executionId: retryId,
+          retryOf: row.id,
+          userId: options.userId,
+          ...input,
+        });
+      } catch (error) {
+        await this.removeBinaryData(tenantId, retryId);
+        throw error;
+      }
+    };
+    // the start node, its items and the pinned data of the original run, so that a retry of this
+    // retry starts from the same trigger
+    const origin = {
+      startNode: runOptions.startNode,
+      triggerItems: clone(runOptions.triggerItems),
+      destinationNode: runOptions.destinationNode,
+    };
+    // a node failed: the engine re-runs that node with its saved input and everything after it
+    const failed = state?.executionData?.failedExecuteData;
+    if (state && failed) {
+      if (!names.has(failed.node)) {
+        throw ApiError.conflict(`Node "${failed.node}" no longer exists in the workflow`);
+      }
+      const retryState = clone(state);
+      const pinData = clone(runOptions.pinData);
+      return launch({ ...origin, pinData, retryState }, retryState, origin.triggerItems, pinData);
+    }
+    // a timeout, a stop or a crash names no failed node: the nodes that already succeeded are
+    // pinned so the retry continues after them without repeating side effects; multi-output and
+    // looping nodes re-run to keep routing correct. A node that failed and then succeeded in an
+    // earlier retry (errors first, success last) counts as succeeded.
+    const pinData: Record<string, Item[]> = clone(runOptions.pinData ?? {});
+    const failedNode = state?.resultData.error?.node;
     for (const [name, runs] of Object.entries(state?.resultData.runData ?? {})) {
-      const task = runs[0];
+      const task = runs[runs.length - 1];
       if (
-        runs.length === 1 &&
+        task &&
+        runs.slice(0, -1).every((run) => run.executionStatus === 'error') &&
         name !== failedNode &&
         names.has(name) &&
         task.executionStatus === 'success' &&
         task.data?.main?.length === 1 &&
         Object.keys(task.data).length === 1
       ) {
-        pinData[name] = (task.data.main[0] ?? []) as Item[];
+        pinData[name] = clone((task.data.main[0] ?? []) as Item[]);
       }
     }
-    return this.start({
-      tenantId,
-      workflow: definition,
-      workflowId,
-      mode: 'retry',
-      startNode: runOptions.startNode,
-      triggerItems: runOptions.triggerItems,
-      pinData,
-      retryOf: row.id,
-      userId: options.userId,
-    });
+    return launch({ ...origin, pinData }, origin.triggerItems, pinData);
+  }
+
+  /**
+   * Copy the filesystem binary files that `value` references into the directory of `executionId`
+   * and point the references (mutated in place) at the copies. A file that is already gone keeps
+   * its reference.
+   */
+  private async adoptBinaryData(tenantId: string, executionId: string, value: unknown): Promise<void> {
+    const { config } = this.deps;
+    if (config.binaryData.mode !== 'filesystem') return;
+    const prefix = `fs:${tenantId}/`;
+    const unsafe = (part: string) => !part || part === '.' || part === '..' || /[\:]/.test(part);
+    const walk = async (node: unknown): Promise<void> => {
+      if (!node || typeof node !== 'object') return;
+      const ref = node as { id?: unknown; mimeType?: unknown };
+      if (typeof ref.id === 'string' && ref.id.startsWith(prefix) && typeof ref.mimeType === 'string') {
+        const parts = ref.id.slice(3).split('/');
+        if (parts.length !== 3 || parts.some(unsafe)) return;
+        const target = binaryDirOf(config, tenantId, executionId);
+        await mkdir(target, { recursive: true });
+        try {
+          await copyFile(path.join(config.binaryData.dir, ...parts), path.join(target, parts[2]));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+          throw error;
+        }
+        ref.id = `${prefix}${executionId}/${parts[2]}`;
+        return;
+      }
+      for (const child of Object.values(node)) await walk(child);
+    };
+    await walk(value);
   }
 }
 

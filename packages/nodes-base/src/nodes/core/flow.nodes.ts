@@ -9,6 +9,7 @@ import {
   type ExecuteWorkflowSource,
   type Item,
   isPlainObject,
+  type ListSearchResult,
   NodeOperationError,
   type NodeType,
   type PairedItem,
@@ -592,6 +593,24 @@ export const ExecuteWorkflowNode: NodeType = {
       }
     }
     return [out];
+  },
+
+  methods: {
+    listSearch: {
+      async searchWorkflows(ctx, filter, paginationToken): Promise<ListSearchResult> {
+        if (!ctx.listWorkflows) throw new NodeOperationError(ctx.getNode(), 'This host cannot list workflows');
+        const page = await ctx.listWorkflows({
+          filter: filter?.trim() || undefined,
+          paginationToken,
+          excludeId: ctx.getWorkflow().id,
+        });
+        const base = ctx.getInstanceBaseUrl().replace(/\/+$/, '');
+        return {
+          results: page.workflows.map((w) => ({ name: w.name, value: w.id, url: `${base}/workflow/${w.id}` })),
+          paginationToken: page.paginationToken,
+        };
+      },
+    },
   },
 };
 

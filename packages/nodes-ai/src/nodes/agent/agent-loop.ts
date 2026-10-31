@@ -64,9 +64,12 @@ export interface AgentRunOptions {
   input: string;
   images?: AiImagePart[];
   maxIterations: number;
-  /** stream answer text through `onChunk` when the model supports it */
+  /**
+   * send answer text through `onChunk`: plain text deltas while the model generates them, or the
+   * whole final answer as one chunk when the model cannot stream. The caller owns the wire protocol.
+   */
   streaming?: boolean;
-  onChunk?: (chunk: DataObject) => void;
+  onChunk?: (text: string) => void;
   /** milliseconds per tool call; 0 = no limit */
   toolTimeoutMs?: number;
   toolErrorBehavior?: 'feedback' | 'stop';
@@ -124,13 +127,11 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
   const steps: AgentStep[] = [];
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
   const streaming = Boolean(options.streaming && model.stream && options.onChunk);
-  const metadata = { nodeName: node.name, itemIndex };
-  if (streaming) options.onChunk!({ type: 'begin', metadata });
 
   const callModel = async (request: AiChatRequest): Promise<AiChatResponse> => {
     if (options.signal?.aborted) throw options.signal.reason;
     const response = streaming
-      ? await model.stream!(request, (delta) => options.onChunk!({ type: 'item', content: delta, metadata }))
+      ? await model.stream!(request, (delta) => options.onChunk!(delta))
       : await model.chat(request);
     usage.modelCalls++;
     usage.inputTokens += response.usage?.inputTokens ?? 0;
@@ -248,7 +249,8 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     }
   }
 
-  if (streaming) options.onChunk!({ type: 'end', metadata });
+  // a model that cannot stream still answers a streaming caller, in one chunk
+  if (options.streaming && !streaming) options.onChunk?.(finalText);
 
   // memory is written only after the whole run succeeded (no half-finished exchanges)
   if (memory && sessionId) {

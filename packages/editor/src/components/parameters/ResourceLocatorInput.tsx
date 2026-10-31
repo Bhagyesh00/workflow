@@ -13,6 +13,7 @@ import { ChevronDown, ExternalLink, Search } from 'lucide-react';
 import { useDeferredValue, useEffect, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { nodeTypesApi } from '../../api/endpoints';
+import { useWorkflowStore } from '../../stores/workflow-store';
 import { cx } from '../ui/cx';
 import { Select } from '../ui/Field';
 import { Spinner } from '../ui/misc';
@@ -53,9 +54,11 @@ function ListMode({
   const rootRef = useRef<HTMLDivElement>(null);
   const method = mode.typeOptions?.searchListMethod;
 
+  const workflowId = useWorkflowStore((s) => s.meta.id);
   const query = useInfiniteQuery({
     queryKey: [
       'list-search',
+      workflowId,
       ctx.node.type,
       method,
       ctx.node.name,
@@ -80,6 +83,7 @@ function ListMode({
         },
         filter: deferredFilter || undefined,
         paginationToken: pageParam,
+        workflowId,
       }),
     getNextPageParam: (last) => last?.paginationToken || undefined,
   });

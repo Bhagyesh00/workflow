@@ -32,14 +32,14 @@ function headerValue(ctx: WebhookContext, name: string): string | undefined {
   return Array.isArray(v) ? v[0] : v;
 }
 
+/** origins compare by scheme, host and port: case and trailing slashes do not matter (as on the server) */
+const normalizeOrigin = (origin: string) => origin.trim().replace(/\/+$/, '').toLowerCase();
+
 function allowedOrigin(allowed: string, origin: string | undefined): string | undefined | false {
-  const list = allowed
-    .split(',')
-    .map((o) => o.trim().replace(/\/+$/, ''))
-    .filter(Boolean);
+  const list = allowed.split(',').map(normalizeOrigin).filter(Boolean);
   if (!list.length || list.includes('*')) return origin ?? '*';
   if (!origin) return undefined; // server-to-server call without an Origin header
-  return list.includes(origin.replace(/\/+$/, '')) ? origin : false;
+  return list.includes(normalizeOrigin(origin)) ? origin : false;
 }
 
 function respond(statusCode: number, body: unknown, origin?: string): WebhookResponseData {

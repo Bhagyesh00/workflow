@@ -52,6 +52,8 @@ export interface LoadOptionsBody {
   node: WorkflowNode;
   filter?: string;
   paginationToken?: string;
+  /** the saved workflow open in the editor, so pickers can leave it out */
+  workflowId?: string;
 }
 
 export const nodeTypesApi = {
@@ -86,7 +88,8 @@ export const workflowsApi = {
       nodeName,
     }),
   webhookUrls: (id: string) => api.get<WebhookUrlInfo[]>(`/workflows/${enc(id)}/webhook-urls`),
-  versions: (id: string) => api.get<VersionSummary[]>(`/workflows/${enc(id)}/versions`),
+  versions: (id: string, query: { limit?: number; cursor?: string } = {}) =>
+    api.list<VersionSummary>(`/workflows/${enc(id)}/versions`, { ...query }),
   version: (id: string, versionId: string) =>
     api.get<VersionSnapshot>(`/workflows/${enc(id)}/versions/${enc(versionId)}`),
   restoreVersion: (id: string, versionId: string) =>

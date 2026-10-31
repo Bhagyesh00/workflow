@@ -695,7 +695,7 @@ export async function withGenericAuth(
     if (!creds.name) throw new Error('The header auth credential has no header name');
     headers[String(creds.name).toLowerCase()] = String(creds.value ?? '');
   } else if (type === 'httpBearerAuth') {
-    headers.authorization = `Bearer ${String(creds.token ?? creds.value ?? '')}`;
+    headers.authorization = `Bearer ${String(creds.token ?? '')}`;
   } else {
     throw new Error(`Unsupported generic auth type "${type}"`);
   }

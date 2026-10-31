@@ -1,5 +1,5 @@
 /** Version history: list, read-only preview of a snapshot, restore. */
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { diffWorkflows } from '@workflow/workflow';
 import { ReactFlowProvider } from '@xyflow/react';
 import { History, RotateCcw, X } from 'lucide-react';
@@ -106,11 +106,15 @@ export function VersionsPanel({
   onClose: () => void;
   onRestore: (versionId: string) => Promise<void>;
 }) {
-  const versions = useQuery({
-    queryKey: queryKeys.versions(workflowId ?? 'new'),
-    queryFn: () => workflowsApi.versions(workflowId!),
+  const queryClient = useQueryClient();
+  const versions = useInfiniteQuery({
+    queryKey: [...queryKeys.versions(workflowId ?? 'new'), 'list'],
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => workflowsApi.versions(workflowId!, { limit: 50, cursor: pageParam }),
+    getNextPageParam: (last) => last.nextCursor ?? undefined,
     enabled: Boolean(workflowId),
   });
+  const list = versions.data?.pages.flatMap((p) => p.data) ?? [];
   const [preview, setPreview] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
 
@@ -140,14 +144,14 @@ export function VersionsPanel({
           <Callout tone="err" className="m-4">
             {errorMessage(versions.error)}
           </Callout>
-        ) : !versions.data?.length ? (
+        ) : !list.length ? (
           <EmptyState
             title="No versions yet"
             description="Every save creates a version you can come back to."
           />
         ) : (
           <ol className="relative px-4 py-3">
-            {versions.data.map((v, i) => (
+            {list.map((v, i) => (
               <li key={v.versionId} className="relative pb-4 pl-5">
                 <span
                   className={cx(
@@ -155,7 +159,7 @@ export function VersionsPanel({
                     i === 0 ? 'border-brand bg-brand' : 'border-line-strong bg-surface',
                   )}
                 />
-                {i < versions.data.length - 1 && (
+                {(i < list.length - 1 || versions.hasNextPage) && (
                   <span className="absolute top-4 bottom-0 left-[4px] w-px bg-line" />
                 )}
                 <button
@@ -176,6 +180,18 @@ export function VersionsPanel({
             ))}
           </ol>
         )}
+        {versions.hasNextPage && (
+          <div className="px-4 pb-4">
+            <Button
+              size="sm"
+              className="w-full"
+              onClick={() => void versions.fetchNextPage()}
+              loading={versions.isFetchingNextPage}
+            >
+              Load more
+            </Button>
+          </div>
+        )}
       </div>
       <Dialog
         open={Boolean(preview)}
@@ -195,6 +211,7 @@ export function VersionsPanel({
                 await onRestore(preview);
                 setPreview(null);
               } finally {
+                await queryClient.invalidateQueries({ queryKey: queryKeys.versions(workflowId) });
                 setRestoring(false);
               }
             }}

@@ -59,15 +59,21 @@ export class CredentialService {
     return redactCredentialData(this.decrypt(row), this.secretFields(row.type));
   }
 
-  /** defaults from the (resolved) type for properties the user did not set */
+  /**
+   * the (resolved) type's defaults for properties the user left unset or blank. Hidden properties
+   * are fixed by the type (Google URLs, scopes): their default always wins, except for the OAuth
+   * token material, which only the OAuth2 callback writes.
+   */
   withDefaults(type: string, data: DataObject): DataObject {
     const resolved = this.types.getResolved(type);
-    const out: DataObject = {};
+    const out: DataObject = { ...data };
     for (const p of resolved?.properties ?? []) {
-      if (p.type === 'notice') continue;
-      if (p.default !== undefined) out[p.name] = p.default;
+      if (p.type === 'notice' || p.default === undefined) continue;
+      const fixed = p.type === 'hidden' && p.default !== '' && !ALWAYS_SECRET.includes(p.name);
+      const current = out[p.name];
+      if (fixed || current === undefined || current === null || current === '') out[p.name] = p.default;
     }
-    return { ...out, ...data };
+    return out;
   }
 
   async create(tenantId: string, input: { name: string; type: string; data: DataObject }, userId?: string) {

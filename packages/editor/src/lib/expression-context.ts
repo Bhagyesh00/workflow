@@ -11,6 +11,7 @@ import {
   type NodeParameters,
   type RunData,
   type SourceData,
+  serializeError,
   stringifyValue,
   type TaskData,
   type WorkflowNode,
@@ -128,7 +129,17 @@ export function buildExpressionContext(input: PreviewInput): ExpressionDataConte
   };
 }
 
-export type PreviewResult = { ok: true; value: unknown; text: string } | { ok: false; error: string };
+export type PreviewResult =
+  | { ok: true; value: unknown; text: string }
+  | {
+      ok: false;
+      error: string;
+      /** stable code from the error catalogue, e.g. `EXPRESSION_SYNTAX` */
+      code?: string;
+      hint?: string;
+      /** the node has no input data yet and the failure comes from reading that missing data */
+      noInput: boolean;
+    };
 
 const previewEvaluator = new ExpressionEvaluator({ timeoutMs: 250, maxSteps: 250_000 });
 
@@ -157,12 +168,26 @@ export function formatPreviewValue(value: unknown): string {
   return stringifyValue(value);
 }
 
+/** Failures that only mean "the data this expression reads has not been produced yet". */
+const MISSING_DATA = /^Cannot read properties of (undefined|null)|has not been executed|^Item \d+ of node/;
+
+/** Names that read the node's input or other nodes' output; only these can wait for data. */
+const READS_INPUT_DATA = /\$(json|input|binary|item|items|node|prevNode)\b|\$\(/;
+
 export function previewExpression(expression: string, ctx: ExpressionDataContext): PreviewResult {
   try {
     const value = previewEvaluator.evaluate(expression, ctx);
     const text = formatPreviewValue(value);
     return { ok: true, value, text: text.length > 5000 ? `${text.slice(0, 5000)}…` : text };
   } catch (error) {
-    return { ok: false, error: (error as Error)?.message ?? String(error) };
+    const { message, code, hint } = serializeError(error);
+    return {
+      ok: false,
+      error: message,
+      code,
+      hint,
+      noInput:
+        ctx.connectionInputData.length === 0 && READS_INPUT_DATA.test(expression) && MISSING_DATA.test(message),
+    };
   }
 }

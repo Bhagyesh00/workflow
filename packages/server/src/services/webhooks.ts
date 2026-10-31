@@ -7,6 +7,11 @@
  *
  * Platform extension: an `Idempotency-Key` header on production calls deduplicates deliveries
  * per workflow for 24 hours; repeats replay the first response without running the workflow again.
+ *
+ * CORS: every reply produced once the node is known (results, errors, unreadable bodies, the
+ * OPTIONS preflight) carries `Access-Control-Allow-Origin` when the caller's Origin is in the
+ * node's `allowedOrigins` option (trailing slashes and case ignored; an expression is evaluated the
+ * way the node evaluates it).
  */
 import { randomUUID } from 'node:crypto';
 import { PassThrough, type Readable } from 'node:stream';
@@ -14,8 +19,10 @@ import { createWebhookContext, getResolvedParameters, type NodeTypes } from '@wo
 import {
   type DataObject,
   type ExecutionState,
+  type ExecutionMode,
   ExpressionEvaluator,
   type Item,
+  isExpression,
   isPlainObject,
   type WebhookRequest,
   type WebhookResponse,
@@ -53,8 +60,24 @@ export interface WebhookReply {
 export interface IncomingWebhook {
   method: string;
   path: string;
-  /** reads and parses the body; called only once the webhook is found, so unknown paths are never parsed */
+  /** request headers, available before the body is read */
+  headers: WebhookRequest['headers'];
+  /**
+   * reads and parses the body; called only once the webhook is found, so unknown paths are never
+   * parsed. A body that cannot be read rejects with a `WebhookBodyError`.
+   */
   read(): Promise<WebhookRequest>;
+}
+
+/** the request body is malformed (400) or too large (413) */
+export class WebhookBodyError extends Error {
+  constructor(
+    readonly statusCode: 400 | 413,
+    readonly code: 'bad_request' | 'payload_too_large',
+    message: string,
+  ) {
+    super(message);
+  }
 }
 
 /** an incoming webhook whose body has been read */
@@ -105,6 +128,15 @@ interface RunInput {
   onStarted?: (executionId: string) => void;
 }
 
+/** the node whose `allowedOrigins` option grants CORS, and the run settings its expressions resolve with */
+interface CorsSource {
+  tenant: TenantRow;
+  mode: ExecutionMode;
+  workflowId?: string;
+  workflow: Workflow;
+  node: WorkflowNode;
+}
+
 export class WebhookService {
   private readonly evaluator = new ExpressionEvaluator({ timeoutMs: 1000 });
 
@@ -126,19 +158,26 @@ export class WebhookService {
     if (!node) return notRegistered(incoming.method, incoming.path);
     const hook = this.hookOf(definition, node, found.webhookName);
     if (!hook) return notRegistered(incoming.method, incoming.path);
-    const received = await receive(incoming);
+    const workflow = new Workflow(definition, this.deps.nodeTypes);
+    const source: CorsSource = { tenant, mode: 'webhook', workflowId: row.id, workflow, node };
+    const cors = (reply: WebhookReply) => this.decorate(reply, source, incoming.headers);
+    let received: ReceivedWebhook;
+    try {
+      received = await receive(incoming);
+    } catch (error) {
+      return cors(bodyErrorReply(error));
+    }
 
     const key = header(received.request.headers, 'idempotency-key');
     if (key) {
       if (key.length > 255)
-        return json(400, errorBody('bad_request', 'The Idempotency-Key header is too long'));
+        return cors(json(400, errorBody('bad_request', 'The Idempotency-Key header is too long')));
       const claimed = await repos.idempotency.claim(tenant.id, row.id, key);
       if (!claimed) {
         const existing = await repos.idempotency.get(tenant.id, row.id, key);
-        if (existing?.response) return replayStored(existing.response, existing.executionId);
-        return json(
-          409,
-          errorBody('idempotency_in_progress', 'A request with this Idempotency-Key is in progress'),
+        if (existing?.response) return cors(replayStored(existing.response, existing.executionId));
+        return cors(
+          json(409, errorBody('idempotency_in_progress', 'A request with this Idempotency-Key is in progress')),
         );
       }
       let executionId: string | null = null;
@@ -177,33 +216,60 @@ export class WebhookService {
     });
   }
 
-  /** CORS preflight for a registered webhook path */
+  /**
+   * CORS preflight for a registered webhook path. The origin is checked against the
+   * `allowedOrigins` option of the node registered for the requested method; requested headers are
+   * listed by name, since `*` never covers `Authorization`.
+   */
   async handlePreflight(
     tenantSlug: string,
     path: string,
-    origin: string | undefined,
+    headers: WebhookRequest['headers'],
     test = false,
   ): Promise<WebhookReply> {
-    const tenant = await this.deps.repos.tenants.getBySlug(tenantSlug);
+    const { repos, testWebhooks, nodeTypes } = this.deps;
+    const tenant = await repos.tenants.getBySlug(tenantSlug);
     if (!tenant) return notRegistered('OPTIONS', path);
+    const requested = header(headers, 'access-control-request-method')?.toUpperCase();
     let methods: string[];
+    let target: { definition: WorkflowDefinition; nodeName: string; workflowId: string } | undefined;
     if (test) {
-      methods = (await this.deps.testWebhooks.list(tenant.id))
-        .filter((r) => r.path === path)
-        .map((r) => r.method);
+      const registrations = (await testWebhooks.list(tenant.id)).filter((r) => r.path === path);
+      methods = registrations.map((r) => r.method);
+      const registration = registrations.find((r) => r.method === requested) ?? registrations[0];
+      if (registration) {
+        target = {
+          definition: registration.workflow,
+          nodeName: registration.nodeName,
+          workflowId: registration.workflowId,
+        };
+      }
     } else {
-      methods = await this.deps.repos.webhooks.methodsForPath(tenant.id, path);
+      methods = await repos.webhooks.methodsForPath(tenant.id, path);
+      const method = requested && methods.includes(requested) ? requested : methods[0];
+      const found = method ? await this.findWebhook(tenant.id, method, path) : undefined;
+      const row = found ? await repos.workflows.get(tenant.id, found.workflowId) : undefined;
+      if (found && row) target = { definition: toDefinition(row), nodeName: found.nodeName, workflowId: row.id };
     }
     if (!methods.length) return notRegistered('OPTIONS', path);
-    return {
-      statusCode: 204,
-      headers: {
-        'access-control-allow-origin': origin ?? '*',
-        'access-control-allow-methods': [...new Set([...methods, 'OPTIONS'])].join(', '),
-        'access-control-allow-headers': '*',
-        'access-control-max-age': '300',
-      },
+    const reply: Record<string, string> = {
+      'access-control-allow-methods': [...new Set([...methods, 'OPTIONS'])].join(', '),
+      'access-control-max-age': '300',
+      vary: 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers',
     };
+    const requestedHeaders = headerNames(header(headers, 'access-control-request-headers'));
+    if (requestedHeaders.length) reply['access-control-allow-headers'] = requestedHeaders.join(', ');
+    const nodeName = target?.nodeName;
+    const node = target?.definition.nodes.find((n) => n.name === nodeName);
+    if (!target || !node) return { statusCode: 204, headers: reply };
+    const allowedOrigins = await this.allowedOrigins({
+      tenant,
+      mode: test ? 'manual' : 'webhook',
+      workflowId: target.workflowId,
+      workflow: new Workflow(target.definition, nodeTypes),
+      node,
+    });
+    return { statusCode: 204, headers: withCors(reply, allowedOrigins, headers) };
   }
 
   private async findWebhook(tenantId: string, method: string, path: string) {
@@ -248,15 +314,22 @@ export class WebhookService {
         ),
       );
     }
-    // a body that cannot be read (too large, malformed) leaves the registration in place
-    const received = await receive(incoming);
-    // one-shot: the first call consumes the registration
-    if (!(await testWebhooks.remove(found.registration)))
-      return notRegistered(incoming.method, incoming.path);
     const { registration } = found;
     const definition = registration.workflow;
     const node = definition.nodes.find((n) => n.name === registration.nodeName);
     if (!node) return notRegistered(incoming.method, incoming.path);
+    // a body that cannot be read (too large, malformed) leaves the registration in place
+    let received: ReceivedWebhook;
+    try {
+      received = await receive(incoming);
+    } catch (error) {
+      const workflow = new Workflow(definition, this.deps.nodeTypes);
+      const source: CorsSource = { tenant, mode: 'manual', workflowId: registration.workflowId, workflow, node };
+      return this.decorate(bodyErrorReply(error), source, incoming.headers);
+    }
+    // one-shot: the first call consumes the registration
+    if (!(await testWebhooks.remove(found.registration)))
+      return notRegistered(incoming.method, incoming.path);
     const type = this.deps.nodeTypes.get(node.type);
     const hook = type
       ? nodeWebhooks(new Workflow(definition, this.deps.nodeTypes), node, type).find(
@@ -349,6 +422,7 @@ export class WebhookService {
     const type = workflow.getNodeType(node);
     const executionId = randomUUID();
     const request: WebhookRequest = { ...incoming.request, params: { ...input.params } };
+    const source: CorsSource = { tenant, mode: input.mode, workflowId: input.workflowId, workflow, node };
 
     let reply: WebhookReply;
     let executionStarted = false;
@@ -384,7 +458,7 @@ export class WebhookService {
       if (!result.workflowData) {
         reply = fromWebhookResponse(result.webhookResponse ?? { statusCode: 200, body: {} });
       } else {
-        const streaming = hook.responseMode === 'streaming' ? this.streamHandle() : undefined;
+        const streaming = hook.responseMode === 'streaming' ? this.streamHandle(tenant) : undefined;
         const handle = this.responseHandle(hook.responseMode);
         let execution: StartedExecution;
         try {
@@ -406,7 +480,7 @@ export class WebhookService {
         } catch (error) {
           if (error instanceof ApiError) {
             reply = json(error.statusCode, errorBody(error.code, error.message));
-            return this.decorate(reply, workflow, node, incoming);
+            return this.decorate(reply, source, incoming.request.headers);
           }
           throw error;
         }
@@ -438,19 +512,28 @@ export class WebhookService {
       if (!executionStarted) await executions.removeBinaryData(tenant.id, executionId);
     }
     metrics.webhookDuration.observe({ status: String(reply.statusCode) }, (Date.now() - started) / 1000);
-    return this.decorate(reply, workflow, node, incoming);
+    return this.decorate(reply, source, incoming.request.headers);
   }
 
   /**
-   * Streaming mode: every `ctx.sendChunk(x)` becomes a line `{"type":"item","content":x}`; the
-   * stream ends with `{"type":"end"}` (or `{"type":"error","message":...}`).
+   * Streaming mode, the one wire protocol for streamed answers: every `ctx.sendChunk(x)` becomes
+   * the NDJSON line `{"type":"item","content":x}` (nodes send plain content, AI agents text deltas);
+   * the stream ends with `{"type":"end"}` or `{"type":"error","message":...}`. A run that succeeds
+   * without sending any chunk still answers: its last node's output becomes one item first.
+   * A client that closes the stream before the end stops the run, so no model is called for nobody.
    */
-  private streamHandle() {
+  private streamHandle(tenant: TenantRow) {
     const stream = new PassThrough();
+    let chunks = 0;
     const write = (line: unknown) => {
       if (!stream.writableEnded) stream.write(`${JSON.stringify(line)}\n`);
     };
-    const observer: ExecutionObserver = { onChunk: (content) => write({ type: 'item', content }) };
+    const observer: ExecutionObserver = {
+      onChunk: (content) => {
+        chunks++;
+        write({ type: 'item', content });
+      },
+    };
     const attach = (execution: StartedExecution): WebhookReply => {
       const limitMs = (this.deps.config.executionTimeout.maxS + 30) * 1000;
       const timer = setTimeout(() => {
@@ -459,8 +542,21 @@ export class WebhookService {
         stream.end();
       }, limitMs);
       timer.unref();
+      stream.once('close', () => {
+        if (stream.writableFinished) return;
+        clearTimeout(timer);
+        const { executions, logger } = this.deps;
+        executions.discardWaiter(execution.executionId);
+        executions.stop(tenant.id, execution.executionId).catch((error: unknown) => {
+          logger.warn({ err: error, executionId: execution.executionId }, 'Could not stop an abandoned stream');
+        });
+      });
       void execution.finished?.then((outcome) => {
         clearTimeout(timer);
+        if (outcome.status === 'success' && !chunks) {
+          const answer = finalAnswer(outcome);
+          if (answer !== undefined) write({ type: 'item', content: answer });
+        }
         if (outcome.status === 'success' || outcome.status === 'waiting') write({ type: 'end' });
         else write({ type: 'error', message: 'Error in workflow' });
         stream.end();
@@ -602,9 +698,12 @@ export class WebhookService {
   }
 
   /** response headers and CORS from the node's options */
-  private decorate(reply: WebhookReply, workflow: Workflow, node: WorkflowNode, incoming: ReceivedWebhook) {
-    const parameters = getResolvedParameters(workflow, node) as DataObject;
-    const options = (parameters.options ?? {}) as DataObject;
+  private async decorate(
+    reply: WebhookReply,
+    source: CorsSource,
+    requestHeaders: WebhookRequest['headers'],
+  ): Promise<WebhookReply> {
+    const options = nodeOptions(source.workflow, source.node);
     const headers = { ...reply.headers };
     if (options.responseHeaders && reply.statusCode < 400) {
       try {
@@ -617,23 +716,102 @@ export class WebhookService {
         /* invalid JSON in the node option: ignore */
       }
     }
-    const origin = header(incoming.request.headers, 'origin');
-    if (origin) {
-      const allowed = String(options.allowedOrigins ?? '*')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (allowed.includes('*')) headers['access-control-allow-origin'] ??= '*';
-      else if (allowed.includes(origin)) {
-        headers['access-control-allow-origin'] ??= origin;
-        headers.vary = 'Origin';
-      }
+    const allowedOrigins = await this.allowedOrigins(source);
+    return { ...reply, headers: withCors(headers, allowedOrigins, requestHeaders) };
+  }
+
+  /**
+   * The `allowedOrigins` option as the node reads it: an expression (e.g. `{{ $vars.CHAT_ORIGINS }}`)
+   * is evaluated without item data, like the node's own check. One that fails allows no origin (`false`).
+   */
+  private async allowedOrigins(source: CorsSource): Promise<unknown> {
+    const { tenant, mode, workflowId, workflow, node } = source;
+    const value = nodeOptions(workflow, node).allowedOrigins;
+    if (!isExpression(value)) return value;
+    try {
+      const services = await this.deps.executions.buildServices({ tenant, executionId: '', mode, workflowId });
+      const request: WebhookRequest = { method: 'OPTIONS', headers: {}, query: {}, params: {}, body: {} };
+      const ctx = createWebhookContext(
+        { workflow, node, services, evaluator: this.evaluator, signal: AbortSignal.timeout(60_000) },
+        request,
+        '',
+      );
+      return ctx.getNodeParameter('options.allowedOrigins', 0, '*');
+    } catch (error) {
+      this.deps.logger.warn({ err: error, tenantId: tenant.id, node: node.name }, 'Allowed origins failed');
+      return false;
     }
-    return { ...reply, headers };
   }
 }
 
 // ---------------------------------------------------------------------------------------------
+
+function nodeOptions(workflow: Workflow, node: WorkflowNode): DataObject {
+  const parameters = getResolvedParameters(workflow, node) as DataObject;
+  return (parameters.options ?? {}) as DataObject;
+}
+
+/** origins compare by scheme, host and port: case and trailing slashes do not matter */
+const normalizeOrigin = (origin: string) => origin.trim().replace(/\/+$/, '').toLowerCase();
+
+/**
+ * Adds `Access-Control-Allow-Origin` when the caller's Origin is allowed: `*` (or an empty list)
+ * allows any origin, `false` none, otherwise the matching Origin is echoed. Headers the reply already set win.
+ */
+function withCors(
+  headers: Record<string, string>,
+  allowedOrigins: unknown,
+  requestHeaders: WebhookRequest['headers'],
+): Record<string, string> {
+  const origin = header(requestHeaders, 'origin');
+  if (!origin || allowedOrigins === false) return headers;
+  const allowed = String(allowedOrigins ?? '*')
+    .split(',')
+    .map(normalizeOrigin)
+    .filter(Boolean);
+  const any = !allowed.length || allowed.includes('*');
+  if (!any && !allowed.includes(normalizeOrigin(origin))) return headers;
+  const out = { ...headers };
+  out['access-control-allow-origin'] ??= any ? '*' : origin;
+  if (out['access-control-allow-origin'] !== '*') out.vary = withVary(out.vary, 'Origin');
+  return out;
+}
+
+function withVary(vary: string | undefined, name: string): string {
+  const names = (vary ?? '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+  if (!names.some((v) => v.toLowerCase() === name.toLowerCase())) names.push(name);
+  return names.join(', ');
+}
+
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9a-z-]+$/;
+
+/** the header names of an `Access-Control-Request-Headers` value; invalid names and `*` are dropped */
+function headerNames(value: string | undefined): string[] {
+  const names = (value ?? '')
+    .split(',')
+    .map((n) => n.trim().toLowerCase())
+    .filter((n) => n && n !== '*' && HEADER_NAME.test(n));
+  return [...new Set(names)];
+}
+
+function bodyErrorReply(error: unknown): WebhookReply {
+  if (error instanceof WebhookBodyError) return json(error.statusCode, errorBody(error.code, error.message));
+  throw error;
+}
+
+/**
+ * The answer of a run that streamed nothing: the last node's first item, or its `output` text when
+ * it has one (AI agents and chains), so chat clients get the text.
+ */
+function finalAnswer(outcome: ExecutionOutcome): unknown {
+  const items = (outcome.lastNodeOutput ?? []).find((o) => o?.length) ?? [];
+  const first = items[0]?.json;
+  if (!first) return undefined;
+  return typeof first.output === 'string' ? first.output : first;
+}
 
 function manualPinData(definition: WorkflowDefinition, startNode: string) {
   const entries = Object.entries(definition.pinData ?? {}).filter(([name]) => name !== startNode);
@@ -668,7 +846,9 @@ export function fromWebhookResponse(response: WebhookResponse): WebhookReply {
 }
 
 function storeReply(reply: WebhookReply): Record<string, unknown> {
-  const stored: Record<string, unknown> = { statusCode: reply.statusCode, headers: reply.headers };
+  // CORS belongs to each caller's Origin: a replay is decorated again
+  const { 'access-control-allow-origin': _origin, ...headers } = reply.headers;
+  const stored: Record<string, unknown> = { statusCode: reply.statusCode, headers };
   if (reply.stream) {
     // a stream cannot be replayed: repeats get the status only
     stored.body = null;

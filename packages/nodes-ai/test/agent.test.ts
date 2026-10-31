@@ -250,14 +250,8 @@ describe('AI Agent', () => {
       services: services({ hooks: { sendChunk: (c) => void chunks.push(c) } }),
     });
     expect(r.status).toBe('success');
-    expect(chunks.map((c) => c.type)).toEqual(['begin', 'item', 'item', 'item', 'end']);
-    expect(
-      chunks
-        .filter((c) => c.type === 'item')
-        .map((c) => c.content)
-        .join(''),
-    ).toBe('Streaming works fine');
-    expect(chunks[0].metadata).toEqual({ nodeName: 'Agent', itemIndex: 0 });
+    // plain text deltas: the server wraps each one in an NDJSON item line
+    expect(chunks).toEqual(['Streaming ', 'works ', 'fine']);
   });
 
   it('uses a defined prompt and fails clearly without chatInput', async () => {

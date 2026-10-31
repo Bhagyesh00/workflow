@@ -16,36 +16,40 @@ export interface PostgresCredentials {
   database: string;
   user: string;
   password: string;
-  ssl: 'disable' | 'allow' | 'require' | 'verify-full';
-  allowUnauthorizedCerts: boolean;
+  ssl: 'disable' | 'allow' | 'require';
+  /** PEM of the CA that signed the server certificate (private CAs); used when ssl is 'require' */
+  caCertificate: string;
 }
 
-/** Read a `postgres` credential, tolerating common field spellings. */
+/** Read a `postgres` credential (field names as defined by the nodes-base credential type). */
 export function postgresCredentials(data: DataObject): PostgresCredentials {
-  const sslValue = data.ssl;
-  let ssl: PostgresCredentials['ssl'] = 'disable';
-  if (sslValue === true || sslValue === 'require' || sslValue === 'prefer') ssl = 'require';
-  else if (sslValue === 'allow') ssl = 'allow';
-  else if (sslValue === 'verify' || sslValue === 'verify-full' || sslValue === 'verify-ca')
-    ssl = 'verify-full';
+  const ssl: PostgresCredentials['ssl'] = data.ssl === 'allow' || data.ssl === 'require' ? data.ssl : 'disable';
   return {
     host: String(data.host ?? 'localhost'),
     port: Number(data.port ?? 5432),
-    database: String(data.database ?? data.db ?? 'postgres'),
-    user: String(data.user ?? data.username ?? 'postgres'),
+    database: String(data.database ?? 'postgres'),
+    user: String(data.user ?? 'postgres'),
     password: String(data.password ?? ''),
     ssl,
-    allowUnauthorizedCerts: Boolean(data.allowUnauthorizedCerts ?? data.ignoreSslIssues ?? false),
+    caCertificate: String(data.caCertificate ?? ''),
   };
+}
+
+/**
+ * TLS options for the SSL setting, the same as the Postgres node: 'allow' encrypts without checking
+ * the certificate, 'require' encrypts and verifies it (against the CA certificate when one is set).
+ */
+export function postgresTlsOptions(creds: PostgresCredentials): pg.ClientConfig['ssl'] {
+  if (creds.ssl === 'allow') return { rejectUnauthorized: false };
+  if (creds.ssl === 'require') {
+    return { rejectUnauthorized: true, ...(creds.caCertificate ? { ca: creds.caCertificate } : {}) };
+  }
+  return false;
 }
 
 async function openPostgres(ctx: BaseContext, creds: PostgresCredentials): Promise<pg.Client> {
   const host = creds.host.trim();
   const allowed = await ctx.helpers.resolveAllowedHost(host);
-  const ssl =
-    creds.ssl === 'disable'
-      ? false
-      : { rejectUnauthorized: creds.ssl === 'verify-full' && !creds.allowUnauthorizedCerts };
   const client = new pg.Client({
     // pg takes the TLS server name from `host`, so it stays the name the user entered
     host,
@@ -66,7 +70,7 @@ async function openPostgres(ctx: BaseContext, creds: PostgresCredentials): Promi
     database: creds.database,
     user: creds.user,
     password: creds.password,
-    ssl,
+    ssl: postgresTlsOptions(creds),
     connectionTimeoutMillis: 10_000,
     query_timeout: 60_000,
     application_name: 'workflow-ai',
@@ -119,14 +123,15 @@ export interface RedisCredentials {
   tls: boolean;
 }
 
+/** Read a `redis` credential (field names as defined by the nodes-base credential type). */
 export function redisCredentials(data: DataObject): RedisCredentials {
   return {
     host: String(data.host ?? 'localhost'),
     port: Number(data.port ?? 6379),
     password: data.password ? String(data.password) : undefined,
-    username: data.user || data.username ? String(data.user ?? data.username) : undefined,
-    db: Number(data.database ?? data.db ?? 0),
-    tls: Boolean(data.ssl ?? data.tls ?? false),
+    username: data.user ? String(data.user) : undefined,
+    db: Number(data.database ?? 0),
+    tls: Boolean(data.ssl ?? false),
   };
 }
 
