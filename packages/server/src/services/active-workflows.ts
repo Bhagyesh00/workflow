@@ -7,6 +7,9 @@
  * on the leader (always this process in regular mode); other mains forward start/stop requests
  * over the `control` channel.
  */
+import { randomUUID } from 'node:crypto';
+import { mkdir, rename } from 'node:fs/promises';
+import path from 'node:path';
 import {
   type ContextDeps,
   createBaseContext,
@@ -35,8 +38,9 @@ import type { PinoLogger } from '../logger';
 import { effectiveLimits, type TenantSettings } from '../plans';
 import { createRepositories, isUniqueViolation, type Repositories } from '../repositories';
 import type { MessageBus } from './bus';
-import type { ExecutionService } from './executions';
+import { binaryDirOf, type ExecutionService } from './executions';
 import type { Leadership } from './queue';
+import { TEST_WEBHOOK_TTL_MS } from './test-webhooks';
 import { type NodeWebhook, nodeWebhooks, workflowWebhooks } from './webhook-paths';
 import { toDefinition } from './workflow-model';
 
@@ -52,6 +56,16 @@ interface RunningTriggers {
   workflow: Workflow;
   abort: AbortController;
   closers: Array<() => Promise<void>>;
+  /** binary data of trigger() contexts is staged under this id until an emit moves it to its execution */
+  stagingId: string;
+}
+
+/** a "Listen for test event" registration with a third-party service, undone when it expires */
+interface TestHooks {
+  workflow: Workflow;
+  node: WorkflowNode;
+  tenant: TenantRow;
+  timer: NodeJS.Timeout;
 }
 
 export const RESPOND_TO_WEBHOOK = 'core.respondToWebhook';
@@ -117,6 +131,7 @@ export class ActiveWorkflowManager {
   private readonly running = new Map<string, RunningTriggers>();
   /** tail of the start/stop chain per workflow: starts and stops of one workflow never overlap */
   private readonly locks = new Map<string, Promise<void>>();
+  private readonly testHooks = new Map<string, TestHooks>();
   private unsubscribe?: () => void;
   private readonly evaluator = new ExpressionEvaluator({ timeoutMs: 1000 });
 
@@ -269,15 +284,23 @@ export class ActiveWorkflowManager {
   // -------------------------------------------------------------------------------------------
   // activate / deactivate
 
+  /** `previous` is the saved version being replaced when an active workflow is saved (mode 'update') */
   async activate(
     tenantId: string,
     workflowId: string,
     mode: ActivationMode = 'activate',
+    previous?: WorkflowRow,
   ): Promise<WorkflowRow> {
     const { repos, database, logger } = this.deps;
-    const row = await repos.workflows.get(tenantId, workflowId);
+    let row = await repos.workflows.get(tenantId, workflowId);
     if (!row) throw ApiError.notFound('Workflow');
     const tenant = (await repos.tenants.get(tenantId))!;
+    if (previous) {
+      // third-party hooks of removed or reconfigured nodes go before validation (a save that fails it
+      // deactivates only the new version's nodes) and before the new version registers its own
+      await this.removeStaleWebhooks(tenant, previous, toDefinition(row));
+      row = (await repos.workflows.get(tenantId, workflowId)) ?? row;
+    }
     const definition = toDefinition(row);
     const issues = await this.validate(tenantId, definition, workflowId);
     if (issues.length)
@@ -330,6 +353,10 @@ export class ActiveWorkflowManager {
       await this.stopTriggers(workflowId);
       await repos.webhooks.deleteForWorkflow(tenantId, workflowId);
       await repos.workflows.setActive(tenantId, workflowId, false);
+      // the caller deactivates a workflow that is no longer active without looking at third-party hooks
+      await this.runWebhookMethods(tenant, workflow, 'delete').catch((cleanup) =>
+        logger.warn({ err: cleanup, tenantId, workflowId }, 'Removing third-party webhooks failed'),
+      );
       throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', [
         { node: (error as { node?: string }).node ?? null, message: (error as Error).message },
       ]);
@@ -355,17 +382,26 @@ export class ActiveWorkflowManager {
     return (await repos.workflows.get(tenantId, workflowId))!;
   }
 
-  /** register/unregister webhooks with third-party services, then persist their static data */
-  private async runWebhookMethods(tenant: TenantRow, workflow: Workflow, action: 'create' | 'delete') {
+  /**
+   * Register/unregister webhooks with third-party services, then persist their static data.
+   * `only` limits it to some nodes; `testUrls` registers the "Listen for test event" URLs, whose
+   * static data is not persisted.
+   */
+  private async runWebhookMethods(
+    tenant: TenantRow,
+    workflow: Workflow,
+    action: 'create' | 'delete',
+    options: { only?: (node: WorkflowNode) => boolean; testUrls?: boolean } = {},
+  ) {
     const before = JSON.stringify(workflow.staticData);
     for (const node of Object.values(workflow.nodes)) {
-      if (node.disabled) continue;
+      if (node.disabled || (options.only && !options.only(node))) continue;
       const type = this.deps.nodeTypes.get(node.type);
       if (!type?.webhookMethods) continue;
       for (const hook of nodeWebhooks(workflow, node, type)) {
         const methods = type.webhookMethods[hook.webhookName];
         if (!methods) continue;
-        const ctx = await this.lifecycleContext(tenant, workflow, node, hook);
+        const ctx = await this.lifecycleContext(tenant, workflow, node, hook, options.testUrls);
         if (action === 'create') {
           if (!(await methods.checkExists(ctx))) {
             const ok = await methods.create(ctx);
@@ -377,9 +413,78 @@ export class ActiveWorkflowManager {
         }
       }
     }
-    if (workflow.id && JSON.stringify(workflow.staticData) !== before) {
+    if (!options.testUrls && workflow.id && JSON.stringify(workflow.staticData) !== before) {
       await this.deps.repos.workflows.setStaticData(tenant.id, workflow.id, workflow.staticData);
     }
+  }
+
+  /** delete the third-party hooks of `previous` nodes that the new definition removed or changed */
+  private async removeStaleWebhooks(
+    tenant: TenantRow,
+    previous: WorkflowRow,
+    next: WorkflowDefinition,
+  ): Promise<void> {
+    const signature = (n: WorkflowNode) =>
+      JSON.stringify([n.type, n.typeVersion, n.parameters, n.credentials, n.webhookId, n.disabled ?? false]);
+    const kept = new Map(next.nodes.map((n) => [n.name, signature(n)]));
+    await this.runWebhookMethods(
+      tenant,
+      new Workflow(toDefinition(previous), this.deps.nodeTypes),
+      'delete',
+      {
+        only: (n) => kept.get(n.name) !== signature(n),
+      },
+    ).catch((error) =>
+      this.deps.logger.warn(
+        { err: error, tenantId: tenant.id, workflowId: previous.id },
+        'Removing third-party webhooks failed',
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // "Listen for test event" for nodes that register their webhook with a third-party service
+
+  /**
+   * Register the test URL of `node` with its provider (webhookMethods) for the duration of a
+   * test listener. A listener for the same node replaces the earlier one; when the listener
+   * expires the registration is removed again.
+   */
+  async registerTestWebhooks(
+    tenant: TenantRow,
+    definition: WorkflowDefinition,
+    nodeName: string,
+  ): Promise<void> {
+    const workflow = new Workflow(definition, this.deps.nodeTypes);
+    const node = workflow.nodes[nodeName];
+    if (!node || !this.deps.nodeTypes.get(node.type)?.webhookMethods) return;
+    const key = `${tenant.id}:${definition.id}:${nodeName}`;
+    await this.unregisterTestWebhooks(key);
+    try {
+      await this.runWebhookMethods(tenant, workflow, 'create', { only: (n) => n === node, testUrls: true });
+    } catch (error) {
+      await this.runWebhookMethods(tenant, workflow, 'delete', {
+        only: (n) => n === node,
+        testUrls: true,
+      }).catch(() => {});
+      throw ApiError.badRequest(`${nodeName}: ${(error as Error).message}`);
+    }
+    const timer = setTimeout(() => void this.unregisterTestWebhooks(key), TEST_WEBHOOK_TTL_MS);
+    timer.unref();
+    this.testHooks.set(key, { tenant, workflow, node, timer });
+  }
+
+  private async unregisterTestWebhooks(key: string): Promise<void> {
+    const registered = this.testHooks.get(key);
+    if (!registered) return;
+    this.testHooks.delete(key);
+    clearTimeout(registered.timer);
+    await this.runWebhookMethods(registered.tenant, registered.workflow, 'delete', {
+      only: (n) => n === registered.node,
+      testUrls: true,
+    }).catch((error) =>
+      this.deps.logger.warn({ err: error, key }, 'Removing third-party test webhooks failed'),
+    );
   }
 
   private async lifecycleContext(
@@ -387,6 +492,7 @@ export class ActiveWorkflowManager {
     workflow: Workflow,
     node: WorkflowNode,
     hook: NodeWebhook,
+    testUrls = false,
   ): Promise<WebhookLifecycleContext> {
     const deps = await this.contextDeps(tenant, workflow, node, new AbortController().signal);
     const base = createBaseContext(deps);
@@ -395,7 +501,8 @@ export class ActiveWorkflowManager {
       getNodeWebhookUrl: (name: string) => {
         const type = this.deps.nodeTypes.get(node.type)!;
         const match = nodeWebhooks(workflow, node, type).find((h) => h.webhookName === name) ?? hook;
-        return `${this.deps.config.baseUrl}/webhook/${tenant.slug}/${match.path}`;
+        const prefix = testUrls ? 'webhook-test' : 'webhook';
+        return `${this.deps.config.baseUrl}/${prefix}/${tenant.slug}/${match.path}`;
       },
       getWebhookName: () => hook.webhookName,
     };
@@ -406,10 +513,11 @@ export class ActiveWorkflowManager {
     workflow: Workflow,
     node: WorkflowNode,
     signal: AbortSignal,
+    executionId = '',
   ): Promise<ContextDeps> {
     const services = await this.deps.executions.buildServices({
       tenant,
-      executionId: '',
+      executionId,
       mode: 'trigger',
       workflowId: workflow.id,
     });
@@ -442,6 +550,8 @@ export class ActiveWorkflowManager {
 
   async close(): Promise<void> {
     this.unsubscribe?.();
+    for (const { timer } of this.testHooks.values()) clearTimeout(timer);
+    this.testHooks.clear();
     await this.stopAll();
   }
 
@@ -486,7 +596,13 @@ export class ActiveWorkflowManager {
     const tenant = await repos.tenants.get(tenantId);
     if (!tenant) return;
     const workflow = new Workflow(toDefinition(row), nodeTypes);
-    const entry: RunningTriggers = { tenantId, workflow, abort: new AbortController(), closers: [] };
+    const entry: RunningTriggers = {
+      tenantId,
+      workflow,
+      abort: new AbortController(),
+      closers: [],
+      stagingId: randomUUID(),
+    };
     // only serialized starts and stops touch this workflow's entry, so nothing can replace or
     // abort it before this start returns: every closer pushed below stays reachable for a stop
     this.running.set(workflowId, entry);
@@ -514,6 +630,7 @@ export class ActiveWorkflowManager {
         this.deps.logger.warn({ err: error, workflowId }, 'Trigger close function failed'),
       );
     }
+    await this.deps.executions.removeBinaryData(entry.tenantId, entry.stagingId);
   }
 
   private async startTriggerNode(
@@ -523,7 +640,7 @@ export class ActiveWorkflowManager {
     type: NodeType,
     mode: ActivationMode,
   ): Promise<void> {
-    const deps = await this.contextDeps(tenant, entry.workflow, node, entry.abort.signal);
+    const deps = await this.contextDeps(tenant, entry.workflow, node, entry.abort.signal, entry.stagingId);
     const ctx = createTriggerContext(deps, {
       activationMode: mode,
       emit: (data, responsePromise) => {
@@ -557,8 +674,11 @@ export class ActiveWorkflowManager {
     const tick = async () => {
       if (busy || entry.abort.signal.aborted) return;
       busy = true;
+      // the poll stores its binary data under the id of the execution it starts
+      const executionId = randomUUID();
+      let started = false;
       try {
-        const deps = await this.contextDeps(tenant, entry.workflow, node, entry.abort.signal);
+        const deps = await this.contextDeps(tenant, entry.workflow, node, entry.abort.signal, executionId);
         const before = JSON.stringify(entry.workflow.staticData);
         const result = await type.poll!(createPollContext(deps, mode));
         if (entry.workflow.id && JSON.stringify(entry.workflow.staticData) !== before) {
@@ -569,13 +689,16 @@ export class ActiveWorkflowManager {
           );
         }
         const items = result?.[0] ?? [];
-        if (items.length) await this.startFromTrigger(tenant, entry, node, items);
+        if (items.length) {
+          started = await this.startFromTrigger(tenant, entry, node, items, undefined, executionId);
+        }
       } catch (error) {
         this.deps.logger.warn(
           { err: error, tenantId: tenant.id, workflowId: entry.workflow.id, node: node.name },
           'Poll failed',
         );
       } finally {
+        if (!started) await this.deps.executions.removeBinaryData(tenant.id, executionId);
         busy = false;
       }
     };
@@ -591,9 +714,14 @@ export class ActiveWorkflowManager {
     node: WorkflowNode,
     items: Item[],
     responsePromise?: { resolve(value: unknown): void; reject(err: Error): void },
-  ): Promise<void> {
-    if (entry.abort.signal.aborted) return;
+    pollExecutionId?: string,
+  ): Promise<boolean> {
+    if (entry.abort.signal.aborted) return false;
+    // a poll already stored its binary data under its execution id; trigger() emits move theirs there
+    const executionId = pollExecutionId ?? randomUUID();
+    let begun = false;
     try {
+      if (!pollExecutionId) await this.moveStagedBinaryData(tenant.id, entry.stagingId, executionId, items);
       const definition = JSON.parse(JSON.stringify(entry.workflow.definition)) as WorkflowDefinition;
       definition.staticData = JSON.parse(JSON.stringify(entry.workflow.staticData));
       const started = await this.deps.executions.start({
@@ -601,22 +729,58 @@ export class ActiveWorkflowManager {
         workflow: definition,
         workflowId: entry.workflow.id,
         mode: 'trigger',
+        executionId,
         startNode: node.name,
         triggerItems: JSON.parse(JSON.stringify(items.length ? items : [{ json: {} }])),
         wait: Boolean(responsePromise),
       });
+      begun = true;
       if (responsePromise && started.finished) {
         const outcome = await started.finished;
         if (outcome.status === 'error')
           responsePromise.reject(new Error(outcome.error?.message ?? 'Execution failed'));
         else responsePromise.resolve(outcome);
       }
+      return true;
     } catch (error) {
+      if (!begun) await this.deps.executions.removeBinaryData(tenant.id, executionId);
       responsePromise?.reject(error as Error);
       this.deps.logger.warn(
         { err: error, tenantId: tenant.id, workflowId: entry.workflow.id, node: node.name },
         'Could not start an execution from a trigger',
       );
+      return begun;
     }
+  }
+
+  /**
+   * Move the filesystem binary files that `items` reference from the staging directory of a
+   * trigger to the directory of the execution they start, and point the references (mutated in
+   * place) at the new location.
+   */
+  private async moveStagedBinaryData(
+    tenantId: string,
+    stagingId: string,
+    executionId: string,
+    items: Item[],
+  ): Promise<void> {
+    const { config } = this.deps;
+    if (config.binaryData.mode !== 'filesystem') return;
+    const prefix = `fs:${tenantId}/${stagingId}/`;
+    const walk = async (value: unknown): Promise<void> => {
+      if (!value || typeof value !== 'object') return;
+      const ref = value as { id?: unknown; mimeType?: unknown };
+      if (typeof ref.id === 'string' && ref.id.startsWith(prefix) && typeof ref.mimeType === 'string') {
+        const file = ref.id.slice(prefix.length);
+        if (!file || file === '.' || file === '..' || /[\\/:]/.test(file)) return;
+        const target = binaryDirOf(config, tenantId, executionId);
+        await mkdir(target, { recursive: true });
+        await rename(path.join(binaryDirOf(config, tenantId, stagingId), file), path.join(target, file));
+        ref.id = `fs:${tenantId}/${executionId}/${file}`;
+        return;
+      }
+      for (const child of Object.values(value)) await walk(child);
+    };
+    await walk(items);
   }
 }

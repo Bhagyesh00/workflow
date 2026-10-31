@@ -187,8 +187,10 @@ export class WorkflowService {
       );
     }
     const newVersionId = randomUUID();
+    let previous: WorkflowRow | undefined;
     const row = await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
+      previous = await repos.workflows.get(tenantId, id);
       const updated = await repos.workflows.update(tenantId, id, expected, {
         ...patch,
         versionId: newVersionId,
@@ -230,7 +232,7 @@ export class WorkflowService {
     let current = row;
     if (row.active && (patch.nodes || patch.connections || patch.settings)) {
       try {
-        current = await this.deps.activeWorkflows.activate(tenantId, id, 'update');
+        current = await this.deps.activeWorkflows.activate(tenantId, id, 'update', previous);
       } catch (error) {
         current = await this.deps.activeWorkflows.deactivate(tenantId, id);
         activationError = {
@@ -383,21 +385,30 @@ export class WorkflowService {
         ([name]) => workflow.nodes[name],
       ),
     );
+    // binary data of a trigger's sample items is stored under the id of the execution that uses it
+    const executionId = randomUUID();
     let triggerItems = input.triggerItems as Item[] | undefined;
-    if (!triggerItems && !pinData[start.name]) {
-      triggerItems = await this.manualTriggerItems(tenant, workflow, start);
+    try {
+      if (!triggerItems && !pinData[start.name]) {
+        triggerItems = await this.manualTriggerItems(tenant, workflow, start, executionId);
+        if (!triggerItems) await this.deps.executions.removeBinaryData(tenant.id, executionId);
+      }
+      await this.deps.executions.start({
+        tenantId: tenant.id,
+        workflow: definition,
+        workflowId: row.id,
+        executionId,
+        mode: 'manual',
+        startNode: start.name,
+        triggerItems,
+        destinationNode: input.destinationNode,
+        pinData: Object.keys(pinData).length ? pinData : undefined,
+        userId: actor.userId,
+      });
+    } catch (error) {
+      await this.deps.executions.removeBinaryData(tenant.id, executionId);
+      throw error;
     }
-    const { executionId } = await this.deps.executions.start({
-      tenantId: tenant.id,
-      workflow: definition,
-      workflowId: row.id,
-      mode: 'manual',
-      startNode: start.name,
-      triggerItems,
-      destinationNode: input.destinationNode,
-      pinData: Object.keys(pinData).length ? pinData : undefined,
-      userId: actor.userId,
-    });
     return { executionId };
   }
 
@@ -405,12 +416,17 @@ export class WorkflowService {
    * Manual runs of trigger/poll nodes: let the node produce sample data (manualTriggerFunction or
    * one poll) instead of starting with an empty item.
    */
-  private async manualTriggerItems(tenant: TenantRow, workflow: Workflow, node: WorkflowNode) {
+  private async manualTriggerItems(
+    tenant: TenantRow,
+    workflow: Workflow,
+    node: WorkflowNode,
+    executionId: string,
+  ) {
     const type = this.deps.nodeTypes.get(node.type);
     if (!type || type.execute || node.disabled || (!type.trigger && !type.poll)) return undefined;
     const services = await this.deps.executions.buildServices({
       tenant,
-      executionId: '',
+      executionId,
       mode: 'manual',
       workflowId: workflow.id,
     });
@@ -481,6 +497,11 @@ export class WorkflowService {
       throw ApiError.badRequest((error as Error).message);
     }
     if (!hooks.length) throw ApiError.badRequest(`Node "${node.name}" does not receive webhooks`);
+    // the provider keeps one hook per registration, so the test URL would replace the production one
+    if (row.active && type?.webhookMethods) {
+      throw ApiError.badRequest('Deactivate the workflow to listen for test events on this trigger');
+    }
+    await this.deps.activeWorkflows.registerTestWebhooks(tenant, definition, node.name);
     const expiresAt = Date.now() + TEST_WEBHOOK_TTL_MS;
     for (const hook of hooks) {
       await this.deps.testWebhooks.add({

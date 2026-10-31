@@ -2,6 +2,8 @@
  * Leader-only background jobs: the wait tracker (resumes executions whose `wait_till` passed)
  * and pruning (old executions, their binary data, expired sessions and idempotency keys).
  */
+import { readdir, rm, stat } from 'node:fs/promises';
+import path from 'node:path';
 import type { Config } from '../config';
 import type { PinoLogger } from '../logger';
 import { effectiveLimits, type TenantSettings } from '../plans';
@@ -105,9 +107,28 @@ export class Pruner {
         if (batch.length < 500) break;
       }
     }
+    await this.sweepActivationBinaryData(now);
     await this.repos.sessions.deleteExpired();
     await this.repos.idempotency.prune(new Date(now.getTime() - DAY));
     if (total) this.logger.info({ deleted: total }, 'Pruned old executions');
     return total;
+  }
+
+  /**
+   * Contexts without an execution (webhook lifecycle hooks) store binary data under
+   * `<tenantId>/activation`. No execution references those files, so they go by age.
+   */
+  private async sweepActivationBinaryData(now: Date): Promise<void> {
+    const { mode, dir } = this.config.binaryData;
+    if (mode !== 'filesystem') return;
+    const cutoff = now.getTime() - DAY;
+    for (const tenantId of await readdir(dir).catch(() => [])) {
+      const activation = path.join(dir, tenantId, 'activation');
+      for (const name of await readdir(activation).catch(() => [])) {
+        const file = path.join(activation, name);
+        const info = await stat(file).catch(() => undefined);
+        if (info && info.mtimeMs < cutoff) await rm(file, { recursive: true, force: true }).catch(() => {});
+      }
+    }
   }
 }
