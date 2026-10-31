@@ -6,7 +6,7 @@
  * Regular mode runs executions in this process. Queue mode enqueues them; a worker process calls
  * `runQueued`. Sub-workflows always run inline in the process running their parent.
  */
-import { randomUUID } from 'node:crypto';
+import { createHmac, hkdfSync, randomUUID, timingSafeEqual } from 'node:crypto';
 import { copyFile, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -23,11 +23,13 @@ import {
   WorkflowExecute,
 } from '@workflow/core';
 import {
+  ExecutionCancelledError,
   type ExecutionErrorShape,
   type ExecutionMode,
   type ExecutionResult,
   type ExecutionState,
   type ExecutionStatus,
+  ExecutionTimeoutError,
   type Item,
   serializeError,
   sortByPosition,
@@ -145,13 +147,38 @@ export function binaryDirOf(config: Config, tenantId: string, executionId: strin
 }
 
 export class ExecutionService {
-  private readonly running = new Map<string, { engine: WorkflowExecute; done: Promise<void> }>();
+  /** `controller` aborts the run: a stop, a shutdown or the execution timeout */
+  private readonly running = new Map<string, { controller: AbortController; done: Promise<void> }>();
   private readonly waiters = new Map<string, Waiter>();
   /** stop requests that arrived before the execution's engine was registered */
   private readonly cancelRequests = new Set<string>();
   private readonly unsubscribers: Array<() => void> = [];
 
-  constructor(private readonly deps: ExecutionServiceDeps) {}
+  /** one key per master key, the current one first: resume URLs signed before a key rotation stay valid */
+  private readonly resumeKeys: Buffer[];
+
+  constructor(private readonly deps: ExecutionServiceDeps) {
+    this.resumeKeys = deps.config.encryptionKeys.map(({ key }) =>
+      Buffer.from(hkdfSync('sha256', key, Buffer.alloc(0), Buffer.from('resume-url:v1'), 32)),
+    );
+  }
+
+  /**
+   * `/webhook-waiting/<executionId>/<signature>`: the signature is the capability to resume the
+   * execution, so knowing its id (webhook replies, logs, the editor) is not enough.
+   */
+  resumeUrl(executionId: string): string {
+    const signature = createHmac('sha256', this.resumeKeys[0]).update(executionId).digest('base64url');
+    return `${this.deps.config.baseUrl}/webhook-waiting/${executionId}/${signature}`;
+  }
+
+  verifyResumeSignature(executionId: string, signature: string): boolean {
+    const given = Buffer.from(signature, 'base64url');
+    return this.resumeKeys.some((key) => {
+      const expected = createHmac('sha256', key).update(executionId).digest();
+      return given.length === expected.length && timingSafeEqual(given, expected);
+    });
+  }
 
   /** wire cross-process events; call once per process */
   async init(): Promise<void> {
@@ -176,13 +203,15 @@ export class ExecutionService {
     if (pending.length) {
       await Promise.race([Promise.allSettled(pending), new Promise((r) => setTimeout(r, timeoutMs))]);
     }
-    for (const { engine } of this.running.values()) engine.cancel('The server is shutting down');
+    for (const { controller } of this.running.values()) {
+      controller.abort(new ExecutionCancelledError('The server is shutting down'));
+    }
   }
 
-  private cancel(executionId: string): void {
+  private cancel(executionId: string, reason = 'Execution was stopped'): void {
     const local = this.running.get(executionId);
     if (local) {
-      local.engine.cancel('Execution was stopped');
+      local.controller.abort(new ExecutionCancelledError(reason));
       return;
     }
     this.cancelRequests.add(executionId);
@@ -356,19 +385,23 @@ export class ExecutionService {
     if (meta.redelivered) {
       // the worker that ran this job died mid-execution: do not run it a second time
       const row = await this.deps.repos.executions.get(job.tenantId, job.executionId);
-      if (row && ['new', 'running'].includes(row.status)) {
-        const message = 'The worker running this execution stopped unexpectedly';
-        await this.deps.repos.executions.update(job.tenantId, job.executionId, {
+      const message = 'The worker running this execution stopped unexpectedly';
+      const stoppedAt = new Date();
+      const closed =
+        row &&
+        (await this.deps.repos.executions.transition(job.tenantId, job.executionId, ['new', 'running'], {
           status: 'crashed',
-          stoppedAt: new Date(),
+          stoppedAt,
           errorMessage: message,
-        });
-        this.deps.push.send(job.tenantId, 'executionFinished', {
-          executionId: job.executionId,
-          workflowId: row.workflowId,
-          status: 'crashed',
-          error: { message },
-        });
+        }));
+      if (row && closed) {
+        const durationMs = row.startedAt ? stoppedAt.getTime() - row.startedAt.getTime() : 0;
+        await this.afterCrash(job.tenantId, row, message, { durationMs }).catch((e) =>
+          this.deps.logger.warn(
+            { err: e, tenantId: job.tenantId, executionId: job.executionId },
+            'Crashed execution could not be closed',
+          ),
+        );
         this.emitFinished(
           { executionId: job.executionId, status: 'crashed', error: { name: 'Error', message } },
           delivery,
@@ -412,6 +445,8 @@ export class ExecutionService {
     const limits = effectiveLimits(tenant.plan, tenant.settings as TenantSettings);
     const timeoutMs = executionTimeoutMs(this.deps.config, limits, definition.settings?.executionTimeout);
 
+    const controller = new AbortController();
+    const { signal } = controller;
     let workflow: Workflow;
     let engine: WorkflowExecute;
     try {
@@ -424,6 +459,7 @@ export class ExecutionService {
         depth: options.depth ?? 0,
         errorChain: options.errorChain,
         hooks: this.hooks(tenant.id, row, definition, delivery),
+        signal,
       });
       engine = new WorkflowExecute(
         workflow,
@@ -451,13 +487,19 @@ export class ExecutionService {
     const done = new Promise<void>((r) => {
       release = r;
     });
-    this.running.set(executionId, { engine, done });
-    if (this.cancelRequests.delete(executionId)) engine.cancel('Execution was stopped');
+    this.running.set(executionId, { controller, done });
+    if (this.cancelRequests.delete(executionId)) {
+      controller.abort(new ExecutionCancelledError('Execution was stopped'));
+    }
+    // the engine enforces the timeout too; this one also reaches the sub-workflows the execution waits for
+    const timer = timeoutMs
+      ? setTimeout(() => controller.abort(new ExecutionTimeoutError(timeoutMs / 1000)), timeoutMs)
+      : undefined;
     try {
       let result: ExecutionResult;
       try {
         if (kind === 'run' && options.retryFromFailure) {
-          result = await engine.retryFromFailure({ timeoutMs });
+          result = await engine.retryFromFailure({ timeoutMs, signal });
         } else if (kind === 'run') {
           result = await engine.run({
             startNode: options.startNode,
@@ -465,9 +507,10 @@ export class ExecutionService {
             destinationNode: options.destinationNode,
             pinData: options.pinData,
             timeoutMs,
+            signal,
           });
         } else {
-          result = await engine.resume({ output: options.resumeOutput ?? undefined, timeoutMs });
+          result = await engine.resume({ output: options.resumeOutput ?? undefined, timeoutMs, signal });
         }
       } catch (error) {
         // run()/resume() reject only before processing starts (no start node, not waiting...)
@@ -477,11 +520,76 @@ export class ExecutionService {
       await this.finish(tenant, row, definition, staticBefore, result, delivery, options.errorChain);
     } catch (error) {
       logger.error({ err: error, tenantId, executionId }, 'Could not persist execution result');
+      // the row must not stay 'running': it would hold a concurrency slot and never alert anyone
+      const message = `Could not store the execution result: ${(error as Error).message}`.slice(0, 2000);
+      const stoppedAt = new Date();
+      const closed = await repos.executions
+        .transition(tenantId, executionId, ['new', 'running'], {
+          status: 'crashed',
+          stoppedAt,
+          errorMessage: message,
+        })
+        .catch(() => false);
+      if (closed) {
+        const durationMs = row.startedAt ? stoppedAt.getTime() - row.startedAt.getTime() : 0;
+        await this.afterCrash(tenantId, row, message, { durationMs, state: engine.state }).catch((e) =>
+          logger.warn({ err: e, tenantId, executionId }, 'Crashed execution could not be closed'),
+        );
+      }
       emit({ executionId, status: 'crashed', error: serializeError(error) });
     } finally {
+      clearTimeout(timer);
       this.running.delete(executionId);
       release();
     }
+  }
+
+  /**
+   * An execution was closed as crashed outside finish() (its worker or process died, or its result could not
+   * be stored): announce it, account for it and start its error workflow. `durationMs` is left out when the
+   * time it ran is unknown.
+   */
+  private async afterCrash(
+    tenantId: string,
+    row: ExecutionRow,
+    message: string,
+    opts: { durationMs?: number; state?: ExecutionState } = {},
+  ): Promise<void> {
+    const { repos, push, metrics, logger } = this.deps;
+    push.send(tenantId, 'executionFinished', {
+      executionId: row.id,
+      workflowId: row.workflowId,
+      status: 'crashed',
+      error: { message },
+    });
+    if (opts.durationMs !== undefined) {
+      const durationMs = Math.max(0, opts.durationMs);
+      await repos.usage.increment(tenantId, currentPeriod(), 0, durationMs);
+      metrics.recordExecution('crashed', row.mode, durationMs);
+    }
+    const data = await repos.executions.getData(tenantId, row.id);
+    if (!data) return;
+    const definition = data.workflowData as unknown as WorkflowDefinition;
+    const options = (data.runOptions ?? {}) as StoredRunOptions;
+    const state = opts.state ?? (data.state as unknown as ExecutionState | null) ?? createInitialState();
+    state.resultData.error = serializeError(new Error(message));
+    await this.startErrorWorkflow(tenantId, row, definition, state, options.errorChain).catch((e) =>
+      logger.warn({ err: e, tenantId, executionId: row.id }, 'Error workflow could not start'),
+    );
+  }
+
+  /** regular-mode startup: close the executions a previous process left running and alert about them */
+  async markCrashed(): Promise<number> {
+    const rows = await this.deps.repos.executions.markCrashed();
+    for (const row of rows) {
+      await this.afterCrash(row.tenantId, row, row.errorMessage ?? 'The process stopped').catch((e) =>
+        this.deps.logger.warn(
+          { err: e, tenantId: row.tenantId, executionId: row.id },
+          'Crashed execution could not be closed',
+        ),
+      );
+    }
+    return rows.length;
   }
 
   private emitFinished(outcome: ExecutionOutcome, delivery: Delivery): void {
@@ -550,6 +658,7 @@ export class ExecutionService {
     const settings = definition.settings ?? {};
     const error = state.resultData.error;
     const durationMs = Math.max(0, result.stoppedAt - result.startedAt);
+    let lastNodeOutput = result.lastNodeOutput ?? null;
 
     let keep = true;
     if (status === 'waiting') keep = true;
@@ -557,6 +666,10 @@ export class ExecutionService {
     else if (status === 'success') keep = settings.saveDataSuccessExecution !== 'none';
     else keep = settings.saveDataErrorExecution !== 'none';
 
+    // linked before the final status is written: whoever sees the retry finished also sees the link
+    if (status === 'success' && row.retryOf) {
+      await repos.executions.update(tenant.id, row.retryOf, { retrySuccessId: row.id });
+    }
     if (keep) {
       await repos.executions.saveState(tenant.id, row.id, state);
       await repos.executions.update(tenant.id, row.id, {
@@ -568,6 +681,8 @@ export class ExecutionService {
         customData: state.resultData.customData ?? {},
       });
     } else {
+      if (lastNodeOutput)
+        lastNodeOutput = await this.handOverBinaryData(tenant.id, row, lastNodeOutput, delivery);
       await repos.executions.delete(tenant.id, row.id);
       await this.removeBinaryData(tenant.id, row.id);
     }
@@ -592,10 +707,6 @@ export class ExecutionService {
       ...(error ? { error: { message: error.message, node: error.node } } : {}),
     });
 
-    if (status === 'success' && row.retryOf) {
-      await repos.executions.update(tenant.id, row.retryOf, { retrySuccessId: row.id });
-    }
-
     if (status === 'error' || status === 'crashed') {
       await this.startErrorWorkflow(tenant.id, row, definition, state, errorChain).catch((e) =>
         logger.warn({ err: e, tenantId: tenant.id, executionId: row.id }, 'Error workflow could not start'),
@@ -608,10 +719,43 @@ export class ExecutionService {
         status,
         error,
         lastNodeExecuted: state.resultData.lastNodeExecuted,
-        lastNodeOutput: result.lastNodeOutput ?? null,
+        lastNodeOutput,
       },
       delivery,
     );
+  }
+
+  /**
+   * The binary files of an execution that is not saved are removed when it finishes, but whoever waits for it
+   * (a parent execution, a webhook answering with the output) still reads them: a parent gets copies in its
+   * own directory, anyone else gets the content inline. Returns the output with the references rewritten.
+   */
+  private async handOverBinaryData(
+    tenantId: string,
+    row: ExecutionRow,
+    output: Item[][],
+    delivery: Delivery,
+  ): Promise<Item[][]> {
+    if (this.deps.config.binaryData.mode !== 'filesystem') return output;
+    const waited = delivery === 'bus' || (delivery === 'local' && this.waiters.has(row.id));
+    if (!waited) return output;
+    // node outputs are frozen
+    const copy = JSON.parse(JSON.stringify(output)) as Item[][];
+    if (row.parentExecutionId) {
+      await this.adoptBinaryData(tenantId, row.parentExecutionId, copy);
+      return copy;
+    }
+    const store = this.binaryStore(tenantId);
+    for (const item of copy.flat()) {
+      for (const [key, binary] of Object.entries(item?.binary ?? {})) {
+        const { id, ...inline } = binary;
+        if (!id) continue;
+        // a file that cannot be read keeps its reference, and the consumer reports it
+        const data = await store.getBuffer(binary).catch(() => undefined);
+        if (data && item.binary) item.binary[key] = { ...inline, data: Buffer.from(data).toString('base64') };
+      }
+    }
+    return copy;
   }
 
   async removeBinaryData(tenantId: string, executionId: string): Promise<void> {
@@ -639,6 +783,8 @@ export class ExecutionService {
     depth?: number;
     errorChain?: boolean;
     hooks?: ExecutionHooks;
+    /** aborts when the execution is stopped or times out; sub-workflows it waits for are canceled then */
+    signal?: AbortSignal;
   }): Promise<ExecutionServices> {
     const { config, repos, nodeTypes, credentials, http, codeRunner, logger } = this.deps;
     const { tenant, executionId } = input;
@@ -651,7 +797,7 @@ export class ExecutionService {
       timezone: settings.timezone ?? config.defaultTimezone,
       variables: await repos.variables.map(tenant.id),
       instanceBaseUrl: config.baseUrl,
-      resumeUrl: executionId ? `${config.baseUrl}/webhook-waiting/${executionId}` : undefined,
+      resumeUrl: executionId ? this.resumeUrl(executionId) : undefined,
       nodeTypes,
       credentialTypes: credentials.types,
       credentials: credentials.provider(tenant.id),
@@ -667,7 +813,8 @@ export class ExecutionService {
       ),
       hooks: input.hooks,
       limits: { maxTries: 5 },
-      executeSubWorkflow: (request) => this.executeSubWorkflow(request, depth, input.errorChain === true),
+      executeSubWorkflow: (request) =>
+        this.executeSubWorkflow(request, depth, input.errorChain === true, input.signal),
     };
   }
 
@@ -678,6 +825,7 @@ export class ExecutionService {
     request: SubWorkflowRequest,
     depth: number,
     errorChain: boolean,
+    signal?: AbortSignal,
   ): Promise<{ executionId: string; data: Item[][] | null }> {
     if (depth >= MAX_SUB_WORKFLOW_DEPTH) {
       throw new Error(`Sub-workflows can be nested at most ${MAX_SUB_WORKFLOW_DEPTH} levels deep`);
@@ -720,11 +868,38 @@ export class ExecutionService {
       wait: !detached,
     });
     if (detached || !finished) return { executionId, data: [request.items] };
-    const outcome = await finished;
+    const outcome = await this.awaitSubWorkflow(executionId, finished, signal);
     if (outcome.status === 'error' || outcome.status === 'crashed' || outcome.status === 'canceled') {
       throw new Error(outcome.error?.message ?? `Sub-workflow execution ${executionId} failed`);
     }
     return { executionId, data: outcome.lastNodeOutput ?? null };
+  }
+
+  /** the outcome of a sub-workflow; when the parent is stopped or times out first, the child is canceled */
+  private async awaitSubWorkflow(
+    executionId: string,
+    finished: Promise<ExecutionOutcome>,
+    signal?: AbortSignal,
+  ): Promise<ExecutionOutcome> {
+    if (!signal) return finished;
+    let onAbort!: () => void;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => {
+        const timedOut = signal.reason instanceof ExecutionTimeoutError;
+        this.cancel(
+          executionId,
+          timedOut ? 'The parent execution timed out' : 'The parent execution was stopped',
+        );
+        reject(signal.reason);
+      };
+    });
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      return await Promise.race([finished, aborted]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
   }
 
   private async startErrorWorkflow(
@@ -823,7 +998,7 @@ export class ExecutionService {
     if (row.status === 'running' || row.status === 'new') {
       const local = this.running.get(executionId);
       if (local) {
-        local.engine.cancel('Execution was stopped');
+        this.cancel(executionId);
         await local.done;
       } else {
         this.cancel(executionId);

@@ -212,8 +212,8 @@ export class ExecutionRepository {
   }
 
   /** system tooling (regular-mode startup): executions left running by a crashed process */
-  async markCrashed(): Promise<number> {
-    const rows = await this.db
+  async markCrashed(): Promise<ExecutionRow[]> {
+    return this.db
       .update(executions)
       .set({
         status: 'crashed',
@@ -221,7 +221,6 @@ export class ExecutionRepository {
         errorMessage: 'The process stopped while the execution ran',
       })
       .where(inArray(executions.status, ['new', 'running']))
-      .returning({ id: executions.id });
-    return rows.length;
+      .returning();
   }
 }

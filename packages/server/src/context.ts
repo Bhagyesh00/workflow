@@ -188,8 +188,9 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       await executions.init();
       await activeWorkflows.init();
       if (!queueMode) {
-        const crashed = await repos.executions.markCrashed();
-        if (crashed) logger.warn({ crashed }, 'Marked executions of a previous run as crashed');
+        // the service also pushes the status change and starts error workflows (R42)
+        const crashed = await executions.markCrashed();
+        if (crashed > 0) logger.warn({ crashed }, 'Marked executions of a previous run as crashed');
       }
       await leadership.start(
         async () => {
