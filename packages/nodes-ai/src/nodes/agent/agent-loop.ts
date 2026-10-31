@@ -195,32 +195,34 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     return failed ? markToolError(message) : message;
   };
 
-  let finalText: string | undefined;
-  for (let iteration = 0; iteration < options.maxIterations; iteration++) {
-    const response = await callModel({
-      messages,
-      tools: tools.length
-        ? tools.map(({ name, description, parameters }) => ({ name, description, parameters }))
-        : undefined,
-      responseFormat,
-      signal: options.signal,
-    });
-    messages.push(response.message);
-    const calls = response.message.toolCalls ?? [];
-    if (!calls.length) {
-      finalText = messageText(response.message.content);
-      break;
+  const modelTools = tools.length
+    ? tools.map(({ name, description, parameters }) => ({ name, description, parameters }))
+    : undefined;
+  // the output-parser retry gets its own iteration budget
+  let iterations = 0;
+  const answer = async (): Promise<string> => {
+    while (iterations < options.maxIterations) {
+      iterations++;
+      const response = await callModel({
+        messages,
+        tools: modelTools,
+        responseFormat,
+        signal: options.signal,
+      });
+      messages.push(response.message);
+      const calls = response.message.toolCalls ?? [];
+      if (!calls.length) return messageText(response.message.content);
+      const results = await Promise.all(calls.map(runTool));
+      messages.push(...results);
     }
-    const results = await Promise.all(calls.map(runTool));
-    messages.push(...results);
-  }
-  if (finalText === undefined) {
     throw fail(
       `The agent stopped after ${options.maxIterations} iterations without a final answer`,
       'AI_MAX_ITERATIONS',
       'Raise "Max Iterations" in the options, or make the tool descriptions clearer so the agent needs fewer steps.',
     );
-  }
+  };
+
+  let finalText = await answer();
 
   let output: unknown = finalText;
   if (outputParser) {
@@ -232,15 +234,9 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
         role: 'user',
         content: `Your previous answer could not be parsed: ${errorMessage(firstError)}\nAnswer again, following these instructions exactly:\n${outputParser.getFormatInstructions()}`,
       });
-      const retry = await callModel({
-        messages,
-        responseFormat:
-          responseFormat ??
-          (wantsSchema && caps.structuredOutput ? { type: 'json', schema: outputParser.schema } : undefined),
-        signal: options.signal,
-      });
-      messages.push(retry.message);
-      finalText = messageText(retry.message.content);
+      // same tools and format as the first pass: the history holds tool calls the provider needs them for
+      iterations = 0;
+      finalText = await answer();
       try {
         output = await outputParser.parse(finalText);
       } catch (secondError) {

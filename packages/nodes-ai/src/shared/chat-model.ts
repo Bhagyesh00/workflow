@@ -48,6 +48,14 @@ export class ModelRefusalError extends Error {
   }
 }
 
+/**
+ * An error event inside a response stream. Providers answer 200 and report overload or server
+ * trouble in the body, so the equivalent HTTP status is carried over to let the retry policy see it.
+ */
+export function streamError(message: string, httpCode?: number): Error {
+  return Object.assign(new Error(message), httpCode ? { httpCode } : {});
+}
+
 export class HttpChatModel implements AiChatModel {
   readonly kind = 'chatModel' as const;
   readonly provider: string;
@@ -81,18 +89,23 @@ export class HttpChatModel implements AiChatModel {
     };
     const input = logInput(request, this.model);
     try {
-      const body = await withRetries(
-        () =>
-          this.ctx.helpers.httpRequestWithAuthentication(
+      // streams are parsed inside the retry: an error event in the body is retried like the HTTP error
+      // it stands for, and deltas reach the caller only once a whole attempt parsed
+      const response = await withRetries(
+        async () => {
+          const body = await this.ctx.helpers.httpRequestWithAuthentication(
             this.adapter.credentialType,
             http,
             this.options.itemIndex,
-          ),
+          );
+          if (!streaming) return this.adapter.parseResponse(body);
+          const deltas: string[] = [];
+          const parsed = parseStreamedBody(this.adapter, body, (text) => deltas.push(text));
+          for (const text of deltas) onDelta!(text);
+          return parsed;
+        },
         { maxRetries: this.options.maxRetries, signal: request.signal ?? this.ctx.signal },
       );
-      const response = streaming
-        ? parseStreamedBody(this.adapter, body, onDelta!)
-        : this.adapter.parseResponse(body);
       this.ctx.logSubNodeRun(input, logOutput(response));
       return response;
     } catch (error) {

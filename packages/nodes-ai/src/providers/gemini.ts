@@ -11,7 +11,7 @@ import type {
   DataObject,
   HttpRequestOptions,
 } from '@workflow/workflow';
-import { type ChatAdapter, ModelRefusalError, trimSlash } from '../shared/chat-model';
+import { type ChatAdapter, ModelRefusalError, streamError, trimSlash } from '../shared/chat-model';
 import { isObjectSchema, toGeminiSchema } from '../shared/json-schema';
 import { RawContentCache } from '../shared/markers';
 import { sseJson } from '../shared/sse';
@@ -203,6 +203,14 @@ export function parseGeminiResponse(body: unknown, cache?: RawContentCache<Part[
   };
 }
 
+/** HTTP status for a stream error that names only a status string */
+const GEMINI_STREAM_STATUS: Record<string, number> = {
+  RESOURCE_EXHAUSTED: 429,
+  INTERNAL: 500,
+  UNAVAILABLE: 503,
+  DEADLINE_EXCEEDED: 504,
+};
+
 /** `streamGenerateContent?alt=sse` delivers partial candidates; merge them into one response. */
 export function parseGeminiStream(
   text: string,
@@ -212,7 +220,12 @@ export function parseGeminiStream(
   const parts: Part[] = [];
   let last: Record<string, any> = {};
   for (const { json } of sseJson(text)) {
-    if (json.error) throw new Error(json.error.message ?? 'The Gemini stream reported an error');
+    if (json.error) {
+      throw streamError(
+        json.error.message ?? 'The Gemini stream reported an error',
+        Number(json.error.code) || GEMINI_STREAM_STATUS[String(json.error.status)],
+      );
+    }
     last = json;
     for (const p of json.candidates?.[0]?.content?.parts ?? []) {
       if (typeof p.text === 'string' && !p.thought) onDelta(p.text);

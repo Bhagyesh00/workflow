@@ -13,6 +13,7 @@ import {
   type ChatAdapter,
   type ChatModelCapabilities,
   ModelRefusalError,
+  streamError,
   trimSlash,
 } from '../shared/chat-model';
 import { isObjectSchema } from '../shared/json-schema';
@@ -170,6 +171,15 @@ export function parseOpenAiResponse(body: unknown): AiChatResponse {
   };
 }
 
+/** HTTP status a stream `error` object stands for (the status line is already 200 by then) */
+const OPENAI_STREAM_STATUS: Record<string, number> = {
+  server_error: 500,
+  rate_limit_exceeded: 429,
+  rate_limit_error: 429,
+  engine_overloaded: 503,
+  overloaded_error: 503,
+};
+
 /** Rebuild a response from `stream: true` chunks. */
 export function parseOpenAiStream(text: string, onDelta: (text: string) => void): AiChatResponse {
   let content = '';
@@ -178,7 +188,12 @@ export function parseOpenAiStream(text: string, onDelta: (text: string) => void)
   let usage: AiChatResponse['usage'];
   const calls = new Map<number, { id: string; name: string; args: string }>();
   for (const { json } of sseJson(text)) {
-    if (json.error) throw new Error(json.error.message ?? 'The model stream reported an error');
+    if (json.error) {
+      throw streamError(
+        json.error.message ?? 'The model stream reported an error',
+        OPENAI_STREAM_STATUS[String(json.error.code)] ?? OPENAI_STREAM_STATUS[String(json.error.type)],
+      );
+    }
     model ??= json.model;
     if (json.usage) {
       usage = {

@@ -17,7 +17,7 @@ import type {
   DataObject,
   HttpRequestOptions,
 } from '@workflow/workflow';
-import { type ChatAdapter, ModelRefusalError, trimSlash } from '../shared/chat-model';
+import { type ChatAdapter, ModelRefusalError, streamError, trimSlash } from '../shared/chat-model';
 import { toAnthropicSchema } from '../shared/json-schema';
 import { isToolError, RawContentCache } from '../shared/markers';
 import { sseJson } from '../shared/sse';
@@ -36,6 +36,14 @@ const SERVER_FALLBACK_MODELS = new Set([
   'claude-sonnet-5-5',
 ]);
 const SERVER_FALLBACK_BETA = 'server-side-fallback-2026-07-01';
+
+/** HTTP status a stream `error` event stands for (the status line is already 200 by then) */
+const ANTHROPIC_STREAM_STATUS: Record<string, number> = {
+  overloaded_error: 529,
+  api_error: 500,
+  rate_limit_error: 429,
+  timeout_error: 504,
+};
 
 export interface AnthropicChatConfig {
   baseUrl: string;
@@ -262,7 +270,10 @@ export function parseAnthropicStream(
         message.usage = { ...message.usage, ...json.usage };
         break;
       case 'error':
-        throw new Error(json.error?.message ?? 'The Anthropic stream reported an error');
+        throw streamError(
+          json.error?.message ?? 'The Anthropic stream reported an error',
+          ANTHROPIC_STREAM_STATUS[json.error?.type as string],
+        );
       default:
         break;
     }

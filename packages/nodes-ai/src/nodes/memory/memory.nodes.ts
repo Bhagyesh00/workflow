@@ -225,8 +225,6 @@ export const MemoryBufferWindowNode: NodeType = {
 // Postgres
 // ---------------------------------------------------------------------------------------------
 
-const ensuredTables = new Set<string>();
-
 export const MemoryPostgresChatNode: NodeType = {
   description: memoryDescription(
     {
@@ -298,8 +296,6 @@ export const MemoryPostgresChatNode: NodeType = {
 };
 
 async function ensureChatTable(client: import('pg').Client, table: string): Promise<void> {
-  const cacheKey = `${(client as unknown as { host?: string }).host}:${(client as unknown as { database?: string }).database}:${table}`;
-  if (ensuredTables.has(cacheKey)) return;
   const indexName = `"${table.replace(/"/g, '').split('.').pop()!.slice(0, 40)}_tenant_session_idx"`;
   try {
     await client.query(
@@ -317,7 +313,6 @@ async function ensureChatTable(client: import('pg').Client, table: string): Prom
     const code = (error as { code?: string }).code;
     if (code !== '23505' && code !== '42P07') throw error;
   }
-  ensuredTables.add(cacheKey);
 }
 
 // ---------------------------------------------------------------------------------------------
