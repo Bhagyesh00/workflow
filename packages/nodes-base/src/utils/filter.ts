@@ -20,6 +20,8 @@ import { deepEqual } from './utilities';
 export interface FilterOptions {
   caseSensitive: boolean;
   typeValidation: 'strict' | 'loose';
+  /** IANA zone in which dates without an offset are read (the workflow timezone); UTC when unset */
+  zone?: string;
 }
 
 export class FilterError extends Error {
@@ -171,6 +173,7 @@ export function coerce(
   type: FilterOperatorType,
   loose: boolean,
   side: 'left' | 'right' = 'left',
+  zone = 'UTC',
 ): unknown {
   if (isNil(value) || type === 'any') return value;
   switch (type) {
@@ -199,7 +202,7 @@ export function coerce(
       throw typeError(value, type, side);
     }
     case 'dateTime': {
-      const d = parseDate(value, loose);
+      const d = parseDate(value, loose, zone);
       if (d?.isValid) return d;
       throw typeError(value, type, side);
     }
@@ -327,7 +330,7 @@ export function evaluateCondition(condition: FilterCondition, options: FilterOpt
       break;
   }
 
-  const left = coerce(rawLeft, type, loose, 'left');
+  const left = coerce(rawLeft, type, loose, 'left', options.zone);
   if (operation === 'true' || operation === 'false') return left === (operation === 'true');
 
   // operations comparing against the right value
@@ -368,6 +371,7 @@ export function evaluateCondition(condition: FilterCondition, options: FilterOpt
     rightType,
     loose || isTypedConstant(condition.rightValue, rightType),
     'right',
+    options.zone,
   );
 
   switch (type) {
@@ -466,6 +470,7 @@ export function evaluateFilter(
   const options: FilterOptions = {
     caseSensitive: overrides.caseSensitive ?? filter?.options?.caseSensitive ?? true,
     typeValidation: overrides.typeValidation ?? filter?.options?.typeValidation ?? 'strict',
+    zone: overrides.zone,
   };
   if (!conditions.length) return true;
   const combinator = filter?.combinator === 'or' ? 'or' : 'and';

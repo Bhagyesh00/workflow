@@ -57,6 +57,8 @@ export function itemMatches(
   const ignoreCase = ctx.getNodeParameter(ignoreCaseParameter, itemIndex, false) as boolean;
   try {
     return evaluateFilter(filter, {
+      // offset-less dates are read in the workflow timezone (R38)
+      zone: ctx.getTimezone(),
       ...(loose ? { typeValidation: 'loose' } : {}),
       ...(ignoreCase ? { caseSensitive: false } : {}),
     });

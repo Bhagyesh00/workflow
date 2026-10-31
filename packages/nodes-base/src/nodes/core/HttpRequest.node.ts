@@ -952,9 +952,71 @@ async function requestForItem(ctx: ExecuteContext, i: number, item: Item): Promi
   const interval = Math.max(0, Number(evaluate(pagination.requestInterval ?? 0, vars({}))) || 0);
 
   const out: Item[] = [];
-  let current: HttpRequestOptions = { ...request, qs: request.qs ? { ...request.qs } : undefined };
   const signatureOf = (req: HttpRequestOptions) =>
     JSON.stringify([req.url, req.qs, req.headers, req.body instanceof Uint8Array ? '' : req.body]);
+  const requestVars = (req: HttpRequestOptions) => ({
+    url: req.url,
+    method: req.method,
+    qs: req.qs ?? {},
+    headers: req.headers ?? {},
+    body: req.body,
+  });
+  const applyParameters = (
+    base: HttpRequestOptions,
+    variables: DataObject,
+    firstRequest = false,
+  ): HttpRequestOptions => {
+    const params = pagination.parameters?.parameters ?? [];
+    if (!params.length) {
+      throw new NodeOperationError(ctx.getNode(), 'Add at least one pagination parameter', {
+        itemIndex: i,
+      });
+    }
+    const next: HttpRequestOptions = {
+      ...base,
+      qs: { ...(base.qs ?? {}) },
+      headers: { ...(base.headers ?? {}) },
+      body: isPlainObject(base.body) ? { ...base.body } : base.body,
+    };
+    for (const p of params) {
+      const name = String(evaluate(p.name ?? '', variables) ?? '');
+      if (!name) continue;
+      let value: unknown;
+      try {
+        value = evaluate(p.value ?? '', variables);
+      } catch (error) {
+        // before the first response a parameter built from $response cannot be evaluated: leave it out
+        if (firstRequest) continue;
+        throw error;
+      }
+      if (value === undefined || value === null || (firstRequest && value === '')) continue;
+      const type = String(p.type ?? 'qs');
+      if (type === 'headers') next.headers![name] = String(value);
+      else if (type === 'body') {
+        if (next.body !== undefined && !isPlainObject(next.body)) {
+          throw new NodeOperationError(ctx.getNode(), 'Body pagination parameters need a JSON or form body', {
+            itemIndex: i,
+          });
+        }
+        next.body = { ...((next.body as DataObject | undefined) ?? {}), [name]: value };
+        next.bodyType ??= 'json';
+      } else next.qs![name] = value;
+    }
+    return next;
+  };
+  let current: HttpRequestOptions = { ...request, qs: request.qs ? { ...request.qs } : undefined };
+  if (mode !== 'responseContainsNextURL') {
+    // the first request carries the pagination parameters too, evaluated for page 0 with no response yet
+    current = applyParameters(
+      current,
+      vars({
+        $response: { body: undefined, headers: {}, statusCode: 0 },
+        $pageCount: 0,
+        $request: requestVars(current),
+      }),
+      true,
+    );
+  }
   let previousSignature = signatureOf(current);
   for (let pageCount = 0; ; ) {
     if (pageCount > 0 && interval) await sleep(interval, ctx.signal);
@@ -981,13 +1043,7 @@ async function requestForItem(ctx: ExecuteContext, i: number, item: Item): Promi
     const variables = vars({
       $response,
       $pageCount: pageCount,
-      $request: {
-        url: current.url,
-        method: current.method,
-        qs: current.qs ?? {},
-        headers: current.headers ?? {},
-        body: current.body,
-      },
+      $request: requestVars(current),
     });
     if (completeWhen === 'responseIsEmpty' && isEmptyBody(parsed ?? res.body)) break;
     out.push(...items);
@@ -1009,39 +1065,7 @@ async function requestForItem(ctx: ExecuteContext, i: number, item: Item): Promi
       const nextUrl = new URL(String(next), current.url).toString();
       current = { ...current, url: nextUrl, qs: nextUrl.includes('?') ? undefined : current.qs };
     } else {
-      const params = pagination.parameters?.parameters ?? [];
-      if (!params.length) {
-        throw new NodeOperationError(ctx.getNode(), 'Add at least one pagination parameter', {
-          itemIndex: i,
-        });
-      }
-      const next: HttpRequestOptions = {
-        ...current,
-        qs: { ...(current.qs ?? {}) },
-        headers: { ...(current.headers ?? {}) },
-        body: isPlainObject(current.body) ? { ...current.body } : current.body,
-      };
-      for (const p of params) {
-        const name = String(evaluate(p.name ?? '', variables) ?? '');
-        if (!name) continue;
-        const value = evaluate(p.value ?? '', variables);
-        const type = String(p.type ?? 'qs');
-        if (type === 'headers') next.headers![name] = String(value ?? '');
-        else if (type === 'body') {
-          if (next.body !== undefined && !isPlainObject(next.body)) {
-            throw new NodeOperationError(
-              ctx.getNode(),
-              'Body pagination parameters need a JSON or form body',
-              {
-                itemIndex: i,
-              },
-            );
-          }
-          next.body = { ...((next.body as DataObject | undefined) ?? {}), [name]: value };
-          next.bodyType ??= 'json';
-        } else next.qs![name] = value;
-      }
-      current = next;
+      current = applyParameters(current, variables);
     }
     const signature = signatureOf(current);
     if (signature === previousSignature) {

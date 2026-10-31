@@ -4,6 +4,7 @@ import {
   deepCopy,
   type ExecuteContext,
   type Item,
+  isPlainObject,
   NodeOperationError,
   type NodeType,
   setByPath,
@@ -312,7 +313,8 @@ export const SetNode: NodeType = {
           };
           for (const a of assignments) {
             if (!a.name) continue;
-            const value = convertFieldValue(
+            // copy so a later dotted assignment can extend an object taken from the (frozen) input data
+            const raw = convertFieldValue(
               a.value,
               a.type,
               a.name,
@@ -320,6 +322,8 @@ export const SetNode: NodeType = {
               i,
               Boolean(options.ignoreConversionErrors),
             );
+            // class instances (luxon dates, Buffers) stay as they are; only plain data is copied
+            const value = isPlainObject(raw) || Array.isArray(raw) ? deepCopy(raw) : raw;
             if (dotNotation) setByPath(json, a.name, value);
             else json[a.name] = value;
           }

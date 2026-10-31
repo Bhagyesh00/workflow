@@ -43,6 +43,9 @@ export function ruleToCron(rule: Rule): string {
   }
 }
 
+/** days from 1970-01-01 to the first Monday (1970-01-05), the anchor week of every multi-week schedule */
+const EPOCH_MONDAY_DAYS = 4;
+
 const hourOptions = Array.from({ length: 24 }, (_, h) => ({
   name: `${String(h).padStart(2, '0')}:00`,
   value: h,
@@ -218,7 +221,17 @@ export const ScheduleTriggerNode: NodeType = {
     if (ctx.getMode() === 'manual') {
       return { manualTriggerFunction: async () => emit() };
     }
-    const stops = rules.map((rule) => ctx.registerCron(ruleToCron(rule), emit));
+    const stops = rules.map((rule) => {
+      const weeks = rule.field === 'weeks' ? Math.floor(Number(rule.weeksInterval ?? 1)) : 1;
+      if (!(weeks > 1)) return ctx.registerCron(ruleToCron(rule), emit);
+      // cron has no "every N weeks": tick weekly and run only on weeks that are a multiple of N since the epoch,
+      // so the schedule stays the same after a restart or reactivation
+      return ctx.registerCron(ruleToCron(rule), () => {
+        const week = DateTime.now().setZone(timezone).startOf('week');
+        const days = Date.UTC(week.year, week.month - 1, week.day) / 86_400_000;
+        if (((days - EPOCH_MONDAY_DAYS) / 7) % weeks === 0) emit();
+      });
+    });
     return {
       closeFunction: async () => {
         for (const stop of stops) stop();
