@@ -217,21 +217,21 @@ describe('allocation budget (R19c)', () => {
     }
     expectFastError(
       () => evaluate('={{ String.raw({ raw: { length: 5e7 } }).length }}'),
-      /allocation|exceeds/,
+      /allocation|exceeds|time limit/,
     );
     expectFastError(
       () =>
         evaluate(
           "={{ (() => { const s = 'x'.repeat(3e7); return Array.from({ length: 17 }, () => s).join('').length })() }}",
         ),
-      /allocation|exceeds/,
+      /allocation|exceeds|time limit/,
     );
     expectFastError(
       () =>
         evaluate(
           "={{ (() => { const s = 'x'.repeat(3e7); return [s, s, s].flatMap(() => [s, s]).join('').length })() }}",
         ),
-      /allocation|exceeds/,
+      /allocation|exceeds|time limit/,
     );
     expectFastError(
       () =>

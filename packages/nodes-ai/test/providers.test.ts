@@ -207,7 +207,8 @@ describe('OpenAI chat model', () => {
     expect(r.output('Agent')).toEqual([{ output: 'Forty-two' }]);
     expect(http.bodies[0]).toMatchObject({ stream: true, stream_options: { include_usage: true } });
     expect(http.requests[0].responseType).toBe('text');
-    expect(chunks.filter((c) => c.type === 'item').map((c) => c.content)).toEqual(['Forty', '-two']);
+    // the agent sends plain text deltas; the server adds the one NDJSON item wrapper
+    expect(chunks).toEqual(['Forty', '-two']);
 
     const again = await run(nodes, links, { services: services({ creds: OPENAI_CREDS, http }) });
     expect(again.output('Agent')).toEqual([{ output: 'plain JSON' }]);

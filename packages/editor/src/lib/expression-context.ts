@@ -187,7 +187,9 @@ export function previewExpression(expression: string, ctx: ExpressionDataContext
       code,
       hint,
       noInput:
-        ctx.connectionInputData.length === 0 && READS_INPUT_DATA.test(expression) && MISSING_DATA.test(message),
+        ctx.connectionInputData.length === 0 &&
+        READS_INPUT_DATA.test(expression) &&
+        MISSING_DATA.test(message),
     };
   }
 }

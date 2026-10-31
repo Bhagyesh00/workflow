@@ -866,7 +866,10 @@ export class ExecutionService {
     // the retry owns copies of every binary file it references: the original may be pruned or deleted
     const retryId = randomUUID();
     const clone = <T>(value: T): T => (value === undefined ? value : JSON.parse(JSON.stringify(value)));
-    const launch = async (input: Partial<StartExecutionInput>, ...owned: unknown[]): Promise<StartedExecution> => {
+    const launch = async (
+      input: Partial<StartExecutionInput>,
+      ...owned: unknown[]
+    ): Promise<StartedExecution> => {
       try {
         for (const value of owned) await this.adoptBinaryData(tenantId, retryId, value);
         return await this.start({
@@ -933,7 +936,7 @@ export class ExecutionService {
     const { config } = this.deps;
     if (config.binaryData.mode !== 'filesystem') return;
     const prefix = `fs:${tenantId}/`;
-    const unsafe = (part: string) => !part || part === '.' || part === '..' || /[\:]/.test(part);
+    const unsafe = (part: string) => !part || part === '.' || part === '..' || /[:]/.test(part);
     const walk = async (node: unknown): Promise<void> => {
       if (!node || typeof node !== 'object') return;
       const ref = node as { id?: unknown; mimeType?: unknown };

@@ -38,7 +38,7 @@ const modelPackage: NodePackage = {
         const hang = Boolean(ctx.getNodeParameter('hang', itemIndex, false));
         const chat = async (): Promise<AiChatResponse> => {
           if (fail) throw new Error('The model is down');
-          return { message: { role: 'assistant', content: text }, stopReason: 'stop' };
+          return { message: { role: 'assistant', content: text }, stopReason: 'end' };
         };
         return {
           response: {
@@ -119,7 +119,11 @@ async function chatWorkflow(nodes: WorkflowNode[], connections: Record<string, u
 
 async function agentChat(options: DataObject, model: DataObject, agent: DataObject = {}) {
   return chatWorkflow(
-    [chatTrigger(options), node('Agent', 'ai.agent', agent, [200, 0]), node('Model', 'test.scriptedChatModel', model)],
+    [
+      chatTrigger(options),
+      node('Agent', 'ai.agent', agent, [200, 0]),
+      node('Model', 'test.scriptedChatModel', model),
+    ],
     { ...link('Chat', 'Agent'), ...link('Model', 'Agent', 'ai_languageModel') },
   );
 }
@@ -131,7 +135,12 @@ const lines = (body: string) =>
     .map((l) => JSON.parse(l) as DataObject);
 
 const send = (url: string) =>
-  app.inject({ method: 'POST', url, headers: { origin: WIDGET }, payload: { sessionId: 's1', chatInput: 'Hi' } });
+  app.inject({
+    method: 'POST',
+    url,
+    headers: { origin: WIDGET },
+    payload: { sessionId: 's1', chatInput: 'Hi' },
+  });
 
 function expectSandboxed(headers: Record<string, unknown>) {
   expect(headers['content-security-policy']).toMatch(/^sandbox /);
@@ -140,7 +149,10 @@ function expectSandboxed(headers: Record<string, unknown>) {
 
 describe('chat streaming protocol', () => {
   it('writes each agent delta as one item line with text content, then one end line', async () => {
-    const { url } = await agentChat({ responseMode: 'streaming' }, { text: 'Streaming works fine', streaming: true });
+    const { url } = await agentChat(
+      { responseMode: 'streaming' },
+      { text: 'Streaming works fine', streaming: true },
+    );
     const res = await send(url);
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('application/x-ndjson');

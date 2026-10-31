@@ -18,8 +18,8 @@ import { PassThrough, type Readable } from 'node:stream';
 import { createWebhookContext, getResolvedParameters, type NodeTypes } from '@workflow/core';
 import {
   type DataObject,
-  type ExecutionState,
   type ExecutionMode,
+  type ExecutionState,
   ExpressionEvaluator,
   type Item,
   isExpression,
@@ -177,7 +177,10 @@ export class WebhookService {
         const existing = await repos.idempotency.get(tenant.id, row.id, key);
         if (existing?.response) return cors(replayStored(existing.response, existing.executionId));
         return cors(
-          json(409, errorBody('idempotency_in_progress', 'A request with this Idempotency-Key is in progress')),
+          json(
+            409,
+            errorBody('idempotency_in_progress', 'A request with this Idempotency-Key is in progress'),
+          ),
         );
       }
       let executionId: string | null = null;
@@ -249,7 +252,8 @@ export class WebhookService {
       const method = requested && methods.includes(requested) ? requested : methods[0];
       const found = method ? await this.findWebhook(tenant.id, method, path) : undefined;
       const row = found ? await repos.workflows.get(tenant.id, found.workflowId) : undefined;
-      if (found && row) target = { definition: toDefinition(row), nodeName: found.nodeName, workflowId: row.id };
+      if (found && row)
+        target = { definition: toDefinition(row), nodeName: found.nodeName, workflowId: row.id };
     }
     if (!methods.length) return notRegistered('OPTIONS', path);
     const reply: Record<string, string> = {
@@ -324,7 +328,13 @@ export class WebhookService {
       received = await receive(incoming);
     } catch (error) {
       const workflow = new Workflow(definition, this.deps.nodeTypes);
-      const source: CorsSource = { tenant, mode: 'manual', workflowId: registration.workflowId, workflow, node };
+      const source: CorsSource = {
+        tenant,
+        mode: 'manual',
+        workflowId: registration.workflowId,
+        workflow,
+        node,
+      };
       return this.decorate(bodyErrorReply(error), source, incoming.headers);
     }
     // one-shot: the first call consumes the registration
@@ -548,7 +558,10 @@ export class WebhookService {
         const { executions, logger } = this.deps;
         executions.discardWaiter(execution.executionId);
         executions.stop(tenant.id, execution.executionId).catch((error: unknown) => {
-          logger.warn({ err: error, executionId: execution.executionId }, 'Could not stop an abandoned stream');
+          logger.warn(
+            { err: error, executionId: execution.executionId },
+            'Could not stop an abandoned stream',
+          );
         });
       });
       void execution.finished?.then((outcome) => {
@@ -729,7 +742,12 @@ export class WebhookService {
     const value = nodeOptions(workflow, node).allowedOrigins;
     if (!isExpression(value)) return value;
     try {
-      const services = await this.deps.executions.buildServices({ tenant, executionId: '', mode, workflowId });
+      const services = await this.deps.executions.buildServices({
+        tenant,
+        executionId: '',
+        mode,
+        workflowId,
+      });
       const request: WebhookRequest = { method: 'OPTIONS', headers: {}, query: {}, params: {}, body: {} };
       const ctx = createWebhookContext(
         { workflow, node, services, evaluator: this.evaluator, signal: AbortSignal.timeout(60_000) },

@@ -159,7 +159,13 @@ export const redis: CredentialType = {
   properties: [
     { displayName: 'Host', name: 'host', type: 'string', default: 'localhost', required: true },
     { displayName: 'Port', name: 'port', type: 'number', default: 6379 },
-    { displayName: 'User', name: 'user', type: 'string', default: '', description: 'Redis 6+ ACL user (optional)' },
+    {
+      displayName: 'User',
+      name: 'user',
+      type: 'string',
+      default: '',
+      description: 'Redis 6+ ACL user (optional)',
+    },
     {
       displayName: 'Password',
       name: 'password',

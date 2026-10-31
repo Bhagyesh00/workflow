@@ -31,7 +31,11 @@ describe('previewExpression without input data', () => {
   const empty = buildExpressionContext({ workflow, runData: {}, nodeName: 'Target' });
 
   it('marks failures that come from missing input as waiting for input', () => {
-    for (const expression of ['={{ $json.name }}', '={{ $input.first().json.a }}', "={{ $('Source').item.json.a }}"]) {
+    for (const expression of [
+      '={{ $json.name }}',
+      '={{ $input.first().json.a }}',
+      "={{ $('Source').item.json.a }}",
+    ]) {
       expect(previewExpression(expression, empty), expression).toMatchObject({ ok: false, noInput: true });
     }
   });
@@ -77,7 +81,10 @@ describe('previewExpression with input data', () => {
   });
 
   it('does not treat a missing value on real input as waiting for input', () => {
-    expect(previewExpression('={{ $json.name.first.last }}', ctx)).toMatchObject({ ok: false, noInput: false });
+    expect(previewExpression('={{ $json.name.first.last }}', ctx)).toMatchObject({
+      ok: false,
+      noInput: false,
+    });
   });
 });
 

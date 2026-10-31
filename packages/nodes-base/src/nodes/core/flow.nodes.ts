@@ -598,7 +598,8 @@ export const ExecuteWorkflowNode: NodeType = {
   methods: {
     listSearch: {
       async searchWorkflows(ctx, filter, paginationToken): Promise<ListSearchResult> {
-        if (!ctx.listWorkflows) throw new NodeOperationError(ctx.getNode(), 'This host cannot list workflows');
+        if (!ctx.listWorkflows)
+          throw new NodeOperationError(ctx.getNode(), 'This host cannot list workflows');
         const page = await ctx.listWorkflows({
           filter: filter?.trim() || undefined,
           paginationToken,
@@ -606,7 +607,11 @@ export const ExecuteWorkflowNode: NodeType = {
         });
         const base = ctx.getInstanceBaseUrl().replace(/\/+$/, '');
         return {
-          results: page.workflows.map((w) => ({ name: w.name, value: w.id, url: `${base}/workflow/${w.id}` })),
+          results: page.workflows.map((w) => ({
+            name: w.name,
+            value: w.id,
+            url: `${base}/workflow/${w.id}`,
+          })),
           paginationToken: page.paginationToken,
         };
       },

@@ -195,7 +195,7 @@ describe('retry of a retry that timed out', () => {
     );
     const firstRow = await waitForExecution(server.ctx, tenant.id, first.executionId);
     expect(firstRow).toMatchObject({ status: 'error', errorNode: null });
-    const firstData = await server.ctx.repos.executions.getData(tenant.id, first.executionId);
+    const firstData: any = await server.ctx.repos.executions.getData(tenant.id, first.executionId);
     expect(firstData!.runOptions).toMatchObject({ startNode: 'Beta' });
     expect(runsOf(firstData!.state, 'Charge')).toHaveLength(2);
 
@@ -206,7 +206,9 @@ describe('retry of a retry that timed out', () => {
     const state: any = secondData!.state;
     expect(Object.keys(state.resultData.pinData).sort()).toEqual(['Beta', 'Charge']);
     // the charge is replayed from the pin and the other trigger never ran
-    expect(state.resultData.pinData.Charge).toEqual(firstData!.state.resultData.runData.Charge[1].data.main[0]);
+    expect(state.resultData.pinData.Charge).toEqual(
+      firstData!.state.resultData.runData.Charge[1].data.main[0],
+    );
     expect(runsOf(state, 'Alpha')).toHaveLength(0);
   });
 });
@@ -226,7 +228,9 @@ describe('binary data of a retried execution', () => {
     writeFileSync(path.join(originalDir, fileName), 'payload');
     const data = await server.ctx.repos.executions.getData(tenant.id, executionId);
     const state: any = JSON.parse(JSON.stringify(data!.state));
-    const binary = { data: { data: '', id: `fs:${tenant.id}/${executionId}/${fileName}`, mimeType: 'text/plain' } };
+    const binary = {
+      data: { data: '', id: `fs:${tenant.id}/${executionId}/${fileName}`, mimeType: 'text/plain' },
+    };
     state.resultData.runData.Start[0].data.main[0][0].binary = binary;
     state.executionData.failedExecuteData.data.main[0][0].binary = binary;
     await server.ctx.repos.executions.saveState(tenant.id, executionId, state);

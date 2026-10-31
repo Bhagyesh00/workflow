@@ -23,7 +23,8 @@ export interface PostgresCredentials {
 
 /** Read a `postgres` credential (field names as defined by the nodes-base credential type). */
 export function postgresCredentials(data: DataObject): PostgresCredentials {
-  const ssl: PostgresCredentials['ssl'] = data.ssl === 'allow' || data.ssl === 'require' ? data.ssl : 'disable';
+  const ssl: PostgresCredentials['ssl'] =
+    data.ssl === 'allow' || data.ssl === 'require' ? data.ssl : 'disable';
   return {
     host: String(data.host ?? 'localhost'),
     port: Number(data.port ?? 5432),

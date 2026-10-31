@@ -4,8 +4,8 @@ import { CredentialTypes, type HttpClient } from '@workflow/core';
 import { nodesAiPackage } from '@workflow/nodes-ai';
 import type { HttpRequestOptions } from '@workflow/workflow';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { CredentialService } from '../src/services/credentials';
 import { testCredential } from '../src/services/credential-test';
+import { CredentialService } from '../src/services/credentials';
 import {
   chain,
   createTestServer,
@@ -59,7 +59,9 @@ describe('CredentialsProvider', () => {
     const a = await signup(server.app);
     const b = await signup(server.app);
     const cred = await createCredential(a.tenant.id, { type: 'testApi', data: { apiKey: 'a-secret' } });
-    const own = await server.ctx.credentials.provider(a.tenant.id).get({ id: cred.id, name: 'Cred' }, 'testApi');
+    const own = await server.ctx.credentials
+      .provider(a.tenant.id)
+      .get({ id: cred.id, name: 'Cred' }, 'testApi');
     expect(own.apiKey).toBe('a-secret');
     const other = server.ctx.credentials.provider(b.tenant.id);
     await expect(other.get({ id: cred.id, name: 'Cred' }, 'testApi')).rejects.toThrow(/was not found/);
@@ -147,7 +149,9 @@ describe('credential type defaults', () => {
       type: 'gmailOAuth2',
       data: { clientId: 'id', clientSecret: 's' },
     });
-    const data = await server.ctx.credentials.provider(tenant.id).get({ id: cred.id, name: 'Mail' }, 'gmailOAuth2');
+    const data = await server.ctx.credentials
+      .provider(tenant.id)
+      .get({ id: cred.id, name: 'Mail' }, 'gmailOAuth2');
     expect(data).toMatchObject({
       authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
       accessTokenUrl: 'https://oauth2.googleapis.com/token',

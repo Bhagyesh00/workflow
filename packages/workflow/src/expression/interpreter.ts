@@ -291,8 +291,13 @@ registerGuardedFunction(Array.prototype.flat, {
   fresh: 'shallow',
   charge: true,
   run: (budget, thisArg, args) => {
-    if (Array.isArray(thisArg))
-      budget.reserve(flatLength(budget, thisArg, flatDepth(args[0]), LIMITS.maxAllocation));
+    if (Array.isArray(thisArg)) {
+      const length = flatLength(budget, thisArg, flatDepth(args[0]), LIMITS.maxAllocation);
+      // refuse before copying: the result would only be rejected after the native call
+      if (length > LIMITS.maxArrayLength)
+        throw new ExpressionError('Array exceeds the maximum allowed length');
+      budget.reserve(length);
+    }
     return Reflect.apply(Array.prototype.flat, thisArg, args);
   },
 });
