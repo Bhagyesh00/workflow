@@ -1,6 +1,6 @@
 /**
  * Incoming webhook calls (ARCHITECTURE.md §11): production `/webhook/<tenantSlug>/<path>`,
- * test `/webhook-test/<tenantSlug>/<path>` and resume `/webhook-waiting/<executionId>`.
+ * test `/webhook-test/<tenantSlug>/<path>` and resume `/webhook-waiting/<executionId>/<signature>`.
  *
  * Response modes: `onReceived` (answer at once), `lastNode` (answer with the last node's data),
  * `responseNode` (hold the request until a Respond to Webhook node answers or the run ends).
@@ -367,6 +367,11 @@ export class WebhookService {
 
   async handleWaiting(executionId: string, incoming: IncomingWebhook): Promise<WebhookReply> {
     const { repos, nodeTypes, executions } = this.deps;
+    // `<signature>[/<suffix>]`: an unsigned or forged URL is answered like an unknown execution
+    const [signature = '', ...rest] = incoming.path.split('/');
+    if (!executions.verifyResumeSignature(executionId, signature))
+      return json(404, errorBody('not_found', 'Execution not found'));
+    const path = rest.join('/');
     const tenantId = await repos.executions.findTenantOf(executionId);
     if (!tenantId) return json(404, errorBody('not_found', 'Execution not found'));
     // every query below is scoped to the execution's own tenant
@@ -385,6 +390,11 @@ export class WebhookService {
     const hook = node && type ? nodeWebhooks(workflow, node, type, { restart: true })[0] : undefined;
     if (hook && hook.method !== incoming.method) {
       return json(404, errorBody('not_found', `This execution resumes on ${hook.method} requests`));
+    }
+    // a hook without its own path falls back to the node id; the resume URL then has no suffix
+    const suffix = hook && hook.path !== (node?.webhookId || node?.id) ? hook.path : '';
+    if (hook && path !== suffix) {
+      return json(404, errorBody('not_found', 'This execution does not resume on this path'));
     }
     const { request } = await receive(incoming);
 
@@ -658,8 +668,7 @@ export class WebhookService {
   }
 
   private finishedWithoutResponse(outcome: ExecutionOutcome): WebhookReply {
-    if (outcome.status === 'waiting')
-      return json(202, { message: 'Workflow is waiting', executionId: outcome.executionId });
+    if (outcome.status === 'waiting') return json(202, { message: 'Workflow is waiting' });
     if (outcome.status !== 'success') return json(500, errorBody('workflow_error', 'Error in workflow'));
     return json(200, { message: 'Workflow finished without a response' });
   }
@@ -671,8 +680,7 @@ export class WebhookService {
     hook: NodeWebhook,
     outcome: ExecutionOutcome,
   ): Promise<WebhookReply> {
-    if (outcome.status === 'waiting')
-      return json(202, { message: 'Workflow is waiting', executionId: outcome.executionId });
+    if (outcome.status === 'waiting') return json(202, { message: 'Workflow is waiting' });
     if (outcome.status !== 'success') return json(500, errorBody('workflow_error', 'Error in workflow'));
     const statusCode = this.responseCode(workflow, node);
     const items = (outcome.lastNodeOutput ?? []).find((o) => o?.length) ?? [];

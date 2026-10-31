@@ -377,6 +377,15 @@ export const WaitNode: NodeType = {
   },
 
   async webhook(ctx: WebhookContext): Promise<WebhookResponseData> {
+    // a time-based wait has a resume URL too, but only the time may end it
+    if (ctx.getNodeParameter('resume', 0) !== 'webhook') {
+      return {
+        webhookResponse: {
+          statusCode: 404,
+          body: { message: 'This execution is not waiting for a webhook call' },
+        },
+      };
+    }
     const req = ctx.getRequestObject();
     const options = ctx.getNodeParameter('options', 0, {}) as DataObject;
     const userAgent = String(ctx.getHeaderData()['user-agent'] ?? '');

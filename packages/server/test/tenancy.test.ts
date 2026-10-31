@@ -192,9 +192,15 @@ describe('tenant isolation', () => {
     // tenant B's REST API cannot stop or delete A's waiting execution
     expect((await b.client.post(`/rest/executions/${aExecution}/stop`)).statusCode).toBe(404);
 
+    // A's signature does not resume B's execution; the bare id resumes nothing
+    const aSignature = server.ctx.executions.resumeUrl(aExecution).split('/').pop();
+    for (const url of [`/webhook-waiting/${bExecution}`, `/webhook-waiting/${bExecution}/${aSignature}`]) {
+      expect((await server.app.inject({ method: 'POST', url, payload: { from: 'x' } })).statusCode).toBe(404);
+    }
+    expect((await server.ctx.repos.executions.get(b.tenant.id, bExecution))?.status).toBe('waiting');
     const res = await server.app.inject({
       method: 'POST',
-      url: `/webhook-waiting/${bExecution}`,
+      url: new URL(server.ctx.executions.resumeUrl(bExecution)).pathname,
       payload: { from: 'b' },
     });
     expect(res.statusCode).toBe(200);

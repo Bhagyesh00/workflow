@@ -180,7 +180,7 @@ describe('queue mode', () => {
     await waitForExecution(main.ctx, tenant.id, executionId, ['waiting']);
     const res = await main.app.inject({
       method: 'POST',
-      url: `/webhook-waiting/${executionId}`,
+      url: new URL(main.ctx.executions.resumeUrl(executionId)).pathname,
       payload: { go: 1 },
     });
     expect(res.statusCode).toBe(200);

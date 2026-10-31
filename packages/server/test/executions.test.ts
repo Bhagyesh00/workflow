@@ -474,13 +474,18 @@ describe('wait and resume', () => {
     const waiting = await waitForExecution(server.ctx, tenant.id, executionId, ['waiting']);
     expect(waiting.waitTill!.getTime()).toBeGreaterThan(Date.now());
     const before = await client.data(client.get(`/rest/executions/${executionId}`));
-    expect(outputOf(before.state, 'Url')[0].resumeUrl).toBe(
-      `http://localhost:5678/webhook-waiting/${executionId}`,
-    );
+    // the resume URL carries a signature: the bare execution id does not resume anything
+    const resumeUrl = server.ctx.executions.resumeUrl(executionId);
+    expect(outputOf(before.state, 'Url')[0].resumeUrl).toBe(resumeUrl);
+    const resumePath = new URL(resumeUrl).pathname;
+    expect(
+      (await server.app.inject({ method: 'POST', url: `/webhook-waiting/${executionId}`, payload: { x: 1 } }))
+        .statusCode,
+    ).toBe(404);
 
     const res = await server.app.inject({
       method: 'POST',
-      url: `/webhook-waiting/${executionId}`,
+      url: resumePath,
       payload: { approved: true },
     });
     expect(res.statusCode).toBe(200);
@@ -490,7 +495,7 @@ describe('wait and resume', () => {
 
     const again = await server.app.inject({
       method: 'POST',
-      url: `/webhook-waiting/${executionId}`,
+      url: resumePath,
       payload: {},
     });
     expect(again.statusCode).toBe(409);
@@ -504,19 +509,18 @@ describe('wait and resume', () => {
     });
     const { executionId } = await client.data(client.post(`/rest/workflows/${wf.id}/run`, {}));
     await waitForExecution(server.ctx, tenant.id, executionId, ['waiting']);
-    expect(
-      (await server.app.inject({ method: 'GET', url: `/webhook-waiting/${executionId}` })).statusCode,
-    ).toBe(404);
+    const resumePath = new URL(server.ctx.executions.resumeUrl(executionId)).pathname;
+    expect((await server.app.inject({ method: 'GET', url: resumePath })).statusCode).toBe(404);
     const rejected = await server.app.inject({
       method: 'POST',
-      url: `/webhook-waiting/${executionId}`,
+      url: resumePath,
       payload: { reject: true },
     });
     expect(rejected.statusCode).toBe(403);
     expect((await server.ctx.repos.executions.get(tenant.id, executionId))?.status).toBe('waiting');
     const res = await server.app.inject({
       method: 'POST',
-      url: `/webhook-waiting/${executionId}`,
+      url: resumePath,
       payload: { ok: 1 },
     });
     expect(res.statusCode).toBe(200);
