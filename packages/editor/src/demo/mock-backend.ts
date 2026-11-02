@@ -622,6 +622,11 @@ export class MockBackend {
       );
       return { executionId };
     });
+    this.on('DELETE', '/workflows/:id/listen-test-webhook', ({ params, body }) => {
+      const wf = this.workflow(params[0]);
+      if (this.listening.get(wf.id)?.nodeName === String(body.nodeName ?? '')) this.listening.delete(wf.id);
+      return { ok: true };
+    });
     this.on('POST', '/workflows/:id/listen-test-webhook', ({ params, body }) => {
       const wf = this.workflow(params[0]);
       const nodeName = String(body.nodeName ?? '');

@@ -1,6 +1,6 @@
 /** One typed function per REST endpoint of the contract. */
-import type { ListSearchResult, NodePropertyOption, WorkflowNode } from '@workflow/workflow';
-import { api } from './client';
+import type { ListSearchResult, NodePropertyOption, RunData, WorkflowNode } from '@workflow/workflow';
+import { api, request } from './client';
 import type {
   ApiKey,
   AuthResult,
@@ -81,11 +81,18 @@ export const workflowsApi = {
   remove: (id: string) => api.delete<{ ok: true }>(`/workflows/${enc(id)}`),
   activate: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/activate`),
   deactivate: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/deactivate`),
-  run: (id: string, body: RunWorkflowBody) =>
+  /** `runData`: a partial run's last run data (server runSchema) */
+  run: (id: string, body: RunWorkflowBody & { runData?: RunData }) =>
     api.post<{ executionId: string }>(`/workflows/${enc(id)}/run`, body),
   listenTestWebhook: (id: string, nodeName: string) =>
     api.post<{ testUrl: string; expiresAt: string }>(`/workflows/${enc(id)}/listen-test-webhook`, {
       nodeName,
+    }),
+  stopListeningTestWebhook: (id: string, nodeName: string) =>
+    request<{ ok: true }>({
+      method: 'DELETE',
+      path: `/workflows/${enc(id)}/listen-test-webhook`,
+      body: { nodeName },
     }),
   webhookUrls: (id: string) => api.get<WebhookUrlInfo[]>(`/workflows/${enc(id)}/webhook-urls`),
   versions: (id: string, query: { limit?: number; cursor?: string } = {}) =>

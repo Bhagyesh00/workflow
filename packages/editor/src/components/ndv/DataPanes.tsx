@@ -534,6 +534,18 @@ export function OutputPane({
           Pinned data replaces this node’s output in manual runs.
         </Callout>
       )}
+      {!pinned && task?.hints && task.hints.length > 0 && (
+        <ul aria-label="Execution hints" className="mx-3 mb-2 flex list-none flex-col gap-1.5 p-0">
+          {task.hints.map((hint, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: hints are positional and may repeat a message
+            <li key={`${i}-${hint.message}`}>
+              <Callout tone={hint.level === 'warning' ? 'warn' : 'info'} className="py-1.5 text-xs">
+                {hint.message}
+              </Callout>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="min-h-0 flex-1 border-t border-line">
         {task?.error && !pinned ? (
           <ErrorPanel error={task.error} />

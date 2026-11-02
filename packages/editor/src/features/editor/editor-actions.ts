@@ -164,6 +164,10 @@ export async function runWorkflow(
   const id = await ensureSaved(deps, false);
   if (!id) return;
   const s = useWorkflowStore.getState();
+  // partial run (n8n): send the last run data of this workflow so the start node gets its parents' output
+  const last = useRunStore.getState();
+  const runData =
+    options.startNode && last.workflowId === id && Object.keys(last.runData).length ? last.runData : undefined;
   useRunStore.getState().beginRun(id);
   try {
     const { executionId } = await workflowsApi.run(id, {
@@ -171,6 +175,7 @@ export async function runWorkflow(
       destinationNode: options.destinationNode,
       startNode: options.startNode,
       pinData: s.pinData,
+      ...(runData ? { runData } : {}),
     });
     useRunStore.getState().adopt(executionId);
   } catch (error) {
@@ -192,7 +197,7 @@ export async function listenForTestEvent(deps: EditorDeps, nodeName: string): Pr
     listenTimer = setTimeout(
       () => {
         if (useRunStore.getState().status === 'listening') {
-          useRunStore.getState().stopListening();
+          void stopListening();
           toast.info('Stopped listening', 'No test event arrived in time.');
         }
       },
@@ -203,9 +208,17 @@ export async function listenForTestEvent(deps: EditorDeps, nodeName: string): Pr
   }
 }
 
-export function stopListening(): void {
+/** Stop listening here and drop the test registration on the server (if that fails it expires by itself). */
+export async function stopListening(): Promise<void> {
   if (listenTimer) clearTimeout(listenTimer);
+  const { workflowId, testWebhook } = useRunStore.getState();
   useRunStore.getState().stopListening();
+  if (!workflowId || !testWebhook) return;
+  try {
+    await workflowsApi.stopListeningTestWebhook(workflowId, testWebhook.nodeName);
+  } catch (error) {
+    toast.error('Could not stop the test listener on the server', errorMessage(error));
+  }
 }
 
 export async function stopExecution(): Promise<void> {

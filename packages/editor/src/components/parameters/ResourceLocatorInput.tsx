@@ -10,7 +10,7 @@ import {
   resolveNodeParameters,
 } from '@workflow/workflow';
 import { ChevronDown, ExternalLink, Search } from 'lucide-react';
-import { useDeferredValue, useEffect, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { nodeTypesApi } from '../../api/endpoints';
 import { useWorkflowStore } from '../../stores/workflow-store';
@@ -37,11 +37,14 @@ export function extractFromUrl(mode: ResourceLocatorMode | undefined, url: strin
 }
 
 function ListMode({
+  name,
   mode,
   value,
   onChange,
   id,
 }: {
+  /** parameter name of the locator, left out of the search key (its value is what the search picks) */
+  name: string;
   mode: ResourceLocatorMode;
   value: ResourceLocatorValue;
   onChange: (value: ResourceLocatorValue) => void;
@@ -55,6 +58,20 @@ function ListMode({
   const method = mode.typeOptions?.searchListMethod;
 
   const workflowId = useWorkflowStore((s) => s.meta.id);
+  // the list can depend on any other parameter (spreadsheet of a sheet list, schema of a table list)
+  const parameters = useMemo(
+    () =>
+      ctx.description
+        ? resolveNodeParameters(ctx.description.properties, ctx.node.parameters, {
+            nodeVersion: ctx.node.typeVersion,
+          })
+        : ctx.node.parameters,
+    [ctx.description, ctx.node.parameters, ctx.node.typeVersion],
+  );
+  const dependencies = useMemo(
+    () => JSON.stringify(Object.entries(parameters).filter(([key]) => key !== name)),
+    [parameters, name],
+  );
   const query = useInfiniteQuery({
     queryKey: [
       'list-search',
@@ -64,6 +81,7 @@ function ListMode({
       ctx.node.name,
       deferredFilter,
       JSON.stringify(ctx.node.credentials ?? {}),
+      dependencies,
     ],
     enabled: open && Boolean(method),
     initialPageParam: undefined as string | undefined,
@@ -73,14 +91,7 @@ function ListMode({
         nodeType: ctx.node.type,
         method: method!,
         kind: 'listSearch',
-        node: {
-          ...ctx.node,
-          parameters: ctx.description
-            ? resolveNodeParameters(ctx.description.properties, ctx.node.parameters, {
-                nodeVersion: ctx.node.typeVersion,
-              })
-            : ctx.node.parameters,
-        },
+        node: { ...ctx.node, parameters },
         filter: deferredFilter || undefined,
         paginationToken: pageParam,
         workflowId,
@@ -229,7 +240,7 @@ export function ResourceLocatorInput({ prop, value, onChange, id }: InputProps) 
             />
           </div>
         ) : mode.type === 'list' ? (
-          <ListMode mode={mode} value={current} onChange={onChange} id={id} />
+          <ListMode name={prop.name} mode={mode} value={current} onChange={onChange} id={id} />
         ) : (
           <input
             id={id}
