@@ -26,6 +26,8 @@ export interface TestWebhookStore {
   list(tenantId: string): Promise<TestWebhookRegistration[]>;
   /** remove; returns false when it was already consumed (another request won) */
   remove(registration: TestWebhookRegistration): Promise<boolean>;
+  /** remove every registration of one node of one workflow; returns how many were removed */
+  removeForNode(tenantId: string, workflowId: string, nodeName: string): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -50,6 +52,18 @@ export class MemoryTestWebhookStore implements TestWebhookStore {
 
   async remove(registration: TestWebhookRegistration): Promise<boolean> {
     return this.byTenant.get(registration.tenantId)?.delete(keyOf(registration)) ?? false;
+  }
+
+  async removeForNode(tenantId: string, workflowId: string, nodeName: string): Promise<number> {
+    const map = this.byTenant.get(tenantId);
+    if (!map) return 0;
+    let removed = 0;
+    for (const [k, r] of map) {
+      if (r.workflowId !== workflowId || r.nodeName !== nodeName) continue;
+      map.delete(k);
+      removed++;
+    }
+    return removed;
   }
 
   async close(): Promise<void> {
@@ -92,6 +106,18 @@ export class RedisTestWebhookStore implements TestWebhookStore {
 
   async remove(registration: TestWebhookRegistration): Promise<boolean> {
     return (await this.redis.hdel(this.key(registration.tenantId), keyOf(registration))) > 0;
+  }
+
+  async removeForNode(tenantId: string, workflowId: string, nodeName: string): Promise<number> {
+    const key = this.key(tenantId);
+    const entries = await this.redis.hgetall(key);
+    const fields = Object.entries(entries)
+      .filter(([, raw]) => {
+        const r = JSON.parse(raw) as TestWebhookRegistration;
+        return r.workflowId === workflowId && r.nodeName === nodeName;
+      })
+      .map(([field]) => field);
+    return fields.length ? await this.redis.hdel(key, ...fields) : 0;
   }
 
   async close(): Promise<void> {

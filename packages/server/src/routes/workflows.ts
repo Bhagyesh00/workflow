@@ -89,6 +89,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
     return { data: await workflows.listenTestWebhook(auth.tenant, id, body, actor(request)) };
   });
 
+  // the editor's "Stop listening": drop the caller tenant's test registrations of one node
+  app.delete('/workflows/:id/listen-test-webhook', async (request) => {
+    const auth = requireRole(request, 'editor');
+    const { id } = parse(idParams, request.params);
+    const { nodeName } = parse(z.object({ nodeName: z.string().min(1).max(256) }), request.body);
+    await workflows.stopTestWebhook(auth.tenant, id, nodeName);
+    return { data: { ok: true } };
+  });
+
   app.get('/workflows/:id/webhook-urls', async (request) => {
     const auth = requireRole(request, 'viewer');
     const { id } = parse(idParams, request.params);

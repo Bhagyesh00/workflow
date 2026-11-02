@@ -7,6 +7,7 @@ import { type ContextDeps, createPollContext, createTriggerContext, type NodeTyp
 import {
   ExpressionEvaluator,
   type Item,
+  type RunData,
   sortByPosition,
   Workflow,
   type WorkflowDefinition,
@@ -401,6 +402,7 @@ export class WorkflowService {
         mode: 'manual',
         startNode: start.name,
         triggerItems,
+        runData: input.runData as RunData | undefined,
         destinationNode: input.destinationNode,
         pinData: Object.keys(pinData).length ? pinData : undefined,
         userId: actor.userId,
@@ -519,6 +521,13 @@ export class WorkflowService {
       testUrl: `${this.deps.config.baseUrl}/webhook-test/${tenant.slug}/${hooks[0].path}`,
       expiresAt: new Date(expiresAt).toISOString(),
     };
+  }
+
+  /** "Stop listening": drop the test registrations of one node and the provider hook they set up */
+  async stopTestWebhook(tenant: TenantRow, id: string, nodeName: string): Promise<void> {
+    await this.get(tenant.id, id);
+    await this.deps.activeWorkflows.unregisterTestWebhook(tenant.id, id, nodeName);
+    await this.deps.testWebhooks.removeForNode(tenant.id, id, nodeName);
   }
 
   async webhookUrls(tenant: TenantRow, id: string) {

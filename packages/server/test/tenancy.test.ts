@@ -67,6 +67,12 @@ describe('tenant isolation', () => {
         'listen',
         b.client.post(`/rest/workflows/${workflow.id}/listen-test-webhook`, { nodeName: 'Webhook' }),
       ],
+      [
+        'stop listening',
+        b.client.request('DELETE', `/rest/workflows/${workflow.id}/listen-test-webhook`, {
+          nodeName: 'Webhook',
+        }),
+      ],
       ['get credential', b.client.get(`/rest/credentials/${credential.id}`)],
       ['patch credential', b.client.patch(`/rest/credentials/${credential.id}`, { name: 'x' })],
       ['delete credential', b.client.delete(`/rest/credentials/${credential.id}`)],

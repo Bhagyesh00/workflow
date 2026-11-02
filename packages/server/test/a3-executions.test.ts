@@ -154,12 +154,13 @@ describe('R43: an execution whose result cannot be stored', () => {
       const row = await waitForExecution(server.ctx, tenant.id, execution.id, ['crashed'], 3000);
       expect(row.stoppedAt).toBeTruthy();
       expect(row.errorMessage).toContain('value too large');
-      expect(await server.ctx.repos.executions.countRunning(tenant.id)).toBe(0);
       const handled = await waitFor(async () => (await executionsOf(server.ctx, tenant.id, handler.id))[0], {
         message: 'error workflow execution',
         timeout: 3000,
       });
       await waitForExecution(server.ctx, tenant.id, handled.id, ['success']);
+      // counted once the error workflow ended: its own run is running while it works
+      expect(await server.ctx.repos.executions.countRunning(tenant.id)).toBe(0);
     } finally {
       saveState.mockRestore();
     }

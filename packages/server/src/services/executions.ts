@@ -31,6 +31,7 @@ import {
   type ExecutionStatus,
   ExecutionTimeoutError,
   type Item,
+  type RunData,
   serializeError,
   sortByPosition,
   type WebhookResponse,
@@ -60,6 +61,8 @@ const BILLABLE_MODES = new Set<ExecutionMode>(['webhook', 'trigger', 'retry', 'i
 export interface StoredRunOptions {
   startNode?: string;
   triggerItems?: Item[];
+  /** partial run: the run data of an earlier execution (the engine drops the start node's and later nodes') */
+  runData?: RunData;
   destinationNode?: string;
   pinData?: Record<string, Item[]>;
   /** output of the waiting node for the next resume (null = keep its own output) */
@@ -96,6 +99,8 @@ export interface StartExecutionInput {
   mode: ExecutionMode;
   startNode?: string;
   triggerItems?: Item[];
+  /** partial run: the run data of an earlier execution that the nodes before the start node keep */
+  runData?: RunData;
   destinationNode?: string;
   pinData?: Record<string, Item[]>;
   executionId?: string;
@@ -237,6 +242,7 @@ export class ExecutionService {
     const runOptions: StoredRunOptions = {
       startNode: input.startNode,
       triggerItems: input.triggerItems,
+      runData: input.runData,
       destinationNode: input.destinationNode,
       pinData: input.pinData,
       depth: input.depth ?? 0,
@@ -504,6 +510,7 @@ export class ExecutionService {
           result = await engine.run({
             startNode: options.startNode,
             triggerItems: options.triggerItems,
+            runData: options.runData,
             destinationNode: options.destinationNode,
             pinData: options.pinData,
             timeoutMs,
@@ -1067,6 +1074,7 @@ export class ExecutionService {
     const origin = {
       startNode: runOptions.startNode,
       triggerItems: clone(runOptions.triggerItems),
+      runData: clone(runOptions.runData),
       destinationNode: runOptions.destinationNode,
     };
     // a node failed: the engine re-runs that node with its saved input and everything after it
@@ -1077,7 +1085,7 @@ export class ExecutionService {
       }
       const retryState = clone(state);
       const pinData = clone(runOptions.pinData);
-      return launch({ ...origin, pinData, retryState }, retryState, origin.triggerItems, pinData);
+      return launch({ ...origin, pinData, retryState }, retryState, origin.triggerItems, origin.runData, pinData);
     }
     // a timeout, a stop or a crash names no failed node: the nodes that already succeeded are
     // pinned so the retry continues after them without repeating side effects; multi-output and
@@ -1099,7 +1107,7 @@ export class ExecutionService {
         pinData[name] = clone((task.data.main[0] ?? []) as Item[]);
       }
     }
-    return launch({ ...origin, pinData }, origin.triggerItems, pinData);
+    return launch({ ...origin, pinData }, origin.triggerItems, origin.runData, pinData);
   }
 
   /**

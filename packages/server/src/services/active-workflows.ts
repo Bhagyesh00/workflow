@@ -51,6 +51,28 @@ export interface ValidationIssue {
 
 type ActivationMode = 'init' | 'create' | 'update' | 'activate' | 'manual';
 
+/** how long a main that is not the leader waits for the leader to start the triggers of a workflow */
+const TRIGGER_START_TIMEOUT_MS = 30_000;
+
+/**
+ * messages on the `control` channel; the leader answers a start with `triggers:started` or `triggers:failed`.
+ * `test-webhooks:clear` asks every other main to remove the provider hook it registered for a test listener.
+ */
+interface ControlMessage {
+  type: 'triggers:start' | 'triggers:stop' | 'triggers:started' | 'triggers:failed' | 'test-webhooks:clear';
+  tenantId?: string;
+  workflowId?: string;
+  /** ties a start request to its answer */
+  requestId?: string;
+  /** the reason of a `triggers:failed` answer */
+  message?: string;
+  node?: string | null;
+  /** the test listener's node of a `test-webhooks:clear` */
+  nodeName?: string;
+  /** the main that sent a `test-webhooks:clear`, which has already removed its own hook */
+  origin?: string;
+}
+
 interface RunningTriggers {
   tenantId: string;
   workflow: Workflow;
@@ -125,6 +147,8 @@ export interface ActiveWorkflowDeps {
   logger: PinoLogger;
   bus: MessageBus;
   leadership: Leadership;
+  /** wait for the leader's answer to a remote trigger start (default 30 seconds) */
+  triggerStartTimeoutMs?: number;
 }
 
 export class ActiveWorkflowManager {
@@ -132,29 +156,92 @@ export class ActiveWorkflowManager {
   /** tail of the start/stop chain per workflow: starts and stops of one workflow never overlap */
   private readonly locks = new Map<string, Promise<void>>();
   private readonly testHooks = new Map<string, TestHooks>();
+  /** names this main on the `control` channel */
+  private readonly mainId = randomUUID();
   private unsubscribe?: () => void;
   private readonly evaluator = new ExpressionEvaluator({ timeoutMs: 1000 });
 
   constructor(private readonly deps: ActiveWorkflowDeps) {}
 
-  /** listen for trigger start/stop requests from other mains */
+  /** listen for trigger start/stop requests and stopped test listeners from other mains */
   async init(): Promise<void> {
-    this.unsubscribe = await this.deps.bus.subscribe(
-      'control',
-      (message: { type: string; tenantId?: string; workflowId?: string }) => {
-        if (!this.deps.leadership.isLeader || !message?.workflowId || !message.tenantId) return;
-        if (message.type === 'triggers:start') {
-          void this.startTriggers(message.tenantId, message.workflowId, 'activate').catch((error) =>
-            this.deps.logger.warn(
-              { err: error, workflowId: message.workflowId },
-              'Trigger activation failed',
-            ),
-          );
-        } else if (message.type === 'triggers:stop') {
-          void this.stopTriggers(message.workflowId);
+    this.unsubscribe = await this.deps.bus.subscribe('control', (message: ControlMessage) => {
+      if (!message?.workflowId || !message.tenantId) return;
+      // a test listener's provider hook lives on the main that registered it, leader or not
+      if (message.type === 'test-webhooks:clear') {
+        if (message.origin !== this.mainId && message.nodeName) {
+          void this.unregisterTestWebhooks(`${message.tenantId}:${message.workflowId}:${message.nodeName}`);
         }
+        return;
+      }
+      if (!this.deps.leadership.isLeader) return;
+      if (message.type === 'triggers:start') {
+        void this.answerRemoteStart(message.tenantId, message.workflowId, message.requestId);
+      } else if (message.type === 'triggers:stop') {
+        void this.stopTriggers(message.workflowId);
+      }
+    });
+  }
+
+  /** leader: start the triggers another main asked for, log a failure and tell that main how it went */
+  private async answerRemoteStart(tenantId: string, workflowId: string, requestId?: string): Promise<void> {
+    const { bus, logger } = this.deps;
+    const answer = await this.startTriggers(tenantId, workflowId, 'activate', true).then(
+      (): Partial<ControlMessage> => ({ type: 'triggers:started' }),
+      (error): Partial<ControlMessage> => {
+        logger.warn({ err: error, tenantId, workflowId }, 'Trigger activation failed');
+        return {
+          type: 'triggers:failed',
+          message: error instanceof Error ? error.message : String(error),
+          node: (error as { node?: string }).node ?? null,
+        };
       },
     );
+    await bus
+      .publish('control', { ...answer, tenantId, workflowId, requestId })
+      .catch((error) => logger.warn({ err: error, tenantId, workflowId }, 'Could not answer a trigger start'));
+  }
+
+  /**
+   * Non-leader: ask the leader to start the triggers and wait for its answer. A failure of the leader
+   * throws like a trigger that fails to start on this main. No answer in time keeps the activation:
+   * while a new leader is elected nobody answers, and that leader's startAll() starts the triggers.
+   * The timeout also bounds a publish that stalls; a publish that fails before the answer throws.
+   */
+  private async startTriggersOnLeader(tenantId: string, workflowId: string): Promise<void> {
+    const { bus } = this.deps;
+    const requestId = randomUUID();
+    const timeoutMs = this.deps.triggerStartTimeoutMs ?? TRIGGER_START_TIMEOUT_MS;
+    let settle!: (answer: ControlMessage | undefined) => void;
+    const answered = new Promise<ControlMessage | undefined>((resolve) => {
+      settle = resolve;
+    });
+    const unsubscribe = await bus.subscribe('control', (message: ControlMessage) => {
+      if (
+        message?.requestId === requestId &&
+        (message.type === 'triggers:started' || message.type === 'triggers:failed')
+      ) {
+        settle(message);
+      }
+    });
+    const timer = setTimeout(() => settle(undefined), timeoutMs);
+    try {
+      const published = bus.publish('control', { type: 'triggers:start', tenantId, workflowId, requestId });
+      published.catch(() => {});
+      const answer = await Promise.race([published.then(() => answered), answered]);
+      if (!answer) {
+        this.deps.logger.warn({ tenantId, workflowId, timeoutMs }, 'No main answered the trigger start');
+        return;
+      }
+      if (answer.type === 'triggers:failed') {
+        throw Object.assign(new Error(answer.message ?? 'The triggers could not be started'), {
+          node: answer.node ?? undefined,
+        });
+      }
+    } finally {
+      clearTimeout(timer);
+      unsubscribe();
+    }
   }
 
   get runningWorkflowIds(): string[] {
@@ -347,7 +434,7 @@ export class ActiveWorkflowManager {
     try {
       await this.runWebhookMethods(tenant, workflow, 'create');
       if (this.deps.leadership.isLeader) await this.startTriggers(tenantId, workflowId, mode, true);
-      else await this.deps.bus.publish('control', { type: 'triggers:start', tenantId, workflowId });
+      else await this.startTriggersOnLeader(tenantId, workflowId);
     } catch (error) {
       logger.warn({ err: error, tenantId, workflowId }, 'Activation failed, rolling back');
       await this.stopTriggers(workflowId);
@@ -474,6 +561,19 @@ export class ActiveWorkflowManager {
     this.testHooks.set(key, { tenant, workflow, node, timer });
   }
 
+  /**
+   * Remove the provider hook a test listener registered for one node of a tenant's workflow. The hook
+   * may live on another main (the listen request reached that one), so every other main is asked too.
+   */
+  async unregisterTestWebhook(tenantId: string, workflowId: string, nodeName: string): Promise<void> {
+    await this.unregisterTestWebhooks(`${tenantId}:${workflowId}:${nodeName}`);
+    await this.deps.bus
+      .publish('control', { type: 'test-webhooks:clear', tenantId, workflowId, nodeName, origin: this.mainId })
+      .catch((error) =>
+        this.deps.logger.warn({ err: error, tenantId, workflowId }, 'Could not ask the other mains to stop listening'),
+      );
+  }
+
   private async unregisterTestWebhooks(key: string): Promise<void> {
     const registered = this.testHooks.get(key);
     if (!registered) return;
@@ -550,8 +650,8 @@ export class ActiveWorkflowManager {
 
   async close(): Promise<void> {
     this.unsubscribe?.();
-    for (const { timer } of this.testHooks.values()) clearTimeout(timer);
-    this.testHooks.clear();
+    // the provider's hook id lives only in this process: remove the hooks now or never
+    await Promise.all([...this.testHooks.keys()].map((key) => this.unregisterTestWebhooks(key)));
     await this.stopAll();
   }
 

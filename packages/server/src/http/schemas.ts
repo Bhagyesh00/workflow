@@ -89,6 +89,27 @@ export const stickyNoteSchema = z
 
 export const pinDataSchema = z.record(z.string(), z.array(itemSchema));
 
+const sourceDataSchema = z
+  .object({
+    previousNode: z.string(),
+    previousNodeOutput: z.number().optional(),
+    previousNodeRun: z.number().optional(),
+  })
+  .loose();
+
+/** the results of one node run in an earlier execution, as a partial run takes them over */
+const taskDataSchema = z
+  .object({
+    startTime: z.number().default(0),
+    executionTime: z.number().default(0),
+    executionStatus: z.string().default('success'),
+    data: z.record(z.string(), z.array(z.array(itemSchema).nullable())).optional(),
+    source: z.array(sourceDataSchema.nullable()).default([]),
+  })
+  .loose();
+
+export const runDataSchema = z.record(z.string(), z.array(taskDataSchema).max(10_000));
+
 export const workflowCreateSchema = z.object({
   name: z.string().trim().min(1).max(128),
   nodes: z.array(nodeSchema).max(2000).default([]),
@@ -131,6 +152,8 @@ export const runSchema = z.object({
   destinationNode: z.string().optional(),
   pinData: pinDataSchema.optional(),
   triggerItems: z.array(itemSchema).max(10_000).optional(),
+  /** partial run: the run data of an earlier execution; the nodes before the start node keep theirs */
+  runData: runDataSchema.optional(),
 });
 
 export const credentialCreateSchema = z.object({
