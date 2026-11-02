@@ -17,10 +17,16 @@ import type {
   DataObject,
   HttpRequestOptions,
 } from '@workflow/workflow';
-import { type ChatAdapter, ModelRefusalError, streamError, trimSlash } from '../shared/chat-model';
+import {
+  type ChatAdapter,
+  type ChatStreamParser,
+  ModelRefusalError,
+  parseCompleteStream,
+  streamError,
+  trimSlash,
+} from '../shared/chat-model';
 import { toAnthropicSchema } from '../shared/json-schema';
 import { isToolError, RawContentCache } from '../shared/markers';
-import { sseJson } from '../shared/sse';
 import { messageText } from '../shared/utils';
 
 export const ANTHROPIC_API_VERSION = '2026-10-21';
@@ -217,69 +223,81 @@ export function parseAnthropicMessage(body: unknown, cache?: RawContentCache<Blo
   };
 }
 
-/** Rebuild the final message from a `stream: true` SSE body, reporting text deltas. */
+/** Rebuild the final message from `stream: true` events as they arrive, reporting text deltas. */
+export function anthropicStreamParser(
+  onDelta: (text: string) => void,
+  cache?: RawContentCache<Block[]>,
+): ChatStreamParser {
+  const message: Record<string, any> = { content: [] as Block[], usage: {} };
+  const partialJson = new Map<number, string>();
+  return {
+    push(_event, json) {
+      switch (json.type) {
+        case 'message_start':
+          Object.assign(message, json.message, { content: [] });
+          break;
+        case 'content_block_start': {
+          const block = { ...json.content_block } as Block;
+          if (block.type === 'tool_use') partialJson.set(json.index, '');
+          message.content[json.index] = block;
+          break;
+        }
+        case 'content_block_delta': {
+          const block = message.content[json.index] as Block | undefined;
+          const delta = json.delta ?? {};
+          if (!block) break;
+          if (delta.type === 'text_delta') {
+            block.text = String(block.text ?? '') + delta.text;
+            onDelta(delta.text);
+          } else if (delta.type === 'input_json_delta') {
+            partialJson.set(json.index, (partialJson.get(json.index) ?? '') + delta.partial_json);
+          } else if (delta.type === 'thinking_delta') {
+            block.thinking = String(block.thinking ?? '') + delta.thinking;
+          } else if (delta.type === 'signature_delta') {
+            block.signature = String(block.signature ?? '') + delta.signature;
+          }
+          break;
+        }
+        case 'content_block_stop': {
+          const block = message.content[json.index] as Block | undefined;
+          if (block?.type === 'tool_use') {
+            const raw = partialJson.get(json.index) ?? '';
+            try {
+              block.input = raw ? JSON.parse(raw) : {};
+            } catch {
+              block.input = { _rawArguments: raw };
+            }
+          }
+          break;
+        }
+        case 'message_delta':
+          if (json.delta?.stop_reason) message.stop_reason = json.delta.stop_reason;
+          if (json.delta?.stop_details) message.stop_details = json.delta.stop_details;
+          message.usage = { ...message.usage, ...json.usage };
+          break;
+        case 'error':
+          throw streamError(
+            json.error?.message ?? 'The Anthropic stream reported an error',
+            ANTHROPIC_STREAM_STATUS[json.error?.type as string],
+          );
+        default:
+          break;
+      }
+    },
+    finish() {
+      message.content = (message.content as Block[]).filter(Boolean);
+      return parseAnthropicMessage(message, cache);
+    },
+  };
+}
+
+/** Rebuild the final message from a complete `stream: true` SSE body, reporting text deltas. */
 export function parseAnthropicStream(
   text: string,
   onDelta: (text: string) => void,
   cache?: RawContentCache<Block[]>,
 ): AiChatResponse {
-  const message: Record<string, any> = { content: [] as Block[], usage: {} };
-  const partialJson = new Map<number, string>();
-  for (const { json } of sseJson(text)) {
-    switch (json.type) {
-      case 'message_start':
-        Object.assign(message, json.message, { content: [] });
-        break;
-      case 'content_block_start': {
-        const block = { ...json.content_block } as Block;
-        if (block.type === 'tool_use') partialJson.set(json.index, '');
-        message.content[json.index] = block;
-        break;
-      }
-      case 'content_block_delta': {
-        const block = message.content[json.index] as Block | undefined;
-        const delta = json.delta ?? {};
-        if (!block) break;
-        if (delta.type === 'text_delta') {
-          block.text = String(block.text ?? '') + delta.text;
-          onDelta(delta.text);
-        } else if (delta.type === 'input_json_delta') {
-          partialJson.set(json.index, (partialJson.get(json.index) ?? '') + delta.partial_json);
-        } else if (delta.type === 'thinking_delta') {
-          block.thinking = String(block.thinking ?? '') + delta.thinking;
-        } else if (delta.type === 'signature_delta') {
-          block.signature = String(block.signature ?? '') + delta.signature;
-        }
-        break;
-      }
-      case 'content_block_stop': {
-        const block = message.content[json.index] as Block | undefined;
-        if (block?.type === 'tool_use') {
-          const raw = partialJson.get(json.index) ?? '';
-          try {
-            block.input = raw ? JSON.parse(raw) : {};
-          } catch {
-            block.input = { _rawArguments: raw };
-          }
-        }
-        break;
-      }
-      case 'message_delta':
-        if (json.delta?.stop_reason) message.stop_reason = json.delta.stop_reason;
-        if (json.delta?.stop_details) message.stop_details = json.delta.stop_details;
-        message.usage = { ...message.usage, ...json.usage };
-        break;
-      case 'error':
-        throw streamError(
-          json.error?.message ?? 'The Anthropic stream reported an error',
-          ANTHROPIC_STREAM_STATUS[json.error?.type as string],
-        );
-      default:
-        break;
-    }
-  }
-  message.content = (message.content as Block[]).filter(Boolean);
-  return parseAnthropicMessage(message, cache);
+  return parseCompleteStream(anthropicStreamParser(onDelta, cache), text);
 }
 
 export function anthropicAdapter(config: AnthropicChatConfig): ChatAdapter {
@@ -299,6 +317,6 @@ export function anthropicAdapter(config: AnthropicChatConfig): ChatAdapter {
       };
     },
     parseResponse: (body) => parseAnthropicMessage(body, cache),
-    parseStream: (body, onDelta) => parseAnthropicStream(body, onDelta, cache),
+    streamParser: (onDelta) => anthropicStreamParser(onDelta, cache),
   };
 }

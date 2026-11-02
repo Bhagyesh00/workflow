@@ -12,12 +12,13 @@ import type {
 import {
   type ChatAdapter,
   type ChatModelCapabilities,
+  type ChatStreamParser,
   ModelRefusalError,
+  parseCompleteStream,
   streamError,
   trimSlash,
 } from '../shared/chat-model';
 import { isObjectSchema } from '../shared/json-schema';
-import { sseJson } from '../shared/sse';
 import { messageText } from '../shared/utils';
 
 export type ResponseFormatMode = 'jsonSchema' | 'jsonObject' | 'none';
@@ -180,54 +181,70 @@ const OPENAI_STREAM_STATUS: Record<string, number> = {
   overloaded_error: 503,
 };
 
-/** Rebuild a response from `stream: true` chunks. */
-export function parseOpenAiStream(text: string, onDelta: (text: string) => void): AiChatResponse {
+/** Rebuild a response from `stream: true` chunks as they arrive. */
+export function openAiStreamParser(onDelta: (text: string) => void): ChatStreamParser {
   let content = '';
+  let refusal = '';
   let finish: unknown;
   let model: string | undefined;
   let usage: AiChatResponse['usage'];
   const calls = new Map<number, { id: string; name: string; args: string }>();
-  for (const { json } of sseJson(text)) {
-    if (json.error) {
-      throw streamError(
-        json.error.message ?? 'The model stream reported an error',
-        OPENAI_STREAM_STATUS[String(json.error.code)] ?? OPENAI_STREAM_STATUS[String(json.error.type)],
-      );
-    }
-    model ??= json.model;
-    if (json.usage) {
-      usage = {
-        inputTokens: Number(json.usage.prompt_tokens ?? 0),
-        outputTokens: Number(json.usage.completion_tokens ?? 0),
-      };
-    }
-    const choice = json.choices?.[0];
-    if (!choice) continue;
-    const delta = choice.delta ?? {};
-    if (typeof delta.content === 'string' && delta.content) {
-      content += delta.content;
-      onDelta(delta.content);
-    }
-    for (const tc of delta.tool_calls ?? []) {
-      const index = Number(tc.index ?? 0);
-      const entry = calls.get(index) ?? { id: '', name: '', args: '' };
-      if (tc.id) entry.id = tc.id;
-      if (tc.function?.name) entry.name += tc.function.name;
-      if (tc.function?.arguments) entry.args += tc.function.arguments;
-      calls.set(index, entry);
-    }
-    if (choice.finish_reason) finish = choice.finish_reason;
-  }
-  const toolCalls = [...calls.entries()]
-    .sort(([a], [b]) => a - b)
-    .filter(([, c]) => c.name)
-    .map(([i, c]) => ({ id: c.id || `call_${i}`, name: c.name, arguments: parseArguments(c.args) }));
   return {
-    message: { role: 'assistant', content, ...(toolCalls.length ? { toolCalls } : {}) },
-    usage,
-    stopReason: stopReason(finish, toolCalls.length > 0),
-    model,
+    push(_event, json) {
+      if (json.error) {
+        throw streamError(
+          json.error.message ?? 'The model stream reported an error',
+          OPENAI_STREAM_STATUS[String(json.error.code)] ?? OPENAI_STREAM_STATUS[String(json.error.type)],
+        );
+      }
+      model ??= json.model;
+      if (json.usage) {
+        usage = {
+          inputTokens: Number(json.usage.prompt_tokens ?? 0),
+          outputTokens: Number(json.usage.completion_tokens ?? 0),
+        };
+      }
+      const choice = json.choices?.[0];
+      if (!choice) return;
+      const delta = choice.delta ?? {};
+      if (typeof delta.content === 'string' && delta.content) {
+        content += delta.content;
+        onDelta(delta.content);
+      }
+      if (typeof delta.refusal === 'string') refusal += delta.refusal;
+      for (const tc of delta.tool_calls ?? []) {
+        const index = Number(tc.index ?? 0);
+        const entry = calls.get(index) ?? { id: '', name: '', args: '' };
+        if (tc.id) entry.id = tc.id;
+        if (tc.function?.name) entry.name += tc.function.name;
+        if (tc.function?.arguments) entry.args += tc.function.arguments;
+        calls.set(index, entry);
+      }
+      if (choice.finish_reason) finish = choice.finish_reason;
+    },
+    finish() {
+      // the same refusal rules as parseOpenAiResponse
+      if (finish === 'content_filter' && !content) {
+        throw new ModelRefusalError('The model provider blocked the response (content filter)');
+      }
+      if (refusal) throw new ModelRefusalError(`The model declined to answer: ${refusal}`);
+      const toolCalls = [...calls.entries()]
+        .sort(([a], [b]) => a - b)
+        .filter(([, c]) => c.name)
+        .map(([i, c]) => ({ id: c.id || `call_${i}`, name: c.name, arguments: parseArguments(c.args) }));
+      return {
+        message: { role: 'assistant', content, ...(toolCalls.length ? { toolCalls } : {}) },
+        usage,
+        stopReason: stopReason(finish, toolCalls.length > 0),
+        model,
+      };
+    },
   };
+}
+
+/** Rebuild a response from a complete `stream: true` SSE body. */
+export function parseOpenAiStream(text: string, onDelta: (text: string) => void): AiChatResponse {
+  return parseCompleteStream(openAiStreamParser(onDelta), text);
 }
 
 export function openAiAdapter(config: OpenAiChatConfig): ChatAdapter {
@@ -247,6 +264,6 @@ export function openAiAdapter(config: OpenAiChatConfig): ChatAdapter {
       body: openAiChatBody(request, config, stream),
     }),
     parseResponse: parseOpenAiResponse,
-    parseStream: parseOpenAiStream,
+    streamParser: openAiStreamParser,
   };
 }

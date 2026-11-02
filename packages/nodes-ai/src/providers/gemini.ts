@@ -11,10 +11,16 @@ import type {
   DataObject,
   HttpRequestOptions,
 } from '@workflow/workflow';
-import { type ChatAdapter, ModelRefusalError, streamError, trimSlash } from '../shared/chat-model';
+import {
+  type ChatAdapter,
+  type ChatStreamParser,
+  ModelRefusalError,
+  parseCompleteStream,
+  streamError,
+  trimSlash,
+} from '../shared/chat-model';
 import { isObjectSchema, toGeminiSchema } from '../shared/json-schema';
 import { RawContentCache } from '../shared/markers';
-import { sseJson } from '../shared/sse';
 import { messageText } from '../shared/utils';
 
 export const GEMINI_DEFAULT_HOST = 'https://generativelanguage.googleapis.com';
@@ -211,39 +217,54 @@ const GEMINI_STREAM_STATUS: Record<string, number> = {
   DEADLINE_EXCEEDED: 504,
 };
 
-/** `streamGenerateContent?alt=sse` delivers partial candidates; merge them into one response. */
+/**
+ * `streamGenerateContent?alt=sse` delivers partial candidates; merge them into one response as they
+ * arrive, reporting text deltas.
+ */
+export function geminiStreamParser(
+  onDelta: (text: string) => void,
+  cache?: RawContentCache<Part[]>,
+): ChatStreamParser {
+  const parts: Part[] = [];
+  let last: Record<string, any> = {};
+  return {
+    push(_event, json) {
+      if (json.error) {
+        throw streamError(
+          json.error.message ?? 'The Gemini stream reported an error',
+          Number(json.error.code) || GEMINI_STREAM_STATUS[String(json.error.status)],
+        );
+      }
+      last = json;
+      for (const p of json.candidates?.[0]?.content?.parts ?? []) {
+        if (typeof p.text === 'string' && !p.thought) onDelta(p.text);
+        const prev = parts[parts.length - 1];
+        if (
+          prev &&
+          typeof prev.text === 'string' &&
+          typeof p.text === 'string' &&
+          !prev.thought &&
+          !p.thought
+        ) {
+          prev.text = `${prev.text}${p.text}`;
+          if (p.thoughtSignature) prev.thoughtSignature = p.thoughtSignature;
+        } else parts.push({ ...p });
+      }
+    },
+    finish() {
+      const candidate = { ...(last.candidates?.[0] ?? {}), content: { role: 'model', parts } };
+      return parseGeminiResponse({ ...last, candidates: [candidate] }, cache);
+    },
+  };
+}
+
+/** Merge a complete `streamGenerateContent?alt=sse` body into one response. */
 export function parseGeminiStream(
   text: string,
   onDelta: (text: string) => void,
   cache?: RawContentCache<Part[]>,
-) {
-  const parts: Part[] = [];
-  let last: Record<string, any> = {};
-  for (const { json } of sseJson(text)) {
-    if (json.error) {
-      throw streamError(
-        json.error.message ?? 'The Gemini stream reported an error',
-        Number(json.error.code) || GEMINI_STREAM_STATUS[String(json.error.status)],
-      );
-    }
-    last = json;
-    for (const p of json.candidates?.[0]?.content?.parts ?? []) {
-      if (typeof p.text === 'string' && !p.thought) onDelta(p.text);
-      const prev = parts[parts.length - 1];
-      if (
-        prev &&
-        typeof prev.text === 'string' &&
-        typeof p.text === 'string' &&
-        !prev.thought &&
-        !p.thought
-      ) {
-        prev.text = `${prev.text}${p.text}`;
-        if (p.thoughtSignature) prev.thoughtSignature = p.thoughtSignature;
-      } else parts.push({ ...p });
-    }
-  }
-  const candidate = { ...(last.candidates?.[0] ?? {}), content: { role: 'model', parts } };
-  return parseGeminiResponse({ ...last, candidates: [candidate] }, cache);
+): AiChatResponse {
+  return parseCompleteStream(geminiStreamParser(onDelta, cache), text);
 }
 
 export function geminiAdapter(config: GeminiChatConfig): ChatAdapter {
@@ -261,6 +282,6 @@ export function geminiAdapter(config: GeminiChatConfig): ChatAdapter {
       body: geminiRequestBody(request, config, cache),
     }),
     parseResponse: (body) => parseGeminiResponse(body, cache),
-    parseStream: (body, onDelta) => parseGeminiStream(body, onDelta, cache),
+    streamParser: (onDelta) => geminiStreamParser(onDelta, cache),
   };
 }

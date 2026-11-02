@@ -206,7 +206,7 @@ describe('OpenAI chat model', () => {
     const r = await run(nodes, links, { services: services({ creds: OPENAI_CREDS, http, hooks }) });
     expect(r.output('Agent')).toEqual([{ output: 'Forty-two' }]);
     expect(http.bodies[0]).toMatchObject({ stream: true, stream_options: { include_usage: true } });
-    expect(http.requests[0].responseType).toBe('text');
+    expect(http.requests[0].responseType).toBe('stream');
     // the agent sends plain text deltas; the server adds the one NDJSON item wrapper
     expect(chunks).toEqual(['Forty', '-two']);
 

@@ -151,11 +151,11 @@ describe('R32: mid-stream provider errors are retried like HTTP errors', () => {
     expect(httpStatusOf(thrownBy(() => parseGeminiStream(gemini, () => {})))).toBe(503);
   });
 
-  it('retries an Anthropic stream that ends in overloaded_error, without duplicate chunks', async () => {
+  // deltas reach the caller as they arrive, so only a stream that failed before its first text is retried
+  it('retries an Anthropic overloaded_error before any text, without duplicate chunks', async () => {
     const failing = sse([
       start,
       textStart,
-      textDelta('partial'),
       ['error', { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }],
     ] as Array<[string, unknown]>);
     const good = sse([
