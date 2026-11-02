@@ -13,6 +13,7 @@ import {
   NodeOperationError,
   type NodeType,
   type PairedItem,
+  type SourceData,
   sleep,
   type WebhookContext,
   type WebhookResponseData,
@@ -29,18 +30,28 @@ import { convertFieldValue, pairToInput } from './simple.nodes';
 
 interface LoopState extends DataObject {
   remaining?: Array<{ json: DataObject; binary?: Item['binary']; index: number }>;
-  processed?: Array<{ json: DataObject; binary?: Item['binary']; run: number; index: number }>;
-  run?: number;
+  processed?: Array<{
+    json: DataObject;
+    binary?: Item['binary'];
+    index: number;
+    source: SourceData | null;
+    /** run of the loop node that received the item */
+    run: number;
+  }>;
+  /** where the first run's input came from: every item in `remaining` is an item of that input */
+  source?: SourceData | null;
 }
 
 /**
- * The engine resolves `pairedItem` against the inputs of the *current* run. Items a loop emits
- * in a later run came from an earlier run's input, which cannot be expressed, so they point at
- * an input that does not exist: `$('Earlier node').item` then fails loudly instead of returning
- * the wrong item. `$('Loop Over Items').item` always works inside the loop.
+ * The engine resolves `pairedItem` against the inputs of the *current* run, but a loop emits items
+ * of an earlier run's input (later batches, and the done items collected over all runs), so each
+ * item names the input it belongs to. An item of an earlier run whose input had no source (the loop
+ * started the execution) points at an input the node does not have, so expressions that follow it
+ * fail instead of resolving against the loop-back input.
  */
-function loopPairedItem(index: number, fromCurrentRun: boolean): PairedItem {
-  return fromCurrentRun ? { item: index } : { item: index, input: 1 };
+function loopPairedItem(item: number, source: SourceData | null | undefined, earlierRun: boolean): PairedItem {
+  if (source) return { item, sourceOverwrite: source };
+  return earlierRun ? { item, input: 1 } : { item };
 }
 
 export const SplitInBatchesNode: NodeType = {
@@ -102,25 +113,28 @@ export const SplitInBatchesNode: NodeType = {
     const batchSize = Math.max(1, Math.floor(Number(ctx.getNodeParameter('batchSize', 0, 1)) || 1));
     const reset = ctx.getNodeParameter('options.reset', 0, false) as boolean;
 
-    if (!state.remaining || reset) {
-      state.remaining = items.map((item, index) => ({ json: item.json, binary: item.binary, index }));
+    const run = ctx.getRunIndex();
+    let remaining = reset ? undefined : state.remaining;
+    const fresh = !remaining;
+    if (!remaining) {
+      remaining = items.map((item, index) => ({ json: item.json, binary: item.binary, index }));
+      state.remaining = remaining;
       state.processed = [];
-      state.run = 0;
+      state.source = deepCopy(ctx.getInputSourceData());
     } else {
-      state.run = (state.run ?? 0) + 1;
+      const source = deepCopy(ctx.getInputSourceData());
       state.processed!.push(
-        ...items.map((item, index) => ({ json: item.json, binary: item.binary, run: state.run!, index })),
+        ...items.map((item, index) => ({ json: item.json, binary: item.binary, index, source, run })),
       );
     }
-    const firstRun = state.run === 0;
-    const batch = state.remaining.splice(0, batchSize);
+    const batch = remaining.splice(0, batchSize);
 
     if (!batch.length) {
       const done = (state.processed ?? []).map(
         (p): Item => ({
           json: p.json,
           ...(p.binary ? { binary: p.binary } : {}),
-          pairedItem: loopPairedItem(p.index, p.run === state.run),
+          pairedItem: loopPairedItem(p.index, p.source, p.run !== run),
         }),
       );
       // forget the finished loop so the node starts fresh when an outer loop runs it again
@@ -132,7 +146,7 @@ export const SplitInBatchesNode: NodeType = {
       batch.map((b) => ({
         json: b.json,
         ...(b.binary ? { binary: b.binary } : {}),
-        pairedItem: loopPairedItem(b.index, firstRun),
+        pairedItem: loopPairedItem(b.index, state.source, !fresh),
       })),
     ];
   },

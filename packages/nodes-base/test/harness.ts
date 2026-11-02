@@ -152,7 +152,7 @@ export async function runWorkflow(
 export interface RecordedRequest {
   method: string;
   url: string;
-  headers: Record<string, string>;
+  headers: Record<string, string | string[]>;
   qs: Record<string, unknown>;
   body: unknown;
   bodyType?: string;
@@ -184,7 +184,7 @@ export class FakeHttpClient extends HttpClient {
       if (Array.isArray(v)) for (const e of v) url.searchParams.append(k, String(e));
       else url.searchParams.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
     }
-    const headers = Object.fromEntries(
+    const headers: Record<string, string | string[]> = Object.fromEntries(
       Object.entries(options.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
     );
     if (options.auth) {

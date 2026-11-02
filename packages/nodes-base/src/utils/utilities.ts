@@ -215,16 +215,32 @@ export function pairedFrom(...pairs: Array<[item: number, input: number] | null 
   return pairs.filter((p): p is [number, number] => !!p).map(([item, input]) => ({ item, input }));
 }
 
-/** Parse a `key=value` fixed collection list into an object. */
-export function keyValuePairs(list: unknown, keyName = 'name', valueName = 'value'): DataObject {
+/**
+ * Parse a `key=value` fixed collection list into an object. A key that appears twice keeps its last
+ * value; with `repeatKeys` the values are collected into a list (for callers whose target takes
+ * repeated names, such as a query string).
+ */
+export function keyValuePairs(
+  list: unknown,
+  options: { keyName?: string; valueName?: string; repeatKeys?: boolean } = {},
+): DataObject {
+  const { keyName = 'name', valueName = 'value', repeatKeys = false } = options;
   const out: DataObject = {};
   if (!Array.isArray(list)) return out;
+  const repeated = new Map<string, unknown[]>();
   for (const entry of list as DataObject[]) {
     const key = entry?.[keyName];
     if (typeof key !== 'string' || !key) continue;
     if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
-    out[key] = entry[valueName];
+    const value = entry[valueName];
+    if (repeatKeys && Object.hasOwn(out, key)) {
+      const values = repeated.get(key) ?? [out[key]];
+      values.push(value);
+      repeated.set(key, values);
+    }
+    out[key] = value;
   }
+  for (const [key, values] of repeated) out[key] = values;
   return out;
 }
 

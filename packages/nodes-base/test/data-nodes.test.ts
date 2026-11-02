@@ -98,18 +98,22 @@ describe('Split Out', () => {
     expect(zipped.outputs).toEqual([
       [
         { a: 1, b: 'x' },
-        { a: 2, b: null },
+        // the shorter field sets no entry past its own elements
+        { a: 2 },
       ],
     ]);
   });
 
-  it('errors for a missing field and continues on fail', async () => {
+  it('hints instead of failing for a field no item has', async () => {
     const r = await runNode('core.splitOut', { fieldToSplitOut: 'missing' }, items({ a: 1 }));
-    expect(r.status).toBe('error');
-    const c = await runNode('core.splitOut', { fieldToSplitOut: 'list' }, items({ a: 1 }, { list: [1] }), {
-      node: { onError: 'continueRegularOutput' },
-    });
-    expect(c.outputs[0]).toEqual([{ error: expect.stringMatching(/does not exist/) }, { list: 1 }]);
+    expect(r.status).toBe('success');
+    expect(r.outputs[0]).toEqual([]);
+    expect(r.result.state.resultData.runData.Node[0].hints).toEqual([
+      { message: "The field 'missing' wasn't found in any input item", level: 'info' },
+    ]);
+    const some = await runNode('core.splitOut', { fieldToSplitOut: 'list' }, items({ a: 1 }, { list: [1] }));
+    expect(some.outputs[0]).toEqual([{ list: 1 }]);
+    expect(some.result.state.resultData.runData.Node[0].hints).toBeUndefined();
   });
 });
 

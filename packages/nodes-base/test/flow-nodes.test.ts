@@ -304,7 +304,7 @@ describe('Merge', () => {
       [{ id: '1', v: 'a' }],
       [{ userId: 1, v: 'b' }],
     );
-    expect(run.json('Merge')).toEqual([{ id: '1', v_1: 'a', userId: 1, v_2: 'b' }]);
+    expect(run.json('Merge')).toEqual([{ id_1: '1', v_1: 'a', userId_2: 1, v_2: 'b' }]);
     const strictRun = await twoInputs(join('inner'), [{ id: '1' }], [{ userId: 1 }]);
     expect(strictRun.status).toBe('success');
     expect(strictRun.runData.Merge[0].data?.main?.[0]).toEqual([]);
@@ -419,10 +419,11 @@ describe('Loop Over Items', () => {
     ]);
     // the loop context is cleared once done
     expect(run.result.state.executionData.contextData['node:Loop']).toEqual({});
-    // $('Loop Over Items').item works inside the loop on later rounds
+    // later rounds pair with the first round's input, which came from Start
+    const start = { previousNode: 'Start', previousNodeOutput: 0, previousNodeRun: 0 };
     expect(run.items('Loop', 1, 1).map((i) => i.pairedItem)).toEqual([
-      { item: 2, input: 1 },
-      { item: 3, input: 1 },
+      { item: 2, sourceOverwrite: start },
+      { item: 3, sourceOverwrite: start },
     ]);
   });
 

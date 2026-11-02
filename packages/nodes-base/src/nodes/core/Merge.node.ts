@@ -20,22 +20,21 @@ interface FieldPair {
   field2: string;
 }
 
-function mergeJson(sources: DataObject[], clash: ClashHandling, deep: boolean): DataObject {
+function mergeJson(
+  sources: Array<{ json: DataObject; input: number }>,
+  clash: ClashHandling,
+  deep: boolean,
+): DataObject {
   if (clash === 'addSuffix') {
     const out: DataObject = {};
-    const counts = new Map<string, number>();
-    for (const source of sources)
-      for (const key of Object.keys(source)) counts.set(key, (counts.get(key) ?? 0) + 1);
-    sources.forEach((source, i) => {
-      for (const [key, value] of Object.entries(source)) {
-        out[(counts.get(key) ?? 0) > 1 ? `${key}_${i + 1}` : key] = deepCopy(value);
-      }
-    });
+    for (const { json, input } of sources) {
+      for (const [key, value] of Object.entries(json)) out[`${key}_${input + 1}`] = deepCopy(value);
+    }
     return out;
   }
   const ordered = clash === 'preferInput1' ? [...sources].reverse() : sources;
   let out: DataObject = {};
-  for (const source of ordered) out = deep ? deepMerge(out, source) : Object.assign(out, deepCopy(source));
+  for (const { json } of ordered) out = deep ? deepMerge(out, json) : Object.assign(out, deepCopy(json));
   return out;
 }
 
@@ -65,7 +64,7 @@ function combine(
 ): Item {
   const present = parts.filter((p): p is { item: Item; index: number; input: number } => !!p);
   const json = mergeJson(
-    present.map((p) => p.item.json),
+    present.map((p) => ({ json: p.item.json, input: p.input })),
     clash,
     deep,
   );
@@ -420,22 +419,30 @@ function joinByFields(
     const found = fuzzy
       ? keys2.flatMap((k, j) => (keysMatch(key, k) ? [j] : []))
       : (index.get(stableStringify(key)) ?? []).filter((j) => keysMatch(key, keys2[j]));
-    // for a right join "first match" applies per input 2 item, below
-    return firstOnly && joinMode !== 'right' ? found.slice(0, 1) : found;
+    return found;
   };
+  // "first match only" limits what is output; every match still makes the input 2 item a partner
+  // (for a right join it applies per input 2 item, below)
+  const emitted = (matches: number[]) => (firstOnly && joinMode !== 'right' ? matches.slice(0, 1) : matches);
 
   const out: Item[] = [];
   const matched2 = new Map<number, number[]>();
+  const emitted2 = new Map<number, number[]>();
   const one = (item: Item, index: number, input: number) => ({ item, index, input });
   const copy = (item: Item, pairedItem: PairedItem[]): Item => ({
     ...item,
     json: deepCopy(item.json),
     pairedItem,
   });
+  // with Always Add Input Number, an item output without a partner is named by its input as well
+  const own = (item: Item, input: number): Item =>
+    clash === 'addSuffix' ? { ...item, json: mergeJson([{ json: item.json, input }], clash, deep) } : item;
 
   input1.forEach((a, i) => {
-    const matches = matchesFor(keyOf(a, 'field1'));
-    for (const j of matches) matched2.set(j, [...(matched2.get(j) ?? []), i]);
+    const found = matchesFor(keyOf(a, 'field1'));
+    const matches = emitted(found);
+    for (const j of found) matched2.set(j, [...(matched2.get(j) ?? []), i]);
+    for (const j of matches) emitted2.set(j, [...(emitted2.get(j) ?? []), i]);
     switch (joinMode) {
       case 'inner':
         if (!matches.length || outputDataFrom === 'input2') break;
@@ -447,7 +454,7 @@ function joinByFields(
         break;
       case 'left':
       case 'outer':
-        if (!matches.length) out.push(copy(a, [{ item: i, input: 0 }]));
+        if (!matches.length) out.push(copy(own(a, 0), [{ item: i, input: 0 }]));
         for (const j of matches) out.push(combine([one(a, i, 0), one(input2[j], j, 1)], clash, deep));
         break;
       case 'antiLeft':
@@ -462,7 +469,7 @@ function joinByFields(
     case 'inner':
       if (outputDataFrom === 'input2') {
         input2.forEach((b, j) => {
-          const from = matched2.get(j);
+          const from = emitted2.get(j);
           if (from) out.push(copy(b, [...from.map((i) => ({ item: i, input: 0 })), { item: j, input: 1 }]));
         });
       }
@@ -472,15 +479,16 @@ function joinByFields(
       input2.forEach((b, j) => {
         let from = matched2.get(j) ?? [];
         if (firstOnly) from = from.slice(0, 1);
-        if (!from.length) right.push(copy(b, [{ item: j, input: 1 }]));
+        if (!from.length) right.push(copy(own(b, 1), [{ item: j, input: 1 }]));
         for (const i of from) right.push(combine([one(input1[i], i, 0), one(b, j, 1)], clash, deep));
       });
       return right;
     }
     case 'outer':
     case 'antiRight':
+      // keeping only the non-matches merges nothing, so antiRight keeps the field names
       input2.forEach((b, j) => {
-        if (!matched2.has(j)) out.push(tag(b, j, 1));
+        if (!matched2.has(j)) out.push(tag(joinMode === 'outer' ? own(b, 1) : b, j, 1));
       });
       return out;
     default:

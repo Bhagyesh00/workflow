@@ -313,6 +313,9 @@ export const SplitOutNode: NodeType = {
     const items = ctx.getInputData();
     const dots = dotNotation(ctx);
     const out: Item[] = [];
+    // an item without the field is an empty list; a field that no item has only adds a hint
+    const asked = new Set<string>();
+    const found = new Set<string>();
     for (let i = 0; i < items.length; i++) {
       try {
         const fields = fieldList(ctx.getNodeParameter('fieldToSplitOut', i));
@@ -323,12 +326,10 @@ export const SplitOutNode: NodeType = {
         const includeBinary = ctx.getNodeParameter('options.includeBinary', i, false) as boolean;
         const json = items[i].json;
         const lists = fields.map((field) => {
+          asked.add(field);
           const value = getField(json, field, dots);
-          if (value === undefined) {
-            throw new NodeOperationError(ctx.getNode(), `The field "${field}" does not exist in item ${i}`, {
-              itemIndex: i,
-            });
-          }
+          if (value === undefined) return [];
+          found.add(field);
           if (Array.isArray(value)) return value;
           if (isPlainObject(value)) return Object.values(value);
           return [value];
@@ -347,10 +348,11 @@ export const SplitOutNode: NodeType = {
         for (let n = 0; n < length; n++) {
           const entry: DataObject = deepCopy(base);
           fields.forEach((field, f) => {
+            // a field sets entries only for its own elements; a null element stays null
+            if (n >= lists[f].length) return;
             const value = deepCopy(lists[f][n]);
             if (fields.length === 1 && !destination && isPlainObject(value)) Object.assign(entry, value);
-            else
-              setField(entry, fields.length === 1 && destination ? destination : field, value ?? null, dots);
+            else setField(entry, fields.length === 1 && destination ? destination : field, value, dots);
           });
           out.push({
             json: entry,
@@ -363,6 +365,13 @@ export const SplitOutNode: NodeType = {
         out.push(errorItem(error, i));
       }
     }
+    const notFound = [...asked].filter((field) => !found.has(field));
+    ctx.addExecutionHints(
+      ...notFound.map((field) => ({
+        message: `The field '${field}' wasn't found in any input item`,
+        level: 'info' as const,
+      })),
+    );
     return [out];
   },
 };

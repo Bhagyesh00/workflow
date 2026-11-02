@@ -51,9 +51,7 @@ describe('Wait resume webhook (R36)', () => {
 });
 
 describe('Loop Over Items paired items (R35)', () => {
-  // needs PairedItem.sourceOverwrite in @workflow/workflow and the loop's first-run input source in the
-  // execute context; the loop cannot express "an item of an earlier run's input" until then
-  it.fails('resolves a pre-loop node item inside later batches and after the done output', async () => {
+  it('resolves a pre-loop node item inside later batches and after the done output', async () => {
     const run = await runWorkflow(
       [
         node('T', 'core.manualTrigger'),

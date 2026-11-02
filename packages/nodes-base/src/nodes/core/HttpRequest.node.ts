@@ -9,6 +9,7 @@
 import { createHash } from 'node:crypto';
 import {
   type DataObject,
+  type DisplayOptions,
   type ExecuteContext,
   evaluateSimple,
   type HttpFullResponse,
@@ -30,6 +31,7 @@ import {
   keyValuePairs,
   parseJsonObject,
   parseJsonParameter,
+  setField,
   stableStringify,
   withItemIndex,
 } from '../../utils/utilities';
@@ -37,6 +39,56 @@ import {
 const METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 /** hard stop for pagination without a page limit */
 export const MAX_PAGES = 10_000;
+
+/**
+ * Body fields as key/value rows. Several properties share the name: the visibility is spelled out for
+ * each body type, so a Specify Body choice left over from another content type cannot hide the fields.
+ */
+function bodyParametersProperty(displayOptions: DisplayOptions): NodeProperty {
+  return {
+    displayName: 'Body Parameters',
+    name: 'bodyParameters',
+    type: 'fixedCollection',
+    default: { parameters: [{ name: '', value: '' }] },
+    placeholder: 'Add parameter',
+    typeOptions: { multipleValues: true },
+    displayOptions,
+    options: [
+      {
+        displayName: 'Parameter',
+        name: 'parameters',
+        values: [
+          {
+            displayName: 'Parameter Type',
+            name: 'parameterType',
+            type: 'options',
+            default: 'formData',
+            displayOptions: { show: { '/contentType': ['multipart-form-data'] } },
+            options: [
+              { name: 'Form Data', value: 'formData' },
+              { name: 'File (Binary)', value: 'formBinaryData' },
+            ],
+          },
+          { displayName: 'Name', name: 'name', type: 'string', default: '' },
+          {
+            displayName: 'Value',
+            name: 'value',
+            type: 'string',
+            default: '',
+            displayOptions: { hide: { parameterType: ['formBinaryData'] } },
+          },
+          {
+            displayName: 'Input Binary Field',
+            name: 'inputDataFieldName',
+            type: 'string',
+            default: 'data',
+            displayOptions: { show: { parameterType: ['formBinaryData'] } },
+          },
+        ],
+      },
+    ],
+  };
+}
 
 function nameValueCollection(
   name: string,
@@ -188,52 +240,10 @@ export const HttpRequestNode: NodeType = {
         options: specifyOptions('body'),
         displayOptions: { show: { sendBody: [true], contentType: ['json', 'form-urlencoded'] } },
       },
-      {
-        displayName: 'Body Parameters',
-        name: 'bodyParameters',
-        type: 'fixedCollection',
-        default: { parameters: [{ name: '', value: '' }] },
-        placeholder: 'Add parameter',
-        typeOptions: { multipleValues: true },
-        displayOptions: {
-          show: { sendBody: [true], contentType: ['json', 'form-urlencoded', 'multipart-form-data'] },
-          hide: { specifyBody: ['json'] },
-        },
-        options: [
-          {
-            displayName: 'Parameter',
-            name: 'parameters',
-            values: [
-              {
-                displayName: 'Parameter Type',
-                name: 'parameterType',
-                type: 'options',
-                default: 'formData',
-                displayOptions: { show: { '/contentType': ['multipart-form-data'] } },
-                options: [
-                  { name: 'Form Data', value: 'formData' },
-                  { name: 'File (Binary)', value: 'formBinaryData' },
-                ],
-              },
-              { displayName: 'Name', name: 'name', type: 'string', default: '' },
-              {
-                displayName: 'Value',
-                name: 'value',
-                type: 'string',
-                default: '',
-                displayOptions: { hide: { parameterType: ['formBinaryData'] } },
-              },
-              {
-                displayName: 'Input Binary Field',
-                name: 'inputDataFieldName',
-                type: 'string',
-                default: 'data',
-                displayOptions: { show: { parameterType: ['formBinaryData'] } },
-              },
-            ],
-          },
-        ],
-      },
+      bodyParametersProperty({
+        show: { sendBody: [true], contentType: ['json', 'form-urlencoded'], specifyBody: ['keypair'] },
+      }),
+      bodyParametersProperty({ show: { sendBody: [true], contentType: ['multipart-form-data'] } }),
       {
         displayName: 'JSON',
         name: 'jsonBody',
@@ -599,16 +609,40 @@ function buildRequest(ctx: ExecuteContext, i: number): HttpRequestOptions & { bo
     request.qs =
       ctx.getNodeParameter('specifyQuery', i, 'keypair') === 'json'
         ? parseJsonObject(ctx, ctx.getNodeParameter('jsonQuery', i, '{}'), 'Query Parameters JSON', i)
-        : keyValuePairs((ctx.getNodeParameter('queryParameters', i, {}) as DataObject).parameters);
+        : keyValuePairs((ctx.getNodeParameter('queryParameters', i, {}) as DataObject).parameters, {
+            repeatKeys: true,
+          });
   }
   if (ctx.getNodeParameter('sendHeaders', i, false)) {
     const headers =
       ctx.getNodeParameter('specifyHeaders', i, 'keypair') === 'json'
         ? parseJsonObject(ctx, ctx.getNodeParameter('jsonHeaders', i, '{}'), 'Headers JSON', i)
-        : keyValuePairs((ctx.getNodeParameter('headerParameters', i, {}) as DataObject).parameters);
-    request.headers = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, String(v ?? '')]));
+        : keyValuePairs((ctx.getNodeParameter('headerParameters', i, {}) as DataObject).parameters, {
+            repeatKeys: true,
+          });
+    const text = (v: unknown) => String(v ?? '');
+    request.headers = Object.fromEntries(
+      Object.entries(headers).map(([k, v]) => [k, Array.isArray(v) ? v.map(text) : text(v)]),
+    );
   }
   return request;
+}
+
+const PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * JSON key/value body as n8n builds it with lodash set: a dotted or indexed name (`user.name`, `tags[0]`)
+ * nests, and a later row replaces an earlier one. A name with a prototype segment is left out.
+ */
+function jsonBodyFromRows(rows: Array<{ name?: string; value?: unknown }>): DataObject {
+  const body: DataObject = {};
+  for (const { name, value } of rows) {
+    if (typeof name !== 'string' || !name) continue;
+    const segments = name.replace(/\[(\d+)\]/g, '.$1').split('.');
+    if (segments.some((segment) => PROTOTYPE_KEYS.has(segment))) continue;
+    setField(body, name, value);
+  }
+  return body;
 }
 
 async function addBody(ctx: ExecuteContext, i: number, request: HttpRequestOptions): Promise<void> {
@@ -633,27 +667,32 @@ async function addBody(ctx: ExecuteContext, i: number, request: HttpRequestOptio
             ? parseJsonParameter(ctx, raw, 'JSON Body', i)
             : parseJsonObject(ctx, raw, 'Body JSON', i);
       } else {
-        body = keyValuePairs(params());
+        body = contentType === 'json' ? jsonBodyFromRows(params()) : keyValuePairs(params(), { repeatKeys: true });
       }
       request.body = body;
       request.bodyType = contentType === 'json' ? 'json' : 'form-urlencoded';
       return;
     }
     case 'multipart-form-data': {
-      const form: DataObject = {};
+      const fields = new Map<string, unknown[]>();
       for (const p of params()) {
         if (!p.name) continue;
         if (p.parameterType === 'formBinaryData') {
           const field = p.inputDataFieldName || 'data';
           const meta = ctx.helpers.assertBinaryData(i, field);
-          form[p.name] = {
-            data: await ctx.helpers.getBinaryDataBuffer(i, field),
-            fileName: meta.fileName ?? field,
-            mimeType: meta.mimeType,
-          };
-        } else form[p.name] = p.value ?? '';
+          fields.set(p.name, [
+            ...(fields.get(p.name) ?? []),
+            {
+              data: await ctx.helpers.getBinaryDataBuffer(i, field),
+              fileName: meta.fileName ?? field,
+              mimeType: meta.mimeType,
+            },
+          ]);
+        } else fields.set(p.name, [...(fields.get(p.name) ?? []), p.value ?? '']);
       }
-      request.body = form;
+      request.body = Object.fromEntries(
+        [...fields].map(([name, values]) => [name, values.length > 1 ? values : values[0]]),
+      );
       request.bodyType = 'multipart';
       return;
     }
@@ -681,7 +720,7 @@ async function addBody(ctx: ExecuteContext, i: number, request: HttpRequestOptio
   }
 }
 
-function hasHeader(headers: Record<string, string> | undefined, name: string): boolean {
+function hasHeader(headers: Record<string, string | string[]> | undefined, name: string): boolean {
   return Object.keys(headers ?? {}).some((k) => k.toLowerCase() === name.toLowerCase());
 }
 
