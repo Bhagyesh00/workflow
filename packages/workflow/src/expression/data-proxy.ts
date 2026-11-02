@@ -64,9 +64,18 @@ function getOutputItems(runData: RunData, node: string, output = 0, run = -1): I
   return task.data?.main?.[output] ?? [];
 }
 
+/** Key of one walk state: an output item of one node run. */
+function pairedStateKey(runData: RunData, source: SourceData, itemIndex: number): string {
+  const node = source.previousNode;
+  const run = source.previousNodeRun ?? lastRunIndex(runData, node);
+  return JSON.stringify([node, run, source.previousNodeOutput ?? 0, itemIndex]);
+}
+
 /**
  * Follow pairedItem links from `item` (an output item of `source`) back to `target`.
  * Returns the matching item of `target`, or throws if the chain is broken.
+ * `seen` holds the states already tried: each is on the current path (a cycle) or failed,
+ * so it is skipped. This keeps the walk linear on cyclic or branching run data.
  */
 export function resolvePairedItem(
   runData: RunData,
@@ -74,8 +83,10 @@ export function resolvePairedItem(
   source: SourceData,
   itemIndex: number,
   depth = 0,
+  seen = new Set<string>(),
 ): Item {
   if (depth > 500) throw new ExpressionError('Paired item chain is too deep');
+  seen.add(pairedStateKey(runData, source, itemIndex));
   const node = source.previousNode;
   const run = source.previousNodeRun ?? lastRunIndex(runData, node);
   const task = runData[node]?.[run];
@@ -104,10 +115,10 @@ export function resolvePairedItem(
 
   let lastError: unknown;
   for (const p of paired) {
-    const parentSource = task.source?.[p.input ?? 0];
-    if (!parentSource) continue;
+    const parentSource = p.sourceOverwrite ?? task.source?.[p.input ?? 0];
+    if (!parentSource || seen.has(pairedStateKey(runData, parentSource, p.item))) continue;
     try {
-      return resolvePairedItem(runData, target, parentSource, p.item, depth + 1);
+      return resolvePairedItem(runData, target, parentSource, p.item, depth + 1, seen);
     } catch (error) {
       lastError = error;
     }

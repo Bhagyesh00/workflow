@@ -11,10 +11,12 @@ import type {
   HttpFullResponse,
   HttpRequestOptions,
   Item,
+  NodeExecutionHint,
   NodeOutput,
   NodePropertyOption,
   NodeTypeDescription,
   PairedItem,
+  SourceData,
   WorkflowDefinition,
   WorkflowNode,
 } from './interfaces';
@@ -131,6 +133,8 @@ export interface WebhookResponse {
 
 export interface ExecuteContext extends BaseContext {
   getInputData(inputIndex?: number, connectionType?: ConnectionType): Item[];
+  /** node, output and run the main input `inputIndex` came from; null when this node started the execution */
+  getInputSourceData(inputIndex?: number): SourceData | null;
   /** resolves sub-nodes (AI model, memory, tools...) attached via `type` */
   getInputConnectionData(type: ConnectionType, itemIndex: number): Promise<unknown>;
   /** true when node.onError is a "continue" mode */
@@ -149,6 +153,8 @@ export interface ExecuteContext extends BaseContext {
   sendChunk(chunk: unknown): void;
   /** forward console output to the editor during manual runs */
   sendMessageToUI(...args: unknown[]): void;
+  /** notes about this run, stored on the node's task and shown in the output pane */
+  addExecutionHints(...hints: NodeExecutionHint[]): void;
   /** per-node scratch state that survives across runs of the same execution (loops) */
   getContext(scope: 'node' | 'flow'): DataObject;
   setCustomData(key: string, value: string): void;

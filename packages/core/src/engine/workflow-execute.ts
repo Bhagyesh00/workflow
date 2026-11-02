@@ -24,6 +24,7 @@ import {
   ExpressionEvaluator,
   evaluateSimple,
   type Item,
+  type NodeExecutionHint,
   type NodeInputConfig,
   NodeOperationError,
   type NodeOutput,
@@ -33,6 +34,7 @@ import {
   portType,
   QuotaExceededError,
   resolvePorts,
+  type RunData,
   type SourceData,
   type SupplyDataContext,
   serializeError,
@@ -57,8 +59,14 @@ import type { ExecutionServices } from './services';
 export interface RunOptions {
   /** node to start from (defaults to the first trigger) */
   startNode?: string;
-  /** items emitted by the trigger / webhook / manual run */
+  /** items emitted by the trigger / webhook / manual run; without them, a start node reads its parents' run data */
   triggerItems?: Item[];
+  /**
+   * partial run: the run data of an earlier execution. The start node and the nodes after it run again,
+   * so their earlier results are dropped; the nodes before it keep theirs for the start node's input
+   * and for expressions such as `$('Trigger').item`.
+   */
+  runData?: RunData;
   /** manual partial execution: stop after this node */
   destinationNode?: string;
   /** pinned outputs (manual mode) */
@@ -112,6 +120,8 @@ export class WorkflowExecute {
   private readonly evaluator: ExpressionEvaluator;
   private lastNodeOutput: Item[][] | null = null;
   private waitTill?: Date;
+  /** hints the running node added with addExecutionHints */
+  private nodeHints: NodeExecutionHint[] = [];
   /** hooks of logged sub-node runs, chained so they land in order and finish before the parent node does */
   private subNodeHooks: Promise<void> = Promise.resolve();
   private startedAt = Date.now();
@@ -154,12 +164,51 @@ export class WorkflowExecute {
     if (options.pinData && Object.keys(options.pinData).length) {
       this.state.resultData.pinData = options.pinData;
     }
-    this.state.executionData.nodeExecutionStack.push({
-      node: start.name,
-      data: { main: [options.triggerItems?.length ? options.triggerItems : [{ json: {} }]] },
-      source: null,
-    });
+    if (options.runData) {
+      const rerun = new Set([start.name, ...this.workflow.getChildNodes(start.name)]);
+      this.state.resultData.runData = Object.fromEntries(
+        Object.entries(options.runData).filter(([name]) => this.workflow.nodes[name] && !rerun.has(name)),
+      );
+    }
+    const triggerItems = options.triggerItems?.length ? options.triggerItems : undefined;
+    this.state.executionData.nodeExecutionStack.push(
+      (!triggerItems && this.startFromParentRunData(start)) || {
+        node: start.name,
+        data: { main: [triggerItems ?? [{ json: {} }]] },
+        source: null,
+      },
+    );
     return this.process(options);
+  }
+
+  /**
+   * A start node whose parents already ran (partial or resumed runs) takes each input from the last
+   * run of the first parent with run data on it, and records that parent as the input's source, so
+   * paired items and nodes that read their input source (Loop Over Items) work as in a full run.
+   */
+  private startFromParentRunData(start: WorkflowNode): ExecuteData | undefined {
+    const runData = this.state.resultData.runData;
+    const main: Item[][] = [];
+    const sources: Array<SourceData | null> = [];
+    let found = false;
+    this.workflow.getMainInputs(start.name).forEach((connections, inputIndex) => {
+      main[inputIndex] = [];
+      sources[inputIndex] = null;
+      for (const connection of connections ?? []) {
+        const run = (runData[connection.node]?.length ?? 0) - 1;
+        const items = run < 0 ? undefined : runData[connection.node][run]?.data?.main?.[connection.index];
+        if (!items) continue;
+        main[inputIndex] = items;
+        sources[inputIndex] = {
+          previousNode: connection.node,
+          previousNodeOutput: connection.index,
+          previousNodeRun: run,
+        };
+        found = true;
+        break;
+      }
+    });
+    return found ? { node: start.name, data: { main }, source: { main: sources } } : undefined;
   }
 
   /**
@@ -310,6 +359,7 @@ export class WorkflowExecute {
     await this.services.hooks?.nodeExecuteBefore?.(node.name, runIndex);
     const startTime = Date.now();
     this.waitTill = undefined;
+    this.nodeHints = [];
 
     let output: NodeOutput = null;
     let error: unknown;
@@ -421,8 +471,11 @@ export class WorkflowExecute {
       source,
       metadata: attempts > 1 ? { attempt: attempts } : undefined,
     };
-    if (errorOutputUsed)
-      task.hints = [{ message: 'Node failed; items were routed to the error output', level: 'warning' }];
+    const hints = [...this.nodeHints];
+    if (errorOutputUsed) {
+      hints.push({ message: 'Node failed; items were routed to the error output', level: 'warning' });
+    }
+    if (hints.length) task.hints = hints;
     runs.push(task);
     this.state.resultData.lastNodeExecuted = node.name;
     this.lastNodeOutput = finalOutput;
@@ -506,6 +559,8 @@ export class WorkflowExecute {
 
     const deps = this.contextDeps(node, effectiveExec, runIndex, signal);
     const closeFunctions: Array<() => Promise<void>> = [];
+    // a retried attempt starts without the hints of the attempt that failed
+    this.nodeHints = [];
     const ctx = createExecuteContext(deps, {
       getInputConnectionData: (type, itemIndex) =>
         this.supplySubNodes(node, nodeType, type, itemIndex, effectiveExec, signal, closeFunctions),
@@ -514,6 +569,9 @@ export class WorkflowExecute {
       },
       continueOnFail: () =>
         node.onError === 'continueRegularOutput' || node.onError === 'continueErrorOutput',
+      addExecutionHints: (hints) => {
+        this.nodeHints.push(...hints);
+      },
     });
     try {
       return await nodeType.execute(ctx);

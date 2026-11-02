@@ -17,11 +17,13 @@ import {
   getByPath,
   type HttpFullResponse,
   type HttpRequestOptions,
+  type HttpResponseStream,
   type Item,
   isResourceLocatorValue,
   type Logger,
   NodeApiError,
   type NodeCredentialRef,
+  type NodeExecutionHint,
   type NodeHelpers,
   NodeOperationError,
   type NodeParameters,
@@ -88,6 +90,32 @@ export function toNodeApiError(node: WorkflowNode, error: unknown): Error {
     return new NodeApiError(node, 'The request timed out', { cause: error });
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * A streamed body is read after the request returned, outside its error mapping: errors while it is
+ * read (a timeout before the first byte, the size limit) are mapped the same way.
+ */
+function mapStreamErrors<T>(node: WorkflowNode, options: HttpRequestOptions, response: T): T {
+  if (options.responseType !== 'stream') return response;
+  const wrap = (body: unknown): unknown => {
+    if (typeof (body as Partial<HttpResponseStream> | null)?.[Symbol.asyncIterator] !== 'function') return body;
+    const stream = body as HttpResponseStream;
+    return {
+      async *[Symbol.asyncIterator]() {
+        try {
+          yield* stream;
+        } catch (error) {
+          throw toNodeApiError(node, error);
+        }
+      },
+    };
+  };
+  if (options.returnFullResponse) {
+    const full = response as HttpFullResponse;
+    return { ...full, body: wrap(full.body) } as T;
+  }
+  return wrap(response) as T;
 }
 
 export interface ContextDeps {
@@ -233,7 +261,7 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
   };
   const httpRequest = async (options: HttpRequestOptions) => {
     try {
-      return await services.http.request(options, deps.signal);
+      return mapStreamErrors(node, options, await services.http.request(options, deps.signal));
     } catch (error) {
       throw toNodeApiError(node, error);
     }
@@ -247,18 +275,19 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
     const data = await getCredentials(credentialType, itemIndex);
     try {
       if (services.credentialTypes.isA(credentialType, 'oAuth2Api')) {
-        return await oauth2Request(
+        const response = await oauth2Request(
           services.http,
           data as OAuth2Data,
           options,
           (updated) => services.credentials.update(ref, credentialType, updated),
           deps.signal,
         );
+        return mapStreamErrors(node, options, response);
       }
       const type = services.credentialTypes.getResolved(credentialType);
       if (!type) throw new NodeOperationError(node, `Unknown credential type "${credentialType}"`);
       const authenticated = await applyAuthentication(type, data, options);
-      return await services.http.request(authenticated, deps.signal);
+      return mapStreamErrors(node, options, await services.http.request(authenticated, deps.signal));
     } catch (error) {
       throw toNodeApiError(node, error);
     }
@@ -372,6 +401,8 @@ export interface ExecuteContextCallbacks {
   getInputConnectionData(type: ConnectionType, itemIndex: number): Promise<unknown>;
   putExecutionToWait(waitTill: Date): void;
   continueOnFail(): boolean;
+  /** receives the hints the node adds during this run */
+  addExecutionHints(hints: NodeExecutionHint[]): void;
 }
 
 /** `executeWorkflow` shared by execute and supply-data contexts */
@@ -429,6 +460,7 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
   return {
     ...base,
     getInputData: (inputIndex = 0, type: ConnectionType = 'main') => inputItems(deps, inputIndex, type),
+    getInputSourceData: (inputIndex = 0) => deps.executeData?.source?.main?.[inputIndex] ?? null,
     getInputConnectionData: (type, itemIndex) => callbacks.getInputConnectionData(type, itemIndex),
     continueOnFail: () => callbacks.continueOnFail(),
     getRunIndex: () => deps.runIndex ?? 0,
@@ -441,6 +473,7 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
     sendMessageToUI: (...args) => {
       if (services.mode === 'manual') services.hooks?.sendMessageToUI?.(node.name, args);
     },
+    addExecutionHints: (...hints) => callbacks.addExecutionHints(hints),
     getContext(scope) {
       if (!state) return {};
       const key = scope === 'node' ? `node:${node.name}` : 'flow';

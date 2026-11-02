@@ -180,6 +180,46 @@ async function readLimited(response: Response, limit: number): Promise<Uint8Arra
   return out;
 }
 
+/** The body as it arrives; reading stops at the size limit, and stopping early cancels the body. */
+async function* streamLimited(response: Response, limit: number): AsyncGenerator<Uint8Array> {
+  const reader = response.body?.getReader();
+  if (!reader) return;
+  let total = 0;
+  let finished = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        finished = true;
+        return;
+      }
+      total += value.byteLength;
+      if (total > limit) throw new Error(`Response exceeds the maximum size of ${limit} bytes`);
+      yield value;
+    }
+  } finally {
+    // releases the connection; a body that already failed rejects the cancel with that same error
+    if (!finished) await reader.cancel().catch(() => undefined);
+  }
+}
+
+function parseBody(
+  raw: Uint8Array,
+  contentType: string,
+  responseType: 'json' | 'text' | 'arraybuffer' | 'auto',
+): unknown {
+  if (responseType === 'arraybuffer') return raw;
+  const text = new TextDecoder().decode(raw);
+  if (responseType === 'json' || (responseType === 'auto' && /json/i.test(contentType))) {
+    try {
+      return text.length ? JSON.parse(text) : {};
+    } catch {
+      return text;
+    }
+  }
+  return text;
+}
+
 export class HttpClient {
   private readonly policy: SsrfPolicy;
   private readonly agent: Agent;
@@ -238,7 +278,7 @@ export class HttpClient {
   ): Promise<T | HttpFullResponse<T>> {
     const url = buildUrl(options.url, options.qs);
     this.assertUrlAllowed(url.toString());
-    const headers: Record<string, string> = {
+    const headers: Record<string, string | string[]> = {
       'user-agent': this.userAgent,
       ...lowerKeys(options.headers ?? {}),
     };
@@ -255,29 +295,30 @@ export class HttpClient {
         body = JSON.stringify(options.body);
         headers['content-type'] ??= 'application/json';
       } else if (bodyType === 'form-urlencoded') {
-        body = new URLSearchParams(
-          Object.entries((options.body ?? {}) as Record<string, unknown>).map(
-            ([k, v]) => [k, String(v)] as [string, string],
-          ),
-        );
+        body = new URLSearchParams();
+        for (const [k, v] of Object.entries((options.body ?? {}) as Record<string, unknown>)) {
+          for (const entry of Array.isArray(v) ? v : [v]) body.append(k, String(entry));
+        }
         headers['content-type'] ??= 'application/x-www-form-urlencoded';
       } else if (bodyType === 'multipart') {
         const form = new FormData();
         for (const [k, v] of Object.entries((options.body ?? {}) as Record<string, unknown>)) {
-          if (
-            v &&
-            typeof v === 'object' &&
-            'data' in (v as object) &&
-            isBinary((v as { data: unknown }).data)
-          ) {
-            const file = v as { data: Uint8Array; fileName?: string; mimeType?: string };
-            form.append(
-              k,
-              new Blob([Buffer.from(file.data)], { type: file.mimeType }),
-              file.fileName ?? 'file',
-            );
-          } else {
-            form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+          for (const entry of Array.isArray(v) ? v : [v]) {
+            if (
+              entry &&
+              typeof entry === 'object' &&
+              'data' in (entry as object) &&
+              isBinary((entry as { data: unknown }).data)
+            ) {
+              const file = entry as { data: Uint8Array; fileName?: string; mimeType?: string };
+              form.append(
+                k,
+                new Blob([Buffer.from(file.data)], { type: file.mimeType }),
+                file.fileName ?? 'file',
+              );
+            } else {
+              form.append(k, typeof entry === 'object' ? JSON.stringify(entry) : String(entry));
+            }
           }
         }
         body = form;
@@ -296,7 +337,9 @@ export class HttpClient {
 
     const response = await fetch(url, {
       method,
-      headers,
+      headers: Object.entries(headers).flatMap(([k, v]) =>
+        (Array.isArray(v) ? v : [v]).map((value) => [k, value] as [string, string]),
+      ),
       body: body as any,
       dispatcher,
       redirect: options.followRedirects === false ? 'manual' : 'follow',
@@ -307,38 +350,32 @@ export class HttpClient {
       throw error;
     });
 
-    const raw = await readLimited(response as unknown as Response, this.maxResponseBytes);
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((v, k) => {
       responseHeaders[k] = v;
     });
-    const contentType = responseHeaders['content-type'] ?? '';
-    const responseType = options.responseType ?? 'auto';
-    let parsed: unknown;
-    if (responseType === 'arraybuffer') parsed = raw;
-    else {
-      const text = new TextDecoder().decode(raw);
-      if (responseType === 'json' || (responseType === 'auto' && /json/i.test(contentType))) {
-        try {
-          parsed = text.length ? JSON.parse(text) : {};
-        } catch {
-          parsed = text;
-        }
-      } else parsed = text;
-    }
+    const isRedirect = response.status >= 300 && response.status < 400 && options.followRedirects === false;
+    const failed =
+      !options.ignoreHttpStatusErrors && (response.status < 200 || response.status >= 300) && !isRedirect;
+    // a failed streamed request is read whole like any other, so the HttpError carries the parsed body
+    const parsed: unknown =
+      options.responseType === 'stream' && !failed
+        ? streamLimited(response as unknown as Response, this.maxResponseBytes)
+        : parseBody(
+            await readLimited(response as unknown as Response, this.maxResponseBytes),
+            responseHeaders['content-type'] ?? '',
+            options.responseType === 'stream' ? 'auto' : (options.responseType ?? 'auto'),
+          );
 
-    if (!options.ignoreHttpStatusErrors && (response.status < 200 || response.status >= 300)) {
-      const isRedirect = response.status >= 300 && response.status < 400 && options.followRedirects === false;
-      if (!isRedirect) {
-        throw new HttpError(
-          `Request failed with status code ${response.status}`,
-          response.status,
-          response.statusText,
-          parsed,
-          responseHeaders,
-          { method, url: `${url.origin}${url.pathname}` },
-        );
-      }
+    if (failed) {
+      throw new HttpError(
+        `Request failed with status code ${response.status}`,
+        response.status,
+        response.statusText,
+        parsed,
+        responseHeaders,
+        { method, url: `${url.origin}${url.pathname}` },
+      );
     }
 
     if (options.returnFullResponse) {
@@ -357,8 +394,14 @@ export class HttpClient {
   }
 }
 
-function lowerKeys(h: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
+/**
+ * lower-case the names; of names that differ only in case the later one wins, as callers override a
+ * default by spreading their own headers after it. A repeated header comes as an array under one name.
+ */
+function lowerKeys(h: Record<string, string | string[]>): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+  for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = v;
+  return out;
 }
 
 function isBinary(v: unknown): v is Uint8Array {

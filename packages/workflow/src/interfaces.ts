@@ -36,6 +36,8 @@ export interface PairedItem {
   item: number;
   /** input index (for nodes with several inputs), default 0 */
   input?: number;
+  /** the source the item refers to when it is not the current run's input (items a loop carries over from an earlier run) */
+  sourceOverwrite?: SourceData;
 }
 
 export interface ItemError {
@@ -467,13 +469,17 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 
 export interface HttpRequestOptions {
   url: string;
   method?: HttpMethod;
-  headers?: Record<string, string>;
+  /** a list sends the header once per value */
+  headers?: Record<string, string | string[]>;
   qs?: Record<string, unknown>;
   body?: unknown;
   /** how to encode `body`: default `json` when body is an object */
   bodyType?: 'json' | 'form-urlencoded' | 'multipart' | 'raw';
-  /** response parsing: `json` (default when content-type is json), `text`, `arraybuffer` */
-  responseType?: 'json' | 'text' | 'arraybuffer' | 'auto';
+  /**
+   * response parsing: `json` (default when content-type is json), `text`, `arraybuffer`, or `stream`
+   * for an `HttpResponseStream` that is read while it arrives (non-2xx responses still throw)
+   */
+  responseType?: 'json' | 'text' | 'arraybuffer' | 'auto' | 'stream';
   /** return { body, headers, statusCode, statusMessage } instead of only the body */
   returnFullResponse?: boolean;
   /** milliseconds */
@@ -485,6 +491,12 @@ export interface HttpRequestOptions {
   followRedirects?: boolean;
   maxRedirects?: number;
 }
+
+/**
+ * The body of a `responseType: 'stream'` response, chunk by chunk as it arrives. The size limit,
+ * timeout and abort signal of the request apply while it is read; stopping early closes the connection.
+ */
+export type HttpResponseStream = AsyncIterable<Uint8Array>;
 
 export interface HttpFullResponse<T = unknown> {
   body: T;
@@ -539,6 +551,12 @@ export interface ExecutionErrorShape {
   context?: DataObject;
 }
 
+/** a note about a node run, shown in the output pane */
+export interface NodeExecutionHint {
+  message: string;
+  level?: 'info' | 'warning';
+}
+
 export interface TaskData {
   startTime: number;
   executionTime: number;
@@ -549,7 +567,7 @@ export interface TaskData {
   inputOverride?: TaskDataConnections;
   error?: ExecutionErrorShape;
   source: Array<SourceData | null>;
-  hints?: Array<{ message: string; level?: 'info' | 'warning' }>;
+  hints?: NodeExecutionHint[];
   metadata?: {
     subExecution?: { executionId: string; workflowId?: string };
     /** retry attempt that produced this result (1-based) */
