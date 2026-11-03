@@ -13,7 +13,9 @@ import {
   type ConnectionType,
   type NodeConnections,
   type NodeDescriptionLookup,
+  type NodeGroupingLookup,
   type NodeTypeDescription,
+  STRUCTURAL_NODE_TYPE,
   validateWorkflowNodeGroups,
   type WorkflowNode,
 } from '@workflow/workflow';
@@ -91,8 +93,8 @@ export function replaceNode(
   };
 
   if (result.nodeGroups.length) {
-    const lookup: NodeDescriptionLookup = (type, version) =>
-      types?.(type, version) ?? descriptions.get(type) ?? ({ group: [] } as unknown as NodeTypeDescription);
+    const lookup: NodeGroupingLookup = (type, version) =>
+      types?.(type, version) ?? descriptions.get(type) ?? STRUCTURAL_NODE_TYPE;
     const problem = validateWorkflowNodeGroups(
       {
         name: '',
