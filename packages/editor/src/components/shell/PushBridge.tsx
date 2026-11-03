@@ -2,7 +2,6 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { connectPush } from '../../api/push';
-import { queryKeys } from '../../api/queries';
 import type { PushEvent } from '../../api/types';
 import { useRunStore } from '../../stores/run-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
@@ -23,7 +22,6 @@ export function PushBridge({ tenantId }: { tenantId: string }) {
       }
       if (event.type === 'workflowReviewChanged') {
         void queryClient.invalidateQueries({ queryKey: ['workflow-reviews'] });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.review(event.data.requestId) });
         void queryClient.invalidateQueries({ queryKey: ['inbox'] });
       }
     });

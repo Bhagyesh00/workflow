@@ -40,7 +40,6 @@ export const queryKeys = {
   annotationTags: (withUsageCount = false) => ['annotation-tags', { withUsageCount }] as const,
   publishTimeline: (id: string) => ['workflow', id, 'publish-timeline'] as const,
   reviews: (query: object = {}) => ['workflow-reviews', query] as const,
-  review: (id: string) => ['workflow-review', id] as const,
   inbox: (query: object = {}) => ['inbox', query] as const,
   inboxSummary: ['inbox', 'summary'] as const,
 };
