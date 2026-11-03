@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import type { WorkflowNode } from '@workflow/workflow';
 import { describe, expect, it } from 'vitest';
 import { AnnotationBadges } from '../src/components/executions/AnnotationBadges';
+import { MAX_ANNOTATION_FILTER_TAGS } from '../src/components/executions/AnnotationFilters';
 import { filterExecutionList } from '../src/demo/mock-annotations';
 import { backend, signedIn } from './backend';
 import { renderApp } from './utils';
@@ -59,7 +60,11 @@ describe('filterExecutionList (demo)', () => {
   it('needs every tag and the vote', () => {
     const run = (id: string, vote: 'up' | 'down' | null, tags: string[]) =>
       ({ id, annotation: { vote, tags: tags.map((t) => ({ id: t, name: t })) } }) as never;
-    const list = [run('1', 'up', ['a', 'b']), run('2', 'down', ['a']), { id: '3', annotation: null } as never];
+    const list = [
+      run('1', 'up', ['a', 'b']),
+      run('2', 'down', ['a']),
+      { id: '3', annotation: null } as never,
+    ];
     const ids = (q: Record<string, string>) =>
       filterExecutionList(null as never, list, q).map((e: { id: string }) => e.id);
     expect(ids({ annotationTags: 'a' })).toEqual(['1', '2']);
@@ -82,7 +87,9 @@ describe('execution detail panel', () => {
     await user.click(within(panel).getByRole('button', { name: 'Good run' }));
     await waitFor(() => expect(backend().executions[0].annotation?.vote).toBe('up'));
     await waitFor(() =>
-      expect(within(panel).getByRole('button', { name: 'Good run' }).getAttribute('aria-pressed')).toBe('true'),
+      expect(within(panel).getByRole('button', { name: 'Good run' }).getAttribute('aria-pressed')).toBe(
+        'true',
+      ),
     );
     expect(within(panel).queryByText('No annotation provided')).toBeNull();
 
@@ -107,7 +114,9 @@ describe('execution detail panel', () => {
     const panel = await screen.findByRole('region', { name: 'Execution annotation' }, LONG);
     await user.click(within(panel).getByRole('button', { name: /Edit annotation tags/ }));
     await user.type(screen.getByLabelText('Find or create an annotation tag'), 'flaky{Enter}');
-    await waitFor(() => expect(backend().executions[0].annotation?.tags.map((t) => t.name)).toEqual(['flaky']));
+    await waitFor(() =>
+      expect(backend().executions[0].annotation?.tags.map((t) => t.name)).toEqual(['flaky']),
+    );
   });
 
   it('is read-only for a viewer', async () => {
@@ -163,4 +172,29 @@ describe('executions list', () => {
     await user.selectOptions(screen.getByLabelText('Filter by rating'), 'up');
     await waitFor(() => expect(screen.queryAllByRole('link', { name: 'Runner' })).toHaveLength(0));
   });
+
+  it('stops offering tags once the filter holds the most the server takes', async () => {
+    const user = userEvent.setup();
+    signedIn();
+    await seedRuns(1);
+    const ids: string[] = [];
+    for (let i = 0; i < MAX_ANNOTATION_FILTER_TAGS + 1; i++) ids.push(await makeTag(`tag-${i}`));
+    renderApp('/executions');
+    await screen.findByRole('table', {}, LONG);
+    for (let i = 0; i < MAX_ANNOTATION_FILTER_TAGS; i++) {
+      await user.selectOptions(await screen.findByLabelText('Filter by tag'), ids[i] as string);
+      await screen.findByRole('button', { name: `Remove tag tag-${i}` });
+    }
+    const select = screen.getByLabelText('Filter by tag') as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    expect(select.title).toBe(`The filter takes at most ${MAX_ANNOTATION_FILTER_TAGS} tags`);
+    // the last request carried exactly 20 ids: never the 400 above the server's limit
+    const sent = backend().requests.filter((r) => r.path === '/executions' && r.query?.annotationTags);
+    const last = String(sent[sent.length - 1]?.query?.annotationTags).split(',');
+    expect(last).toHaveLength(MAX_ANNOTATION_FILTER_TAGS);
+    await user.click(screen.getByRole('button', { name: 'Remove tag tag-0' }));
+    await waitFor(() =>
+      expect((screen.getByLabelText('Filter by tag') as HTMLSelectElement).disabled).toBe(false),
+    );
+  }, 120_000);
 });

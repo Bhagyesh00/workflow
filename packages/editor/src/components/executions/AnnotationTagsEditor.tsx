@@ -7,8 +7,8 @@ import { annotationTagsApi } from '../../api/endpoints';
 import { useAnnotationTags } from '../../api/queries';
 import type { Tag } from '../../api/types';
 import { toast } from '../../stores/ui-store';
-import { TagChip } from '../workflow/TagsEditor';
 import { cx } from '../ui/cx';
+import { TagChip } from '../workflow/TagsEditor';
 
 export const ANNOTATION_TAG_MAX = 24;
 

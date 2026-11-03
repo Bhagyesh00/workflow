@@ -39,7 +39,8 @@ export function ExecutionAnnotationPanel({ execution }: { execution: ExecutionDe
       className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-line bg-surface px-4 py-2"
     >
       <h2 className="text-xs font-semibold text-ink-3">Annotation</h2>
-      <div className="flex items-center gap-1" role="group" aria-label="Rating">
+      <fieldset className="m-0 flex min-w-0 items-center gap-1 border-0 p-0">
+        <legend className="sr-only">Rating</legend>
         {(['up', 'down'] as const).map((v) => {
           const Icon = v === 'up' ? ThumbsUp : ThumbsDown;
           const label = v === 'up' ? 'Good run' : 'Bad run';
@@ -65,7 +66,7 @@ export function ExecutionAnnotationPanel({ execution }: { execution: ExecutionDe
             </button>
           );
         })}
-      </div>
+      </fieldset>
       <AnnotationTagsEditor
         value={tags}
         readOnly={!canWrite}

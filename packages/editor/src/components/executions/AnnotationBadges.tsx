@@ -6,7 +6,7 @@ import { TagChip } from '../workflow/TagsEditor';
 export function AnnotationBadges({ annotation }: { annotation: ExecutionAnnotation | null }) {
   if (!annotation || (!annotation.vote && annotation.tags.length === 0)) return null;
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-1" aria-label="Annotation">
+    <div className="mt-1 flex flex-wrap items-center gap-1">
       {annotation.vote === 'up' && (
         <span role="img" aria-label="Rated good" className="text-ok">
           <ThumbsUp size={12} />

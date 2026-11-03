@@ -34,8 +34,9 @@ function parseName(value: unknown): string {
 export function registerAnnotationRoutes(backend: MockBackend): void {
   const own = (tenantId: string) => tagList(backend).filter((t) => t.tenantId === tenantId);
   const usage = (tag: StoredAnnotationTag) =>
-    backend.executions.filter((e) => e.tenantId === tag.tenantId && e.annotation?.tags.some((t) => t.id === tag.id))
-      .length;
+    backend.executions.filter(
+      (e) => e.tenantId === tag.tenantId && e.annotation?.tags.some((t) => t.id === tag.id),
+    ).length;
   const dto = (tag: StoredAnnotationTag, withUsageCount: boolean): AnnotationTag => ({
     id: tag.id,
     name: tag.name,
@@ -70,7 +71,13 @@ export function registerAnnotationRoutes(backend: MockBackend): void {
     const name = parseName(body.name);
     if (duplicate(tenant.id, name)) throw conflict(name);
     const stamp = now();
-    const tag: StoredAnnotationTag = { id: newId(), tenantId: tenant.id, name, createdAt: stamp, updatedAt: stamp };
+    const tag: StoredAnnotationTag = {
+      id: newId(),
+      tenantId: tenant.id,
+      name,
+      createdAt: stamp,
+      updatedAt: stamp,
+    };
     tagList(backend).push(tag);
     return dto(tag, false);
   });
@@ -106,7 +113,8 @@ export function registerAnnotationRoutes(backend: MockBackend): void {
     if (!execution) throw notFound('Execution');
     const tags = body.tags;
     const vote = body.vote;
-    if (tags === undefined && vote === undefined) throw new HttpError(400, 'validation_error', 'Give tags or vote');
+    if (tags === undefined && vote === undefined)
+      throw new HttpError(400, 'validation_error', 'Give tags or vote');
     if (tags !== undefined && (!Array.isArray(tags) || tags.some((t) => typeof t !== 'string'))) {
       throw new HttpError(400, 'validation_error', 'tags must be a list of ids');
     }
