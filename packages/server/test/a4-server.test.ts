@@ -13,8 +13,8 @@ import { createContext } from '../src/context';
 import { createLogger } from '../src/logger';
 import { ActiveWorkflowManager } from '../src/services/active-workflows';
 import type { MessageBus } from '../src/services/bus';
-import { WorkflowService } from '../src/services/workflows';
 import type { Leadership, SingleLeader } from '../src/services/queue';
+import { WorkflowService } from '../src/services/workflows';
 import {
   createWorkflow,
   node,
@@ -75,7 +75,11 @@ const logs = () => logLines.join('');
 
 beforeAll(async () => {
   const config = testConfig({ LOG_LEVEL: 'info' });
-  const logger = createLogger('info', { service: 'workflow-server' }, { write: (line: string) => logLines.push(line) });
+  const logger = createLogger(
+    'info',
+    { service: 'workflow-server' },
+    { write: (line: string) => logLines.push(line) },
+  );
   const ctx = await createContext({
     config,
     logger,
@@ -107,7 +111,9 @@ beforeEach(async () => {
 describe('R63: token-bearing paths are redacted in request logs', () => {
   it('logs no invitation token, resume signature or execution id, on any request log line', async () => {
     const { client } = await signup(server.app);
-    const invite = await client.data(client.post('/rest/members/invite', { email: 'new@example.com', role: 'editor' }));
+    const invite = await client.data(
+      client.post('/rest/members/invite', { email: 'new@example.com', role: 'editor' }),
+    );
     const guessed = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
     const executionId = randomUUID();
     const resumePath = new URL(server.ctx.executions.resumeUrl(executionId)).pathname;
@@ -185,7 +191,9 @@ describe('R64: activation on a main that is not the leader', () => {
 
   it('keeps the activation when the leader starts the trigger', async () => {
     const { client, tenant } = await signup(server.app);
-    const wf = await createWorkflow(client, { nodes: [node('Interval', 'test.interval', { intervalMs: 1000 })] });
+    const wf = await createWorkflow(client, {
+      nodes: [node('Interval', 'test.interval', { intervalMs: 1000 })],
+    });
 
     const row = await follower().activate(tenant.id, wf.id);
 
@@ -195,7 +203,9 @@ describe('R64: activation on a main that is not the leader', () => {
 
   it('keeps the activation when no main answers, and the next leader starts the triggers', async () => {
     const { client, tenant } = await signup(server.app);
-    const wf = await createWorkflow(client, { nodes: [node('Interval', 'test.interval', { intervalMs: 1000 })] });
+    const wf = await createWorkflow(client, {
+      nodes: [node('Interval', 'test.interval', { intervalMs: 1000 })],
+    });
     const leadership = server.ctx.leadership as SingleLeader;
     const warn = vi.spyOn(server.ctx.logger, 'warn');
     // the leader is gone and no main is elected yet: nobody answers the start request
@@ -214,9 +224,13 @@ describe('R64: activation on a main that is not the leader', () => {
     expect(server.ctx.activeWorkflows.runningWorkflowIds).toEqual([wf.id]);
   });
 
-  it('keeps the activation when the start request cannot be published in time', { timeout: 5000 }, async () => {
+  it('keeps the activation when the start request cannot be published in time', {
+    timeout: 5000,
+  }, async () => {
     const { client, tenant } = await signup(server.app);
-    const wf = await createWorkflow(client, { nodes: [node('Interval', 'test.interval', { intervalMs: 1000 })] });
+    const wf = await createWorkflow(client, {
+      nodes: [node('Interval', 'test.interval', { intervalMs: 1000 })],
+    });
     // the broker takes the start request but never confirms it
     const stalledBus: MessageBus = {
       publish: () => new Promise<void>(() => {}),
@@ -237,7 +251,9 @@ describe('R64: activation on a main that is not the leader', () => {
 
   it('keeps an active workflow active when a new version is published while no main leads', async () => {
     const { client, tenant } = await signup(server.app);
-    const wf = await createWorkflow(client, { nodes: [node('Interval', 'test.interval', { intervalMs: 1000 })] });
+    const wf = await createWorkflow(client, {
+      nodes: [node('Interval', 'test.interval', { intervalMs: 1000 })],
+    });
     await server.ctx.activeWorkflows.activate(tenant.id, wf.id);
     const followerWorkflows = new WorkflowService({
       config: server.ctx.config,
@@ -298,7 +314,9 @@ describe('R35: a run that starts at Loop Over Items with the run data of an earl
       'core.set',
       {
         assignments: {
-          assignments: [{ id: '1', name: 'orig', value: "={{ $('Trigger').item.json.name }}", type: 'string' }],
+          assignments: [
+            { id: '1', name: 'orig', value: "={{ $('Trigger').item.json.name }}", type: 'string' },
+          ],
         },
         includeOtherFields: true,
       },
@@ -332,7 +350,10 @@ describe('R35: a run that starts at Loop Over Items with the run data of an earl
     );
 
     const { executionId } = await client.data<{ executionId: string }>(
-      client.post(`/rest/workflows/${wf.id}/run`, { startNode: 'Loop', runData: earlier.state.resultData.runData }),
+      client.post(`/rest/workflows/${wf.id}/run`, {
+        startNode: 'Loop',
+        runData: earlier.state.resultData.runData,
+      }),
     );
     const row = await waitForExecution(server.ctx, tenant.id, executionId);
     const execution = await client.data<{ state: any }>(client.get(`/rest/executions/${executionId}`));
