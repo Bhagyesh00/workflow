@@ -1,11 +1,13 @@
 /**
  * Binary data of a run as file cards (name, mime type, size, View when previewable, Download)
- * and a preview dialog (P3-08), as n8n's binary data view.
+ * and a preview dialog (P3-08), as n8n's binary data view. Video, JSON, markdown, HTML and other
+ * text open in the same dialog through RichPreview (P3-14).
  *
  * Previews never point the page at /rest/binary-data: the bytes are fetched (or decoded when
  * inline), wrapped in a Blob typed with the allow-listed mime type (lib/binary-preview.ts) and
  * shown through an object URL in a native <img>, <audio> or the browser's PDF viewer. A PDF must
- * start with `%PDF-`. Object URLs are revoked when the preview or the card goes away.
+ * start with `%PDF-`. Object URLs are revoked when the preview or the card goes away. Rich kinds
+ * get the typed Blob itself (RichPreview reads text or makes its own video URL).
  */
 import type { BinaryData, Item } from '@workflow/workflow';
 import { Download, Eye, FileBox } from 'lucide-react';
@@ -16,6 +18,7 @@ import {
   downloadName,
   formatBytes,
   isPdfBytes,
+  isRichKind,
   PREVIEW_MAX_BYTES,
   type PreviewKind,
   previewAccess,
@@ -24,6 +27,7 @@ import { toast } from '../../stores/ui-store';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { Spinner } from '../ui/misc';
+import { RichPreview } from './RichPreview';
 
 const MAX_CARDS = 12;
 
@@ -33,11 +37,16 @@ interface BinaryFile {
   binary: BinaryData;
 }
 
-type Loaded = { state: 'loading' } | { state: 'ready'; url: string } | { state: 'error'; message: string };
+type Loaded =
+  | { state: 'loading' }
+  /** `url` is set for image, audio and PDF; rich kinds use the blob */
+  | { state: 'ready'; blob: Blob; url: string | null }
+  | { state: 'error'; message: string };
 
 /**
- * Load `binary` as a Blob typed `mimeType` and expose it as an object URL while `enabled`.
- * The URL is revoked when the inputs change or the component unmounts.
+ * Load `binary` as a Blob typed `mimeType` while `enabled`, with an object URL for the kinds the
+ * browser shows natively (image, audio, PDF). The URL is revoked when the inputs change or the
+ * component unmounts.
  */
 function useBinaryObjectUrl(
   binary: BinaryData,
@@ -65,8 +74,12 @@ function useBinaryObjectUrl(
         return;
       }
       if (!active) return;
+      if (isRichKind(kind)) {
+        setLoaded({ state: 'ready', blob, url: null });
+        return;
+      }
       url = URL.createObjectURL(blob);
-      setLoaded({ state: 'ready', url });
+      setLoaded({ state: 'ready', blob, url });
     })().catch((error: unknown) => {
       if (!active) return;
       setLoaded({
@@ -127,7 +140,17 @@ function DownloadButton({
   );
 }
 
-function PreviewBody({ kind, name, loaded }: { kind: PreviewKind; name: string; loaded: Loaded }) {
+function PreviewBody({
+  binary,
+  kind,
+  name,
+  loaded,
+}: {
+  binary: BinaryData;
+  kind: PreviewKind;
+  name: string;
+  loaded: Loaded;
+}) {
   if (loaded.state === 'loading') {
     return (
       <div className="grid h-48 place-items-center text-ink-3">
@@ -138,6 +161,8 @@ function PreviewBody({ kind, name, loaded }: { kind: PreviewKind; name: string; 
   if (loaded.state === 'error') {
     return <p className="py-8 text-center text-sm text-ink-2">{loaded.message}</p>;
   }
+  if (isRichKind(kind)) return <RichPreview binary={binary} blob={loaded.blob} />;
+  if (!loaded.url) return null;
   if (kind === 'image') {
     return (
       <div className="flex justify-center">
@@ -181,17 +206,17 @@ function BinaryPreviewDialog({
       onClose={onClose}
       title={name}
       description={[mimeType, formatBytes(binarySize(file.binary))].filter(Boolean).join(' · ')}
-      size={kind === 'pdf' ? 'xl' : 'lg'}
+      size={kind === 'image' || kind === 'audio' || kind === 'video' ? 'lg' : 'xl'}
       footer={<DownloadButton binary={file.binary} property={file.property} size="md" />}
     >
-      <PreviewBody kind={kind} name={name} loaded={loaded} />
+      <PreviewBody binary={file.binary} kind={kind} name={name} loaded={loaded} />
     </Dialog>
   );
 }
 
 function Thumbnail({ binary, mimeType, name }: { binary: BinaryData; mimeType: string; name: string }) {
   const loaded = useBinaryObjectUrl(binary, mimeType, 'image', true);
-  if (loaded.state !== 'ready') {
+  if (loaded.state !== 'ready' || !loaded.url) {
     return <FileBox size={14} className="shrink-0 text-ink-3" />;
   }
   return <img src={loaded.url} alt={name} className="size-8 shrink-0 rounded object-cover" />;

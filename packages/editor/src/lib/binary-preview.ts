@@ -1,14 +1,19 @@
 /**
- * Binary previews (P3-08): which binaries the editor can show, and how big they are.
+ * Binary previews (P3-08, P3-14): which binaries the editor can show, and how big they are.
  *
  * The renderer is chosen from the base mime type against a fixed allow-list, never from
- * `fileType` (a node sets that freely). SVG and HTML are never in the list: both can carry
- * script. The bytes are shown from a Blob typed with the allow-listed mime type, so the browser
- * renders exactly that kind of content (native <img>, <audio> or its PDF viewer).
+ * `fileType` (a node sets that freely). SVG is never in the list (it can carry script and would
+ * render as an image). The bytes are shown from a Blob typed with the allow-listed mime type, so
+ * the browser renders exactly that kind of content (native <img>, <audio>, <video> or its PDF
+ * viewer). JSON, markdown and other text are read as text and rendered as React elements; HTML
+ * only inside a sandboxed srcdoc iframe with a CSP meta (lib/html-preview.ts, RichPreview.tsx).
  */
 import type { BinaryData } from '@workflow/workflow';
 
-export type PreviewKind = 'image' | 'audio' | 'pdf';
+export type PreviewKind = 'image' | 'audio' | 'pdf' | RichPreviewKind;
+
+/** kinds shown by RichPreview (P3-14) */
+export type RichPreviewKind = 'video' | 'json' | 'markdown' | 'html' | 'text';
 
 /** allow-listed base mime type -> renderer */
 const PREVIEW_TYPES: Readonly<Record<string, PreviewKind>> = {
@@ -27,7 +32,35 @@ const PREVIEW_TYPES: Readonly<Record<string, PreviewKind>> = {
   'audio/mp4': 'audio',
   'audio/aac': 'audio',
   'application/pdf': 'pdf',
+  'video/mp4': 'video',
+  'video/webm': 'video',
+  'video/ogg': 'video',
+  'application/json': 'json',
+  'text/json': 'json',
+  'text/markdown': 'markdown',
+  'text/x-markdown': 'markdown',
+  'text/html': 'html',
 };
+
+/** any other `text/<subtype>` is shown as plain text */
+const TEXT_MIME = /^text\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+
+const RICH_KINDS: ReadonlySet<PreviewKind> = new Set<RichPreviewKind>([
+  'video',
+  'json',
+  'markdown',
+  'html',
+  'text',
+]);
+
+export function isRichKind(kind: PreviewKind): kind is RichPreviewKind {
+  return RICH_KINDS.has(kind);
+}
+
+function kindOfMime(mime: string): PreviewKind | null {
+  if (Object.hasOwn(PREVIEW_TYPES, mime)) return PREVIEW_TYPES[mime];
+  return TEXT_MIME.test(mime) ? 'text' : null;
+}
 
 /** previews load at most this many bytes; bigger files are Download only */
 export const PREVIEW_MAX_BYTES = 25 * 1024 * 1024;
@@ -42,12 +75,12 @@ export function baseMimeType(mimeType: string | undefined): string {
 /** The allow-listed mime type of `binary`, or null when the editor must not render it. */
 export function previewMimeType(binary: Pick<BinaryData, 'mimeType'>): string | null {
   const mime = baseMimeType(binary.mimeType);
-  return Object.hasOwn(PREVIEW_TYPES, mime) ? mime : null;
+  return kindOfMime(mime) ? mime : null;
 }
 
 export function previewKind(binary: Pick<BinaryData, 'mimeType'>): PreviewKind | null {
   const mime = previewMimeType(binary);
-  return mime ? PREVIEW_TYPES[mime] : null;
+  return mime ? kindOfMime(mime) : null;
 }
 
 /** Size in bytes: `fileSize` when set, else decoded from inline base64; null when unknown. */
@@ -71,7 +104,7 @@ export function previewAccess(binary: BinaryData): PreviewAccess {
   if (!mimeType) return { kind: null, reason: 'type' };
   const size = binarySize(binary);
   if (size !== null && size > PREVIEW_MAX_BYTES) return { kind: null, reason: 'size' };
-  const kind = PREVIEW_TYPES[mimeType];
+  const kind = kindOfMime(mimeType)!;
   return { kind, mimeType, thumbnail: kind === 'image' && size !== null && size < THUMBNAIL_MAX_BYTES };
 }
 
@@ -97,6 +130,12 @@ async function readHead(blob: Blob, length: number): Promise<Uint8Array> {
     reader.onerror = () => reject(reader.error);
     reader.readAsArrayBuffer(head);
   });
+}
+
+/** The bytes as UTF-8 text (a leading byte order mark is dropped). */
+export async function readBlobText(blob: Blob): Promise<string> {
+  const bytes = await readHead(blob, blob.size);
+  return new TextDecoder('utf-8').decode(bytes);
 }
 
 const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-

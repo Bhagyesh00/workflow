@@ -1,7 +1,8 @@
 /**
  * Item data in three views: table, JSON and schema. In the input pane every field can be
  * dragged onto a parameter, which inserts `{{ $json.path }}` (or `$('Node')...` for non-direct parents).
- * Binary properties show as file cards with previews (BinaryPreview.tsx, P3-08).
+ * Binary properties show as file cards with previews (BinaryPreview.tsx, P3-08). JsonNode is also
+ * the tree of JSON file previews (RichPreview.tsx, P3-14).
  */
 import type { Item } from '@workflow/workflow';
 import { ChevronDown, ChevronRight } from 'lucide-react';
@@ -139,7 +140,7 @@ function TableView({ items, source }: { items: Item[]; source?: DragSource }) {
   );
 }
 
-function JsonNode({
+export function JsonNode({
   name,
   value,
   path,

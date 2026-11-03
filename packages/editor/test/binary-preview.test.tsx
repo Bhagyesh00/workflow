@@ -1,7 +1,8 @@
 /**
  * P3-08 binary previews: file cards, the preview dialog (image, audio, PDF from typed Blobs),
- * the allow-list (SVG and HTML are Download only; fileType never picks the renderer), the size
- * caps, the %PDF- check, object URL revoking, and the input pane.
+ * the allow-list (SVG is Download only; HTML goes to the sandboxed rich preview of P3-14, see
+ * rich-preview.test.tsx; fileType never picks the renderer), the size caps, the %PDF- check,
+ * object URL revoking, and the input pane.
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { BinaryData, Item, RunData, WorkflowNode } from '@workflow/workflow';
@@ -9,7 +10,6 @@ import { HttpResponse, http } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InputPane } from '../src/components/ndv/DataPanes';
 import { RunDataView } from '../src/components/ndv/RunDataView';
-import type { WorkflowGraph } from '../src/lib/workflow-ops';
 import {
   binarySize,
   formatBytes,
@@ -18,6 +18,7 @@ import {
   previewAccess,
   previewKind,
 } from '../src/lib/binary-preview';
+import type { WorkflowGraph } from '../src/lib/workflow-ops';
 import { server } from './setup';
 import { withProviders } from './utils';
 
@@ -48,11 +49,12 @@ describe('binary preview helpers', () => {
     }
     expect(previewKind({ mimeType: 'application/pdf' })).toBe('pdf');
     expect(previewKind({ mimeType: 'image/svg+xml' })).toBeNull();
-    expect(previewKind({ mimeType: 'text/html' })).toBeNull();
+    // P3-14: HTML is the sandboxed srcdoc preview (rich-preview.test.tsx), never an image
+    expect(previewKind({ mimeType: 'text/html' })).toBe('html');
     expect(previewKind({ mimeType: 'image/tiff' })).toBeNull();
     expect(previewKind({ mimeType: '' })).toBeNull();
     // fileType is ignored
-    expect(previewAccess(bin({ mimeType: 'text/html', fileType: 'image' })).kind).toBeNull();
+    expect(previewAccess(bin({ mimeType: 'text/html', fileType: 'image' })).kind).toBe('html');
   });
 
   it('measures size from fileSize or the base64 payload and caps previews at 25 MB', () => {
@@ -145,7 +147,7 @@ describe('binary file cards and preview dialog', () => {
     expect(within(dialog).getByRole('button', { name: 'Download' })).toBeTruthy();
   });
 
-  it('offers SVG and HTML as Download only', () => {
+  it('offers SVG as Download only and HTML as a View without a thumbnail', () => {
     const items: Item[] = [
       {
         json: {},
@@ -156,18 +158,19 @@ describe('binary file cards and preview dialog', () => {
       },
     ];
     withProviders(<RunDataView items={items} mode="json" />);
-    for (const name of ['logo.svg', 'page.html']) {
-      const card = screen.getByRole('group', { name });
-      expect(within(card).queryByRole('button', { name: 'View' })).toBeNull();
-      expect(within(card).queryByRole('img')).toBeNull();
-      expect(within(card).getByRole('button', { name: 'Download' })).toBeTruthy();
-    }
+    const svg = screen.getByRole('group', { name: 'logo.svg' });
+    expect(within(svg).queryByRole('button', { name: 'View' })).toBeNull();
+    expect(within(svg).queryByRole('img')).toBeNull();
+    expect(within(svg).getByRole('button', { name: 'Download' })).toBeTruthy();
+    const html = screen.getByRole('group', { name: 'page.html' });
+    expect(within(html).getByRole('button', { name: 'View' })).toBeTruthy();
+    expect(within(html).queryByRole('img')).toBeNull();
+    expect(within(html).getByRole('button', { name: 'Download' })).toBeTruthy();
   });
 
-  it('never previews from fileType: fileType image with mime text/html has no preview', () => {
+  it('never previews from fileType: fileType image with mime text/html gets no image', () => {
     show(bin({ mimeType: 'text/html', fileType: 'image', fileName: 'trick.png', fileSize: 10 }));
     const card = screen.getByRole('group', { name: 'trick.png' });
-    expect(within(card).queryByRole('button', { name: 'View' })).toBeNull();
     expect(within(card).queryByRole('img')).toBeNull();
     expect(document.querySelector('iframe')).toBeNull();
   });
