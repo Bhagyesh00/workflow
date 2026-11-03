@@ -235,7 +235,7 @@ describe('R64: activation on a main that is not the leader', () => {
     }
   });
 
-  it('keeps an active workflow active when it is saved while no main leads', async () => {
+  it('keeps an active workflow active when a new version is published while no main leads', async () => {
     const { client, tenant } = await signup(server.app);
     const wf = await createWorkflow(client, { nodes: [node('Interval', 'test.interval', { intervalMs: 1000 })] });
     await server.ctx.activeWorkflows.activate(tenant.id, wf.id);
@@ -263,9 +263,13 @@ describe('R64: activation on a main that is not the leader', () => {
         { nodes: [node('Interval', 'test.interval', { intervalMs: 2000 })] as UpdateNodes },
         {},
       );
-
-      expect(saved.active).toBe(true);
+      // P3-10: the save is a draft; publishing it asks the (missing) leader to restart the triggers
       expect(saved.activationError).toBeUndefined();
+      expect(saved.publishedVersionId).toBe(wf.versionId);
+      const published = await followerWorkflows.setActive(tenant.id, wf.id, true, {});
+
+      expect(published.active).toBe(true);
+      expect(published.publishedVersionId).toBe(saved.versionId);
       expect((await server.ctx.repos.workflows.get(tenant.id, wf.id))?.active).toBe(true);
     } finally {
       leadership.isLeader = true;

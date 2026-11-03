@@ -52,7 +52,10 @@ async function openEditor(id: string) {
   return utils;
 }
 
-/** Make the mock server deactivate the workflow on save/restore, as the real one does when re-registration fails. */
+/**
+ * Make the mock server unpublish the workflow on save/restore, as the real one does when the
+ * published triggers cannot restart with changed settings (P3-10: a save is otherwise draft only).
+ */
 function failReactivation() {
   const real = backend().handle.bind(backend());
   vi.spyOn(backend(), 'handle').mockImplementation(async (request) => {
@@ -68,10 +71,32 @@ function failReactivation() {
   });
 }
 
-describe('R23 saving an active workflow that the server deactivated', () => {
+describe('R23 saving a published workflow', () => {
   beforeEach(() => {
     useUiStore.setState({ ndvNode: null, sidePanel: null, saveConflict: false, activationErrors: null });
     useToastStore.setState({ toasts: [] });
+  });
+
+  it('keeps the published version: a save writes the draft and never publishes (P3-10)', async () => {
+    const user = userEvent.setup();
+    const wf = seed();
+    await openEditor(wf.id);
+    const from = backend().requests.length;
+    const name = screen.getByRole('textbox', { name: 'Workflow name' });
+    await user.clear(name);
+    await user.type(name, 'Hooked v2{Enter}');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(useWorkflowStore.getState().dirty).toBe(false));
+    expect(
+      backend()
+        .requests.slice(from)
+        .some((r) => r.path.endsWith('/activate')),
+    ).toBe(false);
+    expect(useWorkflowStore.getState().meta).toMatchObject({
+      active: true,
+      publishedVersionId: wf.versionId,
+    });
+    expect(hasDeactivationToast()).toBe(false);
   });
 
   it('tells the user on save and lists the failing nodes', async () => {

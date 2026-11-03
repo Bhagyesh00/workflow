@@ -382,29 +382,44 @@ const hookNode = (parameters: Record<string, unknown> = {}) =>
 const plainWebhook = () =>
   node('Webhook', 'core.webhook', { httpMethod: 'POST', path: 'plain' }, [200, 0], { webhookId: 'plain-id' });
 
-describe('R41: third-party webhooks on save', () => {
-  it('unregisters the hooks of a removed third-party node', async () => {
+describe('R41: third-party webhooks on publish (P3-10: a save writes the draft only)', () => {
+  /** save a draft; nothing is registered or removed until it is published */
+  async function saveDraft(
+    client: Awaited<ReturnType<typeof signup>>['client'],
+    id: string,
+    nodes: unknown[],
+  ) {
+    const current = await client.data(client.get(`/rest/workflows/${id}`));
+    const saved = await client.data(
+      client.patch(`/rest/workflows/${id}`, { versionId: current.versionId, nodes }),
+    );
+    expect(saved.active).toBe(true);
+    expect(saved.publishedVersionId).toBe(current.publishedVersionId);
+    return saved;
+  }
+
+  it('unregisters the hooks of a removed third-party node when the draft is published', async () => {
     const { client, tenant } = await signup(server.app);
     const wf = await createWorkflow(client, { nodes: [hookNode(), plainWebhook()] });
     await activate(client, wf.id);
     expect(hookRegistry.map((h) => h.action)).toEqual(['create']);
-    const saved = await client.data(
-      client.patch(`/rest/workflows/${wf.id}`, { versionId: wf.versionId, nodes: [plainWebhook()] }),
-    );
-    expect(saved.active).toBe(true);
+    await saveDraft(client, wf.id, [plainWebhook()]);
+    expect(hookRegistry.map((h) => h.action)).toEqual(['create']);
+    const published = await activate(client, wf.id);
+    expect(published.active).toBe(true);
     expect(hookRegistry).toEqual([
       { action: 'create', url: `http://localhost:5678/webhook/${tenant.slug}/remote-hook/events` },
       { action: 'delete', url: `http://localhost:5678/webhook/${tenant.slug}/remote-hook/events` },
     ]);
   });
 
-  it('re-registers a third-party node whose settings changed', async () => {
+  it('re-registers a third-party node whose settings changed when the draft is published', async () => {
     const { client } = await signup(server.app);
     const wf = await createWorkflow(client, { nodes: [hookNode({ note: 'a' })] });
     await activate(client, wf.id);
-    await client.data(
-      client.patch(`/rest/workflows/${wf.id}`, { versionId: wf.versionId, nodes: [hookNode({ note: 'b' })] }),
-    );
+    await saveDraft(client, wf.id, [hookNode({ note: 'b' })]);
+    expect(hookRegistry.map((h) => h.action)).toEqual(['create']);
+    await activate(client, wf.id);
     expect(hookRegistry.map((h) => h.action)).toEqual(['create', 'delete', 'create']);
   });
 
@@ -416,37 +431,33 @@ describe('R41: third-party webhooks on save', () => {
     expect(hookRegistry.map((h) => h.action)).toEqual(['create', 'delete']);
   });
 
-  it('unregisters the hooks when a save makes the activation fail', async () => {
-    const { client } = await signup(server.app);
-    const wf = await createWorkflow(client, { nodes: [hookNode()] });
-    await activate(client, wf.id);
-    const saved = await client.data(
-      client.patch(`/rest/workflows/${wf.id}`, {
-        versionId: wf.versionId,
-        nodes: [hookNode({ note: 'b' }), node('Broken', 'a3.failTrigger')],
-      }),
-    );
-    expect(saved.active).toBe(false);
-    expect(saved.activationError).toBeDefined();
-    expect(hookRegistry.map((h) => h.action)).toEqual(['create', 'delete', 'create', 'delete']);
-  });
-
-  it('unregisters the hooks of a removed third-party node when the save fails validation', async () => {
+  it('restores the published version and its hooks when publishing a draft fails afterwards', async () => {
     const { client, tenant } = await signup(server.app);
     const wf = await createWorkflow(client, { nodes: [hookNode()] });
     await activate(client, wf.id);
-    const saved = await client.data(
-      client.patch(`/rest/workflows/${wf.id}`, {
-        versionId: wf.versionId,
-        nodes: [node('Noop', 'core.noOp')],
-      }),
-    );
-    expect(saved.active).toBe(false);
-    expect(saved.activationError).toBeDefined();
+    await saveDraft(client, wf.id, [hookNode({ note: 'b' }), node('Broken', 'a3.failTrigger')]);
+    const res = await client.post(`/rest/workflows/${wf.id}/activate`);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('activation_failed');
+    // the new hook goes, the old one is registered again and stays published
+    expect(hookRegistry.map((h) => h.action)).toEqual(['create', 'delete', 'create', 'delete', 'create']);
+    const row = await server.ctx.repos.workflows.get(tenant.id, wf.id);
+    expect(row).toMatchObject({ active: true, publishedVersionId: wf.versionId });
+    expect((await server.ctx.repos.webhooks.listForWorkflow(tenant.id, wf.id)).length).toBe(1);
+  });
+
+  it('keeps the published version and its hooks when the draft fails validation', async () => {
+    const { client, tenant } = await signup(server.app);
+    const wf = await createWorkflow(client, { nodes: [hookNode()] });
+    await activate(client, wf.id);
+    await saveDraft(client, wf.id, [node('Noop', 'core.noOp')]);
+    const res = await client.post(`/rest/workflows/${wf.id}/activate`);
+    expect(res.statusCode).toBe(400);
     expect(hookRegistry).toEqual([
       { action: 'create', url: `http://localhost:5678/webhook/${tenant.slug}/remote-hook/events` },
-      { action: 'delete', url: `http://localhost:5678/webhook/${tenant.slug}/remote-hook/events` },
     ]);
+    const row = await server.ctx.repos.workflows.get(tenant.id, wf.id);
+    expect(row).toMatchObject({ active: true, publishedVersionId: wf.versionId });
   });
 });
 

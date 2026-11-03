@@ -405,7 +405,7 @@ describe('production webhooks', () => {
 });
 
 describe('activation', () => {
-  it('registers and removes webhooks and re-registers them when an active workflow is saved', async () => {
+  it('registers and removes webhooks and re-registers them when a saved draft is published', async () => {
     const { client, tenant } = await signup(server.app);
     const wf = await activeWorkflow(client, { nodes: [webhook({ path: 'first' })] });
     const rows = await server.ctx.repos.webhooks.listForWorkflow(tenant.id, wf.id);
@@ -427,6 +427,7 @@ describe('activation', () => {
     expect(refused.statusCode).toBe(400);
     expect(refused.json().error.details[0].message).toMatch(/already used/);
 
+    // P3-10: a save writes the draft only; the published path keeps answering until the draft is published
     const current = await client.data(client.get(`/rest/workflows/${wf.id}`));
     await client.data(
       client.patch(`/rest/workflows/${wf.id}`, {
@@ -434,6 +435,13 @@ describe('activation', () => {
         nodes: [webhook({ path: 'second' })],
       }),
     );
+    expect(
+      (await server.app.inject({ method: 'POST', url: `/webhook/${tenant.slug}/first` })).statusCode,
+    ).toBe(200);
+    expect(
+      (await server.app.inject({ method: 'POST', url: `/webhook/${tenant.slug}/second` })).statusCode,
+    ).toBe(404);
+    await client.data(client.post(`/rest/workflows/${wf.id}/activate`));
     expect(
       (await server.app.inject({ method: 'POST', url: `/webhook/${tenant.slug}/first` })).statusCode,
     ).toBe(404);

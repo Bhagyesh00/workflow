@@ -39,10 +39,10 @@ import { effectiveLimits, type TenantSettings } from '../plans';
 import { createRepositories, isUniqueViolation, type Repositories } from '../repositories';
 import type { MessageBus } from './bus';
 import { binaryDirOf, type ExecutionService } from './executions';
+import { loadPublishedDefinition, publishedDefinition } from './published-workflow';
 import type { Leadership } from './queue';
 import { TEST_WEBHOOK_TTL_MS } from './test-webhooks';
 import { type NodeWebhook, nodeWebhooks, workflowWebhooks } from './webhook-paths';
-import { toDefinition } from './workflow-model';
 import { assertNotArchived } from './workflow-rules';
 
 export interface ValidationIssue {
@@ -51,6 +51,10 @@ export interface ValidationIssue {
 }
 
 type ActivationMode = 'init' | 'create' | 'update' | 'activate' | 'manual';
+
+/** what decides whether a node's third-party hook must be registered again */
+const hookSignature = (n: WorkflowNode) =>
+  JSON.stringify([n.type, n.typeVersion, n.parameters, n.credentials, n.webhookId, n.disabled ?? false]);
 
 /** how long a main that is not the leader waits for the leader to start the triggers of a workflow */
 const TRIGGER_START_TIMEOUT_MS = 30_000;
@@ -374,25 +378,25 @@ export class ActiveWorkflowManager {
   // -------------------------------------------------------------------------------------------
   // activate / deactivate
 
-  /** `previous` is the saved version being replaced when an active workflow is saved (mode 'update') */
+  /**
+   * Publish a version (P3-10): register its webhooks and triggers, then point the workflow at it.
+   * `versionId` defaults to the current draft. When another version is published, its triggers are
+   * replaced; a publish that fails restores that version, so it keeps running.
+   */
   async activate(
     tenantId: string,
     workflowId: string,
-    mode: ActivationMode = 'activate',
-    previous?: WorkflowRow,
+    options: { versionId?: string; mode?: ActivationMode } = {},
   ): Promise<WorkflowRow> {
-    const { repos, database, logger } = this.deps;
-    let row = await repos.workflows.get(tenantId, workflowId);
+    const { repos, logger } = this.deps;
+    const row = await repos.workflows.get(tenantId, workflowId);
     if (!row) throw ApiError.notFound('Workflow');
     assertNotArchived(row, 'activate');
     const tenant = (await repos.tenants.get(tenantId))!;
-    if (previous) {
-      // third-party hooks of removed or reconfigured nodes go before validation (a save that fails it
-      // deactivates only the new version's nodes) and before the new version registers its own
-      await this.removeStaleWebhooks(tenant, previous, toDefinition(row));
-      row = (await repos.workflows.get(tenantId, workflowId)) ?? row;
-    }
-    const definition = toDefinition(row);
+    const versionId = options.versionId ?? row.versionId;
+    const version = await repos.versions.get(tenantId, workflowId, versionId);
+    if (!version) throw ApiError.notFound('Version');
+    const definition = publishedDefinition(row, version);
     const issues = await this.validate(tenantId, definition, workflowId);
     if (issues.length)
       throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', issues);
@@ -406,26 +410,21 @@ export class ActiveWorkflowManager {
         throw ApiError.planLimit(`The plan allows ${limits.activeWorkflows} active workflows`);
       }
     }
+    // the version that runs now, restored when this publish fails
+    const previous =
+      row.active && row.publishedVersionId
+        ? {
+            versionId: row.publishedVersionId,
+            definition: await loadPublishedDefinition(repos, tenantId, row).catch((error) => {
+              logger.warn({ err: error, tenantId, workflowId }, 'The published version could not be loaded');
+              return null;
+            }),
+          }
+        : undefined;
 
     const workflow = new Workflow(definition, this.deps.nodeTypes);
-    const hooks = workflowWebhooks(workflow);
     try {
-      await database.db.transaction(async (tx) => {
-        const r = createRepositories(tx);
-        await r.webhooks.replaceForWorkflow(
-          tenantId,
-          workflowId,
-          hooks.map((h) => ({
-            nodeName: h.nodeName,
-            webhookName: h.webhookName,
-            method: h.method,
-            path: h.path,
-            isDynamic: h.isDynamic,
-            segments: h.segments,
-          })),
-        );
-        await r.workflows.setActive(tenantId, workflowId, true);
-      });
+      await this.storePublished(tenantId, workflowId, workflow, versionId);
     } catch (error) {
       if (isUniqueViolation(error)) {
         throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', [
@@ -436,18 +435,25 @@ export class ActiveWorkflowManager {
     }
 
     try {
+      // third-party hooks of removed or reconfigured nodes go before the new version registers its own
+      if (previous?.definition) await this.removeStaleWebhooks(tenant, previous.definition, definition);
       await this.runWebhookMethods(tenant, workflow, 'create');
+      const mode = options.mode ?? (previous ? 'update' : 'activate');
       if (this.deps.leadership.isLeader) await this.startTriggers(tenantId, workflowId, mode, true);
       else await this.startTriggersOnLeader(tenantId, workflowId);
     } catch (error) {
       logger.warn({ err: error, tenantId, workflowId }, 'Activation failed, rolling back');
       await this.stopTriggers(workflowId);
-      await repos.webhooks.deleteForWorkflow(tenantId, workflowId);
-      await repos.workflows.setActive(tenantId, workflowId, false);
-      // the caller deactivates a workflow that is no longer active without looking at third-party hooks
-      await this.runWebhookMethods(tenant, workflow, 'delete').catch((cleanup) =>
-        logger.warn({ err: cleanup, tenantId, workflowId }, 'Removing third-party webhooks failed'),
-      );
+      if (previous?.definition) {
+        await this.restorePublished(tenant, previous.versionId, previous.definition, workflow);
+      } else {
+        await repos.webhooks.deleteForWorkflow(tenantId, workflowId);
+        await repos.workflows.setPublished(tenantId, workflowId, null);
+        // the caller deactivates a workflow that is no longer active without looking at third-party hooks
+        await this.runWebhookMethods(tenant, workflow, 'delete').catch((cleanup) =>
+          logger.warn({ err: cleanup, tenantId, workflowId }, 'Removing third-party webhooks failed'),
+        );
+      }
       throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', [
         { node: (error as { node?: string }).node ?? null, message: (error as Error).message },
       ]);
@@ -455,17 +461,97 @@ export class ActiveWorkflowManager {
     return (await repos.workflows.get(tenantId, workflowId))!;
   }
 
+  /** the webhook rows of `workflow` and the published pointer, in one transaction */
+  private async storePublished(
+    tenantId: string,
+    workflowId: string,
+    workflow: Workflow,
+    versionId: string,
+  ): Promise<void> {
+    const hooks = workflowWebhooks(workflow);
+    await this.deps.database.db.transaction(async (tx) => {
+      const r = createRepositories(tx);
+      await r.webhooks.replaceForWorkflow(
+        tenantId,
+        workflowId,
+        hooks.map((h) => ({
+          nodeName: h.nodeName,
+          webhookName: h.webhookName,
+          method: h.method,
+          path: h.path,
+          isDynamic: h.isDynamic,
+          segments: h.segments,
+        })),
+      );
+      await r.workflows.setPublished(tenantId, workflowId, versionId);
+    });
+  }
+
+  /**
+   * A publish over a running version failed: drop the third-party hooks only the failed version
+   * registered, put back the previous version's webhooks, pointer and hooks, and restart its triggers.
+   */
+  private async restorePublished(
+    tenant: TenantRow,
+    versionId: string,
+    definition: WorkflowDefinition,
+    failed: Workflow,
+  ): Promise<void> {
+    const { logger, nodeTypes } = this.deps;
+    const workflowId = failed.id ?? '';
+    const log = (message: string) => (error: unknown) =>
+      logger.warn({ err: error, tenantId: tenant.id, workflowId }, message);
+    const kept = new Map(definition.nodes.map((n) => [n.name, hookSignature(n)]));
+    await this.runWebhookMethods(tenant, failed, 'delete', {
+      only: (n) => kept.get(n.name) !== hookSignature(n),
+    }).catch(log('Removing third-party webhooks failed'));
+    // the stored static data changed while the failed version registered its hooks
+    const row = await this.deps.repos.workflows.get(tenant.id, workflowId);
+    const previous = new Workflow(
+      { ...definition, staticData: structuredClone(row?.staticData ?? definition.staticData) },
+      nodeTypes,
+    );
+    try {
+      await this.storePublished(tenant.id, workflowId, previous, versionId);
+    } catch (error) {
+      log('Restoring the published version failed')(error);
+      return;
+    }
+    const removed = new Map(failed.definition.nodes.map((n) => [n.name, hookSignature(n)]));
+    await this.runWebhookMethods(tenant, previous, 'create', {
+      only: (n) => removed.get(n.name) !== hookSignature(n),
+    }).catch(log('Restoring third-party webhooks failed'));
+    if (this.deps.leadership.isLeader) await this.startTriggers(tenant.id, workflowId, 'update');
+    else await this.startTriggersOnLeader(tenant.id, workflowId).catch(log('Restarting triggers failed'));
+  }
+
+  /**
+   * Restart the triggers of a published workflow whose live settings changed (P3-10: settings apply
+   * without a publish). Throws when they do not start; the caller decides what happens then.
+   */
+  async reloadTriggers(tenantId: string, workflowId: string): Promise<void> {
+    if (this.deps.leadership.isLeader) await this.startTriggers(tenantId, workflowId, 'update', true);
+    else await this.startTriggersOnLeader(tenantId, workflowId);
+  }
+
   async deactivate(tenantId: string, workflowId: string): Promise<WorkflowRow> {
     const { repos, logger } = this.deps;
     const row = await repos.workflows.get(tenantId, workflowId);
     if (!row) throw ApiError.notFound('Workflow');
+    // the third-party hooks belong to the published version
+    const published = row.active
+      ? await loadPublishedDefinition(repos, tenantId, row).catch((error) => {
+          logger.warn({ err: error, tenantId, workflowId }, 'The published version could not be loaded');
+          return null;
+        })
+      : null;
     await repos.webhooks.deleteForWorkflow(tenantId, workflowId);
-    await repos.workflows.setActive(tenantId, workflowId, false);
+    await repos.workflows.setPublished(tenantId, workflowId, null);
     await this.stopTriggers(workflowId);
     await this.deps.bus.publish('control', { type: 'triggers:stop', tenantId, workflowId });
-    if (row.active) {
+    if (published) {
       const tenant = (await repos.tenants.get(tenantId))!;
-      const workflow = new Workflow(toDefinition(row), this.deps.nodeTypes);
+      const workflow = new Workflow(published, this.deps.nodeTypes);
       await this.runWebhookMethods(tenant, workflow, 'delete').catch((error) =>
         logger.warn({ err: error, tenantId, workflowId }, 'Removing third-party webhooks failed'),
       );
@@ -512,20 +598,13 @@ export class ActiveWorkflowManager {
   /** delete the third-party hooks of `previous` nodes that the new definition removed or changed */
   private async removeStaleWebhooks(
     tenant: TenantRow,
-    previous: WorkflowRow,
+    previous: WorkflowDefinition,
     next: WorkflowDefinition,
   ): Promise<void> {
-    const signature = (n: WorkflowNode) =>
-      JSON.stringify([n.type, n.typeVersion, n.parameters, n.credentials, n.webhookId, n.disabled ?? false]);
-    const kept = new Map(next.nodes.map((n) => [n.name, signature(n)]));
-    await this.runWebhookMethods(
-      tenant,
-      new Workflow(toDefinition(previous), this.deps.nodeTypes),
-      'delete',
-      {
-        only: (n) => kept.get(n.name) !== signature(n),
-      },
-    ).catch((error) =>
+    const kept = new Map(next.nodes.map((n) => [n.name, hookSignature(n)]));
+    await this.runWebhookMethods(tenant, new Workflow(previous, this.deps.nodeTypes), 'delete', {
+      only: (n) => kept.get(n.name) !== hookSignature(n),
+    }).catch((error) =>
       this.deps.logger.warn(
         { err: error, tenantId: tenant.id, workflowId: previous.id },
         'Removing third-party webhooks failed',
@@ -708,7 +787,9 @@ export class ActiveWorkflowManager {
     if (!row?.active) return;
     const tenant = await repos.tenants.get(tenantId);
     if (!tenant) return;
-    const workflow = new Workflow(toDefinition(row), nodeTypes);
+    const definition = await loadPublishedDefinition(repos, tenantId, row);
+    if (!definition) return;
+    const workflow = new Workflow(definition, nodeTypes);
     const entry: RunningTriggers = {
       tenantId,
       workflow,

@@ -101,6 +101,14 @@ function assertGraph(
   }
 }
 
+/** the `activationError` of a save response */
+function errorOf(error: unknown): { message: string; details?: unknown } {
+  return {
+    message: (error as Error).message,
+    details: error instanceof ApiError ? error.details : undefined,
+  };
+}
+
 /** 400 invalid_node_groups with the rule texts (P3-04, as n8n's save check) */
 function assertNodeGroups(
   definition: Pick<WorkflowDefinition, 'name' | 'nodes' | 'connections' | 'nodeGroups'>,
@@ -216,8 +224,11 @@ export class WorkflowService {
 
   /**
    * Save changes. `expectedVersionId` must match the stored version (409 otherwise); every save
-   * creates a version snapshot. Saving an active workflow re-registers its triggers; when that
-   * fails the workflow is deactivated and the reason returned in `activationError`.
+   * creates a version snapshot and writes the draft only (P3-10). On a published workflow a
+   * settings change restarts its triggers with the new settings; when they fail to start, the
+   * workflow is unpublished and the reason returned in `activationError`. `publishIfActive` (the
+   * public API's PUT) publishes the saved version of a published workflow; a failed publish keeps
+   * the old version running and is returned in `activationError`.
    */
   async update(
     tenantId: string,
@@ -225,8 +236,7 @@ export class WorkflowService {
     input: Omit<UpdateInput, 'versionId'> & { versionId?: string },
     actor: Actor,
     message?: string,
-    /** P3-10 (L10): the public API's ?publishIfActive; C0 keeps today's behaviour (re-register when active) */
-    _options: { publishIfActive?: boolean } = {},
+    options: { publishIfActive?: boolean } = {},
   ): Promise<WorkflowDTO & { activationError?: { message: string; details?: unknown } }> {
     const { versionId: expected, tagIds, versionMessage, autosaved, ...patch } = input;
     const existing = await this.get(tenantId, id);
@@ -296,17 +306,32 @@ export class WorkflowService {
       ip: actor.ip,
     });
 
+    // a save writes the draft only (P3-10); the published version keeps running
     let activationError: { message: string; details?: unknown } | undefined;
     let current = row;
-    if (row.active && (patch.nodes || patch.connections || patch.settings)) {
+    const settingsChanged =
+      patch.settings !== undefined && JSON.stringify(previous?.settings) !== JSON.stringify(row.settings);
+    if (row.active && options.publishIfActive) {
+      // public API PUT: publish the saved version through the same call; a failure keeps the old one
       try {
-        current = await this.deps.activeWorkflows.activate(tenantId, id, 'update', previous);
+        await this.setActive(tenantId, id, true, actor, { versionId: newVersionId });
+      } catch (error) {
+        activationError = errorOf(error);
+      }
+      current = await this.get(tenantId, id);
+    } else if (row.active && settingsChanged) {
+      // settings are live: the published triggers restart with them, without a new publish
+      try {
+        await this.deps.activeWorkflows.reloadTriggers(tenantId, id);
       } catch (error) {
         current = await this.deps.activeWorkflows.deactivate(tenantId, id);
-        activationError = {
-          message: (error as Error).message,
-          details: error instanceof ApiError ? error.details : undefined,
-        };
+        await this.deps.publishHistory.record('deactivated', {
+          tenantId,
+          workflowId: id,
+          versionId: row.publishedVersionId,
+          userId: actor.userId ?? null,
+        });
+        activationError = errorOf(error);
       }
     }
     const dto = await this.dto(tenantId, current);
@@ -334,22 +359,65 @@ export class WorkflowService {
     });
   }
 
-  /** publish (true) or unpublish; `body` names the version to publish (P3-10, L10; C0 ignores it) */
+  /**
+   * Publish (true) or unpublish (P3-10, as n8n activate / deactivate). `body.versionId` names the
+   * version to publish (default the current draft); `versionName` and `description` are stored on
+   * it once it is live. An open review blocks the publish (409, ctx.reviews). A failed publish
+   * leaves the published version as it was.
+   */
   async setActive(
     tenantId: string,
     id: string,
     active: boolean,
     actor: Actor,
-    _body?: PublishBody,
+    body: PublishBody = {},
   ): Promise<WorkflowDTO> {
-    const row = active
-      ? await this.deps.activeWorkflows.activate(tenantId, id)
-      : await this.deps.activeWorkflows.deactivate(tenantId, id);
+    const existing = await this.get(tenantId, id);
+    if (!active) {
+      const row = await this.deps.activeWorkflows.deactivate(tenantId, id);
+      if (existing.active) {
+        await this.deps.publishHistory.record('deactivated', {
+          tenantId,
+          workflowId: id,
+          versionId: existing.publishedVersionId,
+          userId: actor.userId ?? null,
+        });
+      }
+      await this.repos.audit.add(tenantId, {
+        userId: actor.userId,
+        action: 'workflow.deactivated',
+        resourceType: 'workflow',
+        resourceId: id,
+        metadata: { versionId: existing.publishedVersionId },
+        ip: actor.ip,
+      });
+      return this.dto(tenantId, row);
+    }
+
+    await this.deps.reviews.assertCanPublish(tenantId, id, actor.userId);
+    const versionId = body.versionId ?? existing.versionId;
+    if (!(await this.repos.versions.get(tenantId, id, versionId))) throw ApiError.notFound('Version');
+    let row = await this.deps.activeWorkflows.activate(tenantId, id, { versionId });
+    if (body.versionName !== undefined || body.description !== undefined) {
+      await this.repos.versions.update(tenantId, id, versionId, {
+        versionName: body.versionName,
+        description: body.description,
+      });
+      row = await this.get(tenantId, id);
+    }
+    await this.deps.publishHistory.record('activated', {
+      tenantId,
+      workflowId: id,
+      versionId,
+      userId: actor.userId ?? null,
+    });
+    await this.deps.reviews.afterWorkflowPublished(tenantId, id, versionId);
     await this.repos.audit.add(tenantId, {
       userId: actor.userId,
-      action: active ? 'workflow.activated' : 'workflow.deactivated',
+      action: 'workflow.activated',
       resourceType: 'workflow',
       resourceId: id,
+      metadata: { versionId },
       ip: actor.ip,
     });
     return this.dto(tenantId, row);
@@ -400,13 +468,27 @@ export class WorkflowService {
 
   /** PATCH /workflows/:id/versions/:versionId: name or describe a version (P3-10, L10) */
   async updateVersion(
-    _tenantId: string,
-    _id: string,
-    _versionId: string,
-    _patch: VersionPatch,
-    _actor: Actor,
+    tenantId: string,
+    id: string,
+    versionId: string,
+    patch: VersionPatch,
+    actor: Actor,
   ): Promise<Awaited<ReturnType<WorkflowService['getVersion']>>> {
-    throw new ApiError(501, 'not_implemented', 'not implemented (L10)');
+    await this.get(tenantId, id);
+    const updated = await this.repos.versions.update(tenantId, id, versionId, {
+      versionName: patch.versionName,
+      description: patch.description,
+    });
+    if (!updated) throw ApiError.notFound('Version');
+    await this.repos.audit.add(tenantId, {
+      userId: actor.userId,
+      action: 'workflow.version_updated',
+      resourceType: 'workflow',
+      resourceId: id,
+      metadata: { versionId },
+      ip: actor.ip,
+    });
+    return this.getVersion(tenantId, id, versionId);
   }
 
   async restoreVersion(tenantId: string, id: string, versionId: string, actor: Actor) {
@@ -467,7 +549,14 @@ export class WorkflowService {
   private definitionFor(row: WorkflowRow, data?: WorkflowData): WorkflowDefinition {
     if (!data) return toDefinition(row);
     const definition = cloneDefinition(data as unknown as WorkflowDefinition);
-    return { ...definition, id: row.id, staticData: structuredClone(row.staticData), active: row.active };
+    // unsaved editor data is no saved version: its runs record none (P3-10)
+    return {
+      ...definition,
+      id: row.id,
+      staticData: structuredClone(row.staticData),
+      active: row.active,
+      versionId: undefined,
+    };
   }
 
   async run(tenant: TenantRow, id: string, input: RunInput, actor: Actor): Promise<{ executionId: string }> {

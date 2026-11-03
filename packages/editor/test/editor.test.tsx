@@ -152,7 +152,10 @@ describe('workflow editor', () => {
     await waitFor(() => expect(useRunStore.getState().status).toBe('error'), { timeout: 5000 });
     await waitFor(() => expect(document.querySelector('[data-id="n3"] [title="Failed"]')).toBeTruthy());
 
-    await user.click(screen.getByRole('switch', { name: /inactive/i }));
+    // P3-10: Publish opens the publish dialog; the server's refusal lists the problems
+    await user.click(screen.getByRole('button', { name: 'Publish' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Publish workflow' });
+    await user.click(within(dialog).getByRole('button', { name: 'Publish' }));
     expect(await screen.findByText('The workflow could not be activated')).toBeTruthy();
     expect(screen.getByText(/trigger other than the manual trigger/)).toBeTruthy();
   });

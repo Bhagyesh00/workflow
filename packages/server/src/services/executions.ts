@@ -49,8 +49,9 @@ import type { Repositories } from '../repositories';
 import type { MessageBus, PushService } from './bus';
 import type { CredentialService } from './credentials';
 import type { Metrics } from './metrics';
+import { runtimeDefinition } from './published-workflow';
 import type { ExecutionJob, ExecutionQueue } from './queue';
-import { cloneDefinition, toDefinition } from './workflow-model';
+import { cloneDefinition } from './workflow-model';
 import { assertNotArchived } from './workflow-rules';
 
 export const EXECUTE_WORKFLOW_TRIGGER = 'core.executeWorkflowTrigger';
@@ -883,7 +884,8 @@ export class ExecutionService {
         row.settings as WorkflowDefinition['settings'],
         request.parent.workflowId,
       );
-      definition = toDefinition(row);
+      // the callee version follows the root run's mode, through nested calls too (P3-10)
+      definition = await runtimeDefinition(repos, tenantId, row, rootMode);
       workflowId = row.id;
     } else {
       if (!request.source.workflow) throw new Error('No workflow definition was given');
@@ -960,7 +962,8 @@ export class ExecutionService {
       this.deps.logger.warn({ tenantId, errorWorkflowId }, 'Error workflow not found');
       return;
     }
-    const targetDefinition = toDefinition(target);
+    // the error workflow runs its published version, or its draft when it was never published (P3-10)
+    const targetDefinition = await runtimeDefinition(this.deps.repos, tenantId, target, 'error');
     const start = findStartNode(new Workflow(targetDefinition, this.deps.nodeTypes), ERROR_TRIGGER);
     if (!start) return;
     const error = state.resultData.error;
@@ -1071,13 +1074,16 @@ export class ExecutionService {
     }
     let definition = data.workflowData as unknown as WorkflowDefinition;
     let workflowId = row.workflowId ?? undefined;
+    const runOptions = (data.runOptions ?? {}) as StoredRunOptions;
+    // the mode of the run this retry chain started from (a retry keeps it for its sub-workflows)
+    const rootMode = runOptions.rootMode ?? (row.mode as ExecutionMode);
     if (options.useCurrentWorkflow && row.workflowId) {
       const current = await repos.workflows.get(tenantId, row.workflowId);
       if (!current) throw ApiError.notFound('Workflow');
-      definition = toDefinition(current);
+      // a retry of an editor run takes the draft, any other the published version (P3-10)
+      definition = await runtimeDefinition(repos, tenantId, current, rootMode);
       workflowId = current.id;
     }
-    const runOptions = (data.runOptions ?? {}) as StoredRunOptions;
     const state = data.state as unknown as ExecutionState | null;
     const names = new Set(definition.nodes.map((n) => n.name));
     // the retry owns copies of every binary file it references: the original may be pruned or deleted
@@ -1112,7 +1118,7 @@ export class ExecutionService {
       runData: clone(runOptions.runData),
       destinationNode: runOptions.destinationNode,
       dirtyNodeNames: clone(runOptions.dirtyNodeNames),
-      rootMode: runOptions.rootMode,
+      rootMode,
     };
     // a node failed: the engine re-runs that node with its saved input and everything after it
     const failed = state?.executionData?.failedExecuteData;

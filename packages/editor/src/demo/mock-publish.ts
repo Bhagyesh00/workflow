@@ -1,17 +1,15 @@
 /**
  * Demo routes for publishing (P3-10) and the publish timeline (P3-16), registered by the
- * MockBackend constructor.
- *
- * C0: activate / deactivate are the MockBackend's earlier handlers, moved here unchanged except that
- * they keep the published pointer (publishedVersionId) and record timeline events; GET
- * /workflows/:id/publish-timeline answers from those events. Lane L10 rewrites publishing (body,
- * version, review gate) and must keep the timeline recording and route; PATCH of a version answers
- * 501 until L10 writes it.
+ * MockBackend constructor, as the server answers them: POST activate publishes a version (body
+ * {versionId?, versionName?, description?}; default the current one; another workflow's version
+ * 404) and stores the name and description on it, deactivate unpublishes, PATCH of a version names
+ * or describes it (null clears). Every publish and unpublish records a timeline event; GET
+ * /workflows/:id/publish-timeline answers from those events.
  */
-import type { PublishTimelineEntry } from '../api/types';
+import type { PublishBody, PublishTimelineEntry, VersionPatchBody } from '../api/types';
 import { newId } from '../lib/ids';
 import type { MockBackend, StoredWorkflow } from './mock-backend';
-import { notImplemented, now } from './mock-http';
+import { copy, HttpError, now } from './mock-http';
 
 export interface StoredPublishEvent extends PublishTimelineEntry {
   tenantId: string;
@@ -45,15 +43,32 @@ export function recordPublishEvent(
 }
 
 export function registerPublishRoutes(backend: MockBackend): void {
-  backend.on('POST', '/workflows/:id/activate', ({ params }) => {
+  const versionOf = (wf: StoredWorkflow, versionId: string) => {
+    const version = backend.versions.find((v) => v.workflowId === wf.id && v.versionId === versionId);
+    if (!version) throw new HttpError(404, 'not_found', 'Version not found');
+    return version;
+  };
+  backend.on('POST', '/workflows/:id/activate', ({ params, body }) => {
+    backend.requireRole('editor');
     const wf = backend.workflow(params[0]);
-    backend.validateForActivation(wf);
+    const input = (body ?? {}) as PublishBody;
+    const versionId = input.versionId ?? wf.versionId;
+    const version = versionOf(wf, versionId);
+    // the published graph is the version's; settings stay live on the workflow
+    backend.validateForActivation({
+      ...wf,
+      nodes: version.snapshot.nodes,
+      connections: version.snapshot.connections,
+    });
     wf.active = true;
-    wf.publishedVersionId = wf.versionId;
-    recordPublishEvent(backend, wf, 'activated', wf.versionId);
+    wf.publishedVersionId = versionId;
+    if (input.versionName !== undefined) version.versionName = input.versionName;
+    if (input.description !== undefined) version.description = input.description;
+    recordPublishEvent(backend, wf, 'activated', versionId);
     return backend.toDto(wf);
   });
   backend.on('POST', '/workflows/:id/deactivate', ({ params }) => {
+    backend.requireRole('editor');
     const wf = backend.workflow(params[0]);
     const was = wf.publishedVersionId;
     wf.active = false;
@@ -61,7 +76,24 @@ export function registerPublishRoutes(backend: MockBackend): void {
     if (was) recordPublishEvent(backend, wf, 'deactivated', was);
     return backend.toDto(wf);
   });
-  backend.on('PATCH', '/workflows/:id/versions/:versionId', () => notImplemented('L10'));
+  backend.on('PATCH', '/workflows/:id/versions/:versionId', ({ params, body }) => {
+    backend.requireRole('editor');
+    const wf = backend.workflow(params[0]);
+    const version = versionOf(wf, params[1]);
+    const patch = (body ?? {}) as VersionPatchBody;
+    if (patch.versionName === undefined && patch.description === undefined)
+      throw new HttpError(400, 'bad_request', 'Give versionName or description');
+    if (patch.versionName !== undefined) version.versionName = patch.versionName?.trim() || null;
+    if (patch.description !== undefined) version.description = patch.description;
+    return {
+      versionId: version.versionId,
+      createdAt: version.createdAt,
+      versionName: version.versionName ?? null,
+      description: version.description ?? null,
+      autosaved: version.autosaved ?? false,
+      ...copy(version.snapshot),
+    };
+  });
   backend.on('GET', '/workflows/:id/publish-timeline', ({ params, query }) => {
     const wf = backend.workflow(params[0]);
     const skip = Math.max(Number(query.skip) || 0, 0);

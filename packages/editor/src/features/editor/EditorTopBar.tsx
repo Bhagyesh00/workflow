@@ -1,14 +1,19 @@
-/** Editor header: name, tags, save state, Doctor/History/Settings, publishing, archive, save. */
+/**
+ * Editor header: name, tags, save state, Doctor/History/Settings, publishing (status chip, Publish
+ * and the publish dialog, Unpublish in the More menu; P3-10), archive, save.
+ */
 import {
   Archive,
   ArchiveRestore,
   ArrowLeft,
+  CloudOff,
   Copy,
   Download,
   History,
   Keyboard,
   Link2,
   MoreHorizontal,
+  Rocket,
   Settings2,
   Stethoscope,
   Trash2,
@@ -20,14 +25,15 @@ import type { PublishBody } from '../../api/types';
 import { Button, IconButton } from '../../components/ui/Button';
 import { cx } from '../../components/ui/cx';
 import { Dialog } from '../../components/ui/Dialog';
-import { Switch } from '../../components/ui/Field';
 import { Menu } from '../../components/ui/Menu';
-import { Kbd } from '../../components/ui/misc';
+import { Badge, Kbd } from '../../components/ui/misc';
 import { TagsEditor } from '../../components/workflow/TagsEditor';
 import type { DoctorIssue } from '../../lib/doctor';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { AutosaveStatus } from './AutosaveStatus';
+import { PublishDialog } from './PublishDialog';
+import { PUBLISH_STATE_LABEL, publishStateOf, requestPublish } from './publish-actions';
 import { SHORTCUTS } from './useEditorShortcuts';
 import { downloadWorkflow } from './workflow-commands';
 
@@ -46,7 +52,7 @@ export function EditorTopBar({
   issues: DoctorIssue[];
   saving: boolean;
   onSave: () => void;
-  /** P3-10 publish (L10 replaces the switch with a Publish button and dialog) */
+  /** P3-10: the publish dialog's choice (the Publish button opens the dialog after the review gate) */
   onPublish: (body: PublishBody) => void;
   onUnpublish: () => void;
   onDuplicate: () => void;
@@ -85,6 +91,7 @@ export function EditorTopBar({
     if (tagsRequested) useUiStore.getState().setTagsEditRequested(false);
   }, [tagsRequested]);
 
+  const publishState = publishStateOf(meta, dirty);
   const errors = issues.filter((i) => i.severity === 'error').length;
   const warnings = issues.filter((i) => i.severity === 'warning').length;
 
@@ -209,6 +216,17 @@ export function EditorTopBar({
             disabled: readOnly,
           },
           'separator',
+          ...(meta.publishedVersionId
+            ? [
+                {
+                  key: 'unpublish',
+                  label: 'Unpublish',
+                  icon: <CloudOff size={14} />,
+                  onSelect: onUnpublish,
+                  disabled: readOnly || activating,
+                },
+              ]
+            : []),
           ...(meta.isArchived
             ? [
                 {
@@ -240,17 +258,24 @@ export function EditorTopBar({
         ]}
       />
       <div className="mx-1 h-6 w-px bg-line" />
-      <span className="flex items-center gap-2 text-sm font-semibold text-ink-2">
-        <Switch
-          label={meta.active ? 'Active: turn off to stop triggers' : 'Inactive: turn on to start triggers'}
-          checked={meta.active}
-          disabled={readOnly || activating}
-          onChange={(active) => (active ? onPublish({}) : onUnpublish())}
-        />
-        <span className={cx('max-sm:hidden', meta.active && 'text-ok')} aria-hidden="true">
-          {meta.active ? 'Active' : 'Inactive'}
-        </span>
+      <span role="status" aria-label={`Publish status: ${PUBLISH_STATE_LABEL[publishState]}`}>
+        <Badge
+          tone={publishState === 'published' ? 'ok' : publishState === 'changed' ? 'warn' : 'neutral'}
+          className="max-md:hidden"
+        >
+          {PUBLISH_STATE_LABEL[publishState]}
+        </Badge>
       </span>
+      <Button
+        icon={<Rocket size={14} />}
+        onClick={() => void requestPublish()}
+        loading={activating}
+        disabled={readOnly || activating || publishState === 'published'}
+        title={publishState === 'published' ? 'This version is already published' : undefined}
+      >
+        Publish
+      </Button>
+      <PublishDialog onPublish={onPublish} />
       <Button
         variant={dirty || !meta.id ? 'primary' : 'secondary'}
         onClick={onSave}

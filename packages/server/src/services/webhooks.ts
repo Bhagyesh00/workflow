@@ -38,6 +38,7 @@ import type { Repositories } from '../repositories';
 import type { PushService } from './bus';
 import type { ExecutionObserver, ExecutionOutcome, ExecutionService, StartedExecution } from './executions';
 import type { Metrics } from './metrics';
+import { loadPublishedDefinition } from './published-workflow';
 import { findTestWebhook, type TestWebhookStore } from './test-webhooks';
 import {
   evaluateDescriptionValue,
@@ -46,7 +47,6 @@ import {
   nodeWebhooks,
   sortDynamic,
 } from './webhook-paths';
-import { toDefinition } from './workflow-model';
 
 export interface WebhookReply {
   statusCode: number;
@@ -153,7 +153,9 @@ export class WebhookService {
     if (!found) return notRegistered(incoming.method, incoming.path);
     const row = await repos.workflows.get(tenant.id, found.workflowId);
     if (!row?.active) return notRegistered(incoming.method, incoming.path);
-    const definition = toDefinition(row);
+    // production serves the published version (P3-10), never the saved draft
+    const definition = await loadPublishedDefinition(repos, tenant.id, row);
+    if (!definition) return notRegistered(incoming.method, incoming.path);
     const node = definition.nodes.find((n) => n.name === found.nodeName);
     if (!node) return notRegistered(incoming.method, incoming.path);
     const hook = this.hookOf(definition, node, found.webhookName);
@@ -252,8 +254,8 @@ export class WebhookService {
       const method = requested && methods.includes(requested) ? requested : methods[0];
       const found = method ? await this.findWebhook(tenant.id, method, path) : undefined;
       const row = found ? await repos.workflows.get(tenant.id, found.workflowId) : undefined;
-      if (found && row)
-        target = { definition: toDefinition(row), nodeName: found.nodeName, workflowId: row.id };
+      const definition = row?.active ? await loadPublishedDefinition(repos, tenant.id, row) : null;
+      if (found && row && definition) target = { definition, nodeName: found.nodeName, workflowId: row.id };
     }
     if (!methods.length) return notRegistered('OPTIONS', path);
     const reply: Record<string, string> = {
