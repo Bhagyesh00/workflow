@@ -4,6 +4,7 @@
  * The editor routes (routes/folders.ts) and the public API (routes/public-folders.ts) both call
  * this service, so the rules and the tenant checks are the same for both.
  */
+import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ServiceDeps } from '../context';
 import type { FolderRow } from '../db/schema';
@@ -161,13 +162,6 @@ export class FolderService {
 
   async update(tenantId: string, id: string, input: FolderUpdateInput, actor: Actor): Promise<FolderDTO> {
     const current = await this.require(tenantId, id);
-    if (input.parentFolderId !== undefined && input.parentFolderId !== null) {
-      await assertFolderInTenant(this.repos, tenantId, input.parentFolderId);
-      const below = await this.repos.folders.subtreeIds(tenantId, id);
-      if (below.includes(input.parentFolderId)) {
-        throw ApiError.badRequest('A folder cannot be moved into itself or one of its subfolders.');
-      }
-    }
     let tagIds: string[] | undefined;
     if (input.tagIds !== undefined) {
       tagIds = [...new Set(input.tagIds)];
@@ -176,6 +170,17 @@ export class FolderService {
     }
     const row = await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
+      const parentId = input.parentFolderId;
+      if (parentId !== undefined && parentId !== null) {
+        // One move at a time per tenant: the check below and the update see the same tree, so two
+        // moves at the same time cannot each pass and then close a loop together.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`folders:${tenantId}`}))`);
+        await assertFolderInTenant(repos, tenantId, parentId);
+        const below = await repos.folders.subtreeIds(tenantId, id);
+        if (below.includes(parentId)) {
+          throw ApiError.badRequest('A folder cannot be moved into itself or one of its subfolders.');
+        }
+      }
       const updated = await repos.folders.update(tenantId, id, {
         name: input.name,
         parentFolderId: input.parentFolderId,

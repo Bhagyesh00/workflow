@@ -455,7 +455,7 @@ function WorkflowRow({
   return (
     <li
       className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-line px-5 py-3.5 hover:bg-surface-2 md:grid-cols-[minmax(0,2fr)_auto_minmax(0,1fr)_auto]"
-      {...dragProps(item, canWrite)}
+      {...dragProps(item, canWrite && !workflow.isArchived)}
     >
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">

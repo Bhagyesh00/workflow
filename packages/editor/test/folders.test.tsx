@@ -263,8 +263,11 @@ describe('archive', () => {
     signedIn();
     const wf = seed('Archived one', { isArchived: true });
     renderApp(`/workflow/${wf.id}`);
-    const banner = await screen.findByRole('status', {}, LONG);
-    expect(within(banner).getByText('This workflow is archived.')).toBeTruthy();
+    // the page also shows a loading status first, so find the banner by its text
+    const banner = (await screen.findByText('This workflow is archived.', {}, LONG)).closest(
+      '[role="status"]',
+    ) as HTMLElement;
+    expect(banner).toBeTruthy();
     await user.click(within(banner).getByRole('button', { name: 'Restore' }));
     await waitFor(() => expect(backend().workflows.find((w) => w.id === wf.id)?.isArchived).toBe(false));
     await waitFor(() => expect(screen.queryByText('This workflow is archived.')).toBeNull());

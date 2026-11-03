@@ -5,7 +5,7 @@
 import type { ServiceDeps } from '../context';
 import { ApiError } from '../http/errors';
 import type { WorkflowDTO } from './workflow-model';
-import { assertFolderInTenant } from './workflow-rules';
+import { assertFolderInTenant, assertNotArchived } from './workflow-rules';
 import type { Actor } from './workflows';
 
 export class WorkflowArchiveService {
@@ -63,7 +63,7 @@ export class WorkflowArchiveService {
     return workflows.dto(tenantId, await workflows.get(tenantId, id));
   }
 
-  /** move workflows to a folder (null = root); every id must belong to the tenant (404) */
+  /** move workflows to a folder (null = root); every id must belong to the tenant (404) and be unarchived (400) */
   async move(
     tenantId: string,
     workflowIds: string[],
@@ -74,7 +74,9 @@ export class WorkflowArchiveService {
     await assertFolderInTenant(repos, tenantId, folderId);
     const unique = [...new Set(workflowIds)];
     for (const id of unique) {
-      if (!(await repos.workflows.get(tenantId, id))) throw ApiError.notFound('Workflow');
+      const row = await repos.workflows.get(tenantId, id);
+      if (!row) throw ApiError.notFound('Workflow');
+      assertNotArchived(row, 'update');
     }
     const moved = await repos.workflows.setFolder(tenantId, unique, folderId);
     for (const id of moved) {

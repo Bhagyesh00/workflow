@@ -268,6 +268,9 @@ export function registerFolderRoutes(backend: MockBackend): void {
     const ids = Array.isArray(body.workflowIds) ? (body.workflowIds as string[]) : [];
     const folderId = checkParent(body.folderId);
     const list = ids.map((id) => backend.workflow(id));
+    if (list.some((wf) => wf.isArchived)) {
+      throw badRequest('The workflow is archived and cannot be changed. Restore it first.');
+    }
     for (const wf of list) {
       wf.folderId = folderId;
       wf.updatedAt = now();

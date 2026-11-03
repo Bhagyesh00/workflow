@@ -115,29 +115,33 @@ export class FolderRepository {
     return rows.length > 0;
   }
 
-  /** the folder and every folder below it */
+  /** the folder and every folder below it (`union` drops repeated ids, so a cycle that exists ends the walk) */
   async subtreeIds(tenantId: string, id: string): Promise<string[]> {
     if (!isUuid(id)) return [];
     const result = await this.db.execute<{ id: string }>(sql`
       with recursive down as (
         select id from ${folders} where tenant_id = ${tenantId} and id = ${id}::uuid
-        union all
+        union
         select f.id from ${folders} f join down d on f.parent_folder_id = d.id where f.tenant_id = ${tenantId}
       )
       select id from down`);
     return result.rows.map((r) => r.id);
   }
 
-  /** the ancestors of a folder, from the top level down (the folder itself is not included) */
+  /**
+   * the ancestors of a folder, from the top level down (the folder itself is not included); the walk
+   * keeps the ids it has seen, so a cycle that exists ends it
+   */
   async ancestors(tenantId: string, id: string): Promise<FolderPathRow[]> {
     if (!isUuid(id)) return [];
     const result = await this.db.execute<{ id: string; name: string; depth: number }>(sql`
       with recursive up as (
-        select id, name, parent_folder_id, 0 as depth from ${folders}
+        select id, name, parent_folder_id, 0 as depth, array[id] as seen from ${folders}
           where tenant_id = ${tenantId} and id = ${id}::uuid
         union all
-        select f.id, f.name, f.parent_folder_id, up.depth + 1 from ${folders} f
-          join up on f.id = up.parent_folder_id where f.tenant_id = ${tenantId}
+        select f.id, f.name, f.parent_folder_id, up.depth + 1, up.seen || f.id from ${folders} f
+          join up on f.id = up.parent_folder_id
+          where f.tenant_id = ${tenantId} and not (f.id = any(up.seen))
       )
       select id, name, depth from up where depth > 0 order by depth desc`);
     return result.rows.map((r) => ({ id: r.id, name: r.name }));

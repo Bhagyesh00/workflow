@@ -165,6 +165,41 @@ describe('folder names and nesting', () => {
     expect(toRoot.parentFolderId).toBeNull();
   });
 
+  it('two moves at the same time cannot make a cycle (A under B and B under A)', async () => {
+    const { client } = await signup(server.app);
+    for (let round = 0; round < 5; round++) {
+      const a = await folderOf(client, `A${round}`);
+      const b = await folderOf(client, `B${round}`);
+      const results = await Promise.all([
+        client.patch(`/rest/folders/${a.id}`, { parentFolderId: b.id }),
+        client.patch(`/rest/folders/${b.id}`, { parentFolderId: a.id }),
+      ]);
+      expect(results.map((r) => r.statusCode).sort()).toEqual([200, 400]);
+      const rows = await pool().query('select id, parent_folder_id from folders where id = any($1::uuid[])', [
+        [a.id, b.id],
+      ]);
+      expect(rows.rows.filter((r) => r.parent_folder_id === null)).toHaveLength(1);
+    }
+  });
+
+  it('a cycle that already exists ends the walk: read, move and delete answer instead of hanging', async () => {
+    const { client } = await signup(server.app);
+    const a = await folderOf(client, 'A');
+    const b = await folderOf(client, 'B', a.id);
+    await pool().query('update folders set parent_folder_id = $1 where id = $2', [b.id, a.id]);
+    const timeout = (ms: number) =>
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('hung')), ms));
+    const read = await Promise.race([client.get(`/rest/folders/${a.id}`), timeout(10_000)]);
+    expect(read.statusCode).toBe(200);
+    const move = await Promise.race([
+      client.patch(`/rest/folders/${a.id}`, { parentFolderId: b.id }),
+      timeout(10_000),
+    ]);
+    expect(move.statusCode).toBe(400);
+    const removed = await Promise.race([del(client, a.id), timeout(10_000)]);
+    expect(removed.statusCode).toBeLessThan(500);
+  });
+
   it('writes audit rows', async () => {
     const { client, tenant } = await signup(server.app);
     const f = await folderOf(client, 'A');
@@ -259,6 +294,26 @@ describe('move workflows', () => {
     expect((await client.get('/rest/workflows?folderId=root')).json().data).toHaveLength(0);
     await client.data(client.post('/rest/workflows/move', { workflowIds: [w1.id], folderId: null }));
     expect((await client.get('/rest/workflows?folderId=root')).json().data).toHaveLength(1);
+  });
+
+  it('an archived workflow cannot be moved (400) and nothing in the request moves', async () => {
+    const { client } = await signup(server.app);
+    const f = await folderOf(client, 'F');
+    const live = await inFolder(client, null, 'live');
+    const old = await inFolder(client, null, 'old');
+    await client.data(client.post(`/rest/workflows/${old.id}/archive`));
+    const refused = await client.post('/rest/workflows/move', {
+      workflowIds: [live.id, old.id],
+      folderId: f.id,
+    });
+    expect(refused.statusCode).toBe(400);
+    expect((await client.data(client.get(`/rest/workflows/${live.id}`))).folderId).toBeNull();
+    expect((await client.data(client.get(`/rest/workflows/${old.id}`))).folderId).toBeNull();
+    await client.data(client.post(`/rest/workflows/${old.id}/unarchive`));
+    const ok = await client.data(
+      client.post('/rest/workflows/move', { workflowIds: [old.id], folderId: f.id }),
+    );
+    expect(ok.moved).toEqual([old.id]);
   });
 
   it('a foreign folder is 404, a foreign workflow is 404 and nothing moves', async () => {

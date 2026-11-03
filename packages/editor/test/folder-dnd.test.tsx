@@ -1,7 +1,7 @@
 /** Drag a workflow or folder onto a folder row or a breadcrumb item (P3-07, lane L8). */
 import { createEvent, fireEvent, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { foldersApi } from '../src/api/endpoints';
+import { foldersApi, workflowsApi } from '../src/api/endpoints';
 import { folderState } from '../src/demo/mock-folders';
 import { canDrop, currentDrag, type DragItem } from '../src/features/workflows/folder-dnd';
 import { backend, signedIn } from './backend';
@@ -110,6 +110,22 @@ describe('drag to folder', () => {
       return el as HTMLElement;
     });
     expect(drag(await waitFor(() => rowOf('Inside')), current)).toBe(false);
+  });
+
+  it('an archived workflow is not draggable and the move route refuses it', async () => {
+    signedIn();
+    const a = await foldersApi.create({ name: 'Alpha' });
+    const old = seed('Old one', { isArchived: true });
+    seed('Live one');
+    await openList('/workflows', 'Live one');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Show archived workflows' }));
+    await screen.findByText('Old one', undefined, LONG);
+    expect(rowOf('Old one').getAttribute('draggable')).toBeNull();
+    expect(rowOf('Live one').getAttribute('draggable')).toBe('true');
+    const dataTransfer = transfer();
+    fireEvent.dragStart(rowOf('Old one'), { dataTransfer });
+    expect(currentDrag()).toBeNull();
+    await expect(workflowsApi.move({ workflowIds: [old.id], folderId: a.id })).rejects.toBeTruthy();
   });
 
   it('a viewer cannot drag', async () => {
