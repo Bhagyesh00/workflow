@@ -28,6 +28,7 @@ export function ImportUrlDialog() {
   const attempt = useRef(0);
 
   // every close or reopen starts clean and invalidates a request still in flight
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `open` is the trigger, the body does not read it
   useEffect(() => {
     attempt.current += 1;
     setUrl('');
@@ -91,7 +92,12 @@ export function ImportUrlDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={() => void submit()} disabled={!valid || readOnly} loading={busy}>
+          <Button
+            variant="primary"
+            onClick={() => void submit()}
+            disabled={!valid || readOnly}
+            loading={busy}
+          >
             Import
           </Button>
         </>
@@ -100,7 +106,9 @@ export function ImportUrlDialog() {
       <form onSubmit={(e) => void submit(e)}>
         <FormField
           label="Workflow URL"
-          error={error ?? (trimmed && !valid ? 'Enter a URL that starts with http:// or https://' : undefined)}
+          error={
+            error ?? (trimmed && !valid ? 'Enter a URL that starts with http:// or https://' : undefined)
+          }
         >
           {(id) => (
             <TextInput

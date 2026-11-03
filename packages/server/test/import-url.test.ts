@@ -19,6 +19,8 @@ const workflow = {
 let fixture: Server;
 let base: string;
 const hits: string[] = [];
+/** bytes the /error-big handler managed to hand to the socket before the client hung up */
+let errorBigSent = 0;
 
 beforeAll(async () => {
   fixture = createServer((req, res) => {
@@ -39,7 +41,30 @@ beforeAll(async () => {
       res.end(JSON.stringify({ nodes: [] }));
     } else if (path === '/big') {
       res.setHeader('content-type', 'application/json');
-      res.end('{"nodes":[],"connections":{},"pad":"' + 'x'.repeat(6 * 1024 * 1024) + '"}');
+      res.end(`{"nodes":[],"connections":{},"pad":"${'x'.repeat(6 * 1024 * 1024)}"}`);
+    } else if (path === '/error-big') {
+      // a failing answer with a body far larger than any cap; it stops when the client closes
+      res.statusCode = 500;
+      res.setHeader('content-type', 'application/json');
+      errorBigSent = 0;
+      const chunk = Buffer.alloc(1024 * 1024, 120);
+      let closed = false;
+      res.on('close', () => {
+        closed = true;
+      });
+      const pump = (): void => {
+        if (closed || errorBigSent >= 150 * chunk.length) {
+          if (!closed) res.end();
+          return;
+        }
+        errorBigSent += chunk.length;
+        res.write(chunk, pump);
+      };
+      pump();
+    } else if (path === '/error-json') {
+      res.statusCode = 500;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(workflow));
     } else if (path === '/redirect') {
       res.statusCode = 302;
       res.setHeader('location', 'http://169.254.169.254/latest/meta-data');
@@ -119,6 +144,18 @@ describe('import from URL (allowed host)', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.message).toBe(NOT_JSON);
   });
+
+  it('does not read the body of a failing answer, even a huge one', async () => {
+    const { client } = await signup(server.app);
+    const res = await call(client, `${base}/error-big`);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toBe(NOT_JSON);
+    // a read-whole client would have taken the first 100 MB; only socket buffers may be filled
+    expect(errorBigSent).toBeLessThan(40 * 1024 * 1024);
+    const failing = await call(client, `${base}/error-json`);
+    expect(failing.statusCode).toBe(400);
+    expect(failing.json().error.message).toBe(NOT_JSON);
+  }, 60_000);
 
   it('stops a response that never ends after 10 seconds', async () => {
     const { client } = await signup(server.app);

@@ -31,21 +31,35 @@ export class WorkflowImportUrlService {
   private async fetchText(url: string): Promise<string> {
     const { http } = this.deps.context();
     try {
-      const stream = (await http.request({
+      // ignoreHttpStatusErrors: the client reads a failing answer whole (up to its 100 MB default),
+      // so the status is checked here and a failing body is never read
+      const res = (await http.request({
         url,
         method: 'GET',
         responseType: 'stream',
         timeout: TIMEOUT_MS,
         headers: { accept: 'application/json, text/plain;q=0.9, */*;q=0.1' },
-      })) as AsyncIterable<Uint8Array>;
-      const chunks: Buffer[] = [];
-      let total = 0;
-      for await (const chunk of stream) {
-        total += chunk.byteLength;
-        if (total > MAX_BYTES) throw new Error('too large');
-        chunks.push(Buffer.from(chunk));
+        ignoreHttpStatusErrors: true,
+        returnFullResponse: true,
+      })) as { body: AsyncGenerator<Uint8Array>; statusCode: number };
+      const iterator = res.body;
+      try {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          // one read starts the generator so that return() cancels the body and frees the socket
+          await iterator.next();
+          throw new Error('not a success status');
+        }
+        const chunks: Buffer[] = [];
+        let total = 0;
+        for await (const chunk of iterator) {
+          total += chunk.byteLength;
+          if (total > MAX_BYTES) throw new Error('too large');
+          chunks.push(Buffer.from(chunk));
+        }
+        return Buffer.concat(chunks).toString('utf8');
+      } finally {
+        await iterator.return(undefined).catch(() => undefined);
       }
-      return Buffer.concat(chunks).toString('utf8');
     } catch (error) {
       // the guard's message names only the host and address; every other failure hides the URL
       if (error instanceof SsrfBlockedError) throw ApiError.badRequest(error.message);
