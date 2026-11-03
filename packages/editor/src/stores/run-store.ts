@@ -2,7 +2,13 @@
  * Live state of the execution shown in the editor: run data per node, which nodes are running,
  * console output and the final status. Push events are folded in by the pure `reduceRunEvent`.
  */
-import type { ExecutionErrorShape, ExecutionStatus, RunData, TaskData } from '@workflow/workflow';
+import type {
+  ExecutionErrorShape,
+  ExecutionStatus,
+  RunData,
+  TaskData,
+  WorkflowDefinition,
+} from '@workflow/workflow';
 import { create } from 'zustand';
 import type { ExecutionDetail, PushEvent } from '../api/types';
 
@@ -22,11 +28,16 @@ export interface TestWebhookState {
   expiresAt: string;
 }
 
+/** P3-06: the graph that produced `runData` (dirty nodes are found by diffing it with the canvas) */
+export type RanDefinition = Pick<WorkflowDefinition, 'name' | 'nodes' | 'connections' | 'pinData'>;
+
 export interface RunSnapshot {
   executionId: string | null;
   workflowId: string | null;
   status: RunStatus;
   runData: RunData;
+  /** P3-06: the definition the run data came from; null when unknown */
+  ranDefinition: RanDefinition | null;
   /** run data of the previous run, for "compare with previous run" */
   previousRunData: RunData | null;
   runningNodes: string[];
@@ -51,6 +62,7 @@ export const initialRunSnapshot = (): RunSnapshot => ({
   workflowId: null,
   status: 'idle',
   runData: {},
+  ranDefinition: null,
   previousRunData: null,
   runningNodes: [],
   logs: [],
@@ -190,9 +202,12 @@ export function nodeRunStatus(
 }
 
 export interface RunState extends RunSnapshot {
-  /** clears previous results and waits for the execution started by a run request */
-  beginRun(workflowId: string | null): void;
-  beginListening(workflowId: string, webhook: TestWebhookState): void;
+  /**
+   * clears previous results and waits for the execution started by a run request. P3-06: `ran` is the graph the
+   * run uses; a partial run passes the run data it reuses (`reuse`), so those nodes keep their output on screen.
+   */
+  beginRun(workflowId: string | null, options?: { ran?: RanDefinition; reuse?: RunData }): void;
+  beginListening(workflowId: string, webhook: TestWebhookState, ran?: RanDefinition): void;
   adopt(executionId: string): void;
   receive(event: PushEvent, openWorkflowId: string | null): void;
   fail(error: ExecutionErrorShape): void;
@@ -205,23 +220,26 @@ export interface RunState extends RunSnapshot {
 export const useRunStore = create<RunState>()((set, get) => ({
   ...initialRunSnapshot(),
 
-  beginRun(workflowId) {
+  beginRun(workflowId, options = {}) {
     const s = get();
     set({
       ...initialRunSnapshot(),
       workflowId,
       status: 'starting',
+      runData: options.reuse ? { ...options.reuse } : {},
+      ranDefinition: options.ran ?? null,
       previousRunData: Object.keys(s.runData).length ? s.runData : s.previousRunData,
       logs: s.logs,
       startedAt: Date.now(),
     });
   },
-  beginListening(workflowId, webhook) {
+  beginListening(workflowId, webhook, ran) {
     const s = get();
     set({
       ...initialRunSnapshot(),
       workflowId,
       status: 'listening',
+      ranDefinition: ran ?? null,
       testWebhook: webhook,
       previousRunData: Object.keys(s.runData).length ? s.runData : s.previousRunData,
       logs: s.logs,
@@ -248,6 +266,14 @@ export const useRunStore = create<RunState>()((set, get) => ({
       workflowId: detail.workflowId,
       status: detail.status,
       runData: detail.state?.resultData?.runData ?? {},
+      ranDefinition: detail.workflowData
+        ? {
+            name: detail.workflowData.name,
+            nodes: detail.workflowData.nodes ?? [],
+            connections: detail.workflowData.connections ?? {},
+            pinData: detail.workflowData.pinData,
+          }
+        : null,
       error: detail.state?.resultData?.error ?? null,
       startedAt: detail.startedAt ? new Date(detail.startedAt).getTime() : null,
       finishedAt: detail.stoppedAt ? new Date(detail.stoppedAt).getTime() : null,

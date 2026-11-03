@@ -3,14 +3,21 @@
  * webhook, execute a single step, activate/deactivate. They read and write the stores directly
  * so they can be used from buttons, keyboard shortcuts and the NDV alike.
  */
-import type { NodeTypeDescription } from '@workflow/workflow';
+import {
+  dirtyNodesFromDiff,
+  type NodeTypeDescription,
+  planPartialRun,
+  type RunData,
+  sortByPosition,
+} from '@workflow/workflow';
 import { errorMessage, isApiError } from '../../api/client';
 import { executionsApi, workflowsApi } from '../../api/endpoints';
 import type { ActivationErrorDetail, WorkflowDTO, WorkflowPatchBody } from '../../api/types';
 import { isTriggerDescription } from '../../lib/ports';
-import { useRunStore } from '../../stores/run-store';
+import { getAncestors } from '../../lib/workflow-ops';
+import { type RanDefinition, useRunStore } from '../../stores/run-store';
 import { toast, useUiStore } from '../../stores/ui-store';
-import { toWorkflowBody, useWorkflowStore } from '../../stores/workflow-store';
+import { toWorkflowBody, useWorkflowStore, type WorkflowState } from '../../stores/workflow-store';
 
 export interface EditorDeps {
   navigate: (to: string, options?: { replace?: boolean }) => void;
@@ -143,6 +150,25 @@ export function webhookTriggerToListen(deps: EditorDeps): string | null {
   return triggers[0].name;
 }
 
+/** the graph a run uses, kept by the run store to find dirty nodes later (P3-06) */
+export function ranDefinitionOf(
+  s: Pick<WorkflowState, 'meta' | 'nodes' | 'connections' | 'pinData'>,
+): RanDefinition {
+  return { name: s.meta.name, nodes: s.nodes, connections: s.connections, pinData: s.pinData };
+}
+
+/** the trigger a step run starts from, as the server picks it: a manual trigger upstream, else any trigger */
+function stepRunRoot(deps: EditorDeps, def: RanDefinition, destination: string): string | undefined {
+  const upstream = new Set([destination, ...getAncestors(def.connections, destination)]);
+  const candidates = def.nodes.filter((n) => upstream.has(n.name) && !n.disabled);
+  const triggers = candidates.filter((n) => isTriggerDescription(deps.descriptions.get(n.type)));
+  const manual = triggers.filter((n) => n.type === 'core.manualTrigger');
+  return sortByPosition(manual.length ? manual : triggers)[0]?.name;
+}
+
+export const RUN_DATA_TOO_LARGE =
+  'The data of the last run is too large to send. Execute the workflow to run every node again.';
+
 export async function runWorkflow(
   deps: EditorDeps,
   options: { destinationNode?: string; startNode?: string } = {},
@@ -174,13 +200,35 @@ export async function runWorkflow(
   const id = await ensureSaved(deps, false);
   if (!id) return;
   const s = useWorkflowStore.getState();
-  // partial run (n8n): send the last run data of this workflow so the start node gets its parents' output
+  const ran = ranDefinitionOf(s);
   const last = useRunStore.getState();
-  const runData =
-    options.startNode && last.workflowId === id && Object.keys(last.runData).length
-      ? last.runData
-      : undefined;
-  useRunStore.getState().beginRun(id);
+  const lastRunData = last.workflowId === id && Object.keys(last.runData).length ? last.runData : undefined;
+  // P3-06 partial run (n8n): an "Execute step" sends the last run data and the nodes changed since it was produced;
+  // the nodes before the changed ones keep their output. "Execute workflow" (no destination) is a full run.
+  let runData: RunData | undefined;
+  let dirtyNodeNames: string[] | undefined;
+  let reuse: RunData | undefined;
+  if (options.destinationNode && lastRunData && last.ranDefinition) {
+    dirtyNodeNames = Object.keys(dirtyNodesFromDiff(last.ranDefinition, ran, lastRunData));
+    try {
+      const plan = planPartialRun(ran, {
+        root: stepRunRoot(deps, ran, options.destinationNode),
+        destination: options.destinationNode,
+        runData: lastRunData,
+        pinData: s.pinData,
+        dirtyNodeNames,
+      });
+      runData = lastRunData;
+      reuse = plan.runData;
+    } catch (error) {
+      toast.error('Could not run this step', errorMessage(error));
+      return;
+    }
+  } else if (options.startNode && lastRunData) {
+    // a run from a start node gets its parents' output from the last run
+    runData = lastRunData;
+  }
+  useRunStore.getState().beginRun(id, { ran, reuse });
   try {
     const { executionId } = await workflowsApi.run(id, {
       workflowData: s.dirty ? { ...toWorkflowBody(s), id } : undefined,
@@ -188,11 +236,13 @@ export async function runWorkflow(
       startNode: options.startNode,
       pinData: s.pinData,
       ...(runData ? { runData } : {}),
+      ...(runData && dirtyNodeNames ? { dirtyNodeNames } : {}),
     });
     useRunStore.getState().adopt(executionId);
   } catch (error) {
-    useRunStore.getState().fail({ name: 'Error', message: errorMessage(error) });
-    toast.error('Could not start the run', errorMessage(error));
+    const message = isApiError(error, 413) ? RUN_DATA_TOO_LARGE : errorMessage(error);
+    useRunStore.getState().fail({ name: 'Error', message });
+    toast.error('Could not start the run', message);
   }
 }
 
@@ -203,7 +253,9 @@ export async function listenForTestEvent(deps: EditorDeps, nodeName: string): Pr
   if (!id) return;
   try {
     const { testUrl, expiresAt } = await workflowsApi.listenTestWebhook(id, nodeName);
-    useRunStore.getState().beginListening(id, { nodeName, testUrl, expiresAt });
+    useRunStore
+      .getState()
+      .beginListening(id, { nodeName, testUrl, expiresAt }, ranDefinitionOf(useWorkflowStore.getState()));
     if (listenTimer) clearTimeout(listenTimer);
     const ms = Math.max(5_000, new Date(expiresAt).getTime() - Date.now());
     listenTimer = setTimeout(

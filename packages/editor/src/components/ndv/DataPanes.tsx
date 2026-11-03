@@ -391,6 +391,7 @@ export function OutputPane({
   running,
   onPin,
   onExecute,
+  dirty,
 }: {
   node: WorkflowNode;
   description?: NodeTypeDescription;
@@ -535,6 +536,13 @@ export function OutputPane({
       {pinned && (
         <Callout tone="info" className="mx-3 mb-2 py-1.5 text-xs">
           Pinned data replaces this node’s output in manual runs.
+        </Callout>
+      )}
+      {dirty === 'parameters' && (
+        <Callout tone="warn" className="mx-3 mb-2 py-1.5 text-xs">
+          {pinned
+            ? 'Node parameter changes will not affect pinned output data.'
+            : 'Node parameters have changed. Execute the step again to refresh the output.'}
         </Callout>
       )}
       {!pinned && task?.hints && task.hints.length > 0 && (

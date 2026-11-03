@@ -2,6 +2,8 @@
  * Canvas module for a workflow node. Main ports sit on the left/right, AI inputs of root nodes
  * along the bottom with labels, and sub-nodes are round with their output on top.
  */
+
+import type { DirtyReason } from '@workflow/workflow';
 import { Handle, type NodeProps, Position } from '@xyflow/react';
 import {
   AlertTriangle,
@@ -33,14 +35,23 @@ function spread(index: number, count: number): string {
   return `${((index + 1) / (count + 1)) * 100}%`;
 }
 
+/** P3-06: n8n's two tooltips for a node whose output is stale */
+export function dirtyTooltip(reason: DirtyReason): string {
+  return reason === 'parameters'
+    ? 'Node configuration changed. Output data may change when this node is run again'
+    : 'Because of changes in the workflow, output data may change when this node is run again';
+}
+
 function StatusBadge({
   status,
   pinned,
   errors,
+  dirty,
 }: {
   status: string | undefined;
   pinned: boolean;
   errors: number;
+  dirty?: DirtyReason;
 }) {
   if (status === 'running') {
     return (
@@ -60,6 +71,13 @@ function StatusBadge({
     return (
       <span className="wf-node-badge bg-pin" title="Output is pinned">
         <Pin size={10} strokeWidth={2.6} />
+      </span>
+    );
+  }
+  if (dirty && status) {
+    return (
+      <span className="wf-node-badge bg-warn" title={dirtyTooltip(dirty)} data-dirty={dirty}>
+        <AlertTriangle size={10} strokeWidth={2.6} />
       </span>
     );
   }
@@ -182,6 +200,7 @@ export const CanvasNode = memo(function CanvasNode({ data, selected }: NodeProps
     readOnly,
     connectedOutputs,
     connectedInputs,
+    dirty,
   } = data;
   const actions = useCanvasActions();
   const errors = issues.filter((i) => i.severity === 'error').length;
@@ -238,7 +257,7 @@ export const CanvasNode = memo(function CanvasNode({ data, selected }: NodeProps
               style={{ left: spread(i, aiIn.length) }}
             />
           ))}
-          <StatusBadge status={status} pinned={pinned} errors={errors} />
+          <StatusBadge status={status} pinned={pinned} errors={errors} dirty={dirty} />
         </div>
         <p
           className="wf-node-title mt-2 max-w-[140px] text-center text-xs leading-tight font-semibold text-ink"
@@ -358,7 +377,7 @@ export const CanvasNode = memo(function CanvasNode({ data, selected }: NodeProps
             style={{ left: spread(i, aiOut.length) }}
           />
         ))}
-        <StatusBadge status={status} pinned={pinned} errors={errors} />
+        <StatusBadge status={status} pinned={pinned} errors={errors} dirty={dirty} />
       </div>
       {isRoot && (
         // AI inputs hang below the module: label, "+" to add a sub-node, then the port itself,

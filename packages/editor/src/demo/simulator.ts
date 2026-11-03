@@ -12,6 +12,8 @@ import {
   type FilterValue,
   type Item,
   isExpression,
+  type PartialRunPlan,
+  planPartialRun,
   type RunData,
   setByPath,
   type TaskData,
@@ -151,7 +153,7 @@ export async function simulateExecution(input: SimulationInput): Promise<Simulat
   const nodes = new Map(workflow.nodes.map((n) => [n.name, n]));
   const runData: RunData = {};
   const connections = listConnections(workflow.connections);
-  const allowed = input.destinationNode
+  let allowed = input.destinationNode
     ? new Set([input.destinationNode, ...getAncestors(workflow.connections, input.destinationNode)])
     : null;
 
@@ -344,22 +346,80 @@ export async function simulateExecution(input: SimulationInput): Promise<Simulat
     (input.startNode && nodes.get(input.startNode)) ||
     roots.find((n) => /trigger|webhook/i.test(n.type)) ||
     roots[0];
-  if (!start || (allowed && !allowed.has(start.name))) {
-    const error = {
-      name: 'WorkflowOperationError',
-      message: 'There is no node to start from. Add a trigger.',
-    };
+  const fail = (error: ExecutionErrorShape): SimulationResult => {
     emit({
       type: 'executionFinished',
       data: { executionId, workflowId: workflow.id ?? '', status: 'error', error },
     });
     return { status: 'error', runData, error };
+  };
+
+  // P3-06 partial run, planned like the engine does: reused nodes keep their data and emit no events
+  let plan: PartialRunPlan | undefined;
+  if (input.destinationNode && input.runData) {
+    try {
+      plan = planPartialRun(
+        { name: workflow.name, nodes: workflow.nodes, connections: workflow.connections },
+        {
+          root: start?.name,
+          destination: input.destinationNode,
+          runData: input.runData,
+          pinData: workflow.pinData,
+          dirtyNodeNames: input.dirtyNodeNames,
+        },
+      );
+    } catch (error) {
+      return fail({ name: 'WorkflowOperationError', message: (error as Error).message });
+    }
+    Object.assign(runData, plan.runData);
+    allowed = new Set(plan.subgraph);
+  } else if (!start || (allowed && !allowed.has(start.name))) {
+    return fail({
+      name: 'WorkflowOperationError',
+      message: 'There is no node to start from. Add a trigger.',
+    });
   }
 
   const waiting = new Map<string, Item[][]>();
-  const stack: Array<{ node: WorkflowNode; inputs: Item[][]; source: string | null }> = [
-    { node: start, inputs: [[]], source: null },
-  ];
+  const stack: Array<{ node: WorkflowNode; inputs: Item[][]; source: string | null }> = [];
+  const inputCountOf = (name: string) =>
+    Math.max(1, ...getMainParents(workflow.connections, name).map((pa) => pa.inputIndex + 1));
+  if (!plan) {
+    stack.push({ node: start!, inputs: [[]], source: null });
+  } else {
+    const subgraph = allowed!;
+    const parentOutput = (parent: string, output: number): Item[] => {
+      const pinned = workflow.pinData?.[parent];
+      if (pinned) return output === 0 ? pinned : [];
+      return (runData[parent]?.at(-1)?.data?.main?.[output] as Item[] | null | undefined) ?? [];
+    };
+    for (const name of plan.startNodes) {
+      const node = nodes.get(name)!;
+      if (name === plan.root) {
+        stack.push({ node, inputs: [[]], source: null });
+        continue;
+      }
+      const parents = getMainParents(workflow.connections, name).filter((pa) => subgraph.has(pa.node));
+      const inputCount = inputCountOf(name);
+      if (inputCount <= 1) {
+        for (const pa of parents) {
+          const items = parentOutput(pa.node, pa.outputIndex);
+          if (items.length) stack.push({ node, inputs: [items], source: pa.node });
+        }
+        continue;
+      }
+      const collected = Array.from({ length: inputCount }, () => [] as Item[]);
+      for (const pa of parents) {
+        if (!collected[pa.inputIndex].length)
+          collected[pa.inputIndex] = parentOutput(pa.node, pa.outputIndex);
+      }
+      if (collected.every((list) => list.length)) {
+        stack.push({ node, inputs: collected, source: parents[0]?.node ?? null });
+      } else if (collected.some((list) => list.length)) {
+        waiting.set(name, collected);
+      }
+    }
+  }
   let lastNode: string | undefined;
 
   while (stack.length) {
@@ -424,10 +484,7 @@ export async function simulateExecution(input: SimulationInput): Promise<Simulat
       const items = output[c.sourceIndex];
       const child = nodes.get(c.target);
       if (!child || !items?.length || (allowed && !allowed.has(child.name))) continue;
-      const inputCount = Math.max(
-        1,
-        ...getMainParents(workflow.connections, child.name).map((pa) => pa.inputIndex + 1),
-      );
+      const inputCount = inputCountOf(child.name);
       if (inputCount > 1) {
         const collected = waiting.get(child.name) ?? Array.from({ length: inputCount }, () => [] as Item[]);
         collected[c.targetIndex] = items;

@@ -31,10 +31,11 @@ import {
   type NodeOutputConfig,
   type NodeType,
   normalizePairedItems,
+  planPartialRun,
   portType,
   QuotaExceededError,
-  resolvePorts,
   type RunData,
+  resolvePorts,
   type SourceData,
   type SupplyDataContext,
   serializeError,
@@ -148,6 +149,13 @@ export class WorkflowExecute {
   }
 
   async run(options: RunOptions = {}): Promise<ExecutionResult> {
+    if (options.destinationNode && options.runData) {
+      return this.runPartial({
+        ...options,
+        destinationNode: options.destinationNode,
+        runData: options.runData,
+      });
+    }
     const start = this.workflow.getStartNode(options.startNode);
     if (!start) throw new WorkflowOperationError('The workflow has no node to start from');
 
@@ -184,12 +192,128 @@ export class WorkflowExecute {
   }
 
   /**
+   * P3-06 partial run (as n8n's partial execution): planPartialRun keeps the run data of the nodes that do not
+   * change, and names the start nodes. Each start node is queued with the output its parents already produced; a
+   * multi-input node (Merge) still missing an input from a branch that runs again waits for it in
+   * `waitingExecution`. Only the subgraph root .. destination runs.
+   */
+  private runPartial(
+    options: RunOptions & { destinationNode: string; runData: RunData },
+  ): Promise<ExecutionResult> {
+    const pinData = options.pinData && Object.keys(options.pinData).length ? options.pinData : undefined;
+    const plan = planPartialRun(this.workflow.definition, {
+      root: options.startNode ?? this.workflow.getStartNode()?.name,
+      destination: options.destinationNode,
+      runData: options.runData,
+      pinData,
+      dirtyNodeNames: options.dirtyNodeNames,
+    });
+    this.state.startData.destinationNode = plan.destination;
+    this.state.startData.runNodeFilter = plan.subgraph;
+    this.runFilter = new Set(plan.subgraph);
+    if (pinData) this.state.resultData.pinData = pinData;
+    this.state.resultData.runData = plan.runData;
+
+    const triggerItems = options.triggerItems?.length ? options.triggerItems : undefined;
+    for (const name of plan.startNodes) {
+      const node = this.workflow.nodes[name];
+      if (name !== plan.root) {
+        this.seedStartNode(node, plan.runData, pinData);
+        continue;
+      }
+      // the root reads the parents it may have outside the subgraph from the run data it was given
+      this.state.executionData.nodeExecutionStack.push(
+        (!triggerItems && this.startFromParentRunData(node, options.runData)) || {
+          node: name,
+          data: { main: [triggerItems ?? [{ json: {} }]] },
+          source: null,
+        },
+      );
+    }
+    return this.process(options);
+  }
+
+  /** the output a parent already produced on `output`: its pin (first output only), else its last run */
+  private parentOutput(
+    parent: string,
+    output: number,
+    runData: RunData,
+    pinData: Record<string, Item[]> | undefined,
+  ): { items: Item[]; source: SourceData } | undefined {
+    const runs = runData[parent] ?? [];
+    const previousNodeRun = Math.max(0, runs.length - 1);
+    const pinned = pinData?.[parent];
+    const items = pinned
+      ? output === 0
+        ? pinned
+        : undefined
+      : (runs[runs.length - 1]?.data?.main?.[output] as Item[] | null | undefined);
+    if (!items?.length) return undefined;
+    return { items, source: { previousNode: parent, previousNodeOutput: output, previousNodeRun } };
+  }
+
+  /**
+   * Queue a non-root start node of a partial run. A single-input node runs once per parent that has output (as in
+   * a full run). A multi-input node runs now when every connected input has data, otherwise its available inputs
+   * are seeded into `waitingExecution`, where addToWaiting completes them when the missing branch runs again.
+   */
+  private seedStartNode(
+    node: WorkflowNode,
+    runData: RunData,
+    pinData: Record<string, Item[]> | undefined,
+  ): void {
+    const inputs = this.workflow
+      .getMainInputs(node.name)
+      .map((conns) => (conns ?? []).filter((c) => !this.runFilter || this.runFilter.has(c.node)));
+    const inputCount = this.workflow.getMainInputCount(node);
+    const ex = this.state.executionData;
+    if (inputCount <= 1) {
+      for (const conn of inputs[0] ?? []) {
+        const found = this.parentOutput(conn.node, conn.index, runData, pinData);
+        if (found) {
+          ex.nodeExecutionStack.push({
+            node: node.name,
+            data: { main: [found.items] },
+            source: { main: [found.source] },
+          });
+        }
+      }
+      return;
+    }
+    const main: Array<Item[] | null> = Array.from({ length: inputCount }, () => null);
+    const sources: Array<SourceData | null> = Array.from({ length: inputCount }, () => null);
+    inputs.forEach((conns, inputIndex) => {
+      for (const conn of conns) {
+        const found = this.parentOutput(conn.node, conn.index, runData, pinData);
+        if (!found) continue;
+        main[inputIndex] = found.items;
+        sources[inputIndex] = found.source;
+        break;
+      }
+    });
+    const connected = inputs.map((conns, i) => (conns.length ? i : -1)).filter((i) => i >= 0);
+    if (connected.every((i) => main[i] != null)) {
+      ex.nodeExecutionStack.push({ node: node.name, data: { main }, source: { main: sources } });
+      return;
+    }
+    if (main.every((items) => items == null)) return;
+    const waiting = (ex.waitingExecution[node.name] ??= {});
+    const waitingSources = (ex.waitingExecutionSource[node.name] ??= {});
+    const slots = Object.keys(waiting).map(Number);
+    const slot = slots.length ? Math.max(...slots) + 1 : 0;
+    waiting[slot] = { main };
+    waitingSources[slot] = { main: sources };
+  }
+
+  /**
    * A start node whose parents already ran (partial or resumed runs) takes each input from the last
    * run of the first parent with run data on it, and records that parent as the input's source, so
    * paired items and nodes that read their input source (Loop Over Items) work as in a full run.
    */
-  private startFromParentRunData(start: WorkflowNode): ExecuteData | undefined {
-    const runData = this.state.resultData.runData;
+  private startFromParentRunData(
+    start: WorkflowNode,
+    runData: RunData = this.state.resultData.runData,
+  ): ExecuteData | undefined {
     const main: Item[][] = [];
     const sources: Array<SourceData | null> = [];
     let found = false;
