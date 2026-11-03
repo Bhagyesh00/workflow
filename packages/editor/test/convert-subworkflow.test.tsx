@@ -127,7 +127,7 @@ describe('Convert to sub-workflow', () => {
     const user = userEvent.setup();
     const wf = seed(null);
     await openEditor(wf.id);
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn');
     vi.spyOn(workflowsApi, 'activate').mockRejectedValue(new HttpError(400, 'invalid', 'Cannot publish'));
     select(['Shape']);
     act(() => useUiStore.getState().setConvertOpen(true));
@@ -138,7 +138,14 @@ describe('Convert to sub-workflow', () => {
     const [create] = requests('POST', /^\/workflows$/);
     expect((create.body as { name: string; folderId: unknown }).name).toBe('My sub-workflow');
     expect((create.body as { folderId: unknown }).folderId).toBeNull();
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Could not publish the sub-workflow/));
+    // the user is told the new workflow stayed a draft; nothing goes to the console
+    const unpublished = useToastStore
+      .getState()
+      .toasts.find((t) => t.title === 'Could not publish the sub-workflow')!;
+    expect(unpublished.kind).toBe('error');
+    expect(unpublished.description).toBe('Cannot publish. "My sub-workflow" is saved as a draft.');
+    expect(unpublished.action?.label).toBe('Open in new tab');
+    expect(warn).not.toHaveBeenCalled();
     expect(useWorkflowStore.getState().nodes.map((n) => n.name)).toContain('Call My sub-workflow');
     expect(useToastStore.getState().toasts.some((t) => t.title === 'Created sub-workflow')).toBe(true);
   });

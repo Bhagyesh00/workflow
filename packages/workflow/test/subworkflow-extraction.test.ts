@@ -394,3 +394,88 @@ describe('extractSubWorkflow groups', () => {
     ).toBeUndefined();
   });
 });
+
+// runtime-1: the engine returns the last node's output 0, so other exits end at an End Merge
+describe('extractSubWorkflow end node', () => {
+  it('ends an IF false exit at an End Merge that waits for the exit and Start', () => {
+    const def: WorkflowDefinition = {
+      name: 'P',
+      nodes: [n('Trigger', 'core.manualTrigger'), n('A', 'core.set', 200), n('If', 'core.if', 400), n('X')],
+      connections: chain(['Trigger', 'A'], ['A', 'If'], ['If', 'X', 1]),
+    };
+    const r = extractSubWorkflow({ definition: def, nodeIds: ids('A', 'If'), name: 'S' });
+    const end = r.subWorkflow.nodes.find((node) => node.name === 'End');
+    expect(end).toMatchObject({
+      type: 'core.merge',
+      position: [620, 100],
+      parameters: {
+        mode: 'chooseBranch',
+        numberInputs: 2,
+        chooseBranchMode: 'specifiedInput',
+        useDataOfInput: 1,
+      },
+    });
+    expect(r.subWorkflow.connections).toEqual(
+      chain(['A', 'If'], ['Start', 'A'], ['If', 'End', 1, 0], ['Start', 'End', 0, 1]),
+    );
+    // the parent still takes the items from the Call node's only output
+    expect(r.parent.connections['Call S']).toEqual({ main: [[{ node: 'X', type: 'main', index: 0 }]] });
+  });
+
+  it('waits for the other end nodes and puts the Return node after the End node', () => {
+    const def: WorkflowDefinition = {
+      name: 'P',
+      nodes: [
+        n('Trigger', 'core.manualTrigger'),
+        n('A', 'core.set', 200),
+        n('B', 'core.set', 400),
+        n('C', 'core.set', 400),
+        n('X', 'core.set', 600, { v: "={{ $('A').item.json.a }}" }),
+      ],
+      connections: chain(['Trigger', 'A'], ['A', 'B'], ['A', 'C'], ['B', 'X']),
+    };
+    const r = extractSubWorkflow({ definition: def, nodeIds: ids('A', 'B', 'C'), name: 'S' });
+    expect(r.subWorkflow.nodes.map((node) => node.name)).toEqual(['Start', 'A', 'B', 'C', 'End', 'Return']);
+    expect(r.subWorkflow.nodes[4].parameters.numberInputs).toBe(3);
+    expect(r.subWorkflow.connections.B).toEqual({ main: [[{ node: 'End', type: 'main', index: 0 }]] });
+    expect(r.subWorkflow.connections.C).toEqual({ main: [[{ node: 'End', type: 'main', index: 2 }]] });
+    expect(r.subWorkflow.connections.End).toEqual({ main: [[{ node: 'Return', type: 'main', index: 0 }]] });
+  });
+
+  it('adds no End node for an exit on output 0 of the only last node', () => {
+    const r = extractSubWorkflow({ definition: linear(), nodeIds: ids('B', 'C'), name: 'S' });
+    expect(r.subWorkflow.nodes.map((node) => node.name)).toEqual(['Start', 'B', 'C']);
+  });
+
+  it('refuses a selection with more last nodes than the End node can wait for', () => {
+    const tails = Array.from({ length: 9 }, (_, i) => `T${i}`);
+    const def: WorkflowDefinition = {
+      name: 'P',
+      nodes: [n('Trigger', 'core.manualTrigger'), n('A'), n('B'), n('X'), ...tails.map((t) => n(t))],
+      connections: chain(
+        ['Trigger', 'A'],
+        ['A', 'B'],
+        ['B', 'X'],
+        ...tails.map((t): [string, string] => ['A', t]),
+      ),
+    };
+    expect(
+      problemCodes(() =>
+        extractSubWorkflow({ definition: def, nodeIds: ids('A', 'B', ...tails), name: 'S' }),
+      ),
+    ).toEqual(['generic']);
+    // one fewer fits
+    const fits = {
+      ...def,
+      connections: chain(
+        ['Trigger', 'A'],
+        ['A', 'B'],
+        ['B', 'X'],
+        ...tails.slice(1).map((t): [string, string] => ['A', t]),
+      ),
+    };
+    expect(() =>
+      extractSubWorkflow({ definition: fits, nodeIds: ids('A', 'B', ...tails.slice(1)), name: 'S' }),
+    ).not.toThrow();
+  });
+});

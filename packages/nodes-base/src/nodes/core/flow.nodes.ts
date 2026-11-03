@@ -49,7 +49,11 @@ interface LoopState extends DataObject {
  * started the execution) points at an input the node does not have, so expressions that follow it
  * fail instead of resolving against the loop-back input.
  */
-function loopPairedItem(item: number, source: SourceData | null | undefined, earlierRun: boolean): PairedItem {
+function loopPairedItem(
+  item: number,
+  source: SourceData | null | undefined,
+  earlierRun: boolean,
+): PairedItem {
   if (source) return { item, sourceOverwrite: source };
   return earlierRun ? { item, input: 1 } : { item };
 }

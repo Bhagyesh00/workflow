@@ -1,8 +1,8 @@
 /**
  * Convert the selected nodes to a sub-workflow (P3-05, as n8n useWorkflowExtraction): extract with
  * @workflow/workflow extractSubWorkflow, create the new workflow in the parent's folder, publish
- * it (a failed publish is logged, the conversion still succeeds), replace the nodes in the parent
- * with one Execute Workflow node via store.applyGraph (one undo step), toast "Created
+ * it (a failed publish shows an error toast, the conversion still succeeds), replace the nodes in
+ * the parent with one Execute Workflow node via store.applyGraph (one undo step), toast "Created
  * sub-workflow" with "Open in new tab".
  */
 import {
@@ -123,7 +123,11 @@ export async function convertToSubWorkflow(
   try {
     await workflowsApi.activate(created.id, { versionId: created.versionId });
   } catch (error) {
-    console.warn(`Could not publish the sub-workflow ${created.id}: ${errorMessage(error)}`);
+    toast.error(
+      'Could not publish the sub-workflow',
+      `${errorMessage(error).replace(/\.+$/, '')}. "${name}" is saved as a draft.`,
+      { label: 'Open in new tab', onClick: () => openInNewTab(created.id) },
+    );
   }
 
   // the graph may have changed while the workflow was created: extract again from the current one

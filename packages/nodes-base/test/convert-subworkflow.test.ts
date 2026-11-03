@@ -249,3 +249,124 @@ describe('convert to sub-workflow keeps the result (engine)', () => {
     ]);
   });
 });
+
+// runtime-1: the Call node outputs what the selection sent out, also when that leaves from a
+// later output or when another end node of the selection runs after it
+describe('convert to sub-workflow keeps the result for other exits (engine)', () => {
+  const setNode = (name: string, field: string, value: string, position: [number, number]) =>
+    node(
+      name,
+      'core.set',
+      {
+        mode: 'manual',
+        includeOtherFields: true,
+        assignments: { assignments: [{ id: name, name: field, value, type: 'string' }] },
+      },
+      position,
+    );
+  const ifNode = (position: [number, number]) =>
+    node(
+      'IF',
+      'core.if',
+      {
+        conditions: {
+          combinator: 'and',
+          conditions: [
+            {
+              id: '1',
+              leftValue: '={{ $json.n }}',
+              rightValue: 2,
+              operator: { type: 'number', operation: 'gt' },
+            },
+          ],
+        },
+      },
+      position,
+    );
+
+  async function convert(def: WorkflowDefinition, inner: string[], trigger: Item[]) {
+    const before = await runWorkflow(def.nodes, def.connections, trigger);
+    const extracted = extractSubWorkflow({
+      definition: def,
+      nodeIds: def.nodes.filter((n) => inner.includes(n.name)).map((n) => n.id),
+      name: 'Shape',
+      newWorkflowId: 'sub-wf',
+      types: (type) => nodeTypes.get(type)?.description,
+    });
+    const runner = subWorkflowRunner({ 'sub-wf': { ...extracted.subWorkflow } });
+    const after = await runWorkflow(extracted.parent.nodes, extracted.parent.connections, trigger, {
+      services: { executeSubWorkflow: runner.executeSubWorkflow },
+    });
+    expect(before.status).toBe('success');
+    expect(after.status).toBe('success');
+    return { before, after, extracted };
+  }
+
+  // Manual -> Mark -> IF; only the false output leads out, to X
+  const ifFalseExit = (): WorkflowDefinition => ({
+    name: 'P',
+    nodes: [
+      node('Manual', 'core.manualTrigger', {}, [0, 0]),
+      setNode('Mark', 'mark', '={{ "m" + $json.n }}', [200, 0]),
+      ifNode([400, 0]),
+      setNode('X', 'seen', 'x', [600, 100]),
+    ],
+    connections: connect(['Manual', 'Mark'], ['Mark', 'IF'], ['IF', 'X', 1]),
+  });
+
+  it('an exit on the false output of an IF sends the false items', async () => {
+    const { before, after } = await convert(
+      ifFalseExit(),
+      ['Mark', 'IF'],
+      items({ n: 1 }, { n: 3 }, { n: 2 }, { n: 5 }),
+    );
+    expect(before.json('X')).toEqual([
+      { n: 1, mark: 'm1', seen: 'x' },
+      { n: 2, mark: 'm2', seen: 'x' },
+    ]);
+    expect(after.json('X')).toEqual(before.json('X'));
+  });
+
+  it('an exit on the false output sends nothing when no item is false', async () => {
+    const { before, after } = await convert(ifFalseExit(), ['Mark', 'IF'], items({ n: 3 }, { n: 5 }));
+    expect(before.runData.X).toBeUndefined();
+    expect(after.runData.X).toBeUndefined();
+    expect(after.json('Call Shape')).toEqual([]);
+  });
+
+  it('another end node of the selection that runs later does not replace the output', async () => {
+    // Manual -> A -> B -> X, A -> C (C is lower, so it runs after B)
+    const def: WorkflowDefinition = {
+      name: 'P',
+      nodes: [
+        node('Manual', 'core.manualTrigger', {}, [0, 0]),
+        setNode('A', 'a', 'a', [200, 0]),
+        setNode('B', 'b', 'b', [400, 0]),
+        setNode('C', 'side', 'c', [400, 300]),
+        setNode('X', 'seen', '={{ $json.b }}', [600, 0]),
+      ],
+      connections: connect(['Manual', 'A'], ['A', 'B'], ['A', 'C'], ['B', 'X']),
+    };
+    const { before, after, extracted } = await convert(def, ['A', 'B', 'C'], items({ n: 1 }, { n: 2 }));
+    expect(before.json('X')).toEqual([
+      { n: 1, a: 'a', b: 'b', seen: 'b' },
+      { n: 2, a: 'a', b: 'b', seen: 'b' },
+    ]);
+    expect(after.json('X')).toEqual(before.json('X'));
+    // the side end node still runs inside the sub-workflow
+    expect(extracted.subWorkflow.nodes.map((n) => n.name)).toContain('C');
+  });
+
+  it('downstream reads of inner nodes still work behind an IF false exit', async () => {
+    const def = ifFalseExit();
+    def.nodes.push(setNode('Y', 'fromMark', "={{ $('Mark').item.json.mark }}", [800, 100]));
+    def.connections = connect(['Manual', 'Mark'], ['Mark', 'IF'], ['IF', 'X', 1], ['X', 'Y']);
+    const { before, after } = await convert(def, ['Mark', 'IF'], items({ n: 1 }, { n: 4 }, { n: 0 }));
+    expect(before.json('Y')).toEqual([
+      { n: 1, mark: 'm1', seen: 'x', fromMark: 'm1' },
+      { n: 0, mark: 'm0', seen: 'x', fromMark: 'm0' },
+    ]);
+    // the Return node adds the read as a field; the read value stays the same
+    expect(after.json('Y').map((j) => j.fromMark)).toEqual(['m1', 'm0']);
+  });
+});

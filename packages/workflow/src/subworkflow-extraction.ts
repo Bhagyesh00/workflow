@@ -1,8 +1,13 @@
 /**
  * Convert a node selection to a sub-workflow (P3-05), as n8n's workflow extraction: the new workflow is
- * "Start" (Execute Workflow Trigger) -> selected nodes -> optional "Return" Set node; the parent gets one
- * "Call <name>" Execute Workflow node at the selection's average position, rewired, with cross-boundary
- * `$('Node')` references mapped. Pure: the caller creates and publishes the new workflow.
+ * "Start" (Execute Workflow Trigger) -> selected nodes -> optional "End" Merge -> optional "Return" Set
+ * node; the parent gets one "Call <name>" Execute Workflow node at the selection's average position,
+ * rewired, with cross-boundary `$('Node')` references mapped. Pure: the caller creates and publishes the
+ * new workflow.
+ *
+ * Output: a called workflow returns output 0 of the node that ran last. When the items leave the
+ * selection from a later output (an IF false branch) or the section has other last nodes that may run
+ * after the exit, the "End" Merge outputs the exit's items after everything else has run.
  *
  * Expressions:
  * - inner nodes that read outside nodes (`$('Outside').item.json.a`, `.first()`, `.last()`, `.all()`,
@@ -78,6 +83,10 @@ export class SubWorkflowExtractionError extends Error {
 export const SUBWORKFLOW_TRIGGER_TYPE = 'core.executeWorkflowTrigger';
 export const EXECUTE_WORKFLOW_TYPE = 'core.executeWorkflow';
 const RETURN_NODE_TYPE = 'core.set';
+/** Merge that outputs the exit's items once the rest of the section has run */
+const END_NODE_TYPE = 'core.merge';
+/** most inputs a Merge node has */
+const END_NODE_MAX_INPUTS = 10;
 /** distance between the Start / Return node and the node next to it */
 const NODE_OFFSET = 220;
 
@@ -495,6 +504,17 @@ export function extractSubWorkflow(input: ExtractSubWorkflowInput): ExtractionRe
       ? { node: topmost(tails).name, index: 0 }
       : undefined;
   const exitName = outbound.length ? outbound[0].from : undefined;
+  // end nodes besides the exit; the End node below waits for them
+  const otherTails = exitName ? tails.filter((t) => t.name !== exitName) : [];
+  if (otherTails.length + 2 > END_NODE_MAX_INPUTS) {
+    throw new SubWorkflowExtractionError([
+      {
+        code: 'generic',
+        message: `The selection ends in ${otherTails.length + 1} nodes. Select a part that ends in at most ${END_NODE_MAX_INPUTS - 1} nodes.`,
+        nodeIds: otherTails.map((t) => t.id),
+      },
+    ]);
+  }
 
   // --- the new workflow --------------------------------------------------------------------
   const startName = uniqueName('Start', insideNames);
@@ -566,15 +586,51 @@ export function extractSubWorkflow(input: ExtractSubWorkflowInput): ExtractionRe
     addLink(subConnections, { from: startName, type: 'main', outIndex: 0, to: s.node, inIndex: s.index });
 
   const subWorkflowNodes: WorkflowNode[] = [startNode, ...subNodesRewritten];
+  const taken = new Set([...insideNames, startName]);
+  // The engine returns the output 0 of the node that ran last. When the selection's items leave from a
+  // later output (IF false) or another end node of the section may run after the exit, an "End" Merge
+  // outputs the exit's items. It waits for the exit, for Start (so it also runs when the exit sends
+  // nothing) and for every other end node (so it runs after them, at the latest when nothing else is
+  // left to run).
+  let last: { node: WorkflowNode; index: number } = {
+    node: byName.get(exit?.node ?? '') ?? topmost(inside),
+    index: exit?.index ?? 0,
+  };
+  if (exitName && (last.index !== 0 || otherTails.length > 0)) {
+    const endName = uniqueName('End', taken);
+    taken.add(endName);
+    const feeds = [
+      { from: last.node.name, outIndex: last.index },
+      { from: startName, outIndex: 0 },
+      ...otherTails.map((t) => ({ from: t.name, outIndex: 0 })),
+    ];
+    subWorkflowNodes.push({
+      id: newId(),
+      name: endName,
+      type: END_NODE_TYPE,
+      typeVersion: 1,
+      position: [last.node.position[0] + NODE_OFFSET, last.node.position[1]],
+      parameters: {
+        mode: 'chooseBranch',
+        numberInputs: feeds.length,
+        chooseBranchMode: 'specifiedInput',
+        useDataOfInput: 1,
+        options: {},
+      },
+    });
+    for (const [inIndex, f] of feeds.entries()) {
+      addLink(subConnections, { from: f.from, type: 'main', outIndex: f.outIndex, to: endName, inIndex });
+    }
+    last = { node: subWorkflowNodes[subWorkflowNodes.length - 1], index: 0 };
+  }
   if (returns.size > 0) {
-    const returnName = uniqueName('Return', new Set([...insideNames, startName]));
-    const last = byName.get(exit?.node ?? '') ?? topmost(inside);
+    const returnName = uniqueName('Return', taken);
     subWorkflowNodes.push({
       id: newId(),
       name: returnName,
       type: RETURN_NODE_TYPE,
       typeVersion: 1,
-      position: [last.position[0] + NODE_OFFSET, last.position[1]],
+      position: [last.node.position[0] + NODE_OFFSET, last.node.position[1]],
       parameters: {
         mode: 'manual',
         assignments: {
@@ -590,9 +646,9 @@ export function extractSubWorkflow(input: ExtractSubWorkflowInput): ExtractionRe
       },
     });
     addLink(subConnections, {
-      from: last.name,
+      from: last.node.name,
       type: 'main',
-      outIndex: exit?.index ?? 0,
+      outIndex: last.index,
       to: returnName,
       inIndex: 0,
     });
