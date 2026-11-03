@@ -218,6 +218,75 @@ describe('P3-10 save vs publish', () => {
     expect(live.publishedVersionId).toBe(live.versionId);
     expect((await hit(tenant.slug, 'public')).json()).toMatchObject({ answer: 'v3' });
   });
+
+  it('public PUT whose publish is refused still restarts the triggers with the new settings', async () => {
+    const { client, tenant } = await signup(server.app);
+    const key = (await client.data(client.post('/rest/api-keys', { name: 'k' }))).key as string;
+    const definition = { nodes: [node('Interval', 'test.interval', { intervalMs: 50 })], connections: {} };
+    const timer = await createWorkflow(client, definition);
+    await publish(client, timer.id);
+    vi.spyOn(server.ctx.reviews, 'assertCanPublish').mockRejectedValueOnce(
+      ApiError.conflict('A review is pending', { reason: 'review_pending' }),
+    );
+    const res = await server.app.inject({
+      method: 'PUT',
+      url: `/api/v1/workflows/${timer.id}`,
+      headers: { 'x-api-key': key },
+      payload: { ...definition, settings: { timezone: 'Asia/Tokyo' } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ active: true, publishedVersionId: timer.versionId });
+    expect(res.json().data.activationError).toBeDefined();
+    await waitFor(
+      async () => {
+        for (const run of await executionsOf(server.ctx, tenant.id, timer.id)) {
+          const data = await server.ctx.repos.executions.getData(tenant.id, run.id);
+          const settings = (data?.workflowData as { settings?: { timezone?: string } } | undefined)?.settings;
+          if (settings?.timezone === 'Asia/Tokyo') return true;
+        }
+        return false;
+      },
+      { message: 'a run with the new timezone' },
+    );
+    await client.data(client.post(`/rest/workflows/${timer.id}/deactivate`));
+  });
+});
+
+describe('P3-04 groups with sticky note members', () => {
+  it('a group listing a sticky note passes on create, update and version restore', async () => {
+    const { client } = await signup(server.app);
+    const nodes = [node('Start', 'core.manualTrigger'), setNode('A', 'a', 1, [200, 0])];
+    const sticky = { id: 's1', content: 'Note', position: [0, 200], width: 240, height: 160 };
+    const nodeGroups = [{ id: 'g', name: 'G', nodeIds: [nodes[1].id, 's1'] }];
+    const created = await client.data(
+      client.post('/rest/workflows', {
+        name: 'Sticky group',
+        nodes,
+        connections: {},
+        stickyNotes: [sticky],
+        nodeGroups,
+      }),
+    );
+    const updated = await client.data(
+      client.patch(`/rest/workflows/${created.id}`, {
+        versionId: created.versionId,
+        connections: chain('Start', 'A'),
+      }),
+    );
+    expect(updated.nodeGroups).toEqual(nodeGroups);
+    const restored = await client.data(
+      client.post(`/rest/workflows/${created.id}/versions/${created.versionId}/restore`),
+    );
+    expect(restored.nodeGroups).toEqual(nodeGroups);
+
+    // removing the sticky alone is checked again: the group would list a missing member
+    const orphaned = await client.patch(`/rest/workflows/${created.id}`, {
+      versionId: restored.versionId,
+      stickyNotes: [],
+    });
+    expect(orphaned.statusCode).toBe(400);
+    expect(orphaned.json().error.code).toBe('invalid_node_groups');
+  });
 });
 
 describe('P3-10 version names', () => {

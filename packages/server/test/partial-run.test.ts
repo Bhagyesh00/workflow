@@ -137,6 +137,32 @@ describe('partial run (P3-06)', () => {
     expect(outputOf(execution.state, 'C')).toEqual([{ call: 1, a: 'A', b: 'new', c: 'C' }]);
   });
 
+  it('a dirty trigger, or one whose last run failed, is called again for fresh sample data', async () => {
+    const { client, tenant, wf, definition, earlier } = await firstRun();
+    const stepRun = async (runData: Record<string, Task[]>, dirtyNodeNames: string[]) => {
+      const { executionId } = await client.data<{ executionId: string }>(
+        client.post(`/rest/workflows/${wf.id}/run`, {
+          workflowData: { name: 'Test workflow', ...definition, settings: {} },
+          destinationNode: 'C',
+          runData,
+          dirtyNodeNames,
+        }),
+      );
+      const row = await waitForExecution(server.ctx, tenant.id, executionId);
+      expect(row.status).toBe('success');
+      return client.data<{ state: State }>(client.get(`/rest/executions/${executionId}`));
+    };
+
+    const dirty = await stepRun(earlier, ['Trigger']);
+    expect(triggerCalls).toBe(2);
+    expect(outputOf(dirty.state, 'C')).toEqual([{ call: 2, a: 'A', b: 'old', c: 'C' }]);
+
+    const failed = { ...earlier, Trigger: [{ ...earlier.Trigger[0], executionStatus: 'error' }] };
+    const retried = await stepRun(failed as Record<string, Task[]>, []);
+    expect(triggerCalls).toBe(3);
+    expect(outputOf(retried.state, 'C')).toEqual([{ call: 3, a: 'A', b: 'old', c: 'C' }]);
+  });
+
   it('a full run (no destination) ignores nothing and calls the trigger', async () => {
     const { client, tenant, wf } = await firstRun();
     const { executionId } = await client.data<{ executionId: string }>(

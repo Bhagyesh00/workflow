@@ -515,6 +515,8 @@ export class ExecutionService {
     const timer = timeoutMs
       ? setTimeout(() => controller.abort(new ExecutionTimeoutError(timeoutMs / 1000)), timeoutMs)
       : undefined;
+    // set by finish() once the run is counted in usage and metrics: a crash after that is not counted again
+    const tally = { counted: false };
     try {
       let result: ExecutionResult;
       try {
@@ -539,7 +541,7 @@ export class ExecutionService {
         engine.state.resultData.error = serializeError(error);
         result = failedResult(engine.state);
       }
-      await this.finish(tenant, row, definition, staticBefore, result, delivery, options.errorChain);
+      await this.finish(tenant, row, definition, staticBefore, result, delivery, options.errorChain, tally);
     } catch (error) {
       logger.error({ err: error, tenantId, executionId }, 'Could not persist execution result');
       // the row must not stay 'running': it would hold a concurrency slot and never alert anyone
@@ -554,7 +556,10 @@ export class ExecutionService {
         .catch(() => false);
       if (closed) {
         const durationMs = row.startedAt ? stoppedAt.getTime() - row.startedAt.getTime() : 0;
-        await this.afterCrash(tenantId, row, message, { durationMs, state: engine.state }).catch((e) =>
+        await this.afterCrash(tenantId, row, message, {
+          durationMs: tally.counted ? undefined : durationMs,
+          state: engine.state,
+        }).catch((e) =>
           logger.warn({ err: e, tenantId, executionId }, 'Crashed execution could not be closed'),
         );
       }
@@ -674,6 +679,7 @@ export class ExecutionService {
     result: ExecutionResult,
     delivery: Delivery,
     errorChain?: boolean,
+    tally?: { counted: boolean },
   ): Promise<void> {
     const { repos, push, metrics, logger } = this.deps;
     const { status, state } = result;
@@ -709,6 +715,13 @@ export class ExecutionService {
     if (status === 'success' && row.retryOf) {
       await repos.executions.update(tenant.id, row.retryOf, { retrySuccessId: row.id });
     }
+    // counted before the final status is written: whoever sees the run finished also sees it in the usage
+    // and the metrics (a client polling the status, then reading /metrics)
+    if (status !== 'waiting') {
+      await repos.usage.increment(tenant.id, currentPeriod(), 0, durationMs);
+      metrics.recordExecution(status, row.mode, durationMs);
+      if (tally) tally.counted = true;
+    }
     if (keep) {
       await repos.executions.saveState(tenant.id, row.id, state);
       await repos.executions.update(tenant.id, row.id, {
@@ -724,11 +737,6 @@ export class ExecutionService {
         lastNodeOutput = await this.handOverBinaryData(tenant.id, row, lastNodeOutput, delivery);
       await repos.executions.delete(tenant.id, row.id);
       await this.removeBinaryData(tenant.id, row.id);
-    }
-
-    if (status !== 'waiting') {
-      await repos.usage.increment(tenant.id, currentPeriod(), 0, durationMs);
-      metrics.recordExecution(status, row.mode, durationMs);
     }
 
     push.send(tenant.id, 'executionFinished', {

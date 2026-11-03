@@ -7,6 +7,7 @@ import { type ContextDeps, createPollContext, createTriggerContext, type NodeTyp
 import {
   ExpressionEvaluator,
   type Item,
+  planPartialRun,
   type RunData,
   sortByPosition,
   validateWorkflowNodeGroups,
@@ -109,9 +110,9 @@ function errorOf(error: unknown): { message: string; details?: unknown } {
   };
 }
 
-/** 400 invalid_node_groups with the rule texts (P3-04, as n8n's save check) */
+/** 400 invalid_node_groups with the rule texts (P3-04, as n8n's save check); sticky notes can be members */
 function assertNodeGroups(
-  definition: Pick<WorkflowDefinition, 'name' | 'nodes' | 'connections' | 'nodeGroups'>,
+  definition: Pick<WorkflowDefinition, 'name' | 'nodes' | 'connections' | 'nodeGroups' | 'stickyNotes'>,
   nodeTypes: NodeTypes,
 ) {
   const problems = validateWorkflowNodeGroups(
@@ -251,13 +252,15 @@ export class WorkflowService {
         this.deps.nodeTypes,
       );
     }
-    if (patch.nodes || patch.connections || patch.nodeGroups) {
+    // the same members as on create: nodes and sticky notes (a removed sticky is checked too)
+    if (patch.nodes || patch.connections || patch.nodeGroups || patch.stickyNotes) {
       assertNodeGroups(
         {
           name: patch.name ?? existing.name,
           nodes: (patch.nodes ?? existing.nodes) as WorkflowNode[],
           connections: (patch.connections ?? existing.connections) as WorkflowDefinition['connections'],
           nodeGroups: (patch.nodeGroups ?? existing.nodeGroups) as WorkflowNodeGroup[],
+          stickyNotes: (patch.stickyNotes ?? existing.stickyNotes) as WorkflowDefinition['stickyNotes'],
         },
         this.deps.nodeTypes,
       );
@@ -315,27 +318,50 @@ export class WorkflowService {
       // public API PUT: publish the saved version through the same call; a failure keeps the old one
       try {
         await this.setActive(tenantId, id, true, actor, { versionId: newVersionId });
+        current = await this.get(tenantId, id);
       } catch (error) {
         activationError = errorOf(error);
+        // the old version keeps running, but its settings are already the new ones (as below)
+        current = await this.get(tenantId, id);
+        if (settingsChanged && current.active) {
+          const reload = await this.reloadOrUnpublish(tenantId, current, actor);
+          current = reload.row;
+          // a trigger failure unpublished it: that reason matters more than the refused publish
+          activationError = reload.error ?? activationError;
+        }
       }
-      current = await this.get(tenantId, id);
     } else if (row.active && settingsChanged) {
       // settings are live: the published triggers restart with them, without a new publish
-      try {
-        await this.deps.activeWorkflows.reloadTriggers(tenantId, id);
-      } catch (error) {
-        current = await this.deps.activeWorkflows.deactivate(tenantId, id);
-        await this.deps.publishHistory.record('deactivated', {
-          tenantId,
-          workflowId: id,
-          versionId: row.publishedVersionId,
-          userId: actor.userId ?? null,
-        });
-        activationError = errorOf(error);
-      }
+      const reload = await this.reloadOrUnpublish(tenantId, row, actor);
+      current = reload.row;
+      activationError = reload.error;
     }
     const dto = await this.dto(tenantId, current);
     return activationError ? { ...dto, activationError } : dto;
+  }
+
+  /**
+   * Restart the published triggers of `row` so they read its live settings. When they fail to start,
+   * the workflow is unpublished (publish history 'deactivated') and the reason is returned.
+   */
+  private async reloadOrUnpublish(
+    tenantId: string,
+    row: WorkflowRow,
+    actor: Actor,
+  ): Promise<{ row: WorkflowRow; error?: { message: string; details?: unknown } }> {
+    try {
+      await this.deps.activeWorkflows.reloadTriggers(tenantId, row.id);
+      return { row };
+    } catch (error) {
+      const unpublished = await this.deps.activeWorkflows.deactivate(tenantId, row.id);
+      await this.deps.publishHistory.record('deactivated', {
+        tenantId,
+        workflowId: row.id,
+        versionId: row.publishedVersionId,
+        userId: actor.userId ?? null,
+      });
+      return { row: unpublished, error: errorOf(error) };
+    }
   }
 
   /** the editor deletes archived workflows only; the public API passes `force` (P3-07) */
@@ -582,8 +608,7 @@ export class WorkflowService {
     // binary data of a trigger's sample items is stored under the id of the execution that uses it
     const executionId = randomUUID();
     let triggerItems = input.triggerItems as Item[] | undefined;
-    // a partial run whose start node already ran keeps that node's earlier output (no trigger call)
-    const reusesStart = Boolean(input.destinationNode && input.runData?.[start.name]);
+    const reusesStart = this.reusesStartOutput(workflow, start, input, pinData);
     try {
       if (!triggerItems && !pinData[start.name] && !reusesStart) {
         triggerItems = await this.manualTriggerItems(tenant, workflow, start, executionId);
@@ -608,6 +633,33 @@ export class WorkflowService {
       throw error;
     }
     return { executionId };
+  }
+
+  /**
+   * A step run (P3-06) keeps the start node's earlier output, so the trigger is not called, unless the
+   * partial-run plan runs that node again: it is dirty, or its last run failed or never happened. The plan is
+   * the one the engine makes from the same input; when it cannot be made, the engine reports why.
+   */
+  private reusesStartOutput(
+    workflow: Workflow,
+    start: WorkflowNode,
+    input: RunInput,
+    pinData: Record<string, Item[]>,
+  ): boolean {
+    if (!input.destinationNode || !input.runData) return false;
+    try {
+      const plan = planPartialRun(workflow.definition, {
+        root: start.name,
+        destination: input.destinationNode,
+        runData: input.runData as RunData,
+        pinData,
+        dirtyNodeNames: input.dirtyNodeNames,
+      });
+      // the engine feeds trigger items to the plan's root only
+      return plan.root !== start.name || !plan.startNodes.includes(start.name);
+    } catch {
+      return true;
+    }
   }
 
   /**
