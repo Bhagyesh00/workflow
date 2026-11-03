@@ -131,7 +131,9 @@ export const folders = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
-    parentFolderId: uuid('parent_folder_id').references((): AnyPgColumn => folders.id, { onDelete: 'cascade' }),
+    parentFolderId: uuid('parent_folder_id').references((): AnyPgColumn => folders.id, {
+      onDelete: 'cascade',
+    }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -527,15 +529,15 @@ export const workflowReviewRequests = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: 'cascade' }),
     workflowId: uuid('workflow_id').references(() => workflows.id, { onDelete: 'set null' }),
-    workflowVersionId: uuid('workflow_version_id').references(() => workflowVersions.id, {
-      onDelete: 'set null',
-    }),
-    /** the published version before an approval's auto-publish (NULL when none) */
-    approvedBaselineVersionId: uuid('approved_baseline_version_id').references(() => workflowVersions.id, {
-      onDelete: 'set null',
-    }),
+    /** the reviewed version; no FK (as executions): the id stays after compaction prunes the version */
+    workflowVersionId: uuid('workflow_version_id'),
+    /** the published version before an approval's auto-publish (NULL when none); no FK, kept when pruned */
+    approvedBaselineVersionId: uuid('approved_baseline_version_id'),
     state: text('state').$type<'open' | 'closed'>().notNull().default('open'),
-    decision: text('decision').$type<'pending' | 'changes_requested' | 'approved'>().notNull().default('pending'),
+    decision: text('decision')
+      .$type<'pending' | 'changes_requested' | 'approved'>()
+      .notNull()
+      .default('pending'),
     title: varchar('title', { length: 128 }).notNull(),
     description: text('description'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),

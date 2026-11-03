@@ -80,7 +80,9 @@ export class WorkflowRepository {
           sql`exists (select 1 from ${workflowTags} wt join ${tags} t on t.id = wt.tag_id where wt.workflow_id = ${workflows.id} and wt.tenant_id = ${tenantId}::uuid and t.name ilike ${pattern})`,
         );
       }
-      conditions.push(alternatives.length === 1 ? alternatives[0] : sql`(${sql.join(alternatives, sql` or `)})`);
+      conditions.push(
+        alternatives.length === 1 ? alternatives[0] : sql`(${sql.join(alternatives, sql` or `)})`,
+      );
     }
     if (filter.active !== undefined) conditions.push(eq(workflows.active, filter.active));
     const archived = filter.archived ?? 'false';
@@ -190,7 +192,11 @@ export class WorkflowRepository {
   }
 
   /** publish a version (pointer and active together); null unpublishes */
-  async setPublished(tenantId: string, id: string, versionId: string | null): Promise<WorkflowRow | undefined> {
+  async setPublished(
+    tenantId: string,
+    id: string,
+    versionId: string | null,
+  ): Promise<WorkflowRow | undefined> {
     if (!isUuid(id) || (versionId !== null && !isUuid(versionId))) return undefined;
     const [row] = await this.db
       .update(workflows)

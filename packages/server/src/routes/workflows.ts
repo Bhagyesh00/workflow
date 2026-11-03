@@ -22,7 +22,14 @@ const commaList = (item: z.ZodString, max: number) =>
     .string()
     .max(max * 300)
     .optional()
-    .transform((v) => (v ? v.split(',').map((s) => s.trim()).filter(Boolean) : undefined))
+    .transform((v) =>
+      v
+        ? v
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : undefined,
+    )
     .pipe(z.array(item).max(max).optional());
 
 export const workflowListQuery = z.object({

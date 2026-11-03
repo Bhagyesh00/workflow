@@ -159,14 +159,28 @@ export function toWorkflowBody(state: WorkflowState): WorkflowCreateBody {
  * P3-04: an edit that would break a group is refused with n8n's toast and an "Ungroup" action.
  * Returns true when the edit must stop.
  */
-function blockedByGroup(state: WorkflowState, ref: ConnectionRef, edit: groups.CrossingEdit): boolean {
-  const error = groups.crossingEditError(graphOf(state), ref, edit, state.nodeTypeLookup);
-  if (!error) return false;
+/** the edit is refused: say why, with Ungroup as the way out */
+function groupBlockedToast(error: groups.CrossingEditError): void {
   toast.error(error.message, undefined, {
     label: 'Ungroup',
     onClick: () => useWorkflowStore.getState().ungroup(error.groupId),
   });
-  return true;
+}
+
+/** true (after the toast) when `edit` on `graph` would break a valid group */
+function blockedOn(
+  graph: WorkflowGraph,
+  ref: ConnectionRef,
+  edit: groups.CrossingEdit,
+  types: WorkflowState['nodeTypeLookup'],
+): boolean {
+  const error = groups.crossingEditError(graph, ref, edit, types);
+  if (error) groupBlockedToast(error);
+  return Boolean(error);
+}
+
+function blockedByGroup(state: WorkflowState, ref: ConnectionRef, edit: groups.CrossingEdit): boolean {
+  return blockedOn(graphOf(state), ref, edit, state.nodeTypeLookup);
 }
 
 export const useWorkflowStore = create<WorkflowState>()((set, get) => {
@@ -331,10 +345,21 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
     addNode(node, links = {}) {
       const s = get();
       const { graph, node: added } = ops.addNode(graphOf(s), node);
+      const refs: ConnectionRef[] = [];
+      if (links.from) refs.push({ ...links.from, target: added.name });
+      if (links.to) refs.push({ ...links.to, source: added.name });
+      // each link goes through the group guard and auto-extend, as connect does
       let next = graph;
-      if (links.from) next = ops.connect(next, { ...links.from, target: added.name });
-      if (links.to) next = ops.connect(next, { ...links.to, source: added.name });
+      const extended: string[] = [];
+      for (const ref of refs) {
+        // refused: nothing is added (callers check that the node exists)
+        if (blockedOn(next, ref, 'connect', s.nodeTypeLookup)) return added;
+        const extension = groups.extendGroupsForConnection(ops.connect(next, ref), ref, s.nodeTypeLookup);
+        next = extension.graph;
+        extended.push(...extension.extended);
+      }
       commit(next, { selection: { nodes: [added.name], stickies: [], edges: [] } });
+      for (const name of extended) toast.info(`'${name}' extended`);
       return added;
     },
     removeNodes(names) {
@@ -473,11 +498,17 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
     deleteSelection() {
       const s = get();
       const { nodes, stickies, edges } = s.selection;
-      if (!nodes.length && !stickies.length && !edges.length) return;
+      if (s.readOnly || (!nodes.length && !stickies.length && !edges.length)) return;
       let graph = graphOf(s);
       const edgeSet = new Set(edges);
+      const removed = new Set(nodes);
       for (const ref of ops.listConnections(graph.connections)) {
-        if (edgeSet.has(ops.connectionId(ref))) graph = ops.disconnect(graph, ref);
+        if (!edgeSet.has(ops.connectionId(ref))) continue;
+        // cables of deleted nodes go with them: removeNodes shrinks or dissolves their groups
+        if (removed.has(ref.source) || removed.has(ref.target)) continue;
+        // a cable that would break a group is refused as the hover delete is
+        if (blockedOn(graph, ref, 'disconnect', s.nodeTypeLookup)) return;
+        graph = ops.disconnect(graph, ref);
       }
       graph = ops.removeNodes(graph, nodes);
       graph = ops.removeStickies(graph, stickies);

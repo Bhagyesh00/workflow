@@ -5,7 +5,12 @@
  */
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { NodeTypeDescription, WorkflowNode, WorkflowNodeGroup } from '@workflow/workflow';
+import {
+  type NodeTypeDescription,
+  validateWorkflowNodeGroups,
+  type WorkflowNode,
+  type WorkflowNodeGroup,
+} from '@workflow/workflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { type ApiRequest, setTransport } from '../src/api/client';
 import {
@@ -50,7 +55,7 @@ import {
   ungroupNodes,
 } from '../src/lib/node-groups';
 import { replaceNode } from '../src/lib/replace-node';
-import { EMPTY_GRAPH, pasteSubgraph, type WorkflowGraph } from '../src/lib/workflow-ops';
+import { connectionId, EMPTY_GRAPH, pasteSubgraph, type WorkflowGraph } from '../src/lib/workflow-ops';
 import { useRunStore } from '../src/stores/run-store';
 import { toast, useToastStore, useUiStore } from '../src/stores/ui-store';
 import { graphOf, toWorkflowBody, useWorkflowStore } from '../src/stores/workflow-store';
@@ -319,6 +324,141 @@ describe('workflow store slices', () => {
     expect(useWorkflowStore.getState().nodes).toHaveLength(2);
   });
 
+  /** the real guard and auto-extend for one test (the file mocks them to "allowed") */
+  async function withRealGroupGuard(run: () => void) {
+    const real = await vi.importActual<typeof import('../src/lib/node-groups')>('../src/lib/node-groups');
+    vi.mocked(crossingEditError).mockImplementation(real.crossingEditError);
+    vi.mocked(extendGroupsForConnection).mockImplementation(real.extendGroupsForConnection);
+    try {
+      run();
+    } finally {
+      vi.mocked(crossingEditError).mockImplementation(() => null);
+      vi.mocked(extendGroupsForConnection).mockImplementation((graph: WorkflowGraph) => ({
+        graph,
+        extended: [],
+      }));
+    }
+  }
+
+  /** Start -> A -> B with the group {A, B} */
+  const loadChain = () =>
+    useWorkflowStore.getState().load({
+      id: 'w1',
+      name: 'W',
+      versionId: 'v1',
+      nodes: [
+        node('s', 'Start', 'core.manualTrigger', 0),
+        node('a', 'A', 'core.set', 300),
+        node('b', 'B', 'core.set', 600),
+      ],
+      connections: {
+        Start: { main: [[{ node: 'A', type: 'main', index: 0 }]] },
+        A: { main: [[{ node: 'B', type: 'main', index: 0 }]] },
+      },
+      nodeGroups: [{ id: 'g', name: 'Group', nodeIds: ['a', 'b'] }],
+    });
+  const groupProblems = () =>
+    validateWorkflowNodeGroups(toWorkflowBody(useWorkflowStore.getState()) as never).map((p) => p.code);
+
+  it('addNode links go through the group guard and auto-extend, as connect does', async () => {
+    loadChain();
+    const fromA = {
+      source: 'A',
+      sourceType: 'main' as const,
+      sourceIndex: 0,
+      targetType: 'main' as const,
+      targetIndex: 0,
+    };
+    useWorkflowStore.getState().addNode(node('n', 'N', 'core.set', 900), { from: fromA });
+    expect(crossingEditError).toHaveBeenCalledWith(
+      expect.objectContaining({ nodes: expect.arrayContaining([expect.objectContaining({ name: 'N' })]) }),
+      { ...fromA, target: 'N' },
+      'connect',
+      undefined,
+    );
+    expect(extendGroupsForConnection).toHaveBeenCalled();
+
+    // refused: nothing is added and the toast offers Ungroup
+    loadChain();
+    vi.mocked(crossingEditError).mockReturnValueOnce({ message: 'Blocked', groupId: 'g' });
+    useWorkflowStore.getState().addNode(node('n', 'N', 'core.set', 900), { from: fromA });
+    expect(useWorkflowStore.getState().nodes.map((n) => n.name)).toEqual(['Start', 'A', 'B']);
+    expect(useToastStore.getState().toasts.at(-1)).toMatchObject({ kind: 'error', title: 'Blocked' });
+    expect(useToastStore.getState().toasts.at(-1)?.action?.label).toBe('Ungroup');
+
+    // allowed: the extended group gets the info toast
+    loadChain();
+    vi.mocked(extendGroupsForConnection).mockImplementationOnce((graph) => ({ graph, extended: ['Group'] }));
+    useWorkflowStore.getState().addNode(node('n', 'N', 'core.set', 900), { from: fromA });
+    expect(useWorkflowStore.getState().connections.A?.main?.[0]).toContainEqual({
+      node: 'N',
+      type: 'main',
+      index: 0,
+    });
+    expect(useToastStore.getState().toasts.at(-1)).toMatchObject({ kind: 'info', title: "'Group' extended" });
+
+    // with the real rules, adding after A never leaves an invalid group to save
+    await withRealGroupGuard(() => {
+      loadChain();
+      useWorkflowStore.getState().addNode(node('n', 'N', 'core.set', 900), { from: fromA });
+    });
+    expect(groupProblems()).toEqual([]);
+    // adding after the exit node B is a plain connection outside the group
+    await withRealGroupGuard(() => {
+      loadChain();
+      useWorkflowStore
+        .getState()
+        .addNode(node('n', 'N', 'core.set', 900), { from: { ...fromA, source: 'B' } });
+    });
+    expect(useWorkflowStore.getState().connections.B?.main?.[0]).toEqual([
+      { node: 'N', type: 'main', index: 0 },
+    ]);
+    expect(useWorkflowStore.getState().nodeGroups).toEqual([{ id: 'g', name: 'Group', nodeIds: ['a', 'b'] }]);
+  });
+
+  it('deleting a selected cable that would break a group is refused; cables of deleted nodes are not', async () => {
+    const cable = (source: string, target: string) =>
+      connectionId({
+        source,
+        sourceType: 'main',
+        sourceIndex: 0,
+        target,
+        targetType: 'main',
+        targetIndex: 0,
+      });
+    const inner = cable('A', 'B');
+    await withRealGroupGuard(() => {
+      loadChain();
+      useWorkflowStore.getState().select({ nodes: [], stickies: [], edges: [inner] });
+      useWorkflowStore.getState().deleteSelection();
+    });
+    expect(useWorkflowStore.getState().connections.A?.main?.[0]).toEqual([
+      { node: 'B', type: 'main', index: 0 },
+    ]);
+    expect(useToastStore.getState().toasts.at(-1)).toMatchObject({ kind: 'error' });
+    expect(useToastStore.getState().toasts.at(-1)?.action?.label).toBe('Ungroup');
+    expect(groupProblems()).toEqual([]);
+
+    // the cable goes with its deleted node B: the group shrinks to {A}, nothing is refused
+    useToastStore.setState({ toasts: [] });
+    await withRealGroupGuard(() => {
+      loadChain();
+      useWorkflowStore.getState().select({ nodes: ['B'], stickies: [], edges: [inner] });
+      useWorkflowStore.getState().deleteSelection();
+    });
+    expect(useWorkflowStore.getState().nodes.map((n) => n.name)).toEqual(['Start', 'A']);
+    expect(useToastStore.getState().toasts).toEqual([]);
+    expect(groupProblems()).toEqual([]);
+
+    // a cable outside any group is deleted as before
+    await withRealGroupGuard(() => {
+      loadChain();
+      useWorkflowStore.getState().select({ nodes: [], stickies: [], edges: [cable('Start', 'A')] });
+      useWorkflowStore.getState().deleteSelection();
+    });
+    expect(useWorkflowStore.getState().connections.Start?.main?.[0] ?? []).toEqual([]);
+  });
+
   it('groupsOfNodes lists the groups holding any of the nodes', () => {
     const graph: WorkflowGraph = {
       ...EMPTY_GRAPH,
@@ -402,6 +542,8 @@ describe('editor wiring', () => {
 
     key({ key: 'F2', code: 'F2' });
     expect(useUiStore.getState().renameTarget).toBe('Shape');
+    // F2 opens the modal rename dialog, and keys are ignored while a dialog is open: close it first
+    act(() => useUiStore.getState().setRenameTarget(null));
 
     key({ key: 'r', code: 'KeyR' });
     expect(useUiStore.getState()).toMatchObject({ replaceTarget: 'Shape', sidePanel: 'creator' });
@@ -433,6 +575,7 @@ describe('editor wiring', () => {
 
     key({ key: 'x', code: 'KeyX', altKey: true });
     expect(useUiStore.getState().convertOpen).toBe(true);
+    act(() => useUiStore.getState().setConvertOpen(false));
 
     key({ key: 'g', code: 'KeyG', ctrlKey: true });
     expect(groupNodes).toHaveBeenCalledWith(expect.anything(), ['Shape', 'Other'], expect.any(Function));
@@ -459,7 +602,8 @@ describe('editor wiring', () => {
 
   it('the canvas Tidy up button and the selection toolbar call their commands', async () => {
     const user = userEvent.setup();
-    const wf = seed();
+    // Shape and Other outside any group, so the selection can be grouped (one group per node)
+    const wf = seed({ nodeGroups: [] });
     await openEditor(wf.id);
     await user.click(screen.getByRole('button', { name: 'Tidy up' }));
     expect(tidyUp).toHaveBeenCalledWith(expect.anything(), undefined);
@@ -469,8 +613,11 @@ describe('editor wiring', () => {
     const toolbar = await screen.findByRole('toolbar', { name: 'Selection actions' });
     await user.click(within(toolbar).getByRole('button', { name: /Convert to sub-workflow/ }));
     expect(useUiStore.getState().convertOpen).toBe(true);
-    await user.click(within(toolbar).getByRole('button', { name: /Group/ }));
-    expect(groupNodes).toHaveBeenCalled();
+    act(() => useUiStore.getState().setConvertOpen(false));
+    const group = within(toolbar).getByRole('button', { name: /Group/ });
+    expect((group as HTMLButtonElement).disabled).toBe(false);
+    await user.click(group);
+    expect(vi.mocked(groupNodes).mock.calls.at(-1)?.[1]).toEqual(['Shape', 'Other']);
   });
 
   it('an archived workflow opens read-only with Restore and Delete instead of Archive', async () => {

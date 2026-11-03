@@ -24,7 +24,14 @@ export const executionListQuery = z.object({
     .string()
     .max(20 * 40)
     .optional()
-    .transform((v) => (v ? v.split(',').map((s) => s.trim()).filter(Boolean) : undefined))
+    .transform((v) =>
+      v
+        ? v
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : undefined,
+    )
     .pipe(z.array(z.uuid()).max(20).optional()),
   vote: z.enum(['up', 'down']).optional(),
   /** P3-10: executions of one workflow version */
@@ -153,7 +160,10 @@ export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext
     const body = parse(annotationPatchSchema, request.body);
     if (!(await ctx.repos.executions.get(auth.tenant.id, id))) throw ApiError.notFound('Execution');
     return {
-      data: await ctx.annotations.annotate(auth.tenant.id, id, body, { userId: auth.user.id, ip: request.ip }),
+      data: await ctx.annotations.annotate(auth.tenant.id, id, body, {
+        userId: auth.user.id,
+        ip: request.ip,
+      }),
     };
   });
 

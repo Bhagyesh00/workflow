@@ -1,5 +1,5 @@
 /**
- * Phase 3 contract step (C0a): migrations 0003-0010, schema fields, routes, access checks and the
+ * Phase 3 contract step (C0a): migrations 0003-0011, schema fields, routes, access checks and the
  * real C0 code. Stub return values are never asserted (lanes fill those).
  */
 import { readFileSync } from 'node:fs';
@@ -64,7 +64,7 @@ const manual = () => ({
 });
 
 describe('P3 migrations', () => {
-  it('applies 0003-0010 in journal order', () => {
+  it('applies 0003-0011 in journal order', () => {
     const journal = JSON.parse(readFileSync(path.join(migrationsFolder, 'meta', '_journal.json'), 'utf8'));
     expect(journal.entries.map((e: { idx: number; tag: string }) => `${e.idx}:${e.tag}`).slice(3)).toEqual([
       '3:0003_node_groups',
@@ -75,6 +75,7 @@ describe('P3 migrations', () => {
       '8:0008_publish_history',
       '9:0009_version_autosave',
       '10:0010_workflow_reviews',
+      '11:0011_review_version_ids',
     ]);
   });
 
@@ -142,6 +143,27 @@ describe('P3 migrations', () => {
     expect(on?.publishedVersionId).toBe(on?.versionId);
     const unpublished = await server.ctx.repos.workflows.setPublished(tenant.id, wf.id, null);
     expect(unpublished).toMatchObject({ active: false, publishedVersionId: null });
+  });
+
+  it('0011 keeps the review version ids when the version row is gone (no FK, as executions)', async () => {
+    const fks = await pool().query<{ conname: string }>(
+      `select conname from pg_constraint
+        where contype = 'f' and conrelid = 'workflow_review_requests'::regclass
+          and confrelid = 'workflow_versions'::regclass`,
+    );
+    expect(fks.rows).toEqual([]);
+
+    const { tenant } = await signup(server.app);
+    const pruned = '00000000-0000-4000-8000-0000000000aa';
+    const baseline = '00000000-0000-4000-8000-0000000000bb';
+    const { rows } = await pool().query(
+      `insert into workflow_review_requests
+         (tenant_id, workflow_version_id, approved_baseline_version_id, title, state, decision)
+       values ($1, $2, $3, 'Pruned', 'closed', 'approved')
+       returning workflow_version_id, approved_baseline_version_id`,
+      [tenant.id, pruned, baseline],
+    );
+    expect(rows[0]).toEqual({ workflow_version_id: pruned, approved_baseline_version_id: baseline });
   });
 
   it('0010 inserts a review request without an approved baseline', async () => {
@@ -405,6 +427,9 @@ describe('P3 public API', () => {
     expect(doc.components.schemas.Folder.properties.tags.items).toEqual({
       $ref: '#/components/schemas/TagRef',
     });
+    // the published PATCH body caps tagIds as the handler's folderUpdateSchema does (50)
+    const patchBody = doc.paths['/folders/{folderId}'].patch.requestBody.content['application/json'].schema;
+    expect(patchBody.properties.tagIds.maxItems).toBe(50);
     expect(doc.paths['/workflows/{id}'].put.parameters.map((p: { name: string }) => p.name)).toContain(
       'publishIfActive',
     );

@@ -10,8 +10,8 @@ import {
   node,
   resetDatabase,
   signup,
-  type TestServer,
   TestClient,
+  type TestServer,
   waitFor,
 } from './helpers';
 
@@ -31,8 +31,7 @@ beforeEach(async () => {
 const webhook = (name: string, path: string) =>
   node(name, 'core.webhook', { httpMethod: 'POST', path }, [0, 0], { webhookId: `id-${name}` });
 
-const remote = () =>
-  node('Remote', 'test.hookRegister', {}, [0, 0], { webhookId: 'remote-hook' });
+const remote = () => node('Remote', 'test.hookRegister', {}, [0, 0], { webhookId: 'remote-hook' });
 
 /** a second main on the same bus and database: the main that a request reaches behind the load balancer */
 const secondMain = async () => {
@@ -138,9 +137,9 @@ describe('R53: DELETE /workflows/:id/listen-test-webhook', () => {
   it('rejects a body without a node name', async () => {
     const { client } = await signup(server.app);
     const wf = await createWorkflow(client, { nodes: [webhook('Webhook', 'bad-body')] });
-    expect((await client.request('DELETE', `/rest/workflows/${wf.id}/listen-test-webhook`, {})).statusCode).toBe(
-      400,
-    );
+    expect(
+      (await client.request('DELETE', `/rest/workflows/${wf.id}/listen-test-webhook`, {})).statusCode,
+    ).toBe(400);
   });
 });
 

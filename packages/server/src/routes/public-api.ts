@@ -80,7 +80,8 @@ const publicFolderCreate = z.object({
 const publicFolderUpdate = z.object({
   name: z.string().trim().min(1).max(128).optional(),
   parentFolderId: z.uuid().nullable().optional(),
-  tagIds: z.array(z.uuid()).max(100).optional(),
+  /** same cap as folderUpdateSchema, which the handler re-parses with */
+  tagIds: z.array(z.uuid()).max(50).optional(),
 });
 const publicFolderDeleteQuery = z.object({
   transferToFolderId: z.union([z.uuid(), z.literal('root')]).optional(),
@@ -144,9 +145,16 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     body: publicWorkflowUpdate,
     response: 'Workflow',
     handler: async (ctx, input) => ({
-      data: await ctx.workflows.update(input.auth.tenant.id, input.params.id, input.body, actor(input), undefined, {
-        publishIfActive: input.query.publishIfActive !== 'false',
-      }),
+      data: await ctx.workflows.update(
+        input.auth.tenant.id,
+        input.params.id,
+        input.body,
+        actor(input),
+        undefined,
+        {
+          publishIfActive: input.query.publishIfActive !== 'false',
+        },
+      ),
     }),
   },
   {

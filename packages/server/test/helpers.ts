@@ -401,7 +401,9 @@ export async function createTestServer(
     config,
     nodePackages: [nodesBasePackage, testPackage],
     // local test servers (credential test, OAuth2 token endpoint) live on 127.0.0.1
-    http: options.http ?? new HttpClient({ ssrf: { enabled: true, allow: ['127.0.0.1', 'localhost'], deny: [] } }),
+    http:
+      options.http ??
+      new HttpClient({ ssrf: { enabled: true, allow: ['127.0.0.1', 'localhost'], deny: [] } }),
   });
   if (options.reset !== false) await resetDatabase(ctx);
   const app = await buildApp(ctx);

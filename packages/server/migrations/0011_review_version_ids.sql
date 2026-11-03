@@ -1,0 +1,3 @@
+ALTER TABLE "workflow_review_requests" DROP CONSTRAINT "workflow_review_requests_workflow_version_id_workflow_versions_id_fk";
+--> statement-breakpoint
+ALTER TABLE "workflow_review_requests" DROP CONSTRAINT "workflow_review_requests_approved_baseline_version_id_workflow_versions_id_fk";

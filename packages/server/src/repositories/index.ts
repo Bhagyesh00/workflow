@@ -88,9 +88,9 @@ export function createRepositories(db: DbOrTx): Repositories {
   };
 }
 
-export type { AuditEntry } from './resources';
-export { isUniqueViolation, isUuid, pgErrorCode } from './util';
 export type { AnnotationFilter, AnnotationVote, ExecutionAnnotationDTO } from './annotations';
 export type { FavoriteResourceType } from './favorites';
 export type { PublishEvent, PublishTimelineEntry } from './publish-history';
+export type { AuditEntry } from './resources';
+export { isUniqueViolation, isUuid, pgErrorCode } from './util';
 export type { TagRef, WorkflowContent, WorkflowListFilter } from './workflows';
