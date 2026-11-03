@@ -22,6 +22,62 @@
       "when": 1793685206906,
       "tag": "0002_schedule_slots",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793704762093,
+      "tag": "0003_node_groups",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793704872502,
+      "tag": "0004_folders_archive_favorites",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793704984036,
+      "tag": "0005_execution_annotations",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793705027158,
+      "tag": "0006_named_versions",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793705102376,
+      "tag": "0007_folder_tags",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793705152469,
+      "tag": "0008_publish_history",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793705203458,
+      "tag": "0009_version_autosave",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793705264364,
+      "tag": "0010_workflow_reviews",
+      "breakpoints": true
     }
   ]
 }

@@ -43,6 +43,7 @@ import type { Leadership } from './queue';
 import { TEST_WEBHOOK_TTL_MS } from './test-webhooks';
 import { type NodeWebhook, nodeWebhooks, workflowWebhooks } from './webhook-paths';
 import { toDefinition } from './workflow-model';
+import { assertNotArchived } from './workflow-rules';
 
 export interface ValidationIssue {
   node: string | null;
@@ -383,6 +384,7 @@ export class ActiveWorkflowManager {
     const { repos, database, logger } = this.deps;
     let row = await repos.workflows.get(tenantId, workflowId);
     if (!row) throw ApiError.notFound('Workflow');
+    assertNotArchived(row, 'activate');
     const tenant = (await repos.tenants.get(tenantId))!;
     if (previous) {
       // third-party hooks of removed or reconfigured nodes go before validation (a save that fails it

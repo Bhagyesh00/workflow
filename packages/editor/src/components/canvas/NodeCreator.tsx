@@ -15,6 +15,8 @@ export interface NodeCreatorProps {
   needsMainInput?: boolean;
   outputType?: ConnectionType;
   noTriggerYet?: boolean;
+  /** P3-11: replace this node (title "Replace <name>"; L2 filters triggers / non-triggers) */
+  replaceFor?: string;
 }
 
 export function NodeCreator({
@@ -24,6 +26,7 @@ export function NodeCreator({
   needsMainInput,
   outputType,
   noTriggerYet,
+  replaceFor,
 }: NodeCreatorProps) {
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<CatalogEntry | null>(null);
@@ -68,13 +71,15 @@ export function NodeCreator({
     }
   };
 
-  const title = outputType
-    ? `Add ${AI_PORT_LABELS[outputType]?.toLowerCase() ?? 'sub-node'}`
-    : needsMainInput
-      ? 'What happens next?'
-      : noTriggerYet
-        ? 'What starts this workflow?'
-        : 'Add a node';
+  const title = replaceFor
+    ? `Replace ${replaceFor}`
+    : outputType
+      ? `Add ${AI_PORT_LABELS[outputType]?.toLowerCase() ?? 'sub-node'}`
+      : needsMainInput
+        ? 'What happens next?'
+        : noTriggerYet
+          ? 'What starts this workflow?'
+          : 'Add a node';
 
   let index = -1;
   return (

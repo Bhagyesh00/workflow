@@ -1,5 +1,6 @@
 /** Input and output panes of the node details view. */
 import type {
+  DirtyReason,
   ExecutionErrorShape,
   Item,
   NodeTypeDescription,
@@ -401,6 +402,8 @@ export function OutputPane({
   running: boolean;
   onPin: (items: Item[] | null) => void;
   onExecute?: () => void;
+  /** P3-06 (L6): why this node's output is stale; the banner shows for own-parameter changes */
+  dirty?: DirtyReason;
 }) {
   const runs = runData[node.name] ?? [];
   const [runIndex, setRunIndex] = useState(Math.max(0, runs.length - 1));

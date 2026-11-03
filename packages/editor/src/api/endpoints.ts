@@ -1,7 +1,10 @@
 /** One typed function per REST endpoint of the contract. */
-import type { ListSearchResult, NodePropertyOption, RunData, WorkflowNode } from '@workflow/workflow';
-import { api, request } from './client';
+import type { BinaryData, ListSearchResult, NodePropertyOption, WorkflowNode } from '@workflow/workflow';
+import { ApiError, api, buildUrl, getCurrentTenant, request } from './client';
 import type {
+  AnnotationPatchBody,
+  AnnotationTag,
+  AnnotationVote,
   ApiKey,
   AuthResult,
   CreatedApiKey,
@@ -9,22 +12,47 @@ import type {
   CredentialSummary,
   CredentialTestResult,
   CredentialTypeDescription,
+  ExecutionAnnotation,
   ExecutionDetail,
   ExecutionSummary,
+  Favorite,
+  FavoriteResourceType,
+  Folder,
+  FolderCreateBody,
+  FolderDetail,
+  FolderListQuery,
+  FolderUpdateBody,
+  InboxQuery,
+  InboxSummary,
   Me,
   Member,
+  MoveWorkflowsBody,
   NodeTypeDescription,
+  PublishBody,
+  PublishTimelineEntry,
+  ReviewActivity,
+  ReviewCreateBody,
+  ReviewDecisionBody,
+  ReviewDecisionResult,
+  ReviewListQuery,
+  ReviewUpdateVersionBody,
+  ReviewUser,
   Role,
   RunWorkflowBody,
   Settings,
+  SettingsPatchBody,
   Tag,
   Variable,
+  VersionDiff,
+  VersionPatchBody,
   VersionSnapshot,
   VersionSummary,
   WebhookUrlInfo,
   WorkflowCreateBody,
   WorkflowDTO,
+  WorkflowImportData,
   WorkflowPatchBody,
+  WorkflowReviewDTO,
   WorkflowSummary,
 } from './types';
 
@@ -43,6 +71,8 @@ export const authApi = {
 
 export const settingsApi = {
   get: () => api.get<Settings>('/settings'),
+  /** admin only; answers the same shape as GET for the fields it returns */
+  update: (body: SettingsPatchBody) => api.patch<Partial<Settings>>('/settings', body),
 };
 
 export interface LoadOptionsBody {
@@ -71,18 +101,43 @@ export interface WorkflowListQuery {
   active?: boolean;
   limit?: number;
   cursor?: string;
+  /** P3-07: a folder id or 'root'; omitted = every folder */
+  folderId?: string;
+  /** P3-07: 'false' (default) hides archived workflows, 'all' mixes them in */
+  archived?: 'false' | 'true' | 'all';
+  /** P3-01: with `search`, also match workflows holding one of these node types (max 20) */
+  nodeTypes?: string[];
+  /** P3-01: with `search`, also match workflows with a tag named like the search */
+  matchTags?: boolean;
 }
 
+/** `/workflows/:id/versions/:versionId/diff?against=` */
+export type DiffAgainst = 'current' | 'published' | (string & {});
+
 export const workflowsApi = {
-  list: (query: WorkflowListQuery = {}) => api.list<WorkflowSummary>('/workflows', { ...query }),
+  list: ({ nodeTypes, ...query }: WorkflowListQuery = {}) =>
+    api.list<WorkflowSummary>('/workflows', {
+      ...query,
+      nodeTypes: nodeTypes?.length ? nodeTypes.join(',') : undefined,
+    }),
   get: (id: string) => api.get<WorkflowDTO>(`/workflows/${enc(id)}`),
   create: (body: WorkflowCreateBody) => api.post<WorkflowDTO>('/workflows', body),
   update: (id: string, body: WorkflowPatchBody) => api.patch<WorkflowDTO>(`/workflows/${enc(id)}`, body),
   remove: (id: string) => api.delete<{ ok: true }>(`/workflows/${enc(id)}`),
-  activate: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/activate`),
+  /** P3-10 publish: `body` names the version (empty = the current one) */
+  activate: (id: string, body?: PublishBody) =>
+    api.post<WorkflowDTO>(`/workflows/${enc(id)}/activate`, body ?? {}),
   deactivate: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/deactivate`),
-  /** `runData`: a partial run's last run data (server runSchema) */
-  run: (id: string, body: RunWorkflowBody & { runData?: RunData }) =>
+  archive: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/archive`),
+  unarchive: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/unarchive`),
+  move: (body: MoveWorkflowsBody) => api.post<{ moved: string[] }>('/workflows/move', body),
+  /** P3-13: the server fetches the URL; it travels in the body, never in the query string */
+  importFromUrl: (url: string) => api.post<WorkflowImportData>('/workflows/from-url', { url }),
+  /** P3-16: newest first; take 1..100 (server default 20) */
+  publishTimeline: (id: string, page: { skip?: number; take?: number } = {}) =>
+    api.get<PublishTimelineEntry[]>(`/workflows/${enc(id)}/publish-timeline`, { ...page }),
+  /** `runData` + `dirtyNodeNames`: a partial run (server runSchema) */
+  run: (id: string, body: RunWorkflowBody) =>
     api.post<{ executionId: string }>(`/workflows/${enc(id)}/run`, body),
   listenTestWebhook: (id: string, nodeName: string) =>
     api.post<{ testUrl: string; expiresAt: string }>(`/workflows/${enc(id)}/listen-test-webhook`, {
@@ -101,6 +156,11 @@ export const workflowsApi = {
     api.get<VersionSnapshot>(`/workflows/${enc(id)}/versions/${enc(versionId)}`),
   restoreVersion: (id: string, versionId: string) =>
     api.post<WorkflowDTO>(`/workflows/${enc(id)}/versions/${enc(versionId)}/restore`),
+  /** P3-10: name or describe a version */
+  updateVersion: (id: string, versionId: string, body: VersionPatchBody) =>
+    api.patch<VersionSnapshot>(`/workflows/${enc(id)}/versions/${enc(versionId)}`, body),
+  diffVersions: (id: string, versionId: string, against: DiffAgainst = 'current') =>
+    api.get<VersionDiff>(`/workflows/${enc(id)}/versions/${enc(versionId)}/diff`, { against }),
 };
 
 export interface ExecutionListQuery {
@@ -108,15 +168,126 @@ export interface ExecutionListQuery {
   status?: string;
   limit?: number;
   cursor?: string;
+  /** P3-09: annotation tag ids, all must match (max 20) */
+  annotationTags?: string[];
+  vote?: AnnotationVote;
+  /** P3-10 */
+  workflowVersionId?: string;
 }
 
 export const executionsApi = {
-  list: (query: ExecutionListQuery = {}) => api.list<ExecutionSummary>('/executions', { ...query }),
+  list: ({ annotationTags, ...query }: ExecutionListQuery = {}) =>
+    api.list<ExecutionSummary>('/executions', {
+      ...query,
+      annotationTags: annotationTags?.length ? annotationTags.join(',') : undefined,
+    }),
   get: (id: string) => api.get<ExecutionDetail>(`/executions/${enc(id)}`),
   retry: (id: string, useCurrentWorkflow: boolean) =>
     api.post<{ executionId: string }>(`/executions/${enc(id)}/retry`, { useCurrentWorkflow }),
   stop: (id: string) => api.post<{ status: string }>(`/executions/${enc(id)}/stop`),
   remove: (id: string) => api.delete<{ ok: true }>(`/executions/${enc(id)}`),
+  /** P3-09: tags (annotation tag ids) and/or vote */
+  annotate: (id: string, body: AnnotationPatchBody) =>
+    api.patch<ExecutionAnnotation | null>(`/executions/${enc(id)}`, body),
+};
+
+/** binary data of a run, as the server stores it (`id`), or inline (base64 `data`) */
+export type BinaryRef = Pick<BinaryData, 'data' | 'id' | 'mimeType' | 'fileName'>;
+
+/**
+ * URL of GET /rest/binary-data for a stored binary (no secret in it: the session cookie carries
+ * the auth). Inline binaries have no URL; use `fetchBinaryData`.
+ */
+export function binaryDataUrl(binary: BinaryRef, action: 'view' | 'download' = 'view'): string | null {
+  if (!binary.id) return null;
+  return buildUrl('/binary-data', {
+    id: binary.id,
+    action,
+    mimeType: binary.mimeType,
+    fileName: binary.fileName,
+  }).toString();
+}
+
+/** The bytes of a binary as a Blob typed `type` (default: its mime type). */
+export async function fetchBinaryData(
+  binary: BinaryRef,
+  options: { type?: string; signal?: AbortSignal } = {},
+): Promise<Blob> {
+  const type = options.type ?? binary.mimeType ?? 'application/octet-stream';
+  if (!binary.id) {
+    const raw = atob(binary.data ?? '');
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return new Blob([bytes], { type });
+  }
+  const tenantId = getCurrentTenant();
+  const response = await fetch(binaryDataUrl(binary, 'view')!, {
+    credentials: 'same-origin',
+    headers: tenantId ? { 'x-tenant-id': tenantId } : {},
+    signal: options.signal,
+  });
+  if (!response.ok) {
+    throw new ApiError(response.status, `http_${response.status}`, 'Could not load the binary data');
+  }
+  const blob = await response.blob();
+  return blob.type === type ? blob : new Blob([await blob.arrayBuffer()], { type });
+}
+
+export const foldersApi = {
+  list: ({ tags, ...query }: FolderListQuery = {}) =>
+    api.list<Folder>('/folders', { ...query, tags: tags?.length ? tags.join(',') : undefined }),
+  get: (id: string) => api.get<FolderDetail>(`/folders/${enc(id)}`),
+  create: (body: FolderCreateBody) => api.post<Folder>('/folders', body),
+  update: (id: string, body: FolderUpdateBody) => api.patch<Folder>(`/folders/${enc(id)}`, body),
+  /**
+   * Omitted `transferToFolderId`: the folder's workflows go to the root and are archived, then the
+   * folders are deleted. A folder id or 'root': folders and workflows move there.
+   */
+  remove: (id: string, transferToFolderId?: string | 'root') =>
+    request<{ ok: true }>({
+      method: 'DELETE',
+      path: `/folders/${enc(id)}`,
+      body: transferToFolderId ? { transferToFolderId } : {},
+    }),
+};
+
+export const favoritesApi = {
+  list: () => api.get<Favorite[]>('/favorites'),
+  add: (resourceType: FavoriteResourceType, resourceId: string) =>
+    api.post<Favorite>('/favorites', { resourceType, resourceId }),
+  remove: (resourceType: FavoriteResourceType, resourceId: string) =>
+    api.delete<{ ok: true }>(`/favorites/${enc(resourceType)}/${enc(resourceId)}`),
+};
+
+export const annotationTagsApi = {
+  list: (query: { withUsageCount?: boolean } = {}) =>
+    api.get<AnnotationTag[]>('/annotation-tags', { withUsageCount: query.withUsageCount || undefined }),
+  create: (name: string) => api.post<AnnotationTag>('/annotation-tags', { name }),
+  update: (id: string, name: string) => api.patch<AnnotationTag>(`/annotation-tags/${enc(id)}`, { name }),
+  remove: (id: string) => api.delete<{ ok: true }>(`/annotation-tags/${enc(id)}`),
+};
+
+export const reviewsApi = {
+  list: (query: ReviewListQuery = {}) => api.list<WorkflowReviewDTO>('/workflow-reviews', { ...query }),
+  /** tenant members who can publish (editor and up), without the caller */
+  eligibleReviewers: (workflowId: string) =>
+    api.get<ReviewUser[]>('/workflow-reviews/eligible-reviewers', { workflowId }),
+  create: (body: ReviewCreateBody) => api.post<WorkflowReviewDTO>('/workflow-reviews', body),
+  updateVersion: (id: string, body: ReviewUpdateVersionBody) =>
+    api.post<WorkflowReviewDTO>(`/workflow-reviews/${enc(id)}/update-version`, body),
+  decide: (id: string, body: ReviewDecisionBody) =>
+    api.post<ReviewDecisionResult>(`/workflow-reviews/${enc(id)}/decision`, body),
+  /** newest first, 25 per page */
+  activity: (id: string, cursor?: string) =>
+    api.list<ReviewActivity>(`/workflow-reviews/${enc(id)}/activity`, { cursor }),
+  comment: (id: string, body: string) =>
+    api.post<ReviewActivity>(`/workflow-reviews/${enc(id)}/comments`, { body }),
+  get: (id: string) => api.get<WorkflowReviewDTO>(`/workflow-reviews/${enc(id)}`),
+};
+
+export const inboxApi = {
+  list: (query: InboxQuery = {}) => api.list<WorkflowReviewDTO>('/inbox', { ...query }),
+  summary: () => api.get<InboxSummary>('/inbox/summary'),
 };
 
 export const credentialsApi = {

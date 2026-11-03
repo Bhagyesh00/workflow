@@ -2,7 +2,7 @@
  * React Flow surface shared by the editor, execution view and version preview. The workflow
  * model stays the source of truth; React Flow changes are translated back into model updates.
  */
-import type { NodeTypeDescription, RunData } from '@workflow/workflow';
+import type { DirtyReason, NodeTypeDescription, RunData } from '@workflow/workflow';
 import {
   Background,
   BackgroundVariant,
@@ -27,6 +27,7 @@ import {
   listConnections,
   type WorkflowGraph,
 } from '../../lib/workflow-ops';
+import type { ContextMenuState } from '../../stores/ui-store';
 import type { Selection } from '../../stores/workflow-store';
 import { type CanvasActions, CanvasActionsContext } from './actions';
 import { CanvasEdge } from './CanvasEdge';
@@ -55,6 +56,13 @@ export interface FlowCanvasProps {
   /** a cable was dropped on empty canvas */
   onConnectToEmpty?: (from: { nodeName: string; handleId: string }, position: [number, number]) => void;
   onPaneDoubleClick?: (position: [number, number]) => void;
+  /**
+   * P3-02: right-click on a node (selects it unless it is in the selection), the selection, a
+   * sticky or the empty canvas. Without it the browser menu shows.
+   */
+  onContextMenu?: (menu: ContextMenuState) => void;
+  /** P3-06: nodes whose run data is stale, by name (node data `dirty`) */
+  dirtyNodes?: Record<string, DirtyReason>;
   minimap?: boolean;
   children?: ReactNode;
 }
@@ -74,6 +82,8 @@ export function FlowCanvas({
   onDragStart,
   onConnect,
   onConnectToEmpty,
+  onContextMenu,
+  dirtyNodes,
   minimap = true,
   children,
 }: FlowCanvasProps) {
@@ -106,8 +116,20 @@ export function FlowCanvas({
         issues,
         measured: measured.current,
         readOnly,
+        dirtyNodes,
       }),
-    [graph, descriptions, runData, runningNodes, selection, hoveredEdge, issues, readOnly, measureTick],
+    [
+      graph,
+      descriptions,
+      runData,
+      runningNodes,
+      selection,
+      hoveredEdge,
+      issues,
+      readOnly,
+      dirtyNodes,
+      measureTick,
+    ],
   );
 
   useEffect(() => {
@@ -236,6 +258,55 @@ export function FlowCanvas({
     [byId, flow, onConnectToEmpty, readOnly],
   );
 
+  const handleNodeContextMenu = useCallback(
+    (event: React.MouseEvent, node: FlowNode) => {
+      if (!onContextMenu) return;
+      event.preventDefault();
+      const at = { x: event.clientX, y: event.clientY };
+      if (node.type === 'sticky') {
+        const stickyId = node.data.sticky.id;
+        if (!selection.stickies.includes(stickyId))
+          onSelectionChange?.({ nodes: [], stickies: [stickyId], edges: [] });
+        onContextMenu({ ...at, target: { type: 'sticky', stickyId } });
+        return;
+      }
+      const name = node.data.node.name;
+      const inSelection = selection.nodes.includes(name);
+      if (!inSelection) onSelectionChange?.({ nodes: [name], stickies: [], edges: [] });
+      onContextMenu({
+        ...at,
+        target:
+          inSelection && selection.nodes.length > 1
+            ? { type: 'selection' }
+            : { type: 'node', nodeName: name },
+      });
+    },
+    [onContextMenu, onSelectionChange, selection.nodes, selection.stickies],
+  );
+
+  const handleSelectionContextMenu = useCallback(
+    (event: React.MouseEvent) => {
+      if (!onContextMenu) return;
+      event.preventDefault();
+      onContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'selection' } });
+    },
+    [onContextMenu],
+  );
+
+  const handlePaneContextMenu = useCallback(
+    (event: MouseEvent | React.MouseEvent) => {
+      if (!onContextMenu) return;
+      event.preventDefault();
+      const p = flow.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      onContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        target: { type: 'canvas', position: [Math.round(p.x), Math.round(p.y)] },
+      });
+    },
+    [flow, onContextMenu],
+  );
+
   // keep hover state valid when edges disappear
   useEffect(() => {
     if (hoveredEdge && !listConnections(graph.connections).some((c) => connectionId(c) === hoveredEdge)) {
@@ -263,12 +334,15 @@ export function FlowCanvas({
         onEdgeMouseEnter={(_, edge) => setHoveredEdge(edge.id)}
         onEdgeMouseLeave={() => setHoveredEdge(null)}
         onPaneClick={() => onSelectionChange?.({ nodes: [], stickies: [], edges: [] })}
+        onNodeContextMenu={handleNodeContextMenu}
+        onSelectionContextMenu={handleSelectionContextMenu}
+        onPaneContextMenu={handlePaneContextMenu}
         deleteKeyCode={null}
         selectionKeyCode={null}
         multiSelectionKeyCode={['Meta', 'Control', 'Shift']}
         selectionOnDrag
         selectionMode={SelectionMode.Partial}
-        panOnDrag={[1, 2]}
+        panOnDrag={[1]}
         panOnScroll
         zoomOnDoubleClick={false}
         nodesDraggable={!readOnly}

@@ -6,7 +6,8 @@ import type { ExecutionRow } from '../db/schema';
 import { requireRole } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { decodeCursor, encodeCursor, page, paginationQuery } from '../http/pagination';
-import { idParams } from '../http/schemas';
+import { annotationPatchSchema, idParams } from '../http/schemas';
+import type { ExecutionAnnotationDTO } from '../repositories';
 
 const STATUSES = ['new', 'running', 'success', 'error', 'canceled', 'waiting', 'crashed'] as const;
 
@@ -18,10 +19,20 @@ export const executionListQuery = z.object({
     .optional()
     .transform((v) => (v ? v.split(',').map((s) => s.trim()) : undefined))
     .pipe(z.array(z.enum(STATUSES)).optional()),
+  /** P3-09: annotation tag ids, comma separated (an execution needs all of them) */
+  annotationTags: z
+    .string()
+    .max(20 * 40)
+    .optional()
+    .transform((v) => (v ? v.split(',').map((s) => s.trim()).filter(Boolean) : undefined))
+    .pipe(z.array(z.uuid()).max(20).optional()),
+  vote: z.enum(['up', 'down']).optional(),
+  /** P3-10: executions of one workflow version */
+  workflowVersionId: z.uuid().optional(),
   ...paginationQuery,
 });
 
-export function executionSummary(row: ExecutionRow) {
+export function executionSummary(row: ExecutionRow, annotation: ExecutionAnnotationDTO | null = null) {
   return {
     id: row.id,
     workflowId: row.workflowId,
@@ -37,6 +48,8 @@ export function executionSummary(row: ExecutionRow) {
     waitTill: row.waitTill?.toISOString() ?? null,
     retryOf: row.retryOf,
     retrySuccessId: row.retrySuccessId,
+    workflowVersionId: row.workflowVersionId,
+    annotation,
   };
 }
 
@@ -48,19 +61,32 @@ export async function listExecutions(
   const rows = await ctx.repos.executions.list(tenantId, {
     workflowId: query.workflowId,
     status: query.status,
+    workflowVersionId: query.workflowVersionId,
+    annotationTags: query.annotationTags,
+    vote: query.vote,
     limit: query.limit,
     cursor: decodeCursor(query.cursor),
   });
   const { data, nextCursor } = page(rows, query.limit, (r) => encodeCursor(r.createdAt, r.id));
-  return { data: data.map(executionSummary), nextCursor };
+  // one annotation query per page
+  const annotations = await ctx.repos.annotations.forExecutions(
+    tenantId,
+    data.map((r) => r.id),
+  );
+  return { data: data.map((r) => executionSummary(r, annotations.get(r.id) ?? null)), nextCursor };
 }
 
 export async function getExecution(ctx: ServerContext, tenantId: string, id: string, includeData = true) {
   const row = await ctx.repos.executions.get(tenantId, id);
   if (!row) throw ApiError.notFound('Execution');
-  if (!includeData) return executionSummary(row);
+  const annotation = (await ctx.repos.annotations.forExecutions(tenantId, [row.id])).get(row.id) ?? null;
+  if (!includeData) return executionSummary(row, annotation);
   const data = await ctx.repos.executions.getData(tenantId, id);
-  return { ...executionSummary(row), workflowData: data?.workflowData ?? null, state: data?.state ?? null };
+  return {
+    ...executionSummary(row, annotation),
+    workflowData: data?.workflowData ?? null,
+    state: data?.state ?? null,
+  };
 }
 
 export async function deleteExecution(ctx: ServerContext, tenantId: string, id: string) {
@@ -118,6 +144,17 @@ export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext
     const auth = requireRole(request, 'viewer');
     const { id } = parse(idParams, request.params);
     return { data: await getExecution(ctx, auth.tenant.id, id) };
+  });
+
+  // P3-09: tags and / or vote
+  app.patch('/executions/:id', async (request) => {
+    const auth = requireRole(request, 'editor');
+    const { id } = parse(idParams, request.params);
+    const body = parse(annotationPatchSchema, request.body);
+    if (!(await ctx.repos.executions.get(auth.tenant.id, id))) throw ApiError.notFound('Execution');
+    return {
+      data: await ctx.annotations.annotate(auth.tenant.id, id, body, { userId: auth.user.id, ip: request.ip }),
+    };
   });
 
   app.post('/executions/:id/retry', async (request) => {

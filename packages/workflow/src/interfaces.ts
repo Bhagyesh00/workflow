@@ -170,7 +170,21 @@ export interface WorkflowDefinition {
   pinData?: Record<string, Item[]>;
   staticData?: DataObject;
   stickyNotes?: StickyNote[];
+  /** canvas groups (frame computed from the members; no position stored) */
+  nodeGroups?: WorkflowNodeGroup[];
+  /** the saved version this definition was loaded from (workflows.version_id) */
+  versionId?: string;
   active?: boolean;
+}
+
+/** a named canvas group of nodes (P3-04); a node is in at most one group */
+export interface WorkflowNodeGroup {
+  id: string;
+  name: string;
+  /** member node ids (WorkflowNode.id) */
+  nodeIds: string[];
+  /** optional, at most GROUP_DESCRIPTION_MAX_LENGTH (145) characters */
+  description?: string;
 }
 
 // ---------------------------------------------------------------------------------------------

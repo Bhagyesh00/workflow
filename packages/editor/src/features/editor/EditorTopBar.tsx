@@ -1,17 +1,22 @@
-/** Editor header: name, tags, save state, Doctor/History/Settings, activation, save. */
+/** Editor header: name, tags, save state, Doctor/History/Settings, publishing, archive, save. */
 import {
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
   Copy,
   Download,
   History,
   Keyboard,
+  Link2,
   MoreHorizontal,
   Settings2,
   Stethoscope,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
+import { useMe } from '../../api/queries';
+import type { PublishBody } from '../../api/types';
 import { Button, IconButton } from '../../components/ui/Button';
 import { cx } from '../../components/ui/cx';
 import { Dialog } from '../../components/ui/Dialog';
@@ -20,25 +25,35 @@ import { Menu } from '../../components/ui/Menu';
 import { Kbd } from '../../components/ui/misc';
 import { TagsEditor } from '../../components/workflow/TagsEditor';
 import type { DoctorIssue } from '../../lib/doctor';
-import { downloadJson, safeFileName } from '../../lib/format';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
+import { AutosaveStatus } from './AutosaveStatus';
 import { SHORTCUTS } from './useEditorShortcuts';
+import { downloadWorkflow } from './workflow-commands';
 
 export function EditorTopBar({
   issues,
   saving,
   onSave,
-  onToggleActive,
+  onPublish,
+  onUnpublish,
   onDuplicate,
+  onArchive,
+  onUnarchive,
   onDelete,
   activating,
 }: {
   issues: DoctorIssue[];
   saving: boolean;
   onSave: () => void;
-  onToggleActive: (active: boolean) => void;
+  /** P3-10 publish (L10 replaces the switch with a Publish button and dialog) */
+  onPublish: (body: PublishBody) => void;
+  onUnpublish: () => void;
   onDuplicate: () => void;
+  /** P3-07 */
+  onArchive: () => void;
+  onUnarchive: () => void;
+  /** archived workflows only (P3-07) */
   onDelete: () => void;
   activating: boolean;
 }) {
@@ -50,22 +65,28 @@ export function EditorTopBar({
   const sidePanel = useUiStore((s) => s.sidePanel);
   const setSidePanel = useUiStore((s) => s.setSidePanel);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
+  const renameRequested = useUiStore((s) => s.workflowRenameRequested);
+  const tagsRequested = useUiStore((s) => s.tagsEditRequested);
+  // archive / restore / delete follow the role, not the archived read-only state
+  const canWrite = useMe().data?.role !== 'viewer';
   const [name, setDraftName] = useState(meta.name);
+  const nameRef = useRef<HTMLInputElement>(null);
   useEffect(() => setDraftName(meta.name), [meta.name]);
+  // command bar "Rename": focus the name field
+  useEffect(() => {
+    if (!renameRequested) return;
+    useUiStore.getState().setWorkflowRenameRequested(false);
+    if (readOnly) return;
+    nameRef.current?.focus();
+    nameRef.current?.select();
+  }, [renameRequested, readOnly]);
+  // command bar "Add tag": the tags editor opens once per request
+  useEffect(() => {
+    if (tagsRequested) useUiStore.getState().setTagsEditRequested(false);
+  }, [tagsRequested]);
 
   const errors = issues.filter((i) => i.severity === 'error').length;
   const warnings = issues.filter((i) => i.severity === 'warning').length;
-  const exportWorkflow = () => {
-    const s = useWorkflowStore.getState();
-    downloadJson(`${safeFileName(s.meta.name)}.json`, {
-      name: s.meta.name,
-      nodes: s.nodes,
-      connections: s.connections,
-      settings: s.meta.settings,
-      pinData: s.pinData,
-      stickyNotes: s.stickyNotes,
-    });
-  };
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
@@ -78,6 +99,7 @@ export function EditorTopBar({
       </Link>
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <input
+          ref={nameRef}
           aria-label="Workflow name"
           className="min-w-24 max-w-[40ch] flex-shrink rounded-md border border-transparent bg-transparent px-1.5 py-0.5 font-display text-lg font-semibold hover:border-line focus:border-brand focus:outline-none"
           style={{ width: `${Math.max(8, name.length + 2)}ch` }}
@@ -95,12 +117,13 @@ export function EditorTopBar({
           }}
         />
         <div className="hidden min-w-0 sm:flex">
-          <TagsEditor value={meta.tags} onChange={setTags} readOnly={readOnly} />
+          <TagsEditor value={meta.tags} onChange={setTags} readOnly={readOnly} autoOpen={tagsRequested} />
         </div>
       </div>
       <span className={cx('hidden text-xs md:inline', dirty ? 'text-warn' : 'text-ink-3')} aria-live="polite">
         {saving ? 'Saving…' : dirty ? 'Unsaved changes' : meta.id ? 'Saved' : 'Not saved yet'}
       </span>
+      <AutosaveStatus />
       <button
         type="button"
         onClick={() => setSidePanel(sidePanel === 'doctor' ? null : 'doctor')}
@@ -150,7 +173,14 @@ export function EditorTopBar({
             key: 'export',
             label: 'Download as JSON',
             icon: <Download size={14} />,
-            onSelect: exportWorkflow,
+            onSelect: downloadWorkflow,
+          },
+          {
+            key: 'import-url',
+            label: 'Import from URL',
+            icon: <Link2 size={14} />,
+            onSelect: () => useUiStore.getState().setImportUrlOpen(true),
+            disabled: readOnly,
           },
           {
             key: 'history',
@@ -179,14 +209,34 @@ export function EditorTopBar({
             disabled: readOnly,
           },
           'separator',
-          {
-            key: 'delete',
-            label: 'Delete workflow',
-            icon: <Trash2 size={14} />,
-            onSelect: onDelete,
-            danger: true,
-            disabled: readOnly || !meta.id,
-          },
+          ...(meta.isArchived
+            ? [
+                {
+                  key: 'unarchive',
+                  label: 'Restore',
+                  icon: <ArchiveRestore size={14} />,
+                  onSelect: onUnarchive,
+                  disabled: !canWrite,
+                },
+                {
+                  key: 'delete',
+                  label: 'Delete',
+                  icon: <Trash2 size={14} />,
+                  onSelect: onDelete,
+                  danger: true,
+                  disabled: !canWrite,
+                },
+              ]
+            : [
+                {
+                  key: 'archive',
+                  label: 'Archive',
+                  icon: <Archive size={14} />,
+                  onSelect: onArchive,
+                  danger: true,
+                  disabled: readOnly || !meta.id,
+                },
+              ]),
         ]}
       />
       <div className="mx-1 h-6 w-px bg-line" />
@@ -195,7 +245,7 @@ export function EditorTopBar({
           label={meta.active ? 'Active: turn off to stop triggers' : 'Inactive: turn on to start triggers'}
           checked={meta.active}
           disabled={readOnly || activating}
-          onChange={onToggleActive}
+          onChange={(active) => (active ? onPublish({}) : onUnpublish())}
         />
         <span className={cx('max-sm:hidden', meta.active && 'text-ok')} aria-hidden="true">
           {meta.active ? 'Active' : 'Inactive'}

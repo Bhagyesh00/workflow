@@ -9,14 +9,21 @@ import { executionsApi } from '../api/endpoints';
 import { queryKeys, useNodeTypes } from '../api/queries';
 import { readOnlyActions } from '../components/canvas/actions';
 import { FlowCanvas } from '../components/canvas/FlowCanvas';
+import { ExecutionAnnotationPanel } from '../components/executions/ExecutionAnnotationPanel';
+import { RanOnVersion } from '../components/executions/RanOnVersion';
 import { NodeDetailsView } from '../components/ndv/NodeDetailsView';
 import { Button } from '../components/ui/Button';
-import { confirmDialog } from '../components/ui/Dialog';
 import { Menu } from '../components/ui/Menu';
 import { Callout, EmptyState, PageLoader, StatusBadge } from '../components/ui/misc';
+import {
+  debugExecution,
+  deleteExecution,
+  retryExecution,
+  stopExecution,
+} from '../features/executions/execution-commands';
 import { formatDateTime, formatDuration } from '../lib/format';
 import { useRunStore } from '../stores/run-store';
-import { toast, useUiStore } from '../stores/ui-store';
+import { useUiStore } from '../stores/ui-store';
 import { useWorkflowStore } from '../stores/workflow-store';
 
 export function ExecutionDetailPage() {
@@ -46,6 +53,7 @@ export function ExecutionDetailPage() {
         settings: data.workflowData.settings,
         pinData: data.workflowData.pinData,
         stickyNotes: data.workflowData.stickyNotes,
+        nodeGroups: data.workflowData.nodeGroups,
       },
       { readOnly: true },
     );
@@ -65,48 +73,21 @@ export function ExecutionDetailPage() {
   const connections = useWorkflowStore((s) => s.connections);
   const pinData = useWorkflowStore((s) => s.pinData);
   const stickyNotes = useWorkflowStore((s) => s.stickyNotes);
+  const nodeGroups = useWorkflowStore((s) => s.nodeGroups);
   const loadCount = useWorkflowStore((s) => s.loadCount);
   const runData = useRunStore((s) => s.runData);
   const graph = useMemo(
-    () => ({ nodes, connections, pinData, stickyNotes }),
-    [nodes, connections, pinData, stickyNotes],
+    () => ({ nodes, connections, pinData, stickyNotes, nodeGroups }),
+    [nodes, connections, pinData, stickyNotes, nodeGroups],
   );
   const actions = useMemo(() => readOnlyActions((name) => openNdv(name)), [openNdv]);
+  const commandDeps = useMemo(() => ({ navigate, queryClient }), [navigate, queryClient]);
 
   const retry = useMutation({
-    mutationFn: (useCurrentWorkflow: boolean) => executionsApi.retry(id, useCurrentWorkflow),
-    onSuccess: async ({ executionId }) => {
-      await queryClient.invalidateQueries({ queryKey: ['executions'] });
-      toast.success('Retry started');
-      navigate(`/executions/${encodeURIComponent(executionId)}`);
-    },
-    onError: (error) => toast.error('Could not retry the execution', errorMessage(error)),
+    mutationFn: (useCurrentWorkflow: boolean) => retryExecution(id, useCurrentWorkflow, commandDeps),
   });
-  const stop = useMutation({
-    mutationFn: () => executionsApi.stop(id),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.execution(id) });
-      toast.success('Execution stopped');
-    },
-    onError: (error) => toast.error('Could not stop the execution', errorMessage(error)),
-  });
-  const remove = async () => {
-    const ok = await confirmDialog({
-      title: 'Delete this execution?',
-      description: 'Its data is removed for good.',
-      confirmLabel: 'Delete',
-      tone: 'danger',
-    });
-    if (!ok) return;
-    try {
-      await executionsApi.remove(id);
-      await queryClient.invalidateQueries({ queryKey: ['executions'] });
-      toast.success('Execution deleted');
-      navigate('/executions');
-    } catch (error) {
-      toast.error('Could not delete the execution', errorMessage(error));
-    }
-  };
+  const stop = useMutation({ mutationFn: () => stopExecution(id, commandDeps) });
+  const remove = () => deleteExecution(id, commandDeps);
 
   if (execution.isLoading || nodeTypes.isLoading) return <PageLoader label="Loading execution" />;
   if (execution.error || !execution.data) {
@@ -144,6 +125,7 @@ export function ExecutionDetailPage() {
           <p className="text-xs text-ink-3">
             Started {formatDateTime(data.startedAt)}, took {formatDuration(data.durationMs)}
           </p>
+          <RanOnVersion execution={data} />
         </div>
         <StatusBadge status={data.status} />
         <Button
@@ -157,9 +139,7 @@ export function ExecutionDetailPage() {
           size="sm"
           icon={<Bug size={13} />}
           title="Open the workflow with this run's trigger data pinned"
-          onClick={() =>
-            navigate(`/workflow/${encodeURIComponent(data.workflowId)}?debug=${encodeURIComponent(data.id)}`)
-          }
+          onClick={() => debugExecution(data.workflowId, data.id, { navigate })}
         >
           Debug in editor
         </Button>
@@ -219,6 +199,7 @@ export function ExecutionDetailPage() {
           {error.code && <p className="mt-1 font-mono text-xs">{error.code}</p>}
         </Callout>
       )}
+      <ExecutionAnnotationPanel execution={data} />
       <div className="relative min-h-0 flex-1">
         <ReactFlowProvider>
           <FlowCanvas

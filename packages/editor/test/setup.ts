@@ -100,3 +100,10 @@ afterEach(() => {
 });
 
 afterAll(() => server.close());
+
+// object URLs for binary previews (P3-08, P3-14); jsdom has none
+if (typeof URL !== 'undefined') {
+  let objectUrlSeq = 0;
+  URL.createObjectURL ??= () => `blob:http://localhost/${++objectUrlSeq}`;
+  URL.revokeObjectURL ??= () => undefined;
+}

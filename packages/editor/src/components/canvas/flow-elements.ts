@@ -3,6 +3,7 @@
  * read-only execution canvas and the version preview share it.
  */
 import {
+  type DirtyReason,
   evaluateSimple,
   type Item,
   type NodeTypeDescription,
@@ -36,6 +37,8 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   connectedOutputs: string[];
   connectedInputs: string[];
   readOnly: boolean;
+  /** P3-06: the node's run data is stale (badge, L6) */
+  dirty?: DirtyReason;
 }
 
 export interface StickyNodeData extends Record<string, unknown> {
@@ -68,6 +71,8 @@ export interface FlowInput extends WorkflowGraph {
   issues?: Map<string, DoctorIssue[]>;
   measured?: Map<string, { width: number; height: number }>;
   readOnly: boolean;
+  /** P3-06: stale nodes by name */
+  dirtyNodes?: Record<string, DirtyReason>;
 }
 
 const subtitleCache = new WeakMap<WorkflowNode, string | undefined>();
@@ -161,6 +166,7 @@ export function buildFlowElements(input: FlowInput): { nodes: FlowNode[]; edges:
         connectedOutputs: connectedOutputs.get(node.name) ?? [],
         connectedInputs: connectedInputs.get(node.name) ?? [],
         readOnly: input.readOnly,
+        ...(input.dirtyNodes?.[node.name] ? { dirty: input.dirtyNodes[node.name] } : {}),
       },
       measured: input.measured?.get(node.id),
     };

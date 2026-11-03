@@ -18,7 +18,12 @@ export interface EditorDeps {
   onSaved?: (dto: WorkflowDTO) => void;
 }
 
-function patchBody(): WorkflowPatchBody {
+export interface SaveOptions {
+  /** P3-17: the version this save creates is an autosave (useAutosave) */
+  autosaved?: boolean;
+}
+
+function patchBody(options: SaveOptions = {}): WorkflowPatchBody {
   const s = useWorkflowStore.getState();
   return {
     name: s.meta.name,
@@ -27,23 +32,28 @@ function patchBody(): WorkflowPatchBody {
     settings: s.meta.settings,
     pinData: s.pinData,
     stickyNotes: s.stickyNotes,
+    nodeGroups: s.nodeGroups,
     tags: s.meta.tags,
     tagIds: s.meta.tags.map((t) => t.id),
     versionId: s.meta.versionId ?? '',
+    ...(options.autosaved ? { autosaved: true } : {}),
   };
 }
 
 let saving: Promise<WorkflowDTO | null> | null = null;
 
-/** Save the open workflow. Resolves with the saved DTO, or null when it failed or conflicted. */
-export function saveWorkflow(deps: EditorDeps): Promise<WorkflowDTO | null> {
-  saving ??= doSave(deps).finally(() => {
+/**
+ * Save the open workflow (the draft; P3-10 publishing is separate). Resolves with the saved DTO, or
+ * null when it failed or conflicted. While a save runs, another call joins it.
+ */
+export function saveWorkflow(deps: EditorDeps, options: SaveOptions = {}): Promise<WorkflowDTO | null> {
+  saving ??= doSave(deps, options).finally(() => {
     saving = null;
   });
   return saving;
 }
 
-async function doSave(deps: EditorDeps): Promise<WorkflowDTO | null> {
+async function doSave(deps: EditorDeps, options: SaveOptions): Promise<WorkflowDTO | null> {
   const store = useWorkflowStore.getState();
   if (store.readOnly) return null;
   const revision = store.revision;
@@ -55,7 +65,7 @@ async function doSave(deps: EditorDeps): Promise<WorkflowDTO | null> {
       deps.onSaved?.(dto);
       return dto;
     }
-    const dto = await workflowsApi.update(store.meta.id, patchBody());
+    const dto = await workflowsApi.update(store.meta.id, patchBody(options));
     useWorkflowStore.getState().markSaved(dto, revision);
     reportDeactivation(dto);
     deps.onSaved?.(dto);
@@ -167,7 +177,9 @@ export async function runWorkflow(
   // partial run (n8n): send the last run data of this workflow so the start node gets its parents' output
   const last = useRunStore.getState();
   const runData =
-    options.startNode && last.workflowId === id && Object.keys(last.runData).length ? last.runData : undefined;
+    options.startNode && last.workflowId === id && Object.keys(last.runData).length
+      ? last.runData
+      : undefined;
   useRunStore.getState().beginRun(id);
   try {
     const { executionId } = await workflowsApi.run(id, {

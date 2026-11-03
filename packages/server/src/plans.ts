@@ -42,6 +42,8 @@ export interface TenantSettings {
   brand?: { name?: string; logoUrl?: string; primaryColor?: string };
   timezone?: string;
   limits?: Partial<PlanLimits>;
+  /** P3-19: review requests before publish (admins turn it on; off by default) */
+  workflowReviews?: { enabled?: boolean };
 }
 
 export function effectiveLimits(plan: string, settings: TenantSettings | null | undefined): PlanLimits {

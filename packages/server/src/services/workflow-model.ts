@@ -5,6 +5,7 @@ import type {
   StickyNote,
   WorkflowDefinition,
   WorkflowNode,
+  WorkflowNodeGroup,
   WorkflowSettings,
 } from '@workflow/workflow';
 import type { WorkflowRow } from '../db/schema';
@@ -18,8 +19,15 @@ export interface WorkflowDTO {
   settings: WorkflowSettings;
   pinData: Record<string, Item[]>;
   stickyNotes: StickyNote[];
+  /** P3-04 canvas groups */
+  nodeGroups: WorkflowNodeGroup[];
   active: boolean;
   versionId: string;
+  /** P3-07 */
+  folderId: string | null;
+  isArchived: boolean;
+  /** P3-10: the published version (null = not published) */
+  publishedVersionId: string | null;
   tags: TagRef[];
   createdAt: string;
   updatedAt: string;
@@ -35,6 +43,8 @@ export function toDefinition(row: WorkflowRow): WorkflowDefinition {
     pinData: structuredClone(row.pinData as Record<string, Item[]>),
     staticData: structuredClone(row.staticData),
     stickyNotes: structuredClone(row.stickyNotes as StickyNote[]),
+    nodeGroups: structuredClone(row.nodeGroups as WorkflowNodeGroup[]),
+    versionId: row.versionId,
     active: row.active,
   };
 }
@@ -48,8 +58,12 @@ export function toDTO(row: WorkflowRow, tags: TagRef[] = []): WorkflowDTO {
     settings: row.settings as WorkflowSettings,
     pinData: row.pinData as Record<string, Item[]>,
     stickyNotes: row.stickyNotes as StickyNote[],
+    nodeGroups: row.nodeGroups as WorkflowNodeGroup[],
     active: row.active,
     versionId: row.versionId,
+    folderId: row.folderId,
+    isArchived: row.isArchived,
+    publishedVersionId: row.publishedVersionId,
     tags,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

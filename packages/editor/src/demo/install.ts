@@ -5,6 +5,7 @@
  */
 import { setTransport } from '../api/client';
 import { setPushConnector } from '../api/push';
+import { demoGroupedWorkflow } from './fixtures';
 import { MockBackend } from './mock-backend';
 
 export function seedDemo(backend: MockBackend): void {
@@ -230,6 +231,13 @@ export function seedDemo(backend: MockBackend): void {
       'Window Memory': { ai_memory: [[{ node: 'AI Agent', type: 'ai_memory', index: 0 }]] },
       Calculator: { ai_tool: [[{ node: 'AI Agent', type: 'ai_tool', index: 0 }]] },
     },
+  });
+
+  backend.seedWorkflow({
+    name: demoGroupedWorkflow.name,
+    nodes: demoGroupedWorkflow.nodes,
+    connections: demoGroupedWorkflow.connections,
+    nodeGroups: demoGroupedWorkflow.nodeGroups,
   });
 }
 

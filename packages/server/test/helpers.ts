@@ -344,6 +344,17 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'workflow_review_comments',
+  'workflow_review_activity',
+  'workflow_review_authors',
+  'workflow_review_reviewers',
+  'workflow_review_requests',
+  'workflow_publish_history',
+  'folder_tags',
+  'execution_annotation_tags',
+  'execution_annotations',
+  'annotation_tags',
+  'user_favorites',
   'webhook_idempotency',
   'usage_counters',
   'audit_log',
@@ -356,6 +367,7 @@ const TABLES = [
   'tags',
   'workflow_versions',
   'workflows',
+  'folders',
   'api_keys',
   'invitations',
   'sessions',
@@ -382,14 +394,14 @@ export interface TestServer {
 
 export async function createTestServer(
   overrides: Record<string, string> = {},
-  options: { startMain?: boolean; reset?: boolean } = {},
+  options: { startMain?: boolean; reset?: boolean; http?: HttpClient } = {},
 ): Promise<TestServer> {
   const config = testConfig(overrides);
   const ctx = await createContext({
     config,
     nodePackages: [nodesBasePackage, testPackage],
     // local test servers (credential test, OAuth2 token endpoint) live on 127.0.0.1
-    http: new HttpClient({ ssrf: { enabled: true, allow: ['127.0.0.1', 'localhost'], deny: [] } }),
+    http: options.http ?? new HttpClient({ ssrf: { enabled: true, allow: ['127.0.0.1', 'localhost'], deny: [] } }),
   });
   if (options.reset !== false) await resetDatabase(ctx);
   const app = await buildApp(ctx);

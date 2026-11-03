@@ -1,4 +1,5 @@
 /** Zod schemas shared by the REST and public APIs (also used for the OpenAPI document). */
+import { GROUP_DESCRIPTION_MAX_LENGTH } from '@workflow/workflow';
 import { z } from 'zod';
 
 export const uuid = z.uuid();
@@ -87,6 +88,15 @@ export const stickyNoteSchema = z
   })
   .loose();
 
+/** a canvas group (P3-04); the rules are checked by validateWorkflowNodeGroups */
+export const nodeGroupSchema = z.object({
+  id: z.string().min(1).max(64),
+  name: z.string().min(1).max(128),
+  nodeIds: z.array(z.string().max(128)).max(2000),
+  description: z.string().max(GROUP_DESCRIPTION_MAX_LENGTH).optional(),
+});
+const nodeGroupsSchema = z.array(nodeGroupSchema).max(1000);
+
 export const pinDataSchema = z.record(z.string(), z.array(itemSchema));
 
 const sourceDataSchema = z
@@ -117,7 +127,10 @@ export const workflowCreateSchema = z.object({
   settings: settingsSchema.optional(),
   pinData: pinDataSchema.optional(),
   stickyNotes: z.array(stickyNoteSchema).max(1000).optional(),
+  nodeGroups: nodeGroupsSchema.optional(),
   tagIds: z.array(z.uuid()).max(100).optional(),
+  /** P3-07: the folder to create the workflow in (null / absent = root) */
+  folderId: z.uuid().nullable().optional(),
 });
 
 export const workflowUpdateSchema = z.object({
@@ -128,7 +141,10 @@ export const workflowUpdateSchema = z.object({
   settings: settingsSchema.optional(),
   pinData: pinDataSchema.optional(),
   stickyNotes: z.array(stickyNoteSchema).max(1000).optional(),
+  nodeGroups: nodeGroupsSchema.optional(),
   tagIds: z.array(z.uuid()).max(100).optional(),
+  /** P3-17: saved by the editor's autosave */
+  autosaved: z.boolean().optional(),
   /** optional description of the change for version history */
   versionMessage: z.string().max(500).optional(),
 });
@@ -143,6 +159,7 @@ export const workflowDataSchema = z
     settings: settingsSchema.optional(),
     pinData: pinDataSchema.optional(),
     stickyNotes: z.array(stickyNoteSchema).optional(),
+    nodeGroups: nodeGroupsSchema.optional(),
   })
   .loose();
 
@@ -154,6 +171,38 @@ export const runSchema = z.object({
   triggerItems: z.array(itemSchema).max(10_000).optional(),
   /** partial run: the run data of an earlier execution; the nodes before the start node keep theirs */
   runData: runDataSchema.optional(),
+  /** P3-06: nodes changed since runData was produced (they and their descendants run again) */
+  dirtyNodeNames: z.array(z.string().max(256)).max(2000).optional(),
+});
+
+/** POST /workflows/:id/activate (publish, P3-10): all optional; an empty body publishes the current version */
+export const publishSchema = z.object({
+  versionId: z.uuid().optional(),
+  versionName: z.string().trim().min(1).max(128).optional(),
+  description: z.string().max(2000).optional(),
+});
+
+/** PATCH /workflows/:id/versions/:versionId (P3-10): name or describe a version; null clears */
+export const versionPatchSchema = z
+  .object({
+    versionName: z.string().trim().min(1).max(128).nullable().optional(),
+    description: z.string().max(2000).nullable().optional(),
+  })
+  .refine((v) => v.versionName !== undefined || v.description !== undefined, {
+    message: 'Give versionName or description',
+  });
+
+/** PATCH /executions/:id (P3-09): tags replace the execution's tags; vote null clears it */
+export const annotationPatchSchema = z
+  .object({
+    tags: z.array(z.uuid()).max(50).optional(),
+    vote: z.enum(['up', 'down']).nullable().optional(),
+  })
+  .refine((v) => v.tags !== undefined || v.vote !== undefined, { message: 'Give tags or vote' });
+
+/** POST /workflows/from-url (P3-13): the URL travels in the body, never in a query string */
+export const importUrlSchema = z.object({
+  url: z.url({ protocol: /^https?$/ }).max(2048),
 });
 
 export const credentialCreateSchema = z.object({

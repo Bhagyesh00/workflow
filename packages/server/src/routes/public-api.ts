@@ -21,9 +21,10 @@ import {
 import { hasRole } from '../services/auth';
 import { createCredential, deleteCredential } from './credentials';
 import { deleteExecution, executionListQuery, getExecution, listExecutions } from './executions';
+import { publicFolderHandlers } from './public-folders';
 import { createTag, createVariable, renameTag, tagDTO, updateVariable, variableDTO } from './resources';
 
-interface Input {
+export interface PublicApiInput {
   auth: AuthContext;
   params: any;
   query: any;
@@ -43,7 +44,7 @@ interface ApiRoute {
   /** component schema name of `data` in the response */
   response: string;
   list?: boolean;
-  handler(ctx: ServerContext, input: Input): Promise<unknown>;
+  handler(ctx: ServerContext, input: PublicApiInput): Promise<unknown>;
 }
 
 const publicWorkflowListQuery = z.object({
@@ -55,10 +56,39 @@ const publicWorkflowListQuery = z.object({
 });
 
 const publicWorkflowUpdate = workflowUpdateSchema.extend({ versionId: z.uuid().optional() });
+/** P3-10: PUT on a published workflow publishes the new version unless publishIfActive=false */
+const publicWorkflowUpdateQuery = z.object({ publishIfActive: z.enum(['true', 'false']).default('true') });
+/** P3-10: n8n's publish body */
+const publicPublishBody = z.object({
+  versionId: z.uuid().optional(),
+  name: z.string().trim().min(1).max(128).optional(),
+  description: z.string().max(2000).optional(),
+});
+/** P3-15 folders (handlers in public-folders.ts, L16) */
+const folderParams = z.object({ folderId: z.uuid() });
+const publicFolderListQuery = z.object({
+  parentFolderId: z.union([z.uuid(), z.literal('root')]).optional(),
+  /** comma-separated tag names; a folder must have all of them */
+  tags: z.string().max(2000).optional(),
+  limit: z.coerce.number().int().min(1).max(250).default(50),
+  cursor: z.string().max(512).optional(),
+});
+const publicFolderCreate = z.object({
+  name: z.string().trim().min(1).max(128),
+  parentFolderId: z.uuid().nullable().optional(),
+});
+const publicFolderUpdate = z.object({
+  name: z.string().trim().min(1).max(128).optional(),
+  parentFolderId: z.uuid().nullable().optional(),
+  tagIds: z.array(z.uuid()).max(100).optional(),
+});
+const publicFolderDeleteQuery = z.object({
+  transferToFolderId: z.union([z.uuid(), z.literal('root')]).optional(),
+});
 const executionGetQuery = z.object({ includeData: z.stringbool().default(false) });
 const credentialTypeParams = z.object({ type: z.string().min(1).max(128) });
 
-const actor = (input: Input) => ({ userId: input.auth.user.id, ip: input.request.ip });
+const actor = (input: PublicApiInput) => ({ userId: input.auth.user.id, ip: input.request.ip });
 
 export const PUBLIC_ROUTES: ApiRoute[] = [
   {
@@ -110,10 +140,13 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     tag: 'Workflows',
     role: 'editor',
     params: idParams,
+    query: publicWorkflowUpdateQuery,
     body: publicWorkflowUpdate,
     response: 'Workflow',
     handler: async (ctx, input) => ({
-      data: await ctx.workflows.update(input.auth.tenant.id, input.params.id, input.body, actor(input)),
+      data: await ctx.workflows.update(input.auth.tenant.id, input.params.id, input.body, actor(input), undefined, {
+        publishIfActive: input.query.publishIfActive !== 'false',
+      }),
     }),
   },
   {
@@ -125,20 +158,52 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     params: idParams,
     response: 'Ok',
     handler: async (ctx, input) => {
-      await ctx.workflows.delete(input.auth.tenant.id, input.params.id, actor(input));
+      // the public API deletes without archiving first (as n8n deleteForPublicApi)
+      await ctx.workflows.delete(input.auth.tenant.id, input.params.id, actor(input), { force: true });
       return { data: { ok: true } };
     },
   },
   {
     method: 'POST',
     path: '/workflows/:id/activate',
-    summary: 'Activate a workflow',
+    summary: 'Publish a workflow (a version, optionally named; default the current one)',
+    tag: 'Workflows',
+    role: 'editor',
+    params: idParams,
+    body: publicPublishBody,
+    response: 'Workflow',
+    handler: async (ctx, input) => ({
+      data: await ctx.workflows.setActive(input.auth.tenant.id, input.params.id, true, actor(input), {
+        versionId: input.body?.versionId,
+        versionName: input.body?.name,
+        description: input.body?.description,
+      }),
+    }),
+  },
+  {
+    method: 'POST',
+    path: '/workflows/:id/archive',
+    summary: 'Archive a workflow (unpublishes it; archiving an archived workflow is a no-op)',
     tag: 'Workflows',
     role: 'editor',
     params: idParams,
     response: 'Workflow',
     handler: async (ctx, input) => ({
-      data: await ctx.workflows.setActive(input.auth.tenant.id, input.params.id, true, actor(input)),
+      data: await ctx.workflowArchive.archive(input.auth.tenant.id, input.params.id, actor(input), {
+        publicApi: true,
+      }),
+    }),
+  },
+  {
+    method: 'POST',
+    path: '/workflows/:id/unarchive',
+    summary: 'Unarchive a workflow (stays unpublished)',
+    tag: 'Workflows',
+    role: 'editor',
+    params: idParams,
+    response: 'Workflow',
+    handler: async (ctx, input) => ({
+      data: await ctx.workflowArchive.unarchive(input.auth.tenant.id, input.params.id, actor(input)),
     }),
   },
   {
@@ -372,6 +437,59 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
       return { data: { ok: true } };
     },
   },
+  {
+    method: 'GET',
+    path: '/folders',
+    summary: 'List folders',
+    tag: 'Folders',
+    role: 'viewer',
+    query: publicFolderListQuery,
+    response: 'Folder',
+    list: true,
+    handler: (ctx, input) => publicFolderHandlers.list(ctx, input),
+  },
+  {
+    method: 'POST',
+    path: '/folders',
+    summary: 'Create a folder',
+    tag: 'Folders',
+    role: 'editor',
+    body: publicFolderCreate,
+    response: 'Folder',
+    handler: (ctx, input) => publicFolderHandlers.create(ctx, input),
+  },
+  {
+    method: 'GET',
+    path: '/folders/:folderId',
+    summary: 'Get a folder',
+    tag: 'Folders',
+    role: 'viewer',
+    params: folderParams,
+    response: 'Folder',
+    handler: (ctx, input) => publicFolderHandlers.get(ctx, input),
+  },
+  {
+    method: 'PATCH',
+    path: '/folders/:folderId',
+    summary: 'Rename, move or tag a folder',
+    tag: 'Folders',
+    role: 'editor',
+    params: folderParams,
+    body: publicFolderUpdate,
+    response: 'Folder',
+    handler: (ctx, input) => publicFolderHandlers.update(ctx, input),
+  },
+  {
+    method: 'DELETE',
+    path: '/folders/:folderId',
+    summary: 'Delete a folder (transferToFolderId moves its content; omitted archives its workflows to root)',
+    tag: 'Folders',
+    role: 'editor',
+    params: folderParams,
+    query: publicFolderDeleteQuery,
+    response: 'Ok',
+    handler: (ctx, input) => publicFolderHandlers.remove(ctx, input),
+  },
 ];
 
 /** JSON schema of credential data from the type's properties */
@@ -465,6 +583,9 @@ const COMPONENTS: Record<string, unknown> = {
       id: { type: 'string', format: 'uuid' },
       name: { type: 'string' },
       active: { type: 'boolean' },
+      isArchived: { type: 'boolean' },
+      folderId: { type: ['string', 'null'], format: 'uuid' },
+      publishedVersionId: { type: ['string', 'null'], format: 'uuid' },
       tags: { type: 'array', items: ref('TagRef') },
       nodeTypes: { type: 'array', items: { type: 'string' } },
       createdAt: { type: 'string', format: 'date-time' },
@@ -472,6 +593,27 @@ const COMPONENTS: Record<string, unknown> = {
     },
   },
   TagRef: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+  NodeGroup: {
+    type: 'object',
+    required: ['id', 'name', 'nodeIds'],
+    properties: {
+      id: { type: 'string' },
+      name: { type: 'string' },
+      nodeIds: { type: 'array', items: { type: 'string' } },
+      description: { type: 'string', maxLength: 145 },
+    },
+  },
+  Folder: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      name: { type: 'string' },
+      parentFolderId: { type: ['string', 'null'], format: 'uuid' },
+      tags: { type: 'array', items: ref('TagRef') },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
   Workflow: {
     type: 'object',
     properties: {
@@ -482,8 +624,12 @@ const COMPONENTS: Record<string, unknown> = {
       settings: { type: 'object' },
       pinData: { type: 'object' },
       stickyNotes: { type: 'array', items: { type: 'object' } },
+      nodeGroups: { type: 'array', items: ref('NodeGroup') },
       active: { type: 'boolean' },
       versionId: { type: 'string', format: 'uuid' },
+      folderId: { type: ['string', 'null'], format: 'uuid' },
+      isArchived: { type: 'boolean' },
+      publishedVersionId: { type: ['string', 'null'], format: 'uuid' },
       tags: { type: 'array', items: ref('TagRef') },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
@@ -677,7 +823,7 @@ export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerC
         await loadApiKey(request, ctx.auth);
         const auth = request.auth!;
         if (!hasRole(auth.role, route.role)) throw ApiError.forbidden();
-        const input: Input = {
+        const input: PublicApiInput = {
           auth,
           request,
           params: route.params ? parse(route.params, request.params) : {},

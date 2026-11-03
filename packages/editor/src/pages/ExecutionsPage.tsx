@@ -6,6 +6,11 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { errorMessage } from '../api/client';
 import { executionsApi, workflowsApi } from '../api/endpoints';
+import type { AnnotationVote } from '../api/types';
+import { AnnotationBadges } from '../components/executions/AnnotationBadges';
+import { AnnotationFilters, type AnnotationFilterValue } from '../components/executions/AnnotationFilters';
+import { VersionFilter } from '../components/executions/VersionFilter';
+import { VersionLabel } from '../components/executions/VersionLabel';
 import { Button } from '../components/ui/Button';
 import { Select, Switch } from '../components/ui/Field';
 import { Callout, EmptyState, PageLoader, StatusBadge } from '../components/ui/misc';
@@ -38,18 +43,26 @@ export function ExecutionsPage() {
   const [params, setParams] = useSearchParams();
   const workflowId = params.get('workflowId') ?? '';
   const status = params.get('status') ?? '';
+  // P3-09 annotation filters (comma-separated tag ids, all must match) and P3-10 version filter
+  const annotationTags = (params.get('annotationTags') ?? '').split(',').filter(Boolean);
+  const voteParam = params.get('vote');
+  const vote: AnnotationVote | undefined = voteParam === 'up' || voteParam === 'down' ? voteParam : undefined;
+  const workflowVersionId = params.get('workflowVersionId') ?? '';
   const [autoRefresh, setAutoRefresh] = useState(true);
   const workflows = useQuery({
     queryKey: ['workflows', 'filter-options'],
     queryFn: () => workflowsApi.list({ limit: 200 }),
   });
   const query = useInfiniteQuery({
-    queryKey: ['executions', { workflowId, status }],
+    queryKey: ['executions', { workflowId, status, annotationTags, vote, workflowVersionId }],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       executionsApi.list({
         workflowId: workflowId || undefined,
         status: status || undefined,
+        annotationTags: annotationTags.length ? annotationTags : undefined,
+        vote,
+        workflowVersionId: workflowVersionId || undefined,
         limit: 50,
         cursor: pageParam,
       }),
@@ -61,6 +74,14 @@ export function ExecutionsPage() {
     const next = new URLSearchParams(params);
     if (value) next.set(key, value);
     else next.delete(key);
+    setParams(next, { replace: true });
+  };
+  const setAnnotationFilter = (value: AnnotationFilterValue) => {
+    const next = new URLSearchParams(params);
+    if (value.tags.length) next.set('annotationTags', value.tags.join(','));
+    else next.delete('annotationTags');
+    if (value.vote) next.set('vote', value.vote);
+    else next.delete('vote');
     setParams(next, { replace: true });
   };
 
@@ -88,7 +109,14 @@ export function ExecutionsPage() {
           aria-label="Filter by workflow"
           className="w-64"
           value={workflowId}
-          onChange={(e) => setFilter('workflowId', e.target.value)}
+          onChange={(e) => {
+            // a version belongs to one workflow
+            const next = new URLSearchParams(params);
+            if (e.target.value) next.set('workflowId', e.target.value);
+            else next.delete('workflowId');
+            next.delete('workflowVersionId');
+            setParams(next, { replace: true });
+          }}
         >
           <option value="">All workflows</option>
           {(workflows.data?.data ?? []).map((w) => (
@@ -109,6 +137,14 @@ export function ExecutionsPage() {
             </option>
           ))}
         </Select>
+        {workflowId && (
+          <VersionFilter
+            workflowId={workflowId}
+            value={workflowVersionId}
+            onChange={(id) => setFilter('workflowVersionId', id)}
+          />
+        )}
+        <AnnotationFilters value={{ tags: annotationTags, vote }} onChange={setAnnotationFilter} />
       </div>
       <section
         className="overflow-hidden rounded-2xl border border-line bg-surface shadow-card"
@@ -152,6 +188,8 @@ export function ExecutionsPage() {
                         {e.errorMessage}
                       </p>
                     )}
+                    <VersionLabel workflowId={e.workflowId} versionId={e.workflowVersionId} />
+                    <AnnotationBadges annotation={e.annotation} />
                   </td>
                   <td className="px-3 py-3">
                     <StatusBadge status={e.status} />

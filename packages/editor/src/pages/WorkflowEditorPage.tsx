@@ -2,23 +2,30 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { NodeParameters, NodeTypeDescription, WorkflowSettings } from '@workflow/workflow';
 import { ReactFlowProvider, useReactFlow } from '@xyflow/react';
-import { Plus, StickyNote } from 'lucide-react';
+import { LayoutGrid, Plus, StickyNote } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-router';
 import { errorMessage, isApiError } from '../api/client';
 import { executionsApi, workflowsApi } from '../api/endpoints';
 import { queryKeys, useMe, useNodeTypes } from '../api/queries';
+import type { PublishBody } from '../api/types';
 import type { CanvasActions } from '../components/canvas/actions';
 import { FlowCanvas } from '../components/canvas/FlowCanvas';
 import { NodeCreator } from '../components/canvas/NodeCreator';
+import { SelectionToolbar } from '../components/canvas/SelectionToolbar';
 import { NodeDetailsView } from '../components/ndv/NodeDetailsView';
 import { Button, IconButton } from '../components/ui/Button';
 import { confirmDialog, Dialog } from '../components/ui/Dialog';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
+import { ArchivedBanner } from '../components/workflow/ArchivedBanner';
+import { ConvertDialog } from '../components/workflow/ConvertDialog';
 import { DoctorPanel } from '../components/workflow/DoctorPanel';
 import { LogPanel } from '../components/workflow/LogPanel';
 import { VersionsPanel } from '../components/workflow/VersionsPanel';
 import { WorkflowSettingsModal } from '../components/workflow/WorkflowSettingsModal';
+import { useEditorCommands } from '../features/command-bar/editor-commands';
+import { addNodeFromDescription } from '../features/editor/add-node';
+import { CanvasContextMenu } from '../features/editor/CanvasContextMenu';
 import { EditorTopBar, ShortcutsDialog } from '../features/editor/EditorTopBar';
 import { ExecuteBar } from '../features/editor/ExecuteBar';
 import {
@@ -29,34 +36,32 @@ import {
   reportDeactivation,
   runWorkflow,
   saveWorkflow,
-  setWorkflowActive,
   stopExecution,
   webhookTriggerToListen,
 } from '../features/editor/editor-actions';
+import { ImportUrlDialog } from '../features/editor/ImportUrlDialog';
+import { OpenCredentialHost } from '../features/editor/OpenCredentialHost';
+import { publishWorkflow, unpublishWorkflow } from '../features/editor/publish-actions';
+import { RenameNodeDialog } from '../features/editor/RenameNodeDialog';
+import { tidyUp } from '../features/editor/tidy-up';
+import { useAutosave } from '../features/editor/useAutosave';
+import { useDirtyNodes } from '../features/editor/useDirtyNodes';
 import { useEditorShortcuts } from '../features/editor/useEditorShortcuts';
+import { addStickyAt, duplicateWorkflow } from '../features/editor/workflow-commands';
+import { ReviewStatusBanner } from '../features/reviews/ReviewStatusBanner';
+import {
+  archiveWorkflow,
+  deleteArchivedWorkflow,
+  unarchiveWorkflow,
+} from '../features/workflows/archive-actions';
 import { issuesByNode, lintWorkflow } from '../lib/doctor';
-import { createNodeFromDescription } from '../lib/node-catalog';
-import { deriveNodePorts, isTriggerDescription } from '../lib/ports';
-import { getMainParents, getNode, withFreshWebhookIds } from '../lib/workflow-ops';
+import { isTriggerDescription } from '../lib/ports';
+import { getMainParents, getNode } from '../lib/workflow-ops';
 import { useRunStore } from '../stores/run-store';
 import { toast, useUiStore } from '../stores/ui-store';
-import { toWorkflowBody, useWorkflowStore } from '../stores/workflow-store';
+import { useWorkflowStore } from '../stores/workflow-store';
 
-const NODE_SPACING_X = 300;
 const store = () => useWorkflowStore.getState();
-
-function freePosition(position: [number, number]): [number, number] {
-  const nodes = useWorkflowStore.getState().nodes;
-  const p: [number, number] = [position[0], position[1]];
-  for (
-    let i = 0;
-    i < 20 && nodes.some((n) => Math.abs(n.position[0] - p[0]) < 120 && Math.abs(n.position[1] - p[1]) < 60);
-    i++
-  ) {
-    p[1] += 110;
-  }
-  return p;
-}
 
 function EditorSurface({ deps }: { deps: EditorDeps }) {
   const flow = useReactFlow();
@@ -65,6 +70,7 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
   const connections = useWorkflowStore((s) => s.connections);
   const pinData = useWorkflowStore((s) => s.pinData);
   const stickyNotes = useWorkflowStore((s) => s.stickyNotes);
+  const nodeGroups = useWorkflowStore((s) => s.nodeGroups);
   const selection = useWorkflowStore((s) => s.selection);
   const readOnly = useWorkflowStore((s) => s.readOnly);
   const meta = useWorkflowStore((s) => s.meta);
@@ -74,13 +80,19 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
   const logs = useRunStore((s) => s.logs);
   const clearLogs = useRunStore((s) => s.clearLogs);
   const ui = useUiStore();
+  const queryClient = useQueryClient();
   const [saving, setSaving] = useState(false);
   const [activating, setActivating] = useState(false);
+  const dirtyNodes = useDirtyNodes();
 
   const graph = useMemo(
-    () => ({ nodes, connections, pinData, stickyNotes }),
-    [nodes, connections, pinData, stickyNotes],
+    () => ({ nodes, connections, pinData, stickyNotes, nodeGroups }),
+    [nodes, connections, pinData, stickyNotes, nodeGroups],
   );
+  // the group rules need node type descriptions (triggers, sub-nodes)
+  useEffect(() => {
+    store().setNodeTypeLookup((type) => nodeTypes.get(type));
+  }, [nodeTypes]);
   const issues = useMemo(
     () => lintWorkflow({ nodes, connections, pinData, active: meta.active }, nodeTypes),
     [nodes, connections, pinData, meta.active, nodeTypes],
@@ -112,82 +124,31 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
   );
 
   const addSticky = useCallback(() => {
-    const center = flow.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2.5 });
-    store().addSticky({
-      content: '## Note\nDescribe what this part of the workflow does.',
-      position: [Math.round(center.x - 120), Math.round(center.y - 80)],
-      width: 260,
-      height: 160,
-    });
+    addStickyAt(flow);
   }, [flow]);
 
   const handlers = useMemo(
-    () => ({ onSave: () => void save(), onExecute: execute, onAddSticky: addSticky }),
-    [save, execute, addSticky],
+    () => ({
+      onSave: () => void save(),
+      onExecute: execute,
+      onAddSticky: addSticky,
+      descriptions: nodeTypes,
+    }),
+    [save, execute, addSticky, nodeTypes],
   );
   useEditorShortcuts(handlers);
+  useEditorCommands({ deps, flow, save, execute });
+  useAutosave(deps);
 
-  const pickNode = (description: NodeTypeDescription, parameters?: NodeParameters) => {
-    const ctx = ui.creatorContext;
-    const s = store();
-    const incoming = deriveNodePorts(createNodeFromDescription(description, [0, 0], parameters), description);
-    const acceptsMain = incoming.inputs.some((p) => p.type === 'main');
-    let position = ctx.position;
-    let from = ctx.connectFrom
-      ? { ...ctx.connectFrom, targetType: ctx.connectFrom.sourceType, targetIndex: 0 }
-      : undefined;
-    let to:
-      | {
-          targetType: (typeof incoming.outputs)[number]['type'];
-          target: string;
-          targetIndex: number;
-          sourceType: (typeof incoming.outputs)[number]['type'];
-          sourceIndex: number;
-        }
-      | undefined;
+  const actionDeps = useMemo(() => ({ navigate: deps.navigate, queryClient }), [deps.navigate, queryClient]);
 
-    if (ctx.connectTo) {
-      const target = getNode(s, ctx.connectTo.target);
-      to = { ...ctx.connectTo, sourceType: ctx.connectTo.targetType, sourceIndex: 0 };
-      position ??= target
-        ? [target.position[0] + ctx.connectTo.targetIndex * 100 - 20, target.position[1] + 200]
-        : undefined;
-    } else if (ctx.connectFrom) {
-      const source = getNode(s, ctx.connectFrom.source);
-      position ??= source
-        ? [source.position[0] + NODE_SPACING_X, source.position[1] + ctx.connectFrom.sourceIndex * 110]
-        : undefined;
-    } else if (ctx.insertOn) {
-      const a = getNode(s, ctx.insertOn.source);
-      const b = getNode(s, ctx.insertOn.target);
-      position ??=
-        a && b ? [(a.position[0] + b.position[0]) / 2, (a.position[1] + b.position[1]) / 2 + 90] : undefined;
-    } else if (s.selection.nodes.length === 1 && acceptsMain && !isTriggerDescription(description)) {
-      // add after the selected node, like extending a chain
-      const source = getNode(s, s.selection.nodes[0]);
-      const sourcePorts = source ? deriveNodePorts(source, nodeTypes.get(source.type)) : undefined;
-      if (source && sourcePorts?.outputs.some((p) => p.type === 'main')) {
-        position ??= [source.position[0] + NODE_SPACING_X, source.position[1]];
-        from = {
-          source: source.name,
-          sourceType: 'main',
-          sourceIndex: 0,
-          targetType: 'main',
-          targetIndex: 0,
-        };
-      }
-    }
-    if (!position) {
-      const c = flow.screenToFlowPosition({ x: window.innerWidth / 2 - 180, y: window.innerHeight / 2 });
-      position = [c.x - 110, c.y - 32];
-    }
-    const node = createNodeFromDescription(description, freePosition(position), parameters);
-    let added: { name: string };
-    if (ctx.insertOn && acceptsMain) added = s.insertOnConnection(ctx.insertOn, node);
-    else added = s.addNode(node, { from: from && acceptsMain ? from : undefined, to });
-    ui.setSidePanel(null);
-    ui.openNdv(added.name);
-  };
+  const pickNode = (description: NodeTypeDescription, parameters?: NodeParameters) =>
+    addNodeFromDescription(description, {
+      flow,
+      descriptions: nodeTypes,
+      creator: ui.creatorContext,
+      parameters,
+    });
 
   const actions: CanvasActions = useMemo(
     () => ({
@@ -207,9 +168,20 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
       removeEdge: (ref) => store().disconnect(ref),
       updateSticky: (id, patch, history) => store().updateSticky(id, patch, { history }),
       removeSticky: (id) => store().removeStickies([id]),
+      openContextMenu: (name, at) => {
+        if (!store().selection.nodes.includes(name))
+          store().select({ nodes: [name], stickies: [], edges: [] });
+        useUiStore.getState().openContextMenu({ ...at, target: { type: 'node', nodeName: name } });
+      },
     }),
     [executeNode],
   );
+
+  const publish = async (run: () => Promise<boolean>) => {
+    setActivating(true);
+    await run();
+    setActivating(false);
+  };
 
   const creatorFilter = ui.creatorContext.connectTo
     ? { outputType: ui.creatorContext.connectTo.targetType }
@@ -224,46 +196,24 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
         saving={saving}
         activating={activating}
         onSave={() => void save()}
-        onToggleActive={async (active) => {
-          setActivating(true);
-          await setWorkflowActive(deps, active);
-          setActivating(false);
-        }}
-        onDuplicate={async () => {
-          try {
-            const s = store();
-            const body = toWorkflowBody(s);
-            const dto = await workflowsApi.create({
-              ...body,
-              nodes: withFreshWebhookIds(body.nodes),
-              name: `${s.meta.name} copy`,
-            });
-            toast.success('Workflow duplicated', dto.name);
-            deps.navigate(`/workflow/${encodeURIComponent(dto.id)}`);
-          } catch (error) {
-            toast.error('Could not duplicate the workflow', errorMessage(error));
-          }
-        }}
-        onDelete={async () => {
+        onPublish={(body: PublishBody) => void publish(() => publishWorkflow(deps, body))}
+        onUnpublish={() => void publish(() => unpublishWorkflow(deps))}
+        onDuplicate={() => void duplicateWorkflow(deps)}
+        onArchive={() => {
           const id = store().meta.id;
-          if (!id) return;
-          const ok = await confirmDialog({
-            title: 'Delete this workflow?',
-            description: 'Its execution history stays available until it is pruned. This cannot be undone.',
-            confirmLabel: 'Delete workflow',
-            tone: 'danger',
-          });
-          if (!ok) return;
-          try {
-            await workflowsApi.remove(id);
-            store().load({ name: '' });
-            toast.success('Workflow deleted');
-            deps.navigate('/workflows');
-          } catch (error) {
-            toast.error('Could not delete the workflow', errorMessage(error));
-          }
+          if (id) void archiveWorkflow(id, actionDeps);
+        }}
+        onUnarchive={() => {
+          const id = store().meta.id;
+          if (id) void unarchiveWorkflow(id, actionDeps);
+        }}
+        onDelete={() => {
+          const id = store().meta.id;
+          if (id) void deleteArchivedWorkflow(id, actionDeps);
         }}
       />
+      <ArchivedBanner />
+      <ReviewStatusBanner />
       <div className="relative flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1" data-testid="canvas">
           <FlowCanvas
@@ -277,6 +227,8 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
             actions={actions}
             fitKey={loadCount}
             onSelectionChange={(sel) => store().select(sel)}
+            onContextMenu={(menu) => useUiStore.getState().openContextMenu(menu)}
+            dirtyNodes={dirtyNodes}
             onDragStart={() => store().checkpoint()}
             onMove={(positions, stickies) => {
               if (Object.keys(positions).length) store().moveNodes(positions, { history: false });
@@ -333,8 +285,24 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
                 >
                   <StickyNote size={15} />
                 </IconButton>
+                <IconButton
+                  label="Tidy up"
+                  variant="secondary"
+                  onClick={() => {
+                    const sel = store().selection;
+                    tidyUp(
+                      flow,
+                      sel.nodes.length >= 2 ? { nodes: sel.nodes, stickies: sel.stickies } : undefined,
+                    );
+                  }}
+                  className="self-end"
+                >
+                  <LayoutGrid size={15} />
+                </IconButton>
               </div>
             )}
+            <SelectionToolbar />
+            <CanvasContextMenu deps={deps} execute={execute} />
           </FlowCanvas>
         </div>
         {ui.sidePanel === 'creator' && (
@@ -343,6 +311,7 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
             onPick={pickNode}
             onClose={() => ui.setSidePanel(null)}
             noTriggerYet={!hasTrigger}
+            replaceFor={ui.replaceTarget ?? undefined}
             {...creatorFilter}
           />
         )}
@@ -391,9 +360,14 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
           onClose={() => ui.openNdv(null)}
           onExecuteNode={readOnly ? undefined : executeNode}
           onListen={readOnly ? undefined : (name) => void listenForTestEvent(deps, name)}
+          dirtyNodes={dirtyNodes}
         />
       )}
       <ShortcutsDialog />
+      <RenameNodeDialog />
+      <ConvertDialog deps={deps} />
+      <ImportUrlDialog />
+      <OpenCredentialHost />
       <WorkflowSettingsModal
         open={ui.settingsOpen}
         onClose={() => ui.setSettingsOpen(false)}
@@ -575,6 +549,16 @@ export function WorkflowEditorPage() {
         settingsOpen: false,
         saveConflict: false,
         activationErrors: null,
+        contextMenu: null,
+        renameTarget: null,
+        convertOpen: false,
+        publishDialogOpen: false,
+        workflowRenameRequested: false,
+        tagsEditRequested: false,
+        replaceTarget: null,
+        stickyAction: null,
+        importUrlOpen: false,
+        openCredentialId: null,
       });
     },
     [],

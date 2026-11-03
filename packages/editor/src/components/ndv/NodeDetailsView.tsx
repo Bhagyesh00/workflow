@@ -2,7 +2,7 @@
  * Node details view: input data | parameters & settings | output data. Opened by double-clicking
  * a node. Parameters edit the workflow store; previews use the run store's latest data.
  */
-import type { NodeProperty } from '@workflow/workflow';
+import type { DirtyReason, NodeProperty } from '@workflow/workflow';
 import { BookOpen, Copy, Play, Radio, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -38,6 +38,8 @@ export interface NodeDetailsViewProps {
   /** run up to this node (POST /run with destinationNode) */
   onExecuteNode?: (nodeName: string) => void;
   onListen?: (nodeName: string) => void;
+  /** P3-06: nodes changed since their run data was produced (useDirtyNodes) */
+  dirtyNodes?: Record<string, DirtyReason>;
 }
 
 function TriggerPanel({
@@ -136,6 +138,7 @@ export function NodeDetailsView({
   readOnly,
   onExecuteNode,
   onListen,
+  dirtyNodes,
 }: NodeDetailsViewProps) {
   const nodeTypes = useNodeTypes();
   const settings = useSettings();
@@ -145,6 +148,7 @@ export function NodeDetailsView({
   const connections = useWorkflowStore((s) => s.connections);
   const pinData = useWorkflowStore((s) => s.pinData);
   const stickyNotes = useWorkflowStore((s) => s.stickyNotes);
+  const nodeGroups = useWorkflowStore((s) => s.nodeGroups);
   const meta = useWorkflowStore((s) => s.meta);
   const setParameter = useWorkflowStore((s) => s.setParameter);
   const updateNode = useWorkflowStore((s) => s.updateNode);
@@ -177,8 +181,8 @@ export function NodeDetailsView({
   const description = node ? nodeTypes.get(node.type) : undefined;
   const ports = useMemo(() => (node ? deriveNodePorts(node, description) : null), [node, description]);
   const graph = useMemo(
-    () => ({ nodes, connections, pinData, stickyNotes }),
-    [nodes, connections, pinData, stickyNotes],
+    () => ({ nodes, connections, pinData, stickyNotes, nodeGroups }),
+    [nodes, connections, pinData, stickyNotes, nodeGroups],
   );
   const effectiveRunData = useMemo(() => withPinnedData(runData, pinData), [runData, pinData]);
   const variableMap = useMemo(
@@ -436,6 +440,7 @@ export function NodeDetailsView({
                   running={running}
                   onPin={(items) => setPinData(node.name, items)}
                   onExecute={onExecuteNode ? () => onExecuteNode(node.name) : undefined}
+                  dirty={dirtyNodes?.[node.name]}
                 />
               </div>
             </section>

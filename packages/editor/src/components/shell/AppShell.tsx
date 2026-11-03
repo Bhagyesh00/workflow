@@ -4,6 +4,7 @@ import {
   Check,
   ChevronsUpDown,
   History,
+  Inbox,
   KeyRound,
   LogOut,
   Monitor,
@@ -24,14 +25,17 @@ import {
   setCurrentTenant,
 } from '../../api/client';
 import { authApi } from '../../api/endpoints';
-import { queryKeys, useMe } from '../../api/queries';
+import { queryKeys, useMe, useSettings } from '../../api/queries';
 import type { Me } from '../../api/types';
+import { CommandBar } from '../../features/command-bar/CommandBar';
+import { InboxNavBadge } from '../../features/reviews/InboxNavBadge';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { Menu } from '../ui/Menu';
 import { EmptyState, PageLoader } from '../ui/misc';
 import { BrandMark } from './BrandMark';
+import { FavoritesNav } from './FavoritesNav';
 import { PushBridge } from './PushBridge';
 
 const NARROW = '(max-width: 900px)';
@@ -52,6 +56,8 @@ function useNarrowScreen(): boolean {
 const NAV = [
   { to: '/workflows', label: 'Workflows', icon: Workflow },
   { to: '/executions', label: 'Executions', icon: History },
+  // P3-19: shown while workflow reviews are on for the workspace
+  { to: '/inbox', label: 'Inbox', icon: Inbox },
   { to: '/credentials', label: 'Credentials', icon: KeyRound },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
@@ -211,6 +217,7 @@ export function AppShell() {
     location.pathname.startsWith('/workflow/') || /^\/executions\/[^/]+/.test(location.pathname);
   const narrow = useNarrowScreen();
   const collapsed = collapsedPref || inEditor || narrow;
+  const reviewsEnabled = useSettings().workflowReviews?.enabled === true;
 
   useEffect(
     () =>
@@ -269,6 +276,7 @@ export function AppShell() {
   return (
     <div className="flex h-full">
       <PushBridge tenantId={data.tenant.id} />
+      <CommandBar />
       <nav
         aria-label="Main"
         className={cx(
@@ -291,7 +299,7 @@ export function AppShell() {
         </div>
         <TenantSwitcher me={data} collapsed={collapsed} />
         <ul className="flex flex-col gap-0.5">
-          {NAV.map(({ to, label, icon: Icon }) => (
+          {NAV.filter((item) => item.to !== '/inbox' || reviewsEnabled).map(({ to, label, icon: Icon }) => (
             <li key={to}>
               <NavLink
                 to={to}
@@ -308,10 +316,12 @@ export function AppShell() {
               >
                 <Icon size={17} />
                 {!collapsed && label}
+                {to === '/inbox' && <InboxNavBadge collapsed={collapsed} />}
               </NavLink>
             </li>
           ))}
         </ul>
+        <FavoritesNav collapsed={collapsed} />
         <div className="mt-auto flex flex-col gap-2">
           {collapsedPref && !inEditor && !narrow && (
             <button

@@ -15,6 +15,8 @@ import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { Dialog } from '../ui/Dialog';
 import { Callout, EmptyState, PageLoader } from '../ui/misc';
+import { Tabs } from '../ui/Tabs';
+import { PublishTimeline } from './PublishTimeline';
 import { WorkflowDiffSummary } from './WorkflowDiffSummary';
 
 function VersionPreview({
@@ -60,7 +62,13 @@ function VersionPreview({
       <div className="min-h-[50vh] overflow-hidden rounded-xl border border-line">
         <ReactFlowProvider>
           <FlowCanvas
-            graph={{ nodes: data.nodes, connections: data.connections, pinData: {}, stickyNotes: [] }}
+            graph={{
+              nodes: data.nodes,
+              connections: data.connections,
+              pinData: {},
+              stickyNotes: [],
+              nodeGroups: data.nodeGroups ?? [],
+            }}
             descriptions={nodeTypes}
             runData={{}}
             runningNodes={[]}
@@ -117,6 +125,7 @@ export function VersionsPanel({
   const list = versions.data?.pages.flatMap((p) => p.data) ?? [];
   const [preview, setPreview] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
+  const [tab, setTab] = useState<'versions' | 'timeline'>('versions');
 
   return (
     <aside
@@ -135,64 +144,84 @@ export function VersionsPanel({
           <X size={16} />
         </button>
       </div>
-      <div className="wf-scroll min-h-0 flex-1 overflow-y-auto border-t border-line">
-        {!workflowId ? (
-          <EmptyState title="Not saved yet" description="Versions appear once the workflow has been saved." />
-        ) : versions.isLoading ? (
-          <PageLoader />
-        ) : versions.error ? (
-          <Callout tone="err" className="m-4">
-            {errorMessage(versions.error)}
-          </Callout>
-        ) : !list.length ? (
-          <EmptyState
-            title="No versions yet"
-            description="Every save creates a version you can come back to."
-          />
-        ) : (
-          <ol className="relative px-4 py-3">
-            {list.map((v, i) => (
-              <li key={v.versionId} className="relative pb-4 pl-5">
-                <span
-                  className={cx(
-                    'absolute top-1.5 left-0 size-2.5 rounded-full border-2',
-                    i === 0 ? 'border-brand bg-brand' : 'border-line-strong bg-surface',
+      <Tabs
+        label="Version history views"
+        size="sm"
+        className="px-4"
+        value={tab}
+        onChange={setTab}
+        items={[
+          { value: 'versions', label: 'Versions' },
+          { value: 'timeline', label: 'Publish timeline' },
+        ]}
+      />
+      {tab === 'timeline' ? (
+        <div className="wf-scroll min-h-0 flex-1 overflow-y-auto border-t border-line">
+          <PublishTimeline workflowId={workflowId} />
+        </div>
+      ) : (
+        <div className="wf-scroll min-h-0 flex-1 overflow-y-auto border-t border-line">
+          {!workflowId ? (
+            <EmptyState
+              title="Not saved yet"
+              description="Versions appear once the workflow has been saved."
+            />
+          ) : versions.isLoading ? (
+            <PageLoader />
+          ) : versions.error ? (
+            <Callout tone="err" className="m-4">
+              {errorMessage(versions.error)}
+            </Callout>
+          ) : !list.length ? (
+            <EmptyState
+              title="No versions yet"
+              description="Every save creates a version you can come back to."
+            />
+          ) : (
+            <ol className="relative px-4 py-3">
+              {list.map((v, i) => (
+                <li key={v.versionId} className="relative pb-4 pl-5">
+                  <span
+                    className={cx(
+                      'absolute top-1.5 left-0 size-2.5 rounded-full border-2',
+                      i === 0 ? 'border-brand bg-brand' : 'border-line-strong bg-surface',
+                    )}
+                  />
+                  {(i < list.length - 1 || versions.hasNextPage) && (
+                    <span className="absolute top-4 bottom-0 left-[4px] w-px bg-line" />
                   )}
-                />
-                {(i < list.length - 1 || versions.hasNextPage) && (
-                  <span className="absolute top-4 bottom-0 left-[4px] w-px bg-line" />
-                )}
-                <button
-                  type="button"
-                  onClick={() => setPreview(v.versionId)}
-                  className="w-full rounded-lg px-2 py-1 text-left hover:bg-surface-3"
-                >
-                  <span className="block text-sm font-semibold text-ink">
-                    {i === 0 ? 'Current version' : formatRelative(v.createdAt)}
-                  </span>
-                  <span className="block text-xs text-ink-2">
-                    {v.authorName}
-                    {v.message ? `: ${v.message}` : ''}
-                  </span>
-                  <span className="block text-2xs text-ink-3">{formatDateTime(v.createdAt)}</span>
-                </button>
-              </li>
-            ))}
-          </ol>
-        )}
-        {versions.hasNextPage && (
-          <div className="px-4 pb-4">
-            <Button
-              size="sm"
-              className="w-full"
-              onClick={() => void versions.fetchNextPage()}
-              loading={versions.isFetchingNextPage}
-            >
-              Load more
-            </Button>
-          </div>
-        )}
-      </div>
+                  <button
+                    type="button"
+                    onClick={() => setPreview(v.versionId)}
+                    className="w-full rounded-lg px-2 py-1 text-left hover:bg-surface-3"
+                  >
+                    <span className="block text-sm font-semibold text-ink">
+                      {i === 0 ? 'Current version' : formatRelative(v.createdAt)}
+                    </span>
+                    <span className="block text-xs text-ink-2">
+                      {v.authorName}
+                      {v.message ? `: ${v.message}` : ''}
+                    </span>
+                    <span className="block text-2xs text-ink-3">{formatDateTime(v.createdAt)}</span>
+                  </button>
+                </li>
+              ))}
+            </ol>
+          )}
+          {versions.hasNextPage && (
+            <div className="px-4 pb-4">
+              <Button
+                size="sm"
+                className="w-full"
+                onClick={() => void versions.fetchNextPage()}
+                loading={versions.isFetchingNextPage}
+              >
+                Load more
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
       <Dialog
         open={Boolean(preview)}
         onClose={() => setPreview(null)}

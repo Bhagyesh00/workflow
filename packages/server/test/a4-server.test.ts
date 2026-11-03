@@ -247,6 +247,10 @@ describe('R64: activation on a main that is not the leader', () => {
       executions: server.ctx.executions,
       activeWorkflows: follower(200),
       testWebhooks: server.ctx.testWebhooks,
+      favorites: server.ctx.favorites,
+      publishHistory: server.ctx.publishHistory,
+      reviews: server.ctx.reviews,
+      context: () => server.ctx,
     });
     const leadership = server.ctx.leadership as SingleLeader;
     // the leader crashes: its triggers are gone and the next main is not elected yet

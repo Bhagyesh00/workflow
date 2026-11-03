@@ -42,6 +42,8 @@ const settingsPatch = z.object({
       }
     }, 'Unknown time zone')
     .optional(),
+  /** P3-19 */
+  workflowReviews: z.object({ enabled: z.boolean() }).optional(),
 });
 
 const optionsSchema = z.object({
@@ -113,6 +115,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         ...(usage
           ? { usage: { period: usage.period, executions: usage.executions, executionMs: usage.executionMs } }
           : {}),
+        autosaveEnabled: !config.autosaveDisabled,
+        workflowReviews: { enabled: tenantSettings.workflowReviews?.enabled === true },
       },
     };
   });
@@ -125,6 +129,9 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
       ...current,
       ...(body.brand ? { brand: { ...(current.brand ?? {}), ...body.brand } } : {}),
       ...(body.timezone ? { timezone: body.timezone } : {}),
+      ...(body.workflowReviews
+        ? { workflowReviews: { ...(current.workflowReviews ?? {}), ...body.workflowReviews } }
+        : {}),
     };
     const tenant = await repos.tenants.updateSettings(auth.tenant.id, next as Record<string, unknown>);
     await repos.audit.add(auth.tenant.id, {
@@ -138,6 +145,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
       data: {
         brand: (tenant?.settings as TenantSettings | undefined)?.brand ?? {},
         timezone: next.timezone ?? null,
+        autosaveEnabled: !config.autosaveDisabled,
+        workflowReviews: { enabled: next.workflowReviews?.enabled === true },
       },
     };
   });

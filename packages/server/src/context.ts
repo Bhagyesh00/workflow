@@ -11,14 +11,19 @@ import { createLogger, type PinoLogger } from './logger';
 import { buildRegistries, loadNodePackages, type Registries } from './node-packages';
 import { createRepositories, type Repositories } from './repositories';
 import { ActiveWorkflowManager } from './services/active-workflows';
+import { AnnotationService } from './services/annotations';
 import { AuthService } from './services/auth';
 import { MemoryBus, type MessageBus, PushService, RedisBus } from './services/bus';
 import { CredentialService } from './services/credentials';
 import { ExecutionService } from './services/executions';
+import { FavoriteService } from './services/favorites';
+import { FolderService } from './services/folders';
+import { HistoryCompactionService } from './services/history-compaction';
 import { Pruner, WaitTracker } from './services/maintenance';
 import { Metrics } from './services/metrics';
 import { OAuth1Service } from './services/oauth1';
 import { OAuth2Service } from './services/oauth2';
+import { PublishHistoryService } from './services/publish-history';
 import { ExecutionQueue, type Leadership, RedisLeader, SingleLeader } from './services/queue';
 import {
   MemoryTestWebhookStore,
@@ -26,6 +31,9 @@ import {
   type TestWebhookStore,
 } from './services/test-webhooks';
 import { WebhookService } from './services/webhooks';
+import { WorkflowArchiveService } from './services/workflow-archive';
+import { WorkflowImportUrlService } from './services/workflow-import-url';
+import { WorkflowReviewService } from './services/workflow-reviews';
 import { WorkflowService } from './services/workflows';
 
 export interface ServerContext {
@@ -53,11 +61,37 @@ export interface ServerContext {
   workflows: WorkflowService;
   waitTracker: WaitTracker;
   pruner: Pruner;
+  /** P3-07 (L8) */
+  folders: FolderService;
+  favorites: FavoriteService;
+  workflowArchive: WorkflowArchiveService;
+  /** P3-09 (L9) */
+  annotations: AnnotationService;
+  /** P3-13 (L11) */
+  workflowImportUrl: WorkflowImportUrlService;
+  /** P3-16 (L12) */
+  publishHistory: PublishHistoryService;
+  /** P3-18 (L12): leader only, started and stopped with the pruner */
+  historyCompaction: HistoryCompactionService;
+  /** P3-19 (L14) */
+  reviews: WorkflowReviewService;
   /** start leader duties (triggers, wait tracker, pruning) on mains */
   startMain(): Promise<void>;
   /** consume the execution queue (queue mode workers) */
   startWorker(): Promise<void>;
   close(): Promise<void>;
+}
+
+/**
+ * What the Phase 3 services get: the basics, plus the whole context read lazily (they call each
+ * other, e.g. archive -> workflows -> reviews).
+ */
+export interface ServiceDeps {
+  config: Config;
+  database: Database;
+  repos: Repositories;
+  logger: PinoLogger;
+  context: () => ServerContext;
 }
 
 export interface ContextOptions {
@@ -104,6 +138,25 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     queueMode && redisUrl
       ? new RedisTestWebhookStore(redisUrl, config.queue.prefix)
       : new MemoryTestWebhookStore();
+
+  const contextRef: { current?: ServerContext } = {};
+  const serviceDeps: ServiceDeps = {
+    config,
+    database,
+    repos,
+    logger,
+    context: () => {
+      if (!contextRef.current) throw new Error('The server context is not ready yet');
+      return contextRef.current;
+    },
+  };
+  const folders = new FolderService(serviceDeps);
+  const favorites = new FavoriteService(serviceDeps);
+  const annotations = new AnnotationService(serviceDeps);
+  const workflowImportUrl = new WorkflowImportUrlService(serviceDeps);
+  const publishHistory = new PublishHistoryService(serviceDeps);
+  const historyCompaction = new HistoryCompactionService(serviceDeps);
+  const reviews = new WorkflowReviewService(serviceDeps);
 
   const metrics = new Metrics({
     queueDepth: queue ? () => queue.depth() : undefined,
@@ -154,7 +207,12 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     executions,
     activeWorkflows,
     testWebhooks,
+    favorites,
+    publishHistory,
+    reviews,
+    context: serviceDeps.context,
   });
+  const workflowArchive = new WorkflowArchiveService(serviceDeps);
   const waitTracker = new WaitTracker(repos, executions, logger, config.waitTrackerIntervalMs);
   const pruner = new Pruner(config, repos, executions, logger);
 
@@ -185,6 +243,14 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     workflows,
     waitTracker,
     pruner,
+    folders,
+    favorites,
+    workflowArchive,
+    annotations,
+    workflowImportUrl,
+    publishHistory,
+    historyCompaction,
+    reviews,
 
     async startMain() {
       if (started) return;
@@ -202,11 +268,13 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
           await activeWorkflows.startAll();
           waitTracker.start();
           pruner.start();
+          historyCompaction.start();
         },
         async () => {
           logger.warn('Leadership lost: stopping triggers, wait tracker and pruning');
           waitTracker.stop();
           pruner.stop();
+          historyCompaction.stop();
           await activeWorkflows.stopAll();
         },
       );
@@ -227,6 +295,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       closed = true;
       waitTracker.stop();
       pruner.stop();
+      historyCompaction.stop();
       await leadership.stop().catch(() => {});
       await activeWorkflows.close().catch(() => {});
       await queue?.close().catch(() => {});
@@ -238,5 +307,6 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       await database.close().catch(() => {});
     },
   };
+  contextRef.current = context;
   return context;
 }

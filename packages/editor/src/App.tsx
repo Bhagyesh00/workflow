@@ -18,6 +18,9 @@ import { applyTheme } from './lib/brand';
 import { AcceptInvitationPage, LoginPage, SignupPage } from './pages/auth/AuthPages';
 import { NotFoundPage, RouteErrorPage } from './pages/ErrorPages';
 import { ExecutionsPage } from './pages/ExecutionsPage';
+import { InboxPage } from './pages/InboxPage';
+import { ReviewDetailPage } from './pages/ReviewDetailPage';
+import { SecuritySettingsPage } from './pages/SecuritySettingsPage';
 import {
   AccountSettingsPage,
   ApiKeysSettingsPage,
@@ -65,6 +68,8 @@ export const routes: RouteObject[] = [
         ),
       },
       { path: 'executions', element: <ExecutionsPage /> },
+      { path: 'inbox', element: <InboxPage /> },
+      { path: 'inbox/:reviewId', element: <ReviewDetailPage /> },
       {
         path: 'executions/:id',
         element: (
@@ -90,6 +95,7 @@ export const routes: RouteObject[] = [
           { path: 'members', element: <MembersSettingsPage /> },
           { path: 'api-keys', element: <ApiKeysSettingsPage /> },
           { path: 'variables', element: <VariablesSettingsPage /> },
+          { path: 'security', element: <SecuritySettingsPage /> },
         ],
       },
       { path: '*', element: <NotFoundPage /> },

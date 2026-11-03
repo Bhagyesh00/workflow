@@ -71,6 +71,8 @@ export interface RunOptions {
   destinationNode?: string;
   /** pinned outputs (manual mode) */
   pinData?: Record<string, Item[]>;
+  /** partial run (P3-06): nodes the editor marked dirty since `runData` was produced; they and their descendants run again */
+  dirtyNodeNames?: string[];
   /** overrides workflow settings / tenant default */
   timeoutMs?: number;
   signal?: AbortSignal;

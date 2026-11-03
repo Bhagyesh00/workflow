@@ -52,8 +52,12 @@ describe('workflows', () => {
         'settings',
         'pinData',
         'stickyNotes',
+        'nodeGroups',
         'active',
         'versionId',
+        'folderId',
+        'isArchived',
+        'publishedVersionId',
         'tags',
         'createdAt',
         'updatedAt',
@@ -85,6 +89,8 @@ describe('workflows', () => {
     expect(updated.tags).toEqual([]);
     expect(updated.versionId).not.toBe(created.versionId);
 
+    // the editor deletes archived workflows only (P3-07)
+    await client.data(client.post(`/rest/workflows/${created.id}/archive`));
     expect(await client.data(client.delete(`/rest/workflows/${created.id}`))).toEqual({ ok: true });
     expect((await client.get(`/rest/workflows/${created.id}`)).statusCode).toBe(404);
     expect((await client.get('/rest/workflows/not-a-uuid')).statusCode).toBe(400);

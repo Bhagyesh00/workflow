@@ -16,6 +16,8 @@ export interface CanvasActions {
   removeEdge(ref: ConnectionRef): void;
   updateSticky(id: string, patch: Partial<Omit<StickyNote, 'id'>>, history?: boolean): void;
   removeSticky(id: string): void;
+  /** P3-02: the node toolbar's "More" button opens the context menu for the node at `at` (client px) */
+  openContextMenu?(nodeName: string, at: { x: number; y: number }): void;
 }
 
 const noop = () => undefined;

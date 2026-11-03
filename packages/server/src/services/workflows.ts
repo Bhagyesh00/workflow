@@ -9,18 +9,23 @@ import {
   type Item,
   type RunData,
   sortByPosition,
+  validateWorkflowNodeGroups,
   Workflow,
   type WorkflowDefinition,
   type WorkflowNode,
+  type WorkflowNodeGroup,
 } from '@workflow/workflow';
 import type { z } from 'zod';
 import type { Config } from '../config';
+import type { ServerContext } from '../context';
 import type { Database } from '../db/client';
 import type { TenantRow, WorkflowRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import { decodeCursor, encodeCursor, page } from '../http/pagination';
 import type {
+  publishSchema,
   runSchema,
+  versionPatchSchema,
   workflowCreateSchema,
   workflowDataSchema,
   workflowUpdateSchema,
@@ -28,14 +33,36 @@ import type {
 import { createRepositories, type Repositories, type TagRef } from '../repositories';
 import type { ActiveWorkflowManager, ValidationIssue } from './active-workflows';
 import type { ExecutionService } from './executions';
+import type { FavoriteService } from './favorites';
+import type { PublishHistoryService } from './publish-history';
 import { TEST_WEBHOOK_TTL_MS, type TestWebhookStore } from './test-webhooks';
 import { nodeWebhooks } from './webhook-paths';
 import { cloneDefinition, toDefinition, toDTO, type WorkflowDTO } from './workflow-model';
+import type { WorkflowReviewService } from './workflow-reviews';
+import { assertDeletable, assertFolderInTenant, assertNotArchived } from './workflow-rules';
 
 type CreateInput = z.output<typeof workflowCreateSchema>;
 type UpdateInput = z.output<typeof workflowUpdateSchema>;
 type RunInput = z.output<typeof runSchema>;
 type WorkflowData = z.output<typeof workflowDataSchema>;
+/** POST /workflows/:id/activate body (P3-10) */
+export type PublishBody = z.output<typeof publishSchema>;
+export type VersionPatch = z.output<typeof versionPatchSchema>;
+
+export interface WorkflowListQuery {
+  search?: string;
+  tagId?: string;
+  active?: boolean;
+  /** P3-07: a folder id or 'root'; omitted = every folder */
+  folderId?: string;
+  /** P3-07: 'false' (default) | 'true' | 'all' */
+  archived?: 'false' | 'true' | 'all';
+  /** P3-01 command bar: node types matching the search, and tag names */
+  nodeTypes?: string[];
+  matchTags?: boolean;
+  limit: number;
+  cursor?: string;
+}
 
 export const MANUAL_TRIGGER = 'core.manualTrigger';
 const MANUAL_TRIGGER_WAIT_MS = 10_000;
@@ -53,6 +80,11 @@ export interface WorkflowServiceDeps {
   executions: ExecutionService;
   activeWorkflows: ActiveWorkflowManager;
   testWebhooks: TestWebhookStore;
+  /** P3-07 / P3-16 / P3-19 services; context gives the rest lazily */
+  favorites: FavoriteService;
+  publishHistory: PublishHistoryService;
+  reviews: WorkflowReviewService;
+  context: () => ServerContext;
 }
 
 function assertGraph(
@@ -66,6 +98,20 @@ function assertGraph(
     );
   } catch (error) {
     throw ApiError.badRequest((error as Error).message);
+  }
+}
+
+/** 400 invalid_node_groups with the rule texts (P3-04, as n8n's save check) */
+function assertNodeGroups(
+  definition: Pick<WorkflowDefinition, 'name' | 'nodes' | 'connections' | 'nodeGroups'>,
+  nodeTypes: NodeTypes,
+) {
+  const problems = validateWorkflowNodeGroups(
+    { ...definition, connections: definition.connections ?? {} } as WorkflowDefinition,
+    (type) => nodeTypes.get(type)?.description,
+  );
+  if (problems.length) {
+    throw new ApiError(400, 'invalid_node_groups', problems.map((p) => p.message).join(' '), problems);
   }
 }
 
@@ -87,10 +133,7 @@ export class WorkflowService {
     return row;
   }
 
-  async list(
-    tenantId: string,
-    query: { search?: string; tagId?: string; active?: boolean; limit: number; cursor?: string },
-  ) {
+  async list(tenantId: string, query: WorkflowListQuery) {
     const rows = await this.repos.workflows.list(tenantId, { ...query, cursor: decodeCursor(query.cursor) });
     const { data, nextCursor } = page(rows, query.limit, (r) => encodeCursor(r.updatedAt, r.id));
     const tags = await this.repos.workflows.tagsFor(
@@ -102,6 +145,9 @@ export class WorkflowService {
         id: r.id,
         name: r.name,
         active: r.active,
+        isArchived: r.isArchived,
+        folderId: r.folderId,
+        publishedVersionId: r.publishedVersionId,
         tags: tags.get(r.id) ?? [],
         updatedAt: r.updatedAt.toISOString(),
         createdAt: r.createdAt.toISOString(),
@@ -120,6 +166,8 @@ export class WorkflowService {
 
   async create(tenantId: string, input: CreateInput, actor: Actor): Promise<WorkflowDTO> {
     assertGraph(input as unknown as WorkflowDefinition, this.deps.nodeTypes);
+    assertNodeGroups(input as unknown as WorkflowDefinition, this.deps.nodeTypes);
+    await assertFolderInTenant(this.repos, tenantId, input.folderId);
     const id = randomUUID();
     const versionId = randomUUID();
     const content = {
@@ -129,6 +177,7 @@ export class WorkflowService {
       settings: input.settings ?? {},
       pinData: input.pinData ?? {},
       stickyNotes: input.stickyNotes ?? [],
+      nodeGroups: input.nodeGroups ?? [],
     };
     const row = await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
@@ -138,6 +187,7 @@ export class WorkflowService {
         id,
         versionId,
         createdBy: actor.userId,
+        folderId: input.folderId ?? null,
       });
       await repos.versions.create(tenantId, {
         id: versionId,
@@ -147,6 +197,7 @@ export class WorkflowService {
         connections: content.connections,
         settings: content.settings,
         stickyNotes: content.stickyNotes,
+        nodeGroups: content.nodeGroups,
         authorId: actor.userId ?? null,
         message: 'Created',
       });
@@ -174,15 +225,29 @@ export class WorkflowService {
     input: Omit<UpdateInput, 'versionId'> & { versionId?: string },
     actor: Actor,
     message?: string,
+    /** P3-10 (L10): the public API's ?publishIfActive; C0 keeps today's behaviour (re-register when active) */
+    _options: { publishIfActive?: boolean } = {},
   ): Promise<WorkflowDTO & { activationError?: { message: string; details?: unknown } }> {
-    const { versionId: expected, tagIds, versionMessage, ...patch } = input;
+    const { versionId: expected, tagIds, versionMessage, autosaved, ...patch } = input;
+    const existing = await this.get(tenantId, id);
+    assertNotArchived(existing, 'update');
     if (patch.nodes || patch.connections) {
-      const current = await this.get(tenantId, id);
       assertGraph(
         {
-          name: patch.name ?? current.name,
-          nodes: (patch.nodes ?? current.nodes) as WorkflowNode[],
-          connections: (patch.connections ?? current.connections) as WorkflowDefinition['connections'],
+          name: patch.name ?? existing.name,
+          nodes: (patch.nodes ?? existing.nodes) as WorkflowNode[],
+          connections: (patch.connections ?? existing.connections) as WorkflowDefinition['connections'],
+        },
+        this.deps.nodeTypes,
+      );
+    }
+    if (patch.nodes || patch.connections || patch.nodeGroups) {
+      assertNodeGroups(
+        {
+          name: patch.name ?? existing.name,
+          nodes: (patch.nodes ?? existing.nodes) as WorkflowNode[],
+          connections: (patch.connections ?? existing.connections) as WorkflowDefinition['connections'],
+          nodeGroups: (patch.nodeGroups ?? existing.nodeGroups) as WorkflowNodeGroup[],
         },
         this.deps.nodeTypes,
       );
@@ -214,8 +279,10 @@ export class WorkflowService {
         connections: updated.connections,
         settings: updated.settings,
         stickyNotes: updated.stickyNotes,
+        nodeGroups: updated.nodeGroups,
         authorId: actor.userId ?? null,
         message: message ?? versionMessage ?? null,
+        autosaved: autosaved ?? false,
       });
       if (tagIds) await repos.workflows.setTags(tenantId, id, await this.checkTags(repos, tenantId, tagIds));
       return updated;
@@ -246,10 +313,15 @@ export class WorkflowService {
     return activationError ? { ...dto, activationError } : dto;
   }
 
-  async delete(tenantId: string, id: string, actor: Actor): Promise<void> {
+  /** the editor deletes archived workflows only; the public API passes `force` (P3-07) */
+  async delete(tenantId: string, id: string, actor: Actor, options: { force?: boolean } = {}): Promise<void> {
     const row = await this.get(tenantId, id);
+    assertDeletable(row, { force: options.force });
     if (row.active) await this.deps.activeWorkflows.deactivate(tenantId, id);
     const executionIds = await this.repos.executions.idsForWorkflow(tenantId, id);
+    // before the row goes: the FK set-null would hide the open review request
+    await this.deps.reviews.afterWorkflowDeleted(tenantId, id);
+    await this.deps.favorites.removeForResource(tenantId, 'workflow', id);
     await this.repos.workflows.delete(tenantId, id);
     for (const executionId of executionIds)
       await this.deps.executions.removeBinaryData(tenantId, executionId);
@@ -262,7 +334,14 @@ export class WorkflowService {
     });
   }
 
-  async setActive(tenantId: string, id: string, active: boolean, actor: Actor): Promise<WorkflowDTO> {
+  /** publish (true) or unpublish; `body` names the version to publish (P3-10, L10; C0 ignores it) */
+  async setActive(
+    tenantId: string,
+    id: string,
+    active: boolean,
+    actor: Actor,
+    _body?: PublishBody,
+  ): Promise<WorkflowDTO> {
     const row = active
       ? await this.deps.activeWorkflows.activate(tenantId, id)
       : await this.deps.activeWorkflows.deactivate(tenantId, id);
@@ -288,6 +367,9 @@ export class WorkflowService {
         versionId: v.versionId,
         authorName: v.authorName ?? null,
         message: v.message ?? null,
+        versionName: v.versionName ?? null,
+        description: v.description ?? null,
+        autosaved: v.autosaved,
         createdAt: v.createdAt.toISOString(),
       })),
       nextCursor,
@@ -306,10 +388,25 @@ export class WorkflowService {
       connections: v.connections,
       settings: v.settings,
       stickyNotes: v.stickyNotes,
+      nodeGroups: v.nodeGroups,
       authorName: v.authorName,
       message: v.message,
+      versionName: v.versionName,
+      description: v.description,
+      autosaved: v.autosaved,
       createdAt: v.createdAt.toISOString(),
     };
+  }
+
+  /** PATCH /workflows/:id/versions/:versionId: name or describe a version (P3-10, L10) */
+  async updateVersion(
+    _tenantId: string,
+    _id: string,
+    _versionId: string,
+    _patch: VersionPatch,
+    _actor: Actor,
+  ): Promise<Awaited<ReturnType<WorkflowService['getVersion']>>> {
+    throw new ApiError(501, 'not_implemented', 'not implemented (L10)');
   }
 
   async restoreVersion(tenantId: string, id: string, versionId: string, actor: Actor) {
@@ -323,19 +420,26 @@ export class WorkflowService {
         connections: snapshot.connections as UpdateInput['connections'],
         settings: snapshot.settings as UpdateInput['settings'],
         stickyNotes: snapshot.stickyNotes as UpdateInput['stickyNotes'],
+        nodeGroups: snapshot.nodeGroups as UpdateInput['nodeGroups'],
       },
       actor,
       `Restored version ${versionId}`,
     );
   }
 
-  /** structural diff between two versions (`against` = another version id or "current") */
+  /** structural diff between two versions (`against` = another version id, "current" or "published") */
   async diffVersions(tenantId: string, id: string, versionId: string, against: string) {
     const from = await this.getVersion(tenantId, id, versionId);
+    let againstId = against;
+    if (against === 'published') {
+      const row = await this.get(tenantId, id);
+      if (!row.publishedVersionId) throw ApiError.notFound('Published version');
+      againstId = row.publishedVersionId;
+    }
     const to =
       against === 'current'
         ? { ...toDefinition(await this.get(tenantId, id)), versionId: 'current' }
-        : await this.getVersion(tenantId, id, against);
+        : await this.getVersion(tenantId, id, againstId);
     return {
       from: versionId,
       to: against,
@@ -389,8 +493,10 @@ export class WorkflowService {
     // binary data of a trigger's sample items is stored under the id of the execution that uses it
     const executionId = randomUUID();
     let triggerItems = input.triggerItems as Item[] | undefined;
+    // a partial run whose start node already ran keeps that node's earlier output (no trigger call)
+    const reusesStart = Boolean(input.destinationNode && input.runData?.[start.name]);
     try {
-      if (!triggerItems && !pinData[start.name]) {
+      if (!triggerItems && !pinData[start.name] && !reusesStart) {
         triggerItems = await this.manualTriggerItems(tenant, workflow, start, executionId);
         if (!triggerItems) await this.deps.executions.removeBinaryData(tenant.id, executionId);
       }
@@ -403,6 +509,7 @@ export class WorkflowService {
         startNode: start.name,
         triggerItems,
         runData: input.runData as RunData | undefined,
+        dirtyNodeNames: input.dirtyNodeNames,
         destinationNode: input.destinationNode,
         pinData: Object.keys(pinData).length ? pinData : undefined,
         userId: actor.userId,

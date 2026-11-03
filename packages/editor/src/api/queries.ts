@@ -3,8 +3,12 @@ import { QueryClient, useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 import { isApiError, setCurrentTenant } from './client';
 import {
+  annotationTagsApi,
   authApi,
   credentialsApi,
+  favoritesApi,
+  foldersApi,
+  inboxApi,
   nodeTypesApi,
   settingsApi,
   tagsApi,
@@ -30,6 +34,15 @@ export const queryKeys = {
   variables: ['variables'] as const,
   members: ['members'] as const,
   apiKeys: ['api-keys'] as const,
+  folders: (query: object = {}) => ['folders', query] as const,
+  folder: (id: string) => ['folder', id] as const,
+  favorites: ['favorites'] as const,
+  annotationTags: (withUsageCount = false) => ['annotation-tags', { withUsageCount }] as const,
+  publishTimeline: (id: string) => ['workflow', id, 'publish-timeline'] as const,
+  reviews: (query: object = {}) => ['workflow-reviews', query] as const,
+  review: (id: string) => ['workflow-review', id] as const,
+  inbox: (query: object = {}) => ['inbox', query] as const,
+  inboxSummary: ['inbox', 'summary'] as const,
 };
 
 export function createQueryClient(): QueryClient {
@@ -54,6 +67,9 @@ export const DEFAULT_SETTINGS: Settings = {
   timezone: 'UTC',
   limits: {},
   features: {},
+  // until the settings load: no autosave, no review gate
+  autosaveEnabled: false,
+  workflowReviews: { enabled: false },
 };
 
 export function useMe() {
@@ -149,5 +165,49 @@ export function useWebhookUrls(workflowId: string | undefined, enabled: boolean)
     queryFn: () => workflowsApi.webhookUrls(workflowId!),
     enabled: Boolean(workflowId) && enabled,
     retry: false,
+  });
+}
+
+/** P3-07: folders under `parentFolderId` (a folder id or 'root'; omitted = every folder) */
+export function useFolders(parentFolderId?: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.folders({ parentFolderId }),
+    queryFn: () => foldersApi.list({ parentFolderId, limit: 250 }),
+    enabled,
+  });
+}
+
+/** P3-07: one folder with its path and counts */
+export function useFolder(id: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.folder(id ?? 'none'),
+    queryFn: () => foldersApi.get(id!),
+    enabled: Boolean(id),
+    retry: false,
+  });
+}
+
+/** P3-07: the signed-in user's favorites (workflows and folders) */
+export function useFavorites(enabled = true) {
+  return useQuery({ queryKey: queryKeys.favorites, queryFn: favoritesApi.list, enabled, staleTime: 60_000 });
+}
+
+/** P3-09 */
+export function useAnnotationTags(withUsageCount = false) {
+  return useQuery({
+    queryKey: queryKeys.annotationTags(withUsageCount),
+    queryFn: () => annotationTagsApi.list({ withUsageCount }),
+    staleTime: 60_000,
+  });
+}
+
+/** P3-19: open review counts for the nav badge */
+export function useInboxSummary(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.inboxSummary,
+    queryFn: inboxApi.summary,
+    enabled,
+    retry: false,
+    staleTime: 30_000,
   });
 }

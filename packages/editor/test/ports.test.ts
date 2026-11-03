@@ -194,6 +194,7 @@ describe('flow elements', () => {
       nodes: [a, b],
       connections: { A: { main: [[{ node: 'B', type: 'main', index: 0 }]] } },
       pinData: { B: [{ json: {} }] },
+      nodeGroups: [],
       stickyNotes: [{ id: 's', content: 'hi', position: [0, 0], width: 200, height: 100 }],
       descriptions: { get: (t) => types.get(t) },
       runData: {

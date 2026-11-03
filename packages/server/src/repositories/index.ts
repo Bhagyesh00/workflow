@@ -12,7 +12,11 @@ import {
   TenantRepository,
   UserRepository,
 } from './accounts';
+import { AnnotationRepository } from './annotations';
 import { ExecutionRepository } from './executions';
+import { FavoriteRepository } from './favorites';
+import { FolderRepository } from './folders';
+import { PublishHistoryRepository } from './publish-history';
 import {
   AuditRepository,
   CredentialRepository,
@@ -21,6 +25,7 @@ import {
   VariableRepository,
   WebhookRepository,
 } from './resources';
+import { ReviewRepository } from './reviews';
 import { ScheduleSlotRepository } from './schedule-slots';
 import { StaticDataRepository } from './static-data';
 import { TagRepository, WorkflowRepository, WorkflowVersionRepository } from './workflows';
@@ -44,6 +49,15 @@ export interface Repositories {
   idempotency: IdempotencyRepository;
   staticData: StaticDataRepository;
   scheduleSlots: ScheduleSlotRepository;
+  /** P3-07 (L8) */
+  folders: FolderRepository;
+  favorites: FavoriteRepository;
+  /** P3-09 (L9) */
+  annotations: AnnotationRepository;
+  /** P3-16 (L12) */
+  publishHistory: PublishHistoryRepository;
+  /** P3-19 (L14) */
+  reviews: ReviewRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -66,9 +80,17 @@ export function createRepositories(db: DbOrTx): Repositories {
     idempotency: new IdempotencyRepository(db),
     staticData: new StaticDataRepository(db),
     scheduleSlots: new ScheduleSlotRepository(db),
+    folders: new FolderRepository(db),
+    favorites: new FavoriteRepository(db),
+    annotations: new AnnotationRepository(db),
+    publishHistory: new PublishHistoryRepository(db),
+    reviews: new ReviewRepository(db),
   };
 }
 
 export type { AuditEntry } from './resources';
 export { isUniqueViolation, isUuid, pgErrorCode } from './util';
-export type { TagRef, WorkflowContent } from './workflows';
+export type { AnnotationFilter, AnnotationVote, ExecutionAnnotationDTO } from './annotations';
+export type { FavoriteResourceType } from './favorites';
+export type { PublishEvent, PublishTimelineEntry } from './publish-history';
+export type { TagRef, WorkflowContent, WorkflowListFilter } from './workflows';

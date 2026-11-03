@@ -5,12 +5,15 @@
  */
 import {
   type Connections,
+  diffWorkflows,
   type ExecutionState,
   type Item,
   isParameterDisplayed,
+  type RunData,
   resolveNodeParameters,
   type StickyNote,
   type WorkflowNode,
+  type WorkflowNodeGroup,
   type WorkflowSettings,
 } from '@workflow/workflow';
 import type { ApiRequest, ApiResponse } from '../api/client';
@@ -18,6 +21,7 @@ import type {
   ApiKey,
   CredentialSummary,
   ExecutionDetail,
+  ExecutionSummary,
   Member,
   PushEvent,
   Role,
@@ -26,10 +30,16 @@ import type {
   Variable,
   VersionSummary,
   WorkflowDTO,
+  WorkflowSummary,
 } from '../api/types';
 import { REDACTED } from '../api/types';
 import { newId } from '../lib/ids';
 import { demoContacts, demoCredentialTypes, demoLoadOptions, demoNodeTypes } from './fixtures';
+import { filterExecutionList, registerAnnotationRoutes } from './mock-annotations';
+import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
+import { copy, HttpError, now, page } from './mock-http';
+import { registerPublishRoutes } from './mock-publish';
+import { registerReviewRoutes } from './mock-reviews';
 import { type SimulationResult, simulateExecution } from './simulator';
 
 interface StoredUser {
@@ -45,23 +55,41 @@ interface StoredTenant {
   slug: string;
 }
 
-interface StoredWorkflow extends WorkflowDTO {
+export interface StoredWorkflow extends WorkflowDTO {
   tenantId: string;
 }
 
-interface StoredVersion {
+export interface StoredVersion {
   versionId: string;
   workflowId: string;
   authorName: string;
   message: string | null;
   createdAt: string;
-  snapshot: { name: string; nodes: WorkflowNode[]; connections: Connections; settings: WorkflowSettings };
+  /** P3-10 (absent = null) */
+  versionName?: string | null;
+  description?: string | null;
+  /** P3-17 (absent = false) */
+  autosaved?: boolean;
+  snapshot: {
+    name: string;
+    nodes: WorkflowNode[];
+    connections: Connections;
+    settings: WorkflowSettings;
+    nodeGroups?: WorkflowNodeGroup[];
+  };
 }
 
-interface StoredExecution extends ExecutionDetail {
+export interface StoredExecution extends ExecutionDetail {
   tenantId: string;
   cancel?: { canceled: boolean };
 }
+
+/** per-workspace settings PATCH /settings changes */
+interface StoredTenantSettings {
+  workflowReviews: { enabled: boolean };
+}
+
+export type MockHandler = Handler;
 
 interface StoredCredential extends CredentialSummary {
   tenantId: string;
@@ -82,27 +110,11 @@ type Handler = (ctx: {
   body: Record<string, unknown>;
 }) => unknown | Promise<unknown>;
 
-class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-    readonly details?: unknown,
-  ) {
-    super(message);
-  }
-}
+export { HttpError };
 
-const now = () => new Date().toISOString();
-const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
-
-function page<T>(list: T[], query: Record<string, string>): { data: T[]; nextCursor: string | null } {
-  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 250);
-  const offset = query.cursor ? Number(atob(query.cursor)) || 0 : 0;
-  const slice = list.slice(offset, offset + limit);
-  const next = offset + limit < list.length ? btoa(String(offset + limit)) : null;
-  return { data: slice, nextCursor: next };
-}
+/** P3-13: the n8n messages of GET /from-url */
+const NOT_JSON = 'The URL does not point to valid JSON file!';
+const NOT_WORKFLOW = 'The data in the file does not seem to be a workflow JSON file!';
 
 export class MockBackend {
   users: StoredUser[] = [];
@@ -119,12 +131,23 @@ export class MockBackend {
   session: { userId: string; tenantId: string } | null = null;
   /** last request bodies, for assertions in tests */
   requests: ApiRequest[] = [];
+  /** state of the Phase 3 route modules (mock-folders, mock-annotations, mock-publish, mock-reviews) */
+  ext: Record<string, unknown> = {};
+  /** P3-13: what POST /workflows/from-url answers per URL (the demo never fetches) */
+  private urlFixtures = new Map<string, unknown>();
+  private tenantSettings = new Map<string, StoredTenantSettings>();
+  /** the execution simulator; tests may spy on it (P3-06 runData / dirtyNodeNames reach it) */
+  simulate: typeof simulateExecution = simulateExecution;
   private listeners = new Set<(event: PushEvent) => void>();
   private routes: Array<[string, RegExp, Handler]> = [];
   private listening = new Map<string, { nodeName: string; expiresAt: number }>();
 
   constructor(readonly options: MockBackendOptions = {}) {
     this.registerRoutes();
+    registerFolderRoutes(this);
+    registerAnnotationRoutes(this);
+    registerPublishRoutes(this);
+    registerReviewRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -184,11 +207,22 @@ export class MockBackend {
       tags: input.tags ?? [],
       createdAt: input.createdAt ?? now(),
       updatedAt: input.updatedAt ?? now(),
+      nodeGroups: input.nodeGroups ?? [],
+      folderId: input.folderId ?? null,
+      isArchived: input.isArchived ?? false,
+      publishedVersionId: null,
       tenantId,
     };
+    // a seeded active workflow is published at its version (as migration 0006 backfills)
+    if (wf.active) wf.publishedVersionId = wf.versionId;
     this.workflows.push(wf);
     this.recordVersion(wf, 'Created');
     return this.toDto(wf);
+  }
+
+  /** P3-13: POST /workflows/from-url with this URL answers `json` (anything else: n8n's 400) */
+  setUrlFixture(url: string, json: unknown): void {
+    this.urlFixtures.set(url, copy(json));
   }
 
   // -------------------------------------------------------------------------------------------
@@ -233,12 +267,14 @@ export class MockBackend {
     };
   }
 
-  private on(method: string, path: string, handler: Handler) {
+  /** register a route; `:name` segments become handler params (in order). First match wins. */
+  on(method: string, path: string, handler: Handler) {
     const pattern = new RegExp(`^${path.replace(/:[a-zA-Z]+/g, '([^/]+)')}$`);
     this.routes.push([method, pattern, handler]);
   }
 
-  private auth() {
+  /** the signed-in user, workspace and role (401 when signed out) */
+  auth() {
     if (!this.session) throw new HttpError(401, 'unauthorized', 'Sign in to continue');
     const user = this.users.find((u) => u.id === this.session!.userId)!;
     const tenant = this.tenants.find((t) => t.id === this.session!.tenantId)!;
@@ -252,20 +288,29 @@ export class MockBackend {
     return { user: { id: user.id, email: user.email, name: user.name }, tenant: { ...tenant }, role };
   }
 
-  private toDto(wf: StoredWorkflow): WorkflowDTO {
+  /** 403 unless the signed-in role is at least `role` */
+  requireRole(role: 'editor' | 'admin') {
+    const auth = this.auth();
+    const rank = { viewer: 0, editor: 1, admin: 2, owner: 3 } as const;
+    if (rank[auth.role] < rank[role]) throw new HttpError(403, 'forbidden', 'You do not have permission');
+    return auth;
+  }
+
+  toDto(wf: StoredWorkflow): WorkflowDTO {
     const { tenantId, ...dto } = wf;
     void tenantId;
     return copy(dto);
   }
 
-  private workflow(id: string): StoredWorkflow {
+  /** the workflow in the signed-in workspace (404 otherwise) */
+  workflow(id: string): StoredWorkflow {
     const { tenant } = this.auth();
     const wf = this.workflows.find((w) => w.id === id && w.tenantId === tenant.id);
     if (!wf) throw new HttpError(404, 'not_found', 'Workflow not found');
     return wf;
   }
 
-  private recordVersion(wf: StoredWorkflow, message: string | null) {
+  recordVersion(wf: StoredWorkflow, message: string | null, options: { autosaved?: boolean } = {}) {
     const author = this.session ? this.users.find((u) => u.id === this.session!.userId)?.name : undefined;
     this.versions.unshift({
       versionId: wf.versionId,
@@ -273,11 +318,81 @@ export class MockBackend {
       authorName: author ?? 'Demo user',
       message,
       createdAt: now(),
-      snapshot: copy({ name: wf.name, nodes: wf.nodes, connections: wf.connections, settings: wf.settings }),
+      versionName: null,
+      description: null,
+      autosaved: options.autosaved ?? false,
+      snapshot: copy({
+        name: wf.name,
+        nodes: wf.nodes,
+        connections: wf.connections,
+        settings: wf.settings,
+        nodeGroups: wf.nodeGroups ?? [],
+      }),
     });
   }
 
-  private validateForActivation(wf: StoredWorkflow) {
+  versionSummary(v: StoredVersion): VersionSummary {
+    return {
+      versionId: v.versionId,
+      authorName: v.authorName,
+      message: v.message,
+      createdAt: v.createdAt,
+      versionName: v.versionName ?? null,
+      description: v.description ?? null,
+      autosaved: v.autosaved ?? false,
+    };
+  }
+
+  /** the execution in the signed-in workspace (404 otherwise) */
+  execution(id: string): StoredExecution {
+    const { tenant } = this.auth();
+    const e = this.executions.find((x) => x.id === id && x.tenantId === tenant.id);
+    if (!e) throw new HttpError(404, 'not_found', 'Execution not found');
+    return e;
+  }
+
+  executionSummary(e: StoredExecution): ExecutionSummary {
+    return {
+      id: e.id,
+      workflowId: e.workflowId,
+      workflowName: e.workflowName,
+      mode: e.mode,
+      status: e.status,
+      startedAt: e.startedAt,
+      stoppedAt: e.stoppedAt,
+      durationMs: e.durationMs,
+      errorMessage: e.errorMessage,
+      customData: e.customData,
+      workflowVersionId: e.workflowVersionId ?? null,
+      annotation: e.annotation ? copy(e.annotation) : null,
+    };
+  }
+
+  workflowSummary(w: StoredWorkflow): WorkflowSummary {
+    return {
+      id: w.id,
+      name: w.name,
+      active: w.active,
+      tags: copy(w.tags),
+      updatedAt: w.updatedAt,
+      createdAt: w.createdAt,
+      nodeTypes: w.nodes.map((n) => n.type),
+      isArchived: w.isArchived,
+      folderId: w.folderId,
+      publishedVersionId: w.publishedVersionId,
+    };
+  }
+
+  private settingsOf(tenantId: string): StoredTenantSettings {
+    let settings = this.tenantSettings.get(tenantId);
+    if (!settings) {
+      settings = { workflowReviews: { enabled: false } };
+      this.tenantSettings.set(tenantId, settings);
+    }
+    return settings;
+  }
+
+  validateForActivation(wf: StoredWorkflow) {
     const details: Array<{ node: string; message: string }> = [];
     const byName = new Map(demoNodeTypes.map((d) => [d.name, d]));
     const triggers = wf.nodes.filter(
@@ -325,6 +440,11 @@ export class MockBackend {
       startNode?: string;
       triggerItems?: Item[];
       retryOf?: string;
+      /** P3-06 partial run */
+      runData?: RunData;
+      dirtyNodeNames?: string[];
+      /** P3-10: the saved version the run used (null for unsaved editor data) */
+      workflowVersionId?: string | null;
     },
   ): string {
     const executionId = newId();
@@ -341,6 +461,8 @@ export class MockBackend {
       durationMs: null,
       errorMessage: null,
       customData: null,
+      workflowVersionId: options.workflowVersionId ?? null,
+      annotation: null,
       workflowData: copy({ id: wf.id, ...data }),
       state: {
         startData: { destinationNode: options.destinationNode },
@@ -360,7 +482,7 @@ export class MockBackend {
     );
     // start asynchronously so the HTTP response (with the id) can win or lose the race, like on a real server
     setTimeout(() => {
-      void simulateExecution({
+      void this.simulate({
         executionId,
         workflow: {
           id: wf.id,
@@ -374,6 +496,8 @@ export class MockBackend {
         destinationNode: options.destinationNode,
         startNode: options.startNode,
         triggerItems: options.triggerItems,
+        runData: options.runData,
+        dirtyNodeNames: options.dirtyNodeNames,
         variables,
         emit: (event) => {
           if (event.type === 'nodeExecuteAfter') {
@@ -412,7 +536,11 @@ export class MockBackend {
     this.listening.delete(workflowId);
     const wf = this.workflows.find((w) => w.id === workflowId);
     if (!wf) return null;
-    const executionId = this.startExecution(wf, wf, { mode: 'webhook', startNode: listen.nodeName });
+    const executionId = this.startExecution(wf, wf, {
+      mode: 'webhook',
+      startNode: listen.nodeName,
+      workflowVersionId: wf.versionId,
+    });
     this.emit({ type: 'testWebhookReceived', data: { workflowId, executionId } });
     return executionId;
   }
@@ -494,14 +622,36 @@ export class MockBackend {
     });
 
     // --- settings & types -------------------------------------------------------------------------
-    this.on('GET', '/settings', () => ({
-      brand: this.options.brand ?? { name: 'Workflow', logoUrl: null, primaryColor: '#3346d3' },
-      baseUrl: typeof window === 'undefined' ? 'http://localhost' : window.location.origin,
-      webhookBaseUrl: typeof window === 'undefined' ? 'http://localhost' : window.location.origin,
-      timezone: 'Europe/Berlin',
-      limits: { executionTimeoutMax: 3600 },
-      features: { demo: true },
-    }));
+    this.on(
+      'GET',
+      '/settings',
+      (): Settings => ({
+        brand: this.options.brand ?? { name: 'Workflow', logoUrl: null, primaryColor: '#3346d3' },
+        baseUrl: typeof window === 'undefined' ? 'http://localhost' : window.location.origin,
+        webhookBaseUrl: typeof window === 'undefined' ? 'http://localhost' : window.location.origin,
+        timezone: 'Europe/Berlin',
+        limits: { executionTimeoutMax: 3600 },
+        features: { demo: true },
+        autosaveEnabled: true,
+        workflowReviews: copy(
+          this.session ? this.settingsOf(this.session.tenantId).workflowReviews : { enabled: false },
+        ),
+      }),
+    );
+    this.on('PATCH', '/settings', ({ body }) => {
+      const { tenant } = this.requireRole('admin');
+      const settings = this.settingsOf(tenant.id);
+      const reviews = body.workflowReviews as { enabled?: unknown } | undefined;
+      if (reviews && typeof reviews.enabled === 'boolean')
+        settings.workflowReviews = { enabled: reviews.enabled };
+      // the server's PATCH answer: brand, timezone and the two P3 fields
+      return {
+        brand: this.options.brand ?? { name: 'Workflow', logoUrl: null, primaryColor: '#3346d3' },
+        timezone: 'Europe/Berlin',
+        autosaveEnabled: true,
+        workflowReviews: copy(settings.workflowReviews),
+      };
+    });
     this.on('GET', '/node-types', () => {
       this.auth();
       return copy(demoNodeTypes);
@@ -529,22 +679,44 @@ export class MockBackend {
     this.on('GET', '/workflows', ({ query }) => {
       const { tenant } = this.auth();
       const search = (query.search ?? '').toLowerCase();
-      const list = this.workflows
-        .filter((w) => w.tenantId === tenant.id)
-        .filter((w) => !search || w.name.toLowerCase().includes(search))
+      // P3-01 command bar search: name, or a node of one of `nodeTypes`, or (matchTags) a tag named like it
+      const nodeTypes = new Set((query.nodeTypes ?? '').split(',').filter(Boolean).slice(0, 20));
+      const matchTags = query.matchTags === 'true';
+      const matches = (w: StoredWorkflow) =>
+        w.name.toLowerCase().includes(search) ||
+        w.nodes.some((n) => nodeTypes.has(n.type)) ||
+        (matchTags && w.tags.some((t) => t.name.toLowerCase().includes(search)));
+      const scoped = filterWorkflowList(
+        this,
+        this.workflows.filter((w) => w.tenantId === tenant.id),
+        query,
+      );
+      const list = scoped
+        .filter((w) => !search || matches(w))
         .filter((w) => !query.tagId || w.tags.some((t) => t.id === query.tagId))
         .filter((w) => query.active === undefined || String(w.active) === query.active)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-        .map((w) => ({
-          id: w.id,
-          name: w.name,
-          active: w.active,
-          tags: copy(w.tags),
-          updatedAt: w.updatedAt,
-          createdAt: w.createdAt,
-          nodeTypes: w.nodes.map((n) => n.type),
-        }));
+        .map((w) => this.workflowSummary(w));
       return { __list: true, ...page(list, query) };
+    });
+    // P3-13: the server fetches the URL; the demo answers fixtures set with setUrlFixture
+    this.on('POST', '/workflows/from-url', ({ body }) => {
+      this.requireRole('editor');
+      const url = typeof body.url === 'string' ? body.url : '';
+      if (!/^https?:\/\/.+/i.test(url) || url.length > 2048)
+        throw new HttpError(400, 'invalid_url', 'Enter a URL that starts with http:// or https://');
+      if (!this.urlFixtures.has(url)) throw new HttpError(400, 'invalid_json', NOT_JSON);
+      const data = this.urlFixtures.get(url) as { nodes?: unknown; connections?: unknown } | null;
+      if (
+        !data ||
+        typeof data !== 'object' ||
+        !Array.isArray(data.nodes) ||
+        !data.connections ||
+        typeof data.connections !== 'object'
+      ) {
+        throw new HttpError(400, 'invalid_workflow', NOT_WORKFLOW);
+      }
+      return copy(data);
     });
     this.on('POST', '/workflows', ({ body }) => {
       const { tenant } = this.auth();
@@ -563,6 +735,10 @@ export class MockBackend {
         tags: this.tags.filter((t) => tagIds.includes(t.id)).map(({ id, name }) => ({ id, name })),
         createdAt: now(),
         updatedAt: now(),
+        nodeGroups: (body.nodeGroups as WorkflowNodeGroup[]) ?? [],
+        folderId: typeof body.folderId === 'string' ? body.folderId : null,
+        isArchived: false,
+        publishedVersionId: null,
       };
       this.workflows.push(wf);
       this.recordVersion(wf, null);
@@ -573,7 +749,15 @@ export class MockBackend {
       const wf = this.workflow(params[0]);
       if (body.versionId !== wf.versionId)
         throw new HttpError(409, 'version_conflict', 'The workflow was changed by someone else');
-      for (const key of ['name', 'nodes', 'connections', 'settings', 'pinData', 'stickyNotes'] as const) {
+      for (const key of [
+        'name',
+        'nodes',
+        'connections',
+        'settings',
+        'pinData',
+        'stickyNotes',
+        'nodeGroups',
+      ] as const) {
         if (body[key] !== undefined) (wf as unknown as Record<string, unknown>)[key] = copy(body[key]);
       }
       const tagIds =
@@ -582,7 +766,7 @@ export class MockBackend {
         wf.tags = this.tags.filter((t) => tagIds.includes(t.id)).map(({ id, name }) => ({ id, name }));
       wf.versionId = newId();
       wf.updatedAt = now();
-      this.recordVersion(wf, null);
+      this.recordVersion(wf, null, { autosaved: body.autosaved === true });
       return this.toDto(wf);
     });
     this.on('DELETE', '/workflows/:id', ({ params }) => {
@@ -590,17 +774,7 @@ export class MockBackend {
       this.workflows = this.workflows.filter((w) => w !== wf);
       return { ok: true };
     });
-    this.on('POST', '/workflows/:id/activate', ({ params }) => {
-      const wf = this.workflow(params[0]);
-      this.validateForActivation(wf);
-      wf.active = true;
-      return this.toDto(wf);
-    });
-    this.on('POST', '/workflows/:id/deactivate', ({ params }) => {
-      const wf = this.workflow(params[0]);
-      wf.active = false;
-      return this.toDto(wf);
-    });
+    // POST /workflows/:id/activate and /deactivate: mock-publish.ts
     this.on('POST', '/workflows/:id/run', ({ params, body }) => {
       const wf = this.workflow(params[0]);
       const data = (body.workflowData as typeof wf | undefined) ?? wf;
@@ -618,6 +792,9 @@ export class MockBackend {
           destinationNode: body.destinationNode as string | undefined,
           startNode: body.startNode as string | undefined,
           triggerItems: body.triggerItems as Item[] | undefined,
+          runData: body.runData as RunData | undefined,
+          dirtyNodeNames: body.dirtyNodeNames as string[] | undefined,
+          workflowVersionId: body.workflowData ? null : wf.versionId,
         },
       );
       return { executionId };
@@ -663,19 +840,41 @@ export class MockBackend {
       const wf = this.workflow(params[0]);
       const list: VersionSummary[] = this.versions
         .filter((v) => v.workflowId === wf.id)
-        .map(({ versionId, authorName, message, createdAt }) => ({
-          versionId,
-          authorName,
-          message,
-          createdAt,
-        }));
+        .map((v) => this.versionSummary(v));
       return { __list: true, ...page(list, query) };
     });
     this.on('GET', '/workflows/:id/versions/:versionId', ({ params }) => {
       const wf = this.workflow(params[0]);
       const version = this.versions.find((v) => v.workflowId === wf.id && v.versionId === params[1]);
       if (!version) throw new HttpError(404, 'not_found', 'Version not found');
-      return { versionId: version.versionId, createdAt: version.createdAt, ...copy(version.snapshot) };
+      return {
+        versionId: version.versionId,
+        createdAt: version.createdAt,
+        versionName: version.versionName ?? null,
+        description: version.description ?? null,
+        autosaved: version.autosaved ?? false,
+        ...copy(version.snapshot),
+      };
+    });
+    // structural diff: `against` = a version id, 'current' (the saved workflow) or 'published'
+    this.on('GET', '/workflows/:id/versions/:versionId/diff', ({ params, query }) => {
+      const wf = this.workflow(params[0]);
+      const find = (id: string | null) => {
+        const v = id ? this.versions.find((x) => x.workflowId === wf.id && x.versionId === id) : undefined;
+        if (!v) throw new HttpError(404, 'not_found', 'Version not found');
+        return v.snapshot;
+      };
+      const against = query.against || 'current';
+      const from = find(params[1]);
+      const to = against === 'current' ? wf : find(against === 'published' ? wf.publishedVersionId : against);
+      return {
+        from: params[1],
+        to: against,
+        ...diffWorkflows(
+          { name: from.name, nodes: from.nodes, connections: from.connections, settings: from.settings },
+          { name: to.name, nodes: to.nodes, connections: to.connections, settings: to.settings ?? {} },
+        ),
+      };
     });
     this.on('POST', '/workflows/:id/versions/:versionId/restore', ({ params }) => {
       const wf = this.workflow(params[0]);
@@ -689,30 +888,18 @@ export class MockBackend {
     });
 
     // --- executions -----------------------------------------------------------------------------
-    const summary = (e: StoredExecution) => ({
-      id: e.id,
-      workflowId: e.workflowId,
-      workflowName: e.workflowName,
-      mode: e.mode,
-      status: e.status,
-      startedAt: e.startedAt,
-      stoppedAt: e.stoppedAt,
-      durationMs: e.durationMs,
-      errorMessage: e.errorMessage,
-      customData: e.customData,
-    });
-    const execution = (id: string) => {
-      const { tenant } = this.auth();
-      const e = this.executions.find((x) => x.id === id && x.tenantId === tenant.id);
-      if (!e) throw new HttpError(404, 'not_found', 'Execution not found');
-      return e;
-    };
+    const summary = (e: StoredExecution) => this.executionSummary(e);
+    const execution = (id: string) => this.execution(id);
     this.on('GET', '/executions', ({ query }) => {
       const { tenant } = this.auth();
-      const list = this.executions
-        .filter((e) => e.tenantId === tenant.id)
+      const list = filterExecutionList(
+        this,
+        this.executions.filter((e) => e.tenantId === tenant.id),
+        query,
+      )
         .filter((e) => !query.workflowId || e.workflowId === query.workflowId)
         .filter((e) => !query.status || e.status === query.status)
+        .filter((e) => !query.workflowVersionId || e.workflowVersionId === query.workflowVersionId)
         .map(summary);
       return { __list: true, ...page(list, query) };
     });
@@ -727,7 +914,13 @@ export class MockBackend {
       }
       const wf = this.workflow(e.workflowId);
       const data = body.useCurrentWorkflow ? wf : { ...wf, ...e.workflowData, name: e.workflowData.name };
-      return { executionId: this.startExecution(wf, data, { mode: 'retry', retryOf: e.id }) };
+      return {
+        executionId: this.startExecution(wf, data, {
+          mode: 'retry',
+          retryOf: e.id,
+          workflowVersionId: body.useCurrentWorkflow ? wf.versionId : e.workflowVersionId,
+        }),
+      };
     });
     this.on('POST', '/executions/:id/stop', ({ params }) => {
       const e = execution(params[0]);

@@ -1,7 +1,7 @@
 /** Workflows: search, tag/status filters, activation toggle, create, import, duplicate, export, delete. */
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Copy, Download, FileUp, MoreHorizontal, Plus, Search, Trash2, Workflow } from 'lucide-react';
-import { useDeferredValue, useState } from 'react';
+import { useDeferredValue, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { errorMessage } from '../api/client';
 import { workflowsApi } from '../api/endpoints';
@@ -18,7 +18,7 @@ import { TagChip } from '../components/workflow/TagsEditor';
 import { activationDetails } from '../features/editor/editor-actions';
 import { downloadJson, formatRelative, safeFileName } from '../lib/format';
 import { parseClipboard, withFreshWebhookIds } from '../lib/workflow-ops';
-import { toast } from '../stores/ui-store';
+import { toast, useUiStore } from '../stores/ui-store';
 
 export interface ImportedWorkflow {
   name: string;
@@ -317,7 +317,10 @@ export function WorkflowsPage() {
   const [search, setSearch] = useState('');
   const [tagId, setTagId] = useState('');
   const [status, setStatus] = useState<'all' | 'active' | 'inactive'>('all');
-  const [importOpen, setImportOpen] = useState(false);
+  // in the ui store so the command bar can open it (P3-01 "Import from file")
+  const importOpen = useUiStore((s) => s.importOpen);
+  const setImportOpen = useUiStore((s) => s.setImportOpen);
+  useEffect(() => () => setImportOpen(false), [setImportOpen]);
   const deferredSearch = useDeferredValue(search.trim());
   const query = useInfiniteQuery({
     queryKey: ['workflows', { search: deferredSearch, tagId, status }],

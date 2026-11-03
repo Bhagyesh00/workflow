@@ -29,6 +29,10 @@ export interface SimulationInput {
   destinationNode?: string;
   startNode?: string;
   triggerItems?: Item[];
+  /** P3-06 partial run: the last run data the editor sent (L6 plans the run from it) */
+  runData?: RunData;
+  /** P3-06: nodes changed since that run data was produced */
+  dirtyNodeNames?: string[];
   variables: Record<string, string>;
   emit: (event: PushEvent) => void;
   /** pause between nodes, so the canvas can show progress */

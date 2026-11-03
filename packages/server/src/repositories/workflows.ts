@@ -1,5 +1,5 @@
 /** Workflows, version snapshots and tags. */
-import { and, asc, count, desc, eq, ilike, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import {
   tags,
@@ -22,6 +22,9 @@ export interface WorkflowSummaryRow {
   id: string;
   name: string;
   active: boolean;
+  isArchived: boolean;
+  folderId: string | null;
+  publishedVersionId: string | null;
   updatedAt: Date;
   createdAt: Date;
   nodeTypes: string[];
@@ -34,18 +37,59 @@ export interface WorkflowContent {
   settings: Record<string, unknown>;
   pinData: Record<string, unknown>;
   stickyNotes: unknown[];
+  /** canvas groups (P3-04); the column defaults to [] */
+  nodeGroups?: unknown[];
+}
+
+export interface WorkflowListFilter {
+  /** name ILIKE; with `nodeTypes` / `matchTags` also a node type or a tag name (command bar, P3-01) */
+  search?: string;
+  /** node type ids whose display name matches `search` (at most 20 are used) */
+  nodeTypes?: string[];
+  /** with `search`: also match workflows having a tag whose name ILIKEs the search */
+  matchTags?: boolean;
+  tagId?: string;
+  active?: boolean;
+  /** a folder id, 'root' (no folder) or omitted (every folder) */
+  folderId?: string;
+  /** 'false' (default) hides archived workflows, 'true' shows only them, 'all' both */
+  archived?: 'false' | 'true' | 'all';
+  limit: number;
+  cursor?: Cursor;
 }
 
 export class WorkflowRepository {
   constructor(private readonly db: DbOrTx) {}
 
-  async list(
-    tenantId: string,
-    filter: { search?: string; tagId?: string; active?: boolean; limit: number; cursor?: Cursor },
-  ): Promise<WorkflowSummaryRow[]> {
+  async list(tenantId: string, filter: WorkflowListFilter): Promise<WorkflowSummaryRow[]> {
     const conditions = [eq(workflows.tenantId, tenantId)];
-    if (filter.search) conditions.push(ilike(workflows.name, `%${escapeLike(filter.search)}%`));
+    if (filter.search) {
+      const pattern = `%${escapeLike(filter.search)}%`;
+      const alternatives = [sql`${workflows.name} ilike ${pattern}`];
+      const types = (filter.nodeTypes ?? []).slice(0, 20);
+      if (types.length) {
+        alternatives.push(
+          sql`exists (select 1 from jsonb_array_elements(${workflows.nodes}) n where n->>'type' in (${sql.join(
+            types.map((t) => sql`${t}`),
+            sql`, `,
+          )}))`,
+        );
+      }
+      if (filter.matchTags) {
+        alternatives.push(
+          sql`exists (select 1 from ${workflowTags} wt join ${tags} t on t.id = wt.tag_id where wt.workflow_id = ${workflows.id} and wt.tenant_id = ${tenantId}::uuid and t.name ilike ${pattern})`,
+        );
+      }
+      conditions.push(alternatives.length === 1 ? alternatives[0] : sql`(${sql.join(alternatives, sql` or `)})`);
+    }
     if (filter.active !== undefined) conditions.push(eq(workflows.active, filter.active));
+    const archived = filter.archived ?? 'false';
+    if (archived !== 'all') conditions.push(eq(workflows.isArchived, archived === 'true'));
+    if (filter.folderId !== undefined) {
+      if (filter.folderId === 'root') conditions.push(isNull(workflows.folderId));
+      else if (!isUuid(filter.folderId)) return [];
+      else conditions.push(eq(workflows.folderId, filter.folderId));
+    }
     if (filter.tagId) {
       if (!isUuid(filter.tagId)) return [];
       conditions.push(
@@ -63,6 +107,9 @@ export class WorkflowRepository {
         id: workflows.id,
         name: workflows.name,
         active: workflows.active,
+        isArchived: workflows.isArchived,
+        folderId: workflows.folderId,
+        publishedVersionId: workflows.publishedVersionId,
         updatedAt: workflows.updatedAt,
         createdAt: workflows.createdAt,
         nodeTypes: sql<
@@ -86,7 +133,7 @@ export class WorkflowRepository {
 
   async create(
     tenantId: string,
-    input: WorkflowContent & { id?: string; versionId: string; createdBy?: string },
+    input: WorkflowContent & { id?: string; versionId: string; createdBy?: string; folderId?: string | null },
   ): Promise<WorkflowRow> {
     const [row] = await this.db
       .insert(workflows)
@@ -103,7 +150,7 @@ export class WorkflowRepository {
     tenantId: string,
     id: string,
     expectedVersionId: string | undefined,
-    patch: Partial<WorkflowContent> & { versionId: string },
+    patch: Partial<WorkflowContent> & { versionId: string; folderId?: string | null },
   ): Promise<WorkflowRow | 'conflict' | undefined> {
     if (!isUuid(id)) return undefined;
     const conditions = [eq(workflows.tenantId, tenantId), eq(workflows.id, id)];
@@ -129,13 +176,50 @@ export class WorkflowRepository {
     return rows.length > 0;
   }
 
+  /**
+   * Keeps the published pointer in step until L10 retires these callers: true publishes the
+   * current version (pointer = version_id), false clears the pointer.
+   */
   async setActive(tenantId: string, id: string, active: boolean): Promise<WorkflowRow | undefined> {
     const [row] = await this.db
       .update(workflows)
-      .set({ active })
+      .set({ active, publishedVersionId: active ? sql`${workflows.versionId}` : null })
       .where(and(eq(workflows.tenantId, tenantId), eq(workflows.id, id)))
       .returning();
     return row;
+  }
+
+  /** publish a version (pointer and active together); null unpublishes */
+  async setPublished(tenantId: string, id: string, versionId: string | null): Promise<WorkflowRow | undefined> {
+    if (!isUuid(id) || (versionId !== null && !isUuid(versionId))) return undefined;
+    const [row] = await this.db
+      .update(workflows)
+      .set({ publishedVersionId: versionId, active: versionId !== null })
+      .where(and(eq(workflows.tenantId, tenantId), eq(workflows.id, id)))
+      .returning();
+    return row;
+  }
+
+  async setArchived(tenantId: string, id: string, archived: boolean): Promise<WorkflowRow | undefined> {
+    if (!isUuid(id)) return undefined;
+    const [row] = await this.db
+      .update(workflows)
+      .set({ isArchived: archived, updatedAt: now() })
+      .where(and(eq(workflows.tenantId, tenantId), eq(workflows.id, id)))
+      .returning();
+    return row;
+  }
+
+  /** move workflows to a folder (null = root); returns the ids that moved */
+  async setFolder(tenantId: string, ids: string[], folderId: string | null): Promise<string[]> {
+    const valid = ids.filter(isUuid);
+    if (!valid.length || (folderId !== null && !isUuid(folderId))) return [];
+    const rows = await this.db
+      .update(workflows)
+      .set({ folderId, updatedAt: now() })
+      .where(and(eq(workflows.tenantId, tenantId), inArray(workflows.id, valid)))
+      .returning({ id: workflows.id });
+    return rows.map((r) => r.id);
   }
 
   async setStaticData(tenantId: string, id: string, staticData: Record<string, unknown>): Promise<void> {
@@ -214,6 +298,9 @@ export class WorkflowVersionRepository {
         versionId: workflowVersions.id,
         authorName: users.name,
         message: workflowVersions.message,
+        versionName: workflowVersions.versionName,
+        description: workflowVersions.description,
+        autosaved: workflowVersions.autosaved,
         createdAt: workflowVersions.createdAt,
       })
       .from(workflowVersions)
@@ -241,6 +328,30 @@ export class WorkflowVersionRepository {
         ),
       );
     return row ? { ...row.version, authorName: row.authorName } : undefined;
+  }
+
+  /** name or describe a version (P3-10); undefined fields stay, null clears */
+  async update(
+    tenantId: string,
+    workflowId: string,
+    versionId: string,
+    patch: { versionName?: string | null; description?: string | null },
+  ): Promise<WorkflowVersionRow | undefined> {
+    if (!isUuid(versionId)) return undefined;
+    const set = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+    if (!Object.keys(set).length) return (await this.get(tenantId, workflowId, versionId)) ?? undefined;
+    const [row] = await this.db
+      .update(workflowVersions)
+      .set(set)
+      .where(
+        and(
+          eq(workflowVersions.tenantId, tenantId),
+          eq(workflowVersions.workflowId, workflowId),
+          eq(workflowVersions.id, versionId),
+        ),
+      )
+      .returning();
+    return row;
   }
 }
 

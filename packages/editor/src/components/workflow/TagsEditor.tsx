@@ -31,14 +31,20 @@ export function TagsEditor({
   value,
   onChange,
   readOnly,
+  autoOpen,
 }: {
   value: Tag[];
   onChange: (tags: Tag[]) => void;
   readOnly?: boolean;
+  /** opens the picker when it turns true (command bar "Add tag") */
+  autoOpen?: boolean;
 }) {
   const tags = useTags();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (autoOpen && !readOnly) setOpen(true);
+  }, [autoOpen, readOnly]);
   const [query, setQuery] = useState('');
   const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {

@@ -33,6 +33,7 @@ export function SettingsLayout() {
     { to: '/settings/members', label: 'Members' },
     { to: '/settings/api-keys', label: 'API keys' },
     { to: '/settings/variables', label: 'Variables' },
+    { to: '/settings/security', label: 'Security' },
   ];
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-8 md:flex-row">

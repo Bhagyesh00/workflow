@@ -12,6 +12,7 @@ import {
   type StickyNote,
   type WorkflowDefinition,
   type WorkflowNode,
+  type WorkflowNodeGroup,
 } from '@workflow/workflow';
 import { newId } from './ids';
 
@@ -20,6 +21,8 @@ export interface WorkflowGraph {
   connections: Connections;
   pinData: Record<string, Item[]>;
   stickyNotes: StickyNote[];
+  /** canvas groups (P3-04); members are node ids */
+  nodeGroups: WorkflowNodeGroup[];
 }
 
 export interface ConnectionRef {
@@ -33,7 +36,13 @@ export interface ConnectionRef {
 
 export type ParameterPath = Array<string | number>;
 
-export const EMPTY_GRAPH: WorkflowGraph = { nodes: [], connections: {}, pinData: {}, stickyNotes: [] };
+export const EMPTY_GRAPH: WorkflowGraph = {
+  nodes: [],
+  connections: {},
+  pinData: {},
+  stickyNotes: [],
+  nodeGroups: [],
+};
 
 // ---------------------------------------------------------------------------------------------
 // Names
@@ -489,6 +498,7 @@ export function pasteSubgraph(
       connections: { ...graph.connections, ...definition.connections },
       pinData: { ...graph.pinData, ...(definition.pinData ?? {}) },
       stickyNotes: [...graph.stickyNotes, ...stickies],
+      nodeGroups: graph.nodeGroups,
     },
     names: finalNames,
     stickyIds: stickies.map((s) => s.id),

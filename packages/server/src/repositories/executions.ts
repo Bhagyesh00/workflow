@@ -1,8 +1,9 @@
 /** Executions and their (separately stored) run data. */
-import { and, count, desc, eq, inArray, lt, lte, notInArray, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, lt, lte, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import { type ExecutionDataRow, type ExecutionRow, executionData, executions } from '../db/schema';
 import type { Cursor } from '../http/pagination';
+import { type AnnotationVote, annotationConditions } from './annotations';
 import { isUuid, now } from './util';
 
 export type ExecutionInsert = Omit<typeof executions.$inferInsert, 'tenantId'>;
@@ -87,14 +88,29 @@ export class ExecutionRepository {
 
   async list(
     tenantId: string,
-    filter: { workflowId?: string; status?: string[]; limit: number; cursor?: Cursor },
+    filter: {
+      workflowId?: string;
+      status?: string[];
+      /** P3-10: executions of one workflow version */
+      workflowVersionId?: string;
+      /** P3-09: annotation tag ids (any) and vote */
+      annotationTags?: string[];
+      vote?: AnnotationVote;
+      limit: number;
+      cursor?: Cursor;
+    },
   ): Promise<ExecutionRow[]> {
-    const conditions = [eq(executions.tenantId, tenantId)];
+    const conditions: SQL[] = [eq(executions.tenantId, tenantId)];
     if (filter.workflowId) {
       if (!isUuid(filter.workflowId)) return [];
       conditions.push(eq(executions.workflowId, filter.workflowId));
     }
     if (filter.status?.length) conditions.push(inArray(executions.status, filter.status));
+    if (filter.workflowVersionId) {
+      if (!isUuid(filter.workflowVersionId)) return [];
+      conditions.push(eq(executions.workflowVersionId, filter.workflowVersionId));
+    }
+    conditions.push(...annotationConditions(tenantId, { tags: filter.annotationTags, vote: filter.vote }));
     if (filter.cursor) {
       if (!isUuid(filter.cursor.id)) return [];
       conditions.push(

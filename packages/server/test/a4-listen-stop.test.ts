@@ -56,6 +56,10 @@ const secondMain = async () => {
     executions: server.ctx.executions,
     activeWorkflows,
     testWebhooks: server.ctx.testWebhooks,
+    favorites: server.ctx.favorites,
+    publishHistory: server.ctx.publishHistory,
+    reviews: server.ctx.reviews,
+    context: () => server.ctx,
   });
   return { activeWorkflows, workflows };
 };

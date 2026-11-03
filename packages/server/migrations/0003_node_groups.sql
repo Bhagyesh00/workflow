@@ -1,0 +1,2 @@
+ALTER TABLE "workflow_versions" ADD COLUMN "node_groups" jsonb DEFAULT '[]'::jsonb NOT NULL;--> statement-breakpoint
+ALTER TABLE "workflows" ADD COLUMN "node_groups" jsonb DEFAULT '[]'::jsonb NOT NULL;

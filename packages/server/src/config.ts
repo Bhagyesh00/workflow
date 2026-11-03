@@ -30,6 +30,8 @@ const list = z
 const MB = 1024 * 1024;
 
 const int = (fallback: number, min = 0) => z.coerce.number().int().min(min).default(fallback);
+/** a non-negative number that may have a fraction (e.g. 0.25 hours) */
+const num = (fallback: number) => z.coerce.number().min(0).default(fallback);
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -79,6 +81,15 @@ const envSchema = z.object({
   NODE_REMOTE_FILE_MAX_MB: int(100, 1),
   /** seconds a schedule slot may be late before it counts as missed (a node setting >= 1 replaces it) */
   SCHEDULE_MISFIRE_GRACE_S: int(60, 0),
+  /** P3-17: turns the editor's autosave off (GET /settings autosaveEnabled) */
+  WORKFLOWS_AUTOSAVE_DISABLED: bool(false),
+  /** P3-18 version history compaction, n8n's settings with a WORKFLOW_HISTORY_ prefix (numbers, 0.25 allowed) */
+  WORKFLOW_HISTORY_OPTIMIZING_MINIMUM_AGE_HOURS: num(0.25),
+  WORKFLOW_HISTORY_OPTIMIZING_TIME_WINDOW_HOURS: num(2),
+  WORKFLOW_HISTORY_TRIMMING_MINIMUM_AGE_DAYS: num(6),
+  WORKFLOW_HISTORY_TRIMMING_TIME_WINDOW_DAYS: num(2),
+  WORKFLOW_HISTORY_COMPACTION_BATCH_SIZE: num(100),
+  WORKFLOW_HISTORY_COMPACTION_BATCH_DELAY_MS: num(1000),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -117,6 +128,17 @@ export interface Config {
   nodeLimits: InstanceLimits;
   /** default misfire grace of the Schedule Trigger in seconds */
   scheduleMisfireGraceS: number;
+  /** P3-17: WORKFLOWS_AUTOSAVE_DISABLED */
+  autosaveDisabled: boolean;
+  /** P3-18: WORKFLOW_HISTORY_* compaction settings */
+  historyCompaction: {
+    optimizingMinimumAgeHours: number;
+    optimizingTimeWindowHours: number;
+    trimmingMinimumAgeDays: number;
+    trimmingTimeWindowDays: number;
+    batchSize: number;
+    batchDelayMs: number;
+  };
 }
 
 export class ConfigError extends Error {
@@ -222,6 +244,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       maxRemoteFileBytes: e.NODE_REMOTE_FILE_MAX_MB * MB,
     },
     scheduleMisfireGraceS: e.SCHEDULE_MISFIRE_GRACE_S,
+    autosaveDisabled: e.WORKFLOWS_AUTOSAVE_DISABLED,
+    historyCompaction: {
+      optimizingMinimumAgeHours: e.WORKFLOW_HISTORY_OPTIMIZING_MINIMUM_AGE_HOURS,
+      optimizingTimeWindowHours: e.WORKFLOW_HISTORY_OPTIMIZING_TIME_WINDOW_HOURS,
+      trimmingMinimumAgeDays: e.WORKFLOW_HISTORY_TRIMMING_MINIMUM_AGE_DAYS,
+      trimmingTimeWindowDays: e.WORKFLOW_HISTORY_TRIMMING_TIME_WINDOW_DAYS,
+      batchSize: e.WORKFLOW_HISTORY_COMPACTION_BATCH_SIZE,
+      batchDelayMs: e.WORKFLOW_HISTORY_COMPACTION_BATCH_DELAY_MS,
+    },
   };
 }
 

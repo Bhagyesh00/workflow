@@ -6,15 +6,19 @@ import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import type { ServerContext } from './context';
 import { checkCsrf, checkTenant, loadSession, TENANT_HEADER } from './http/auth';
 import { handleError } from './http/errors';
+import { registerAnnotationTagRoutes } from './routes/annotation-tags';
 import { registerAuthRoutes } from './routes/auth';
 import { registerCredentialRoutes } from './routes/credentials';
 import { registerExecutionRoutes } from './routes/executions';
+import { registerFavoriteRoutes } from './routes/favorites';
+import { registerFolderRoutes } from './routes/folders';
 import { publicApiPlugin } from './routes/public-api';
 import { registerPushRoutes } from './routes/push';
 import { registerResourceRoutes } from './routes/resources';
 import { registerSettingsRoutes } from './routes/settings';
 import { registerEditor, registerHealthRoutes } from './routes/system';
 import { webhookPlugin } from './routes/webhooks';
+import { registerWorkflowReviewRoutes } from './routes/workflow-reviews';
 import { registerWorkflowRoutes } from './routes/workflows';
 
 /** JSON bodies: empty bodies are allowed, `__proto__` keys are dropped */
@@ -69,6 +73,9 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
         fontSrc: ["'self'", 'data:'],
         connectSrc: ["'self'"],
         workerSrc: ["'self'", 'blob:'],
+        // P3-08 binary previews: audio / video and the browser PDF viewer from typed Blobs
+        mediaSrc: ["'self'", 'blob:', 'data:'],
+        frameSrc: ["'self'", 'blob:'],
         frameAncestors: ["'none'"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
@@ -119,6 +126,11 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerCredentialRoutes(rest, ctx);
       registerResourceRoutes(rest, ctx);
       registerPushRoutes(rest, ctx);
+      // Phase 3 (filled by L8, L9, L14)
+      registerFolderRoutes(rest, ctx);
+      registerFavoriteRoutes(rest, ctx);
+      registerAnnotationTagRoutes(rest, ctx);
+      registerWorkflowReviewRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );

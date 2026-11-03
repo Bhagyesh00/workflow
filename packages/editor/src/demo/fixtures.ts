@@ -3,7 +3,7 @@
  * suite's mock server. They mirror the shape the real server sends (GET /rest/node-types) and
  * between them use every parameter type the editor supports.
  */
-import type { CredentialTypeDescription, NodeTypeDescription } from '@workflow/workflow';
+import type { CredentialTypeDescription, NodeTypeDescription, WorkflowDefinition } from '@workflow/workflow';
 
 const manualTrigger: NodeTypeDescription = {
   name: 'core.manualTrigger',
@@ -922,3 +922,60 @@ export const demoContacts = Array.from({ length: 34 }, (_, i) => ({
   value: `c_${100 + i}`,
   url: `https://crm.example.com/contacts/c_${100 + i}`,
 }));
+
+/** A workflow with one canvas group (P3-04): Clean up and Tag members, between a trigger and a no-op. */
+export const demoGroupedWorkflow: WorkflowDefinition & { name: string } = {
+  name: 'Lead cleanup',
+  nodes: [
+    {
+      id: 'g-1',
+      name: 'Try it',
+      type: 'core.manualTrigger',
+      typeVersion: 1,
+      position: [0, 0],
+      parameters: {},
+    },
+    {
+      id: 'g-2',
+      name: 'Clean up',
+      type: 'core.set',
+      typeVersion: 1,
+      position: [280, 0],
+      parameters: {
+        mode: 'manual',
+        includeOtherFields: true,
+        assignments: {
+          assignments: [{ id: 'e', name: 'email', type: 'string', value: '={{ $json.email }}' }],
+        },
+      },
+    },
+    {
+      id: 'g-3',
+      name: 'Tag',
+      type: 'core.set',
+      typeVersion: 1,
+      position: [560, 0],
+      parameters: {
+        mode: 'manual',
+        includeOtherFields: true,
+        assignments: { assignments: [{ id: 't', name: 'source', type: 'string', value: 'demo' }] },
+      },
+    },
+    {
+      id: 'g-4',
+      name: 'Done',
+      type: 'core.noOp',
+      typeVersion: 1,
+      position: [840, 0],
+      parameters: {},
+    },
+  ],
+  connections: {
+    'Try it': { main: [[{ node: 'Clean up', type: 'main', index: 0 }]] },
+    'Clean up': { main: [[{ node: 'Tag', type: 'main', index: 0 }]] },
+    Tag: { main: [[{ node: 'Done', type: 'main', index: 0 }]] },
+  },
+  nodeGroups: [
+    { id: 'group-cleanup', name: 'Clean the lead', nodeIds: ['g-2', 'g-3'], description: 'Trim and tag.' },
+  ],
+};

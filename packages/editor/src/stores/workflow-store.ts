@@ -2,21 +2,36 @@
  * The open workflow: graph (nodes, connections, pinned data, sticky notes), metadata, selection
  * and undo/redo history. Graph mutations go through the pure functions in `lib/workflow-ops`.
  */
-import type { Item, StickyNote, WorkflowNode, WorkflowSettings } from '@workflow/workflow';
+import type {
+  Item,
+  NodeDescriptionLookup,
+  StickyNote,
+  WorkflowNode,
+  WorkflowSettings,
+} from '@workflow/workflow';
 import { create } from 'zustand';
 import type { Tag, WorkflowCreateBody, WorkflowDTO } from '../api/types';
+import * as groups from '../lib/node-groups';
 import type { ClipboardPayload, ConnectionRef, ParameterPath, WorkflowGraph } from '../lib/workflow-ops';
 import * as ops from '../lib/workflow-ops';
+import { toast } from './ui-store';
 
 export interface WorkflowMeta {
   id?: string;
   name: string;
+  /** true while a version is published (publishedVersionId !== null) */
   active: boolean;
   versionId?: string;
   settings: WorkflowSettings;
   tags: Tag[];
   createdAt?: string;
   updatedAt?: string;
+  /** P3-07: null = the root folder */
+  folderId: string | null;
+  /** P3-07: an archived workflow opens read-only */
+  isArchived: boolean;
+  /** P3-10 */
+  publishedVersionId: string | null;
 }
 
 export interface Selection {
@@ -41,15 +56,24 @@ export interface WorkflowState extends WorkflowGraph {
   readOnly: boolean;
   /** bumped on load so views can reset (fit view, close panels) */
   loadCount: number;
+  /** node type descriptions for the group rules (set by the editor page once the catalog loads) */
+  nodeTypeLookup?: NodeDescriptionLookup;
 
+  /** an archived workflow (`isArchived`) always loads read-only */
   load(workflow: Partial<WorkflowDTO> & { name: string }, options?: { readOnly?: boolean }): void;
   reset(): void;
   markSaved(dto: Pick<WorkflowDTO, 'id' | 'versionId'> & Partial<WorkflowDTO>, revision?: number): void;
+  setNodeTypeLookup(lookup: NodeDescriptionLookup | undefined): void;
 
   setName(name: string): void;
   setSettings(settings: WorkflowSettings): void;
   setTags(tags: Tag[]): void;
+  /** P3-10: the published pointer (null = unpublished); `active` follows it */
+  setPublished(publishedVersionId: string | null, versionId?: string): void;
+  /** wrapper of setPublished: true publishes `versionId` (else the current version), false unpublishes */
   setActive(active: boolean, versionId?: string): void;
+  /** P3-07: after archive / unarchive. Archived is read-only; on unarchive pass the role's `readOnly` */
+  setArchived(isArchived: boolean, readOnly?: boolean): void;
 
   /** push the current graph to history (call before a gesture like a drag) */
   checkpoint(): void;
@@ -70,7 +94,19 @@ export interface WorkflowState extends WorkflowGraph {
   disconnect(ref: ConnectionRef): void;
   insertOnConnection(ref: ConnectionRef, node: WorkflowNode): WorkflowNode;
   setPinData(nodeName: string, items: Item[] | null): void;
+  /** pin (items) or unpin (null) several nodes as one undo step */
+  setPinDataMany(map: Record<string, Item[] | null>): void;
   toggleDisabled(names: string[]): void;
+  /** replace the whole graph as one undo step (tidy up, convert, replace, import); optional new selection */
+  applyGraph(next: WorkflowGraph, selection?: Partial<Selection>): void;
+
+  /** P3-04: group the selected nodes; returns the new group id, or null when the rules refused it */
+  groupSelection(): string | null;
+  ungroup(groupId: string): void;
+  renameGroup(groupId: string, name: string): void;
+  /** move every member by (dx, dy); during a drag pass history: false after checkpoint(), like moveNodes */
+  moveGroup(groupId: string, dx: number, dy: number, options?: { history?: boolean }): void;
+  updateGroupDescription(groupId: string, text: string): void;
 
   addSticky(sticky: Omit<StickyNote, 'id'>): string;
   updateSticky(id: string, patch: Partial<Omit<StickyNote, 'id'>>, options?: { history?: boolean }): void;
@@ -85,14 +121,24 @@ export interface WorkflowState extends WorkflowGraph {
   deleteSelection(): void;
 }
 
-const graphOf = (s: WorkflowGraph): WorkflowGraph => ({
+/** The editable graph of a store state (or any object holding the graph fields). */
+export const graphOf = (s: WorkflowGraph): WorkflowGraph => ({
   nodes: s.nodes,
   connections: s.connections,
   pinData: s.pinData,
   stickyNotes: s.stickyNotes,
+  nodeGroups: s.nodeGroups,
 });
 
-const emptyMeta = (): WorkflowMeta => ({ name: 'My workflow', active: false, settings: {}, tags: [] });
+const emptyMeta = (): WorkflowMeta => ({
+  name: 'My workflow',
+  active: false,
+  settings: {},
+  tags: [],
+  folderId: null,
+  isArchived: false,
+  publishedVersionId: null,
+});
 
 /** Body for POST /workflows (and the run endpoint's `workflowData`). */
 export function toWorkflowBody(state: WorkflowState): WorkflowCreateBody {
@@ -103,8 +149,24 @@ export function toWorkflowBody(state: WorkflowState): WorkflowCreateBody {
     settings: state.meta.settings,
     pinData: state.pinData,
     stickyNotes: state.stickyNotes,
+    nodeGroups: state.nodeGroups,
     tagIds: state.meta.tags.map((t) => t.id),
+    ...(state.meta.folderId ? { folderId: state.meta.folderId } : {}),
   };
+}
+
+/**
+ * P3-04: an edit that would break a group is refused with n8n's toast and an "Ungroup" action.
+ * Returns true when the edit must stop.
+ */
+function blockedByGroup(state: WorkflowState, ref: ConnectionRef, edit: groups.CrossingEdit): boolean {
+  const error = groups.crossingEditError(graphOf(state), ref, edit, state.nodeTypeLookup);
+  if (!error) return false;
+  toast.error(error.message, undefined, {
+    label: 'Ungroup',
+    onClick: () => useWorkflowStore.getState().ungroup(error.groupId),
+  });
+  return true;
 }
 
 export const useWorkflowStore = create<WorkflowState>()((set, get) => {
@@ -137,13 +199,16 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
     revision: 0,
     readOnly: false,
     loadCount: 0,
+    nodeTypeLookup: undefined,
 
     load(workflow, options = {}) {
+      const isArchived = workflow.isArchived ?? false;
       set({
         nodes: ops.normalizeNodes(workflow.nodes ?? []),
         connections: workflow.connections ?? {},
         pinData: workflow.pinData ?? {},
         stickyNotes: workflow.stickyNotes ?? [],
+        nodeGroups: workflow.nodeGroups ?? [],
         meta: {
           id: workflow.id,
           name: workflow.name,
@@ -153,12 +218,15 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
           tags: workflow.tags ?? [],
           createdAt: workflow.createdAt,
           updatedAt: workflow.updatedAt,
+          folderId: workflow.folderId ?? null,
+          isArchived,
+          publishedVersionId: workflow.publishedVersionId ?? null,
         },
         selection: emptySelection(),
         past: [],
         future: [],
         dirty: false,
-        readOnly: options.readOnly ?? false,
+        readOnly: (options.readOnly ?? false) || isArchived,
         loadCount: get().loadCount + 1,
       });
     },
@@ -187,8 +255,15 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
           tags: dto.tags ?? s.meta.tags,
           createdAt: dto.createdAt ?? s.meta.createdAt,
           updatedAt: dto.updatedAt ?? s.meta.updatedAt,
+          folderId: dto.folderId !== undefined ? dto.folderId : s.meta.folderId,
+          isArchived: dto.isArchived ?? s.meta.isArchived,
+          publishedVersionId:
+            dto.publishedVersionId !== undefined ? dto.publishedVersionId : s.meta.publishedVersionId,
         },
       }));
+    },
+    setNodeTypeLookup(lookup) {
+      set({ nodeTypeLookup: lookup });
     },
 
     setName(name) {
@@ -203,8 +278,22 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
       if (get().readOnly) return;
       set((s) => ({ meta: { ...s.meta, tags }, dirty: true, revision: s.revision + 1 }));
     },
+    setPublished(publishedVersionId, versionId) {
+      set((s) => ({
+        meta: {
+          ...s.meta,
+          publishedVersionId,
+          active: publishedVersionId !== null,
+          versionId: versionId ?? s.meta.versionId,
+        },
+      }));
+    },
     setActive(active, versionId) {
-      set((s) => ({ meta: { ...s.meta, active, versionId: versionId ?? s.meta.versionId } }));
+      const current = versionId ?? get().meta.versionId ?? null;
+      get().setPublished(active ? current : null, versionId);
+    },
+    setArchived(isArchived, readOnly) {
+      set((s) => ({ meta: { ...s.meta, isArchived }, readOnly: isArchived || (readOnly ?? s.readOnly) }));
     },
 
     checkpoint() {
@@ -271,13 +360,21 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
       commit(ops.moveNodes(graphOf(get()), positions), { history: options.history });
     },
     connect(ref) {
-      commit(ops.connect(graphOf(get()), ref));
+      const s = get();
+      if (s.readOnly || blockedByGroup(s, ref, 'connect')) return;
+      const extension = groups.extendGroupsForConnection(ops.connect(graphOf(s), ref), ref, s.nodeTypeLookup);
+      commit(extension.graph);
+      for (const name of extension.extended) toast.info(`'${name}' extended`);
     },
     disconnect(ref) {
-      commit(ops.disconnect(graphOf(get()), ref));
+      const s = get();
+      if (s.readOnly || blockedByGroup(s, ref, 'disconnect')) return;
+      commit(ops.disconnect(graphOf(s), ref));
     },
     insertOnConnection(ref, node) {
-      const { graph, node: added } = ops.addNode(graphOf(get()), node);
+      const s = get();
+      if (s.readOnly || blockedByGroup(s, ref, 'insert')) return node;
+      const { graph, node: added } = ops.addNode(graphOf(s), node);
       commit(ops.insertNodeOnConnection(graph, ref, added.name), {
         selection: { nodes: [added.name], stickies: [], edges: [] },
       });
@@ -285,6 +382,38 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
     },
     setPinData(nodeName, items) {
       commit(ops.setPinData(graphOf(get()), nodeName, items));
+    },
+    setPinDataMany(map) {
+      let graph = graphOf(get());
+      for (const [name, items] of Object.entries(map)) graph = ops.setPinData(graph, name, items);
+      commit(graph);
+    },
+    applyGraph(next, selection) {
+      commit(next, selection ? { selection } : {});
+    },
+
+    groupSelection() {
+      const s = get();
+      if (s.readOnly || !s.selection.nodes.length) return null;
+      const result = groups.groupNodes(graphOf(s), s.selection.nodes, s.nodeTypeLookup);
+      if (!result.groupId) {
+        if (result.problems[0]) toast.error('Could not group these nodes', result.problems[0].message);
+        return null;
+      }
+      commit(result.graph);
+      return result.groupId;
+    },
+    ungroup(groupId) {
+      commit(groups.ungroupNodes(graphOf(get()), groupId));
+    },
+    renameGroup(groupId, name) {
+      commit(groups.renameNodeGroup(graphOf(get()), groupId, name));
+    },
+    moveGroup(groupId, dx, dy, options = {}) {
+      commit(groups.moveNodeGroup(graphOf(get()), groupId, dx, dy), { history: options.history });
+    },
+    updateGroupDescription(groupId, text) {
+      commit(groups.setNodeGroupDescription(graphOf(get()), groupId, text));
     },
     toggleDisabled(names) {
       const s = get();

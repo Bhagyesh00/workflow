@@ -5,9 +5,11 @@
  */
 import { sql } from 'drizzle-orm';
 import {
+  type AnyPgColumn,
   bigint,
   bigserial,
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -17,6 +19,7 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  varchar,
 } from 'drizzle-orm/pg-core';
 
 // millisecond precision so keyset cursors (JS Dates) round-trip exactly
@@ -119,6 +122,22 @@ export const apiKeys = pgTable(
   (t) => [index('api_keys_tenant_idx').on(t.tenantId)],
 );
 
+/** workflow folders (P3-07); a folder may sit inside another folder of the same tenant */
+export const folders = pgTable(
+  'folders',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    parentFolderId: uuid('parent_folder_id').references((): AnyPgColumn => folders.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('folders_tenant_parent_idx').on(t.tenantId, t.parentFolderId)],
+);
+
 export const workflows = pgTable(
   'workflows',
   {
@@ -133,8 +152,13 @@ export const workflows = pgTable(
     pinData: jsonb('pin_data').$type<Record<string, unknown>>().notNull().default({}),
     staticData: jsonb('static_data').$type<Record<string, unknown>>().notNull().default({}),
     stickyNotes: jsonb('sticky_notes').$type<unknown[]>().notNull().default([]),
+    nodeGroups: jsonb('node_groups').$type<unknown[]>().notNull().default([]),
     active: boolean('active').notNull().default(false),
     versionId: uuid('version_id').notNull(),
+    folderId: uuid('folder_id').references(() => folders.id, { onDelete: 'set null' }),
+    isArchived: boolean('is_archived').notNull().default(false),
+    /** the published (running) version; null = not published. No FK: compaction may prune versions */
+    publishedVersionId: uuid('published_version_id'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -142,6 +166,7 @@ export const workflows = pgTable(
   (t) => [
     index('workflows_tenant_updated_idx').on(t.tenantId, t.updatedAt, t.id),
     index('workflows_active_idx').on(t.active),
+    index('workflows_tenant_folder_idx').on(t.tenantId, t.folderId),
   ],
 );
 
@@ -161,11 +186,37 @@ export const workflowVersions = pgTable(
     connections: jsonb('connections').$type<Record<string, unknown>>().notNull(),
     settings: jsonb('settings').$type<Record<string, unknown>>().notNull(),
     stickyNotes: jsonb('sticky_notes').$type<unknown[]>().notNull().default([]),
+    nodeGroups: jsonb('node_groups').$type<unknown[]>().notNull().default([]),
     authorId: uuid('author_id').references(() => users.id, { onDelete: 'set null' }),
     message: text('message'),
+    versionName: varchar('version_name', { length: 128 }),
+    description: text('description'),
+    /** saved by the editor's autosave (P3-17) */
+    autosaved: boolean('autosaved').notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [index('workflow_versions_workflow_idx').on(t.tenantId, t.workflowId, t.createdAt)],
+);
+
+/** per-user favorites (P3-07): workflows and folders */
+export const userFavorites = pgTable(
+  'user_favorites',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    resourceType: text('resource_type').$type<'workflow' | 'folder'>().notNull(),
+    resourceId: uuid('resource_id').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.resourceType, t.resourceId] }),
+    index('user_favorites_tenant_user_idx').on(t.tenantId, t.userId),
+    check('user_favorites_resource_type_check', sql`${t.resourceType} in ('workflow', 'folder')`),
+  ],
 );
 
 export const tags = pgTable(
@@ -196,6 +247,23 @@ export const workflowTags = pgTable(
       .references(() => tenants.id, { onDelete: 'cascade' }),
   },
   (t) => [primaryKey({ columns: [t.workflowId, t.tagId] }), index('workflow_tags_tag_idx').on(t.tagId)],
+);
+
+/** tags on folders (P3-07 addendum); same tag table as workflows */
+export const folderTags = pgTable(
+  'folder_tags',
+  {
+    folderId: uuid('folder_id')
+      .notNull()
+      .references(() => folders.id, { onDelete: 'cascade' }),
+    tagId: uuid('tag_id')
+      .notNull()
+      .references(() => tags.id, { onDelete: 'cascade' }),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+  },
+  (t) => [primaryKey({ columns: [t.folderId, t.tagId] }), index('folder_tags_tag_idx').on(t.tagId)],
 );
 
 export const credentials = pgTable(
@@ -237,6 +305,8 @@ export const executions = pgTable(
     customData: jsonb('custom_data').$type<Record<string, string>>().notNull().default({}),
     errorMessage: text('error_message'),
     errorNode: text('error_node'),
+    /** the workflow version that ran (no FK: versions can be pruned) */
+    workflowVersionId: uuid('workflow_version_id'),
     createdAt: createdAt(),
   },
   (t) => [
@@ -244,6 +314,7 @@ export const executions = pgTable(
     index('executions_tenant_workflow_idx').on(t.tenantId, t.workflowId, t.createdAt),
     index('executions_status_wait_idx').on(t.status, t.waitTill),
     index('executions_stopped_idx').on(t.stoppedAt),
+    index('executions_tenant_version_idx').on(t.tenantId, t.workflowVersionId),
   ],
 );
 
@@ -374,6 +445,190 @@ export const scheduleSlots = pgTable(
   (t) => [primaryKey({ columns: [t.workflowId, t.nodeName, t.ruleKey] })],
 );
 
+/** execution annotation tags (P3-09); separate from workflow tags, as n8n */
+export const annotationTags = pgTable(
+  'annotation_tags',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 24 }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex('annotation_tags_tenant_name_idx').on(t.tenantId, sql`lower(${t.name})`)],
+);
+
+/** one annotation (vote) per execution (P3-09) */
+export const executionAnnotations = pgTable(
+  'execution_annotations',
+  {
+    executionId: uuid('execution_id')
+      .primaryKey()
+      .references(() => executions.id, { onDelete: 'cascade' }),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    vote: text('vote').$type<'up' | 'down'>(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [check('execution_annotations_vote_check', sql`${t.vote} in ('up', 'down')`)],
+);
+
+export const executionAnnotationTags = pgTable(
+  'execution_annotation_tags',
+  {
+    executionId: uuid('execution_id')
+      .notNull()
+      .references(() => executions.id, { onDelete: 'cascade' }),
+    tagId: uuid('tag_id')
+      .notNull()
+      .references(() => annotationTags.id, { onDelete: 'cascade' }),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.executionId, t.tagId] }),
+    index('execution_annotation_tags_tag_idx').on(t.tagId),
+  ],
+);
+
+/** publish timeline (P3-16): one row per publish / unpublish; version_id NULL once the version is pruned */
+export const workflowPublishHistory = pgTable(
+  'workflow_publish_history',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    workflowId: uuid('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    versionId: uuid('version_id').references(() => workflowVersions.id, { onDelete: 'set null' }),
+    event: text('event').$type<'activated' | 'deactivated'>().notNull(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('workflow_publish_history_workflow_idx').on(t.tenantId, t.workflowId, t.id.desc()),
+    check('workflow_publish_history_event_check', sql`${t.event} in ('activated', 'deactivated')`),
+  ],
+);
+
+// workflow reviews (P3-19): a request pins one version for review before publish
+
+export const workflowReviewRequests = pgTable(
+  'workflow_review_requests',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    workflowId: uuid('workflow_id').references(() => workflows.id, { onDelete: 'set null' }),
+    workflowVersionId: uuid('workflow_version_id').references(() => workflowVersions.id, {
+      onDelete: 'set null',
+    }),
+    /** the published version before an approval's auto-publish (NULL when none) */
+    approvedBaselineVersionId: uuid('approved_baseline_version_id').references(() => workflowVersions.id, {
+      onDelete: 'set null',
+    }),
+    state: text('state').$type<'open' | 'closed'>().notNull().default('open'),
+    decision: text('decision').$type<'pending' | 'changes_requested' | 'approved'>().notNull().default('pending'),
+    title: varchar('title', { length: 128 }).notNull(),
+    description: text('description'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    closedBy: uuid('closed_by').references(() => users.id, { onDelete: 'set null' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('workflow_review_requests_open_idx').on(t.workflowId).where(sql`${t.state} = 'open'`),
+    index('workflow_review_requests_tenant_idx').on(t.tenantId, t.updatedAt),
+    check('workflow_review_requests_state_check', sql`${t.state} in ('open', 'closed')`),
+    check(
+      'workflow_review_requests_decision_check',
+      sql`${t.decision} in ('pending', 'changes_requested', 'approved')`,
+    ),
+  ],
+);
+
+export const workflowReviewReviewers = pgTable(
+  'workflow_review_reviewers',
+  {
+    requestId: uuid('request_id')
+      .notNull()
+      .references(() => workflowReviewRequests.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.requestId, t.userId] }),
+    index('workflow_review_reviewers_user_idx').on(t.tenantId, t.userId),
+  ],
+);
+
+export const workflowReviewAuthors = pgTable(
+  'workflow_review_authors',
+  {
+    requestId: uuid('request_id')
+      .notNull()
+      .references(() => workflowReviewRequests.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.requestId, t.userId] }),
+    index('workflow_review_authors_user_idx').on(t.tenantId, t.userId),
+  ],
+);
+
+export const workflowReviewActivity = pgTable(
+  'workflow_review_activity',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    requestId: uuid('request_id')
+      .notNull()
+      .references(() => workflowReviewRequests.id, { onDelete: 'cascade' }),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(),
+    data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: createdAt(),
+  },
+  (t) => [index('workflow_review_activity_request_idx').on(t.requestId, t.id)],
+);
+
+export const workflowReviewComments = pgTable(
+  'workflow_review_comments',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    activityId: bigint('activity_id', { mode: 'number' })
+      .notNull()
+      .references(() => workflowReviewActivity.id, { onDelete: 'cascade' }),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    body: text('body').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index('workflow_review_comments_activity_idx').on(t.activityId)],
+);
+
 export type Role = 'owner' | 'admin' | 'editor' | 'viewer';
 
 export type TenantRow = typeof tenants.$inferSelect;
@@ -388,3 +643,9 @@ export type TagRow = typeof tags.$inferSelect;
 export type VariableRow = typeof variables.$inferSelect;
 export type ApiKeyRow = typeof apiKeys.$inferSelect;
 export type InvitationRow = typeof invitations.$inferSelect;
+export type FolderRow = typeof folders.$inferSelect;
+export type UserFavoriteRow = typeof userFavorites.$inferSelect;
+export type AnnotationTagRow = typeof annotationTags.$inferSelect;
+export type ExecutionAnnotationRow = typeof executionAnnotations.$inferSelect;
+export type PublishHistoryRow = typeof workflowPublishHistory.$inferSelect;
+export type WorkflowReviewRequestRow = typeof workflowReviewRequests.$inferSelect;

@@ -272,6 +272,7 @@ describe('R21: binary data of activation-time contexts', () => {
     expect(files).toHaveLength(1);
     expect(path.basename(path.dirname(files[0]))).toBe(executionId);
 
+    await client.data(client.post(`/rest/workflows/${wf.id}/archive`));
     await client.data(client.delete(`/rest/workflows/${wf.id}`));
     expect(await filesUnder(tenantDir(tenant.id))).toEqual([]);
   });

@@ -6,6 +6,7 @@ import { Handle, type NodeProps, Position } from '@xyflow/react';
 import {
   AlertTriangle,
   Check,
+  MoreHorizontal,
   StickyNote as NoteIcon,
   Pin,
   Play,
@@ -124,6 +125,21 @@ function NodeToolbar({
       >
         <Trash2 size={13} />
       </button>
+      {actions.openContextMenu && (
+        <button
+          type="button"
+          className={button}
+          title="More"
+          aria-label={`More actions for ${name}`}
+          aria-haspopup="menu"
+          onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            actions.openContextMenu?.(name, { x: rect.left, y: rect.bottom + 4 });
+          }}
+        >
+          <MoreHorizontal size={13} />
+        </button>
+      )}
     </div>
   );
 }

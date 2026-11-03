@@ -51,6 +51,7 @@ import type { CredentialService } from './credentials';
 import type { Metrics } from './metrics';
 import type { ExecutionJob, ExecutionQueue } from './queue';
 import { cloneDefinition, toDefinition } from './workflow-model';
+import { assertNotArchived } from './workflow-rules';
 
 export const EXECUTE_WORKFLOW_TRIGGER = 'core.executeWorkflowTrigger';
 export const ERROR_TRIGGER = 'core.errorTrigger';
@@ -65,6 +66,10 @@ export interface StoredRunOptions {
   runData?: RunData;
   destinationNode?: string;
   pinData?: Record<string, Item[]>;
+  /** P3-06 partial run: nodes changed since `runData` was produced */
+  dirtyNodeNames?: string[];
+  /** P3-10: mode of the root execution, carried through nested sub-workflow calls */
+  rootMode?: ExecutionMode;
   /** output of the waiting node for the next resume (null = keep its own output) */
   resumeOutput?: Item[][] | null;
   depth?: number;
@@ -103,6 +108,10 @@ export interface StartExecutionInput {
   runData?: RunData;
   destinationNode?: string;
   pinData?: Record<string, Item[]>;
+  /** P3-06 partial run: nodes changed since `runData` was produced */
+  dirtyNodeNames?: string[];
+  /** P3-10: mode of the root execution (absent = this execution is the root) */
+  rootMode?: ExecutionMode;
   executionId?: string;
   retryOf?: string;
   /** retry only: the state of the failed execution; the run continues at its `failedExecuteData` */
@@ -245,6 +254,8 @@ export class ExecutionService {
       runData: input.runData,
       destinationNode: input.destinationNode,
       pinData: input.pinData,
+      dirtyNodeNames: input.dirtyNodeNames,
+      rootMode: input.rootMode,
       depth: input.depth ?? 0,
       userId: input.userId,
       errorChain: input.mode === 'error' || input.errorChain === true ? true : undefined,
@@ -263,6 +274,7 @@ export class ExecutionService {
           startedAt: new Date(),
           retryOf: input.retryOf ?? null,
           parentExecutionId: input.parentExecutionId ?? null,
+          workflowVersionId: input.workflow.versionId ?? null,
         },
         {
           workflowData: workflowData as unknown as Record<string, unknown>,
@@ -464,6 +476,7 @@ export class ExecutionService {
         workflowId: row.workflowId ?? undefined,
         depth: options.depth ?? 0,
         errorChain: options.errorChain,
+        rootMode: options.rootMode,
         hooks: this.hooks(tenant.id, row, definition, delivery),
         signal,
       });
@@ -513,6 +526,7 @@ export class ExecutionService {
             runData: options.runData,
             destinationNode: options.destinationNode,
             pinData: options.pinData,
+            dirtyNodeNames: options.dirtyNodeNames,
             timeoutMs,
             signal,
           });
@@ -798,6 +812,8 @@ export class ExecutionService {
     workflowId?: string;
     depth?: number;
     errorChain?: boolean;
+    /** P3-10: mode of the root execution; absent = `mode` (this execution is the root) */
+    rootMode?: ExecutionMode;
     hooks?: ExecutionHooks;
     /** aborts when the execution is stopped or times out; sub-workflows it waits for are canceled then */
     signal?: AbortSignal;
@@ -831,7 +847,13 @@ export class ExecutionService {
       limits: { maxTries: 5 },
       nodeLimits: config.nodeLimits,
       executeSubWorkflow: (request) =>
-        this.executeSubWorkflow(request, depth, input.errorChain === true, input.signal),
+        this.executeSubWorkflow(
+          request,
+          depth,
+          input.errorChain === true,
+          input.signal,
+          input.rootMode ?? input.mode,
+        ),
     };
   }
 
@@ -843,6 +865,7 @@ export class ExecutionService {
     depth: number,
     errorChain: boolean,
     signal?: AbortSignal,
+    rootMode?: ExecutionMode,
   ): Promise<{ executionId: string; data: Item[][] | null }> {
     if (depth >= MAX_SUB_WORKFLOW_DEPTH) {
       throw new Error(`Sub-workflows can be nested at most ${MAX_SUB_WORKFLOW_DEPTH} levels deep`);
@@ -854,6 +877,7 @@ export class ExecutionService {
     if (request.source.source === 'database') {
       const row = await repos.workflows.get(tenantId, request.source.workflowId ?? '');
       if (!row) throw new Error(`Workflow "${request.source.workflowId ?? ''}" was not found`);
+      assertNotArchived(row, 'call');
       assertCallerAllowed(
         row.name,
         row.settings as WorkflowDefinition['settings'],
@@ -879,6 +903,7 @@ export class ExecutionService {
       startNode: start.name,
       triggerItems: JSON.parse(JSON.stringify(items)),
       parentExecutionId: request.parent.executionId || undefined,
+      rootMode,
       depth: depth + 1,
       errorChain,
       inline: !detached,
@@ -1086,6 +1111,8 @@ export class ExecutionService {
       triggerItems: clone(runOptions.triggerItems),
       runData: clone(runOptions.runData),
       destinationNode: runOptions.destinationNode,
+      dirtyNodeNames: clone(runOptions.dirtyNodeNames),
+      rootMode: runOptions.rootMode,
     };
     // a node failed: the engine re-runs that node with its saved input and everything after it
     const failed = state?.executionData?.failedExecuteData;
