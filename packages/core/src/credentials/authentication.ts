@@ -3,9 +3,11 @@
  * custom authenticate functions, and OAuth2 bearer tokens with automatic refresh.
  */
 import {
+  assertCredentialUrlAllowed,
   type CredentialType,
   type DataObject,
   evaluateSimple,
+  getCredentialAllowedDomains,
   type HttpRequestOptions,
   isExpression,
 } from '@workflow/workflow';
@@ -79,6 +81,10 @@ export async function requestOAuth2Token(
   signal?: AbortSignal,
 ): Promise<NonNullable<OAuth2Data['oauthTokenData']>> {
   if (!data.accessTokenUrl) throw new Error('OAuth2 credential has no access token URL');
+  // the credential's own token calls honour its allowed domains too (the token URL is not typed by the
+  // user of a node, so the `none` mode does not apply): checked here and on every redirect hop
+  const allowedDomains = getCredentialAllowedDomains(data, { userUrl: false });
+  assertCredentialUrlAllowed(data.accessTokenUrl, allowedDomains);
   const body: Record<string, string> =
     grant.type === 'refresh_token'
       ? { grant_type: 'refresh_token', refresh_token: grant.refreshToken }
@@ -92,7 +98,15 @@ export async function requestOAuth2Token(
     auth = { username: data.clientId ?? '', password: data.clientSecret ?? '' };
   }
   const token = (await http.request(
-    { url: data.accessTokenUrl, method: 'POST', body, bodyType: 'form-urlencoded', headers, auth },
+    {
+      url: data.accessTokenUrl,
+      method: 'POST',
+      body,
+      bodyType: 'form-urlencoded',
+      headers,
+      auth,
+      ...(allowedDomains === undefined ? {} : { allowedDomains }),
+    },
     signal,
   )) as Record<string, unknown>;
   if (!token.access_token) throw new Error('OAuth2 token response did not contain an access_token');

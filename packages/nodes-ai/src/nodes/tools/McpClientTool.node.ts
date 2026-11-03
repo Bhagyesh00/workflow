@@ -3,8 +3,10 @@
  * Requests go through `ctx.helpers.httpRequest`, so the server URL is subject to the SSRF policy.
  */
 import {
+  assertCredentialUrlAllowed,
   type BaseContext,
   type DataObject,
+  getCredentialAllowedDomains,
   type HttpFullResponse,
   type JsonSchema,
   type LoadOptionsContext,
@@ -16,34 +18,55 @@ import { acquireShared, type Shared, sharedKey } from '../../shared/shared-resou
 import { createTool } from '../../shared/tools';
 import { errorMessage, toToolName } from '../../shared/utils';
 
+interface McpAuth {
+  headers: Record<string, string>;
+  /** the credential's allowed domains (undefined = unrestricted) */
+  allowedDomains?: string[];
+}
+
+/**
+ * The credential is read by hand here, so its allowed domains are read with it. The endpoint is typed
+ * by the user, so the credential's `none` mode applies (it throws).
+ */
 async function authHeaders(
   ctx: Pick<BaseContext, 'getCredentials'>,
   authentication: string,
   itemIndex = 0,
-): Promise<Record<string, string>> {
+): Promise<McpAuth> {
   if (authentication === 'bearerAuth') {
     const creds = await ctx.getCredentials('httpBearerAuth', itemIndex);
-    return { authorization: `Bearer ${String(creds.token ?? '')}` };
+    return {
+      headers: { authorization: `Bearer ${String(creds.token ?? '')}` },
+      allowedDomains: getCredentialAllowedDomains(creds, { userUrl: true }),
+    };
   }
   if (authentication === 'headerAuth') {
     const creds = await ctx.getCredentials('httpHeaderAuth', itemIndex);
+    const allowedDomains = getCredentialAllowedDomains(creds, { userUrl: true });
     if (!creds.name) throw new Error('The header auth credential has no header name');
-    return { [String(creds.name).toLowerCase()]: String(creds.value ?? '') };
+    return { headers: { [String(creds.name).toLowerCase()]: String(creds.value ?? '') }, allowedDomains };
   }
-  return {};
+  return { headers: {} };
 }
 
 function createClient(
   ctx: Pick<BaseContext, 'helpers'>,
   endpoint: string,
-  headers: Record<string, string>,
+  auth: McpAuth,
   timeoutMs: number,
 ): McpClient {
   if (!/^https?:\/\//i.test(endpoint)) throw new Error('The MCP endpoint must be an http(s) URL');
+  // checked before any request carries the credential; the list also goes with every request, so
+  // HttpClient refuses a redirect to another host
+  assertCredentialUrlAllowed(endpoint, auth.allowedDomains);
+  const { allowedDomains } = auth;
   return new McpClient(
-    async (request) => (await ctx.helpers.httpRequest<string>(request)) as HttpFullResponse<string>,
+    async (request) =>
+      (await ctx.helpers.httpRequest<string>(
+        allowedDomains === undefined ? request : { ...request, allowedDomains },
+      )) as HttpFullResponse<string>,
     endpoint,
-    headers,
+    auth.headers,
     timeoutMs,
   );
 }
@@ -173,13 +196,13 @@ export const McpClientToolNode: NodeType = {
     const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
     let shared: Shared<{ client: McpClient; tools: McpTool[] }>;
     try {
-      const headers = await authHeaders(ctx, authentication, itemIndex);
+      const auth = await authHeaders(ctx, authentication, itemIndex);
       const timeout = Number(options.timeout ?? 60_000);
       // one session per node and execution, shared by every item the agent processes
       shared = await acquireShared(
-        sharedKey(ctx, 'mcp', endpoint, headers, timeout),
+        sharedKey(ctx, 'mcp', endpoint, auth.headers, auth.allowedDomains, timeout),
         async () => {
-          const client = createClient(ctx, endpoint, headers, timeout);
+          const client = createClient(ctx, endpoint, auth, timeout);
           await client.connect();
           return { client, tools: await client.listTools() };
         },

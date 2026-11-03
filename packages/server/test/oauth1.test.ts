@@ -248,6 +248,42 @@ describe('OAuth1 sign-in flow', () => {
     expect(received).toHaveLength(0);
   });
 
+  it('applies the allowed domains to the token calls: outside the list or an empty list is a 400', async () => {
+    const { client } = await signup(server.app);
+    const make = async (allowedDomains: string) =>
+      client.data(
+        client.post('/rest/credentials', {
+          name: `restricted ${allowedDomains || 'empty'}`,
+          type: 'oAuth1Api',
+          data: {
+            requestTokenUrl: `${remoteUrl}/request_token`,
+            authUrl: 'https://auth.example.com/authorize',
+            accessTokenUrl: `${remoteUrl}/access_token`,
+            consumerKey: 'consumer-1',
+            consumerSecret: 'consumer-secret',
+            allowedHttpRequestDomains: 'domains',
+            allowedDomains,
+          },
+        }),
+      );
+
+    const outside = await make('api.example.com');
+    const refused = await client.get(`/rest/oauth1/authorize?credentialId=${outside.id}`);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.body).toContain('Domain not allowed');
+    expect(received).toHaveLength(0);
+
+    const empty = await make('');
+    const noList = await client.get(`/rest/oauth1/authorize?credentialId=${empty.id}`);
+    expect(noList.statusCode).toBe(400);
+    expect(noList.body).toContain('No allowed domains specified');
+    expect(received).toHaveLength(0);
+
+    const listed = await make('127.0.0.1');
+    const ok = await client.data(client.get(`/rest/oauth1/authorize?credentialId=${listed.id}`));
+    expect(new URL(ok.url).searchParams.get('oauth_token')).toBe('rt-1');
+  });
+
   it('reports a provider refusal with the status, not the raw client message', async () => {
     const { client } = await signup(server.app);
     const credential = await client.data(

@@ -5,9 +5,11 @@
  * never lets the model pick the host of a request that carries credentials.
  */
 import {
+  assertCredentialUrlAllowed,
   type DataObject,
   evaluateSimple,
   getByPath,
+  getCredentialAllowedDomains,
   type HttpMethod,
   type HttpRequestOptions,
   type Item,
@@ -633,9 +635,12 @@ export const ToolHttpRequestNode: NodeType = {
 
     const send = async (request: HttpRequestOptions): Promise<unknown> => {
       if (!credentialType) return ctx.helpers.httpRequest(request);
+      // the URL is typed by the user (the model only fills placeholders after the host): the credential's
+      // allowed domains, including its `none` mode, apply
+      const scoped: HttpRequestOptions = { ...request, credentialScope: 'userUrl' };
       if (authentication === 'genericCredentialType')
-        return ctx.helpers.httpRequest(await withGenericAuth(ctx, credentialType, request, itemIndex));
-      return ctx.helpers.httpRequestWithAuthentication(credentialType, request, itemIndex);
+        return ctx.helpers.httpRequest(await withGenericAuth(ctx, credentialType, scoped, itemIndex));
+      return ctx.helpers.httpRequestWithAuthentication(credentialType, scoped, itemIndex);
     };
 
     return {
@@ -676,7 +681,12 @@ export const ToolHttpRequestNode: NodeType = {
   },
 };
 
-/** Generic auth credentials (basic / header / bearer) applied without needing the types registered here. */
+/**
+ * Generic auth credentials (basic / header / bearer) applied without needing the types registered here.
+ * This path reads the credential by hand, so it does what httpRequestWithAuthentication does itself: the
+ * credential's allowed domains are checked before anything is applied (a blocked request never gets the
+ * secret) and travel with the request, so HttpClient checks every redirect hop as well.
+ */
 export async function withGenericAuth(
   ctx: SupplyDataContext,
   type: string,
@@ -684,6 +694,13 @@ export async function withGenericAuth(
   itemIndex: number,
 ): Promise<HttpRequestOptions> {
   const creds = await ctx.getCredentials(type, itemIndex);
+  const allowedDomains = getCredentialAllowedDomains(creds, { userUrl: true });
+  assertCredentialUrlAllowed(request.url, allowedDomains);
+  request = {
+    ...request,
+    credentialScope: 'userUrl',
+    ...(allowedDomains === undefined ? {} : { allowedDomains }),
+  };
   const headers = { ...(request.headers ?? {}) };
   if (type === 'httpBasicAuth') {
     return {

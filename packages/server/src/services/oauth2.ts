@@ -6,7 +6,7 @@
  */
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { CredentialCipher, HttpClient } from '@workflow/core';
-import type { DataObject } from '@workflow/workflow';
+import { assertCredentialUrlAllowed, type DataObject, getCredentialAllowedDomains } from '@workflow/workflow';
 import type { Config } from '../config';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
@@ -114,6 +114,14 @@ export class OAuth2Service {
     }
     const { row, data } = await this.loadOAuth2(payload.t, payload.c);
     if (!data.accessTokenUrl) throw ApiError.badRequest('The credential has no access token URL');
+    // the code exchange is a token call of the credential: its allowed domains apply (the `none` mode does
+    // not: the token URL is not a URL a user typed), here and on every redirect hop
+    const allowedDomains = getCredentialAllowedDomains(data, { userUrl: false });
+    try {
+      assertCredentialUrlAllowed(String(data.accessTokenUrl), allowedDomains);
+    } catch (error) {
+      throw ApiError.badRequest((error as Error).message);
+    }
     const body: Record<string, string> = {
       grant_type: 'authorization_code',
       code,
@@ -139,6 +147,7 @@ export class OAuth2Service {
       bodyType: 'form-urlencoded',
       headers: { accept: 'application/json' },
       auth,
+      ...(allowedDomains === undefined ? {} : { allowedDomains }),
     })) as DataObject;
     if (!token || typeof token !== 'object' || !token.access_token) {
       throw ApiError.badRequest('The token response did not contain an access token');

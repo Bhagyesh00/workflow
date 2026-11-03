@@ -181,7 +181,13 @@ describe('credential type defaults', () => {
 
   it('treats a blank visible field as unset so its type default applies', () => {
     const data = server.ctx.credentials.withDefaults('testApi', { region: '', apiKey: 'k' });
-    expect(data).toEqual({ baseUrl: '', region: 'eu', apiKey: 'k' });
+    expect(data).toEqual({
+      baseUrl: '',
+      region: 'eu',
+      apiKey: 'k',
+      allowedHttpRequestDomains: 'all',
+      allowedDomains: '',
+    });
     expect(server.ctx.credentials.withDefaults('testApi', { region: 'us' }).region).toBe('us');
   });
 

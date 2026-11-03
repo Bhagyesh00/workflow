@@ -1,5 +1,12 @@
-import type { CredentialType, NodePackage, NodeType } from '@workflow/workflow';
+import {
+  ALLOWED_DOMAINS_PROPERTIES,
+  type CredentialType,
+  type NodePackage,
+  type NodeType,
+} from '@workflow/workflow';
 import type { CredentialTypeRegistry, NodeTypeRegistry } from './engine/services';
+
+const DOMAIN_FIELD_NAMES = new Set(ALLOWED_DOMAINS_PROPERTIES.map((p) => p.name));
 
 export class NodeTypes implements NodeTypeRegistry {
   private readonly types = new Map<string, NodeType>();
@@ -66,6 +73,14 @@ export class CredentialTypes implements CredentialTypeRegistry {
       authenticate: type.authenticate ?? parents.find((p) => p.authenticate)?.authenticate,
       test: type.test ?? parents.find((p) => p.test)?.test,
     };
+    // the "Allowed HTTP Request Domains" fields go last on every type that sends requests; a parent's
+    // copy is dropped first so a child never shows them twice (or in the middle of its own fields)
+    const withoutDomainFields = merged.properties.filter((p) => !DOMAIN_FIELD_NAMES.has(p.name));
+    merged.properties =
+      !merged.hideDomainRestrictionFields &&
+      (merged.authenticate || this.isA(name, 'oAuth1Api') || this.isA(name, 'oAuth2Api'))
+        ? [...withoutDomainFields, ...ALLOWED_DOMAINS_PROPERTIES]
+        : withoutDomainFields;
     this.resolved.set(name, merged);
     return merged;
   }
