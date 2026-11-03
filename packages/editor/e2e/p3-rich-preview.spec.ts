@@ -8,7 +8,7 @@
  * editor cannot reach into it, so it cannot reach the editor), no script runs, the remote image,
  * `@import` and `url(https:)` never load, a clicked link does not navigate, and the form is gone.
  */
-import { expect, type Page, test } from '@playwright/test';
+import { expect, type Page, type Request, test } from '@playwright/test';
 
 /** a host that must never be requested; .invalid never resolves, so a request would only show as an attempt */
 const PROBE_HOST = 'rich-preview-probe.invalid';
@@ -78,10 +78,15 @@ async function openPreview(page: Page, fileName: string) {
 
 test('video, JSON, markdown, text and sandboxed HTML previews under the real CSP', async ({ page }) => {
   const id = Date.now().toString(36);
-  const probeRequests: string[] = [];
+  const probeRequests = new Set<Request>();
   const cspViolations: string[] = [];
   page.on('request', (request) => {
-    if (request.url().includes(PROBE_HOST)) probeRequests.push(request.url());
+    if (request.url().includes(PROBE_HOST)) probeRequests.add(request);
+  });
+  // a load the CSP refuses can still show as a request that then fails with 'csp': it never
+  // reaches the network, so it is not a leak
+  page.on('requestfailed', (request) => {
+    if (request.failure()?.errorText === 'csp') probeRequests.delete(request);
   });
   page.on('console', (message) => {
     if (/Content Security Policy|Refused to/i.test(message.text())) cspViolations.push(message.text());
@@ -226,7 +231,13 @@ test('video, JSON, markdown, text and sandboxed HTML previews under the real CSP
   await preview.getByRole('button', { name: 'Close' }).click();
 
   expect(await page.title()).toBe(editorTitle);
-  expect(probeRequests).toEqual([]);
+  expect([...probeRequests].map((request) => request.url())).toEqual([]);
+  // the frame's own policy refused the remote images (the editor's policy allows https images)
+  for (const file of ['pixel.png', 'bg.png']) {
+    expect(
+      cspViolations.some((v) => v.includes(`${PROBE_HOST}/${file}`) && v.includes('img-src data:')),
+    ).toBe(true);
+  }
   test.info().annotations.push({
     type: 'csp-violations',
     description: cspViolations.length ? cspViolations.join('\n') : 'none',
