@@ -14,9 +14,15 @@ import {
   DEFAULT_NODE_SIZE,
   GROUP_HEADER,
   GROUP_PADDING,
+  GROUP_VIEW_EVENT,
   PUSH_GAP,
 } from '../src/lib/group-layout-push';
-import { isGroupDescriptionPinned, isGroupExpanded } from '../src/lib/group-view';
+import {
+  isGroupDescriptionPinned,
+  isGroupExpanded,
+  setGroupDescriptionPinned,
+  setGroupsExpanded,
+} from '../src/lib/group-view';
 import { EMPTY_GRAPH, type WorkflowGraph } from '../src/lib/workflow-ops';
 import { toWorkflowBody, useWorkflowStore } from '../src/stores/workflow-store';
 import { backend, signedIn } from './backend';
@@ -107,6 +113,50 @@ describe('group elements', () => {
     const pinned = byId(build([], { pinned: ['g'] }).nodes, 'group:g');
     expect(pinned.height!).toBeGreaterThan(plain);
     expect(pinned.data).toMatchObject({ descriptionPinned: true });
+  });
+});
+
+describe('group view of a new workflow', () => {
+  const stored = () =>
+    JSON.parse(window.localStorage.getItem('workflow.groupView') ?? '{}') as Record<string, unknown>;
+  const newWorkflowWithGroup = () => {
+    useWorkflowStore.getState().reset();
+    useWorkflowStore.setState({ ...GRAPH });
+    setGroupsExpanded(['g'], true);
+    setGroupDescriptionPinned('g', true);
+  };
+
+  it('keeps the expanded and pinned state on the first save and tells the canvas', () => {
+    newWorkflowWithGroup();
+    let events = 0;
+    const count = () => events++;
+    window.addEventListener(GROUP_VIEW_EVENT, count);
+    act(() => useWorkflowStore.getState().markSaved({ id: 'wf-first-save', versionId: 'v1' }));
+    window.removeEventListener(GROUP_VIEW_EVENT, count);
+
+    expect(isGroupExpanded('g')).toBe(true);
+    expect(isGroupDescriptionPinned('g')).toBe(true);
+    expect(isGroupExpanded('g', 'wf-first-save')).toBe(true);
+    expect(events).toBeGreaterThan(0);
+    expect(stored()).toHaveProperty('wf-first-save');
+    expect(stored()).not.toHaveProperty('__unsaved__');
+
+    // a later save of the same workflow changes nothing
+    act(() => useWorkflowStore.getState().markSaved({ id: 'wf-first-save', versionId: 'v2' }));
+    expect(isGroupExpanded('g')).toBe(true);
+  });
+
+  it('never carries the unsaved state into the next new workflow or an opened one', () => {
+    newWorkflowWithGroup();
+    useWorkflowStore.getState().reset();
+    useWorkflowStore.setState({ nodeGroups: GRAPH.nodeGroups });
+    expect(isGroupExpanded('g')).toBe(false);
+    expect(isGroupDescriptionPinned('g')).toBe(false);
+
+    newWorkflowWithGroup();
+    useWorkflowStore.getState().load({ ...GRAPH, id: 'wf-opened', name: 'Opened' });
+    expect(isGroupExpanded('g')).toBe(false);
+    expect(stored()).not.toHaveProperty('__unsaved__');
   });
 });
 

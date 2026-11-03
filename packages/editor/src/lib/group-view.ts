@@ -5,7 +5,7 @@
  * marks it dirty.
  *
  * The workflow id is the open workflow (workflow store meta.id); an unsaved workflow uses one
- * shared slot. State lives in memory and is written through to localStorage (one key, entries per
+ * slot that moves to the new id on its first save. State lives in memory and is written through to localStorage (one key, entries per
  * workflow id), so it survives a reload; without storage it lasts for the page.
  */
 import { useWorkflowStore } from '../stores/workflow-store';
@@ -52,11 +52,7 @@ function viewOf(workflowId?: string): WorkflowGroupView {
   return state()[workflowKey(workflowId)] ?? { expanded: [], pinned: [] };
 }
 
-function save(next: WorkflowGroupView, workflowId?: string): void {
-  const all = state();
-  const key = workflowKey(workflowId);
-  if (!next.expanded.length && !next.pinned.length) delete all[key];
-  else all[key] = next;
+function persist(all: Record<string, WorkflowGroupView>): void {
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
   } catch {
@@ -64,6 +60,33 @@ function save(next: WorkflowGroupView, workflowId?: string): void {
   }
   if (typeof window !== 'undefined') window.dispatchEvent(new Event(GROUP_VIEW_EVENT));
 }
+
+function save(next: WorkflowGroupView, workflowId?: string): void {
+  const all = state();
+  const key = workflowKey(workflowId);
+  if (!next.expanded.length && !next.pinned.length) delete all[key];
+  else all[key] = next;
+  persist(all);
+}
+
+/**
+ * The unsaved slot belongs to the new workflow on the canvas. Its first save (markSaved gives it
+ * an id without a load) moves the slot to that id, so the groups the user just made stay as they
+ * are. A load or reset (a new loadCount) opens another workflow, so the slot is dropped and never
+ * reaches the next new workflow.
+ */
+useWorkflowStore.subscribe((next, prev) => {
+  const all = state();
+  if (!all[UNSAVED]) return;
+  if (next.loadCount !== prev.loadCount) {
+    delete all[UNSAVED];
+    persist(all);
+  } else if (!prev.meta.id && next.meta.id) {
+    all[next.meta.id] = all[UNSAVED];
+    delete all[UNSAVED];
+    persist(all);
+  }
+});
 
 const openGroups = () => useWorkflowStore.getState().nodeGroups;
 

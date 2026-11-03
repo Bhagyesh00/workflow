@@ -109,7 +109,11 @@ describe('node group save checks', () => {
     const { client } = await signup(server.app);
     const w = line();
     expectRejected(
-      await create(client, { nodes: w.nodes, connections: w.connections, nodeGroups: [group('g1', 'A', [])] }),
+      await create(client, {
+        nodes: w.nodes,
+        connections: w.connections,
+        nodeGroups: [group('g1', 'A', [])],
+      }),
       'empty_group',
     );
   });
@@ -174,7 +178,11 @@ describe('node group save checks', () => {
     const n = setNode('N', 'n', 1, [400, 100]);
     const connections = { ...chain('X', 'M'), ...chain('Y', 'N'), ...chain('M', 'N') };
     expectRejected(
-      await create(client, { nodes: [x, y, m, n], connections, nodeGroups: [group('g1', 'A', [m.id, n.id])] }),
+      await create(client, {
+        nodes: [x, y, m, n],
+        connections,
+        nodeGroups: [group('g1', 'A', [m.id, n.id])],
+      }),
       'multiple_entry',
     );
   });
@@ -245,7 +253,9 @@ describe('node group save checks', () => {
       client.post(`/rest/workflows/${created.id}/versions/${created.versionId}/restore`),
     );
     expect(restored.nodeGroups).toEqual(groups);
-    const version = await client.data(client.get(`/rest/workflows/${created.id}/versions/${created.versionId}`));
+    const version = await client.data(
+      client.get(`/rest/workflows/${created.id}/versions/${created.versionId}`),
+    );
     expect(version.nodeGroups).toEqual(groups);
   });
 });

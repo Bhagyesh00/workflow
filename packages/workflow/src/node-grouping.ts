@@ -14,6 +14,18 @@ import type { NodeTypeDescription, WorkflowDefinition, WorkflowNode } from './in
 /** resolves a node type description (editor: node catalog; server: registry); undefined = unknown type */
 export type NodeDescriptionLookup = (type: string, typeVersion?: number) => NodeTypeDescription | undefined;
 
+/** the part of a node type description the grouping and extraction rules read */
+export type NodeGroupingTypeInfo = Pick<NodeTypeDescription, 'group' | 'polling' | 'hidden'>;
+
+/** resolves what the grouping rules read of a node type; a NodeDescriptionLookup is one */
+export type NodeGroupingLookup = (type: string, typeVersion?: number) => NodeGroupingTypeInfo | undefined;
+
+/**
+ * Stands in for a node type a lookup cannot resolve, so the structural checks (one section, one
+ * entry, one exit, no AI connection across the border) still run: not a trigger, not deprecated.
+ */
+export const STRUCTURAL_NODE_TYPE: NodeGroupingTypeInfo = { group: [] };
+
 /** max length of a group description (P3-04 addendum); the server answers 400 above it */
 export const GROUP_DESCRIPTION_MAX_LENGTH = 145;
 
@@ -115,7 +127,7 @@ function buildGraph(definition: WorkflowDefinition): Graph {
   return { byId, links, stickyIds };
 }
 
-function isTriggerType(d: NodeTypeDescription): boolean {
+function isTriggerType(d: NodeGroupingTypeInfo): boolean {
   return d.group.includes('trigger') || Boolean(d.polling);
 }
 
@@ -207,7 +219,7 @@ function selectionProblems(
   definition: WorkflowDefinition,
   graph: Graph,
   members: string[],
-  types: NodeDescriptionLookup | undefined,
+  types: NodeGroupingLookup | undefined,
   opts: { checkOtherGroups: boolean; extraction: boolean },
 ): GroupingProblem[] {
   const problems: GroupingProblem[] = [];
@@ -340,7 +352,7 @@ function selectionProblems(
 export function validateSelectionForGrouping(
   definition: WorkflowDefinition,
   nodeIds: readonly string[],
-  types?: NodeDescriptionLookup,
+  types?: NodeGroupingLookup,
 ): GroupingProblem[] {
   const graph = buildGraph(definition);
   const members = expandIds(graph, realNodeIds(graph, nodeIds));
@@ -351,7 +363,7 @@ export function validateSelectionForGrouping(
 export function validateSelectionForExtraction(
   definition: WorkflowDefinition,
   nodeIds: readonly string[],
-  types?: NodeDescriptionLookup,
+  types?: NodeGroupingLookup,
 ): GroupingProblem[] {
   const graph = buildGraph(definition);
   const members = expandIds(graph, realNodeIds(graph, nodeIds));
@@ -361,7 +373,7 @@ export function validateSelectionForExtraction(
 /** save-path check of `definition.nodeGroups`; [] = valid */
 export function validateWorkflowNodeGroups(
   definition: WorkflowDefinition,
-  types?: NodeDescriptionLookup,
+  types?: NodeGroupingLookup,
 ): GroupingProblem[] {
   const groups = definition.nodeGroups ?? [];
   if (groups.length === 0) return [];
@@ -383,7 +395,11 @@ export function validateWorkflowNodeGroups(
     const before = problems.length;
     if ((idCount.get(g.id) ?? 0) > 1 && !reportedIds.has(g.id)) {
       reportedIds.add(g.id);
-      problems.push({ code: 'duplicate_group_id', message: `Two groups share the id "${g.id}".`, groupId: g.id });
+      problems.push({
+        code: 'duplicate_group_id',
+        message: `Two groups share the id "${g.id}".`,
+        groupId: g.id,
+      });
     }
     if ((nameCount.get(g.name) ?? 0) > 1 && !reportedNames.has(g.name)) {
       reportedNames.add(g.name);

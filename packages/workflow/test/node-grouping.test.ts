@@ -26,7 +26,11 @@ const lookup = (type: string) =>
   TYPE[type] ? ({ name: type, ...TYPE[type] } as NodeTypeDescription) : undefined;
 
 /** nodes: name -> type (id = lowercase name); edges by name */
-function wf(nodes: Record<string, string>, edges: Edge[], groups: WorkflowNodeGroup[] = []): WorkflowDefinition {
+function wf(
+  nodes: Record<string, string>,
+  edges: Edge[],
+  groups: WorkflowNodeGroup[] = [],
+): WorkflowDefinition {
   const connections: Connections = {};
   for (const [from, to, o] of edges) {
     const type = (o?.type ?? 'main') as 'main';
@@ -333,9 +337,11 @@ describe('validateWorkflowNodeGroups', () => {
   });
   it('runs the full checks for each group (disconnected, boundary)', () => {
     expect(codes(v([g('g1', 'A', ['a', 'c'])]))).toContain('disconnected');
-    const d = wf({ Agent: 'plain', Model: 'model' }, [['Model', 'Agent', { type: 'ai_languageModel' }]], [
-      g('g1', 'A', ['model']),
-    ]);
+    const d = wf(
+      { Agent: 'plain', Model: 'model' },
+      [['Model', 'Agent', { type: 'ai_languageModel' }]],
+      [g('g1', 'A', ['model'])],
+    );
     expect(codes(validateWorkflowNodeGroups(d, lookup))).toEqual(['non_main_boundary']);
   });
   it('does not report node_in_other_group on top of node_in_multiple_groups', () => {

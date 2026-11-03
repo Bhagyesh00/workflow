@@ -9,9 +9,9 @@ import {
   GROUP_DESCRIPTION_MAX_LENGTH,
   type GroupingProblem,
   type GroupingProblemCode,
-  type NodeDescriptionLookup,
-  type NodeTypeDescription,
+  type NodeGroupingLookup,
   normalizeGroupDescription,
+  STRUCTURAL_NODE_TYPE,
   validateSelectionForGrouping,
   validateWorkflowNodeGroups,
   type WorkflowDefinition,
@@ -67,7 +67,7 @@ export function consumeGroupRenameRequest(groupId: string): boolean {
 export function groupNodes(
   graph: WorkflowGraph,
   nodeNames: readonly string[],
-  types?: NodeDescriptionLookup,
+  types?: NodeGroupingLookup,
 ): GroupNodesResult {
   const definition = definitionOf(graph);
   const ids = idsOf(graph, nodeNames);
@@ -169,19 +169,13 @@ export function blockedEditMessage(code: GroupingProblemCode, groupName: string)
   return `${BLOCKED[reason](groupName)} Ungroup it to make this change.`;
 }
 
-/**
- * Stands in for a node type the lookup cannot resolve, so the structural checks (one section,
- * one entry, one exit, no AI connection across the border) still run; only the trigger rule
- * needs the real description.
- */
-const STRUCTURAL_ONLY = { group: [] } as unknown as NodeTypeDescription;
-
-function lookupFor(types?: NodeDescriptionLookup): NodeDescriptionLookup {
-  return (type, version) => types?.(type, version) ?? STRUCTURAL_ONLY;
+/** an unresolved node type still gets the structural checks; only the trigger rule needs the real description */
+function lookupFor(types?: NodeGroupingLookup): NodeGroupingLookup {
+  return (type, version) => types?.(type, version) ?? STRUCTURAL_NODE_TYPE;
 }
 
 /** the save-path problems of one group in `graph` ([] = valid) */
-function groupProblems(graph: WorkflowGraph, group: WorkflowNodeGroup, types?: NodeDescriptionLookup) {
+function groupProblems(graph: WorkflowGraph, group: WorkflowNodeGroup, types?: NodeGroupingLookup) {
   return validateWorkflowNodeGroups(definitionOf(graph, [group]), lookupFor(types));
 }
 
@@ -196,7 +190,7 @@ function afterEdit(
   graph: WorkflowGraph,
   ref: ConnectionRef,
   edit: CrossingEdit,
-  types?: NodeDescriptionLookup,
+  types?: NodeGroupingLookup,
 ): WorkflowGraph {
   if (edit === 'connect') return extendGroupsForConnection(connect(graph, ref), ref, types).graph;
   if (edit === 'disconnect') return disconnect(graph, ref);
@@ -227,7 +221,7 @@ export function crossingEditError(
   graph: WorkflowGraph,
   ref: ConnectionRef,
   edit: CrossingEdit,
-  types?: NodeDescriptionLookup,
+  types?: NodeGroupingLookup,
 ): CrossingEditError | null {
   const touched = new Set(
     [groupOfId(graph, idOfName(graph, ref.target)), groupOfId(graph, idOfName(graph, ref.source))]
@@ -260,7 +254,7 @@ export interface GroupExtension {
 export function extendGroupsForConnection(
   graph: WorkflowGraph,
   ref: ConnectionRef,
-  types?: NodeDescriptionLookup,
+  types?: NodeGroupingLookup,
 ): GroupExtension {
   const sourceId = idOfName(graph, ref.source);
   const targetId = idOfName(graph, ref.target);
