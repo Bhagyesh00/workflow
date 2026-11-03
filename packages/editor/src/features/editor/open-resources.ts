@@ -25,16 +25,31 @@ export interface CredentialTarget {
 
 const EXECUTE_WORKFLOW = 'core.executeWorkflow';
 
+/** the same pattern the By URL mode of the Execute Workflow node extracts its id with */
+const WORKFLOW_URL_ID = /\/workflows?\/([0-9a-zA-Z_-]+)/;
+
+/** the workflow id a locator value stands for; null for an empty value, an expression or an unreadable URL */
+function readId(value: unknown, mode?: unknown): string | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const text = String(value).trim();
+  if (!text || text.startsWith('=')) return null;
+  if (mode === 'url') return WORKFLOW_URL_ID.exec(text)?.[1] ?? null;
+  return text;
+}
+
 /** the workflow id and cached name a node's workflowId parameter holds (plain string or resource locator) */
 function readTarget(node: WorkflowNode): { id: string; name: string } | null {
   if (node.type !== EXECUTE_WORKFLOW) return null;
   const source = node.parameters.source;
   if (source !== undefined && source !== 'database') return null;
   const raw = node.parameters.workflowId;
-  if (typeof raw === 'string') return raw.trim() ? { id: raw.trim(), name: '' } : null;
+  if (typeof raw === 'string') {
+    const id = readId(raw);
+    return id ? { id, name: '' } : null;
+  }
   if (raw && typeof raw === 'object') {
-    const rl = raw as { value?: unknown; cachedResultName?: unknown };
-    const id = typeof rl.value === 'string' || typeof rl.value === 'number' ? String(rl.value).trim() : '';
+    const rl = raw as { value?: unknown; mode?: unknown; cachedResultName?: unknown };
+    const id = readId(rl.value, rl.mode);
     if (!id) return null;
     return { id, name: typeof rl.cachedResultName === 'string' ? rl.cachedResultName.trim() : '' };
   }

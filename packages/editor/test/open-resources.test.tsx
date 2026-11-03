@@ -46,6 +46,20 @@ describe('targets (model)', () => {
     ]);
   });
 
+  it('reads the id out of a By URL value and skips values it cannot read', () => {
+    const nodes = [
+      child('Url', { __rl: true, mode: 'url', value: 'https://app.example.com/workflow/abc123' }),
+      child('Url plural', { __rl: true, mode: 'url', value: 'https://app.example.com/workflows/x_Y-9/edit' }),
+      child('Bad url', { __rl: true, mode: 'url', value: 'https://app.example.com/home' }),
+      child('Expr', { __rl: true, mode: 'id', value: '={{ $json.id }}' }),
+      child('Expr plain', '={{ $json.id }}'),
+    ];
+    expect(subWorkflowTargets(nodes)).toEqual([
+      { nodeName: 'Url', workflowId: 'abc123', label: 'abc123' },
+      { nodeName: 'Url plural', workflowId: 'x_Y-9', label: 'x_Y-9' },
+    ]);
+  });
+
   it('lists each credential once, by id, with its type; skips unsaved ones', () => {
     const nodes = [
       node('A', { credentials: { httpBasicAuth: { id: 'c1', name: 'Shop login' } } }),
@@ -80,6 +94,15 @@ describe('opening', () => {
     expect(String(url)).toMatch(/\/workflow\/wf%20a%2F1$/);
     expect(target).toBe('_blank');
     expect(features).toBe('noopener,noreferrer');
+  });
+
+  it('opens a By URL sub-workflow at its id, not at the whole address', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    useWorkflowStore.setState({
+      nodes: [child('Call', { __rl: true, mode: 'url', value: 'https://app.example.com/workflow/abc123' })],
+    });
+    openSubWorkflow('Call');
+    expect(String(open.mock.calls[0][0])).toMatch(/\/workflow\/abc123$/);
   });
 
   it('openCredential sets the id the host shows', () => {
@@ -158,6 +181,24 @@ describe('in the editor', () => {
     await screen.findByDisplayValue('Shop login', {}, { timeout: 10_000 });
     act(() => useUiStore.getState().setOpenCredentialId(null));
     await waitFor(() => expect(screen.queryByDisplayValue('Shop login')).toBeNull());
+  });
+
+  it('a credential that no longer exists shows a not-found error, not an empty form', async () => {
+    const mock = signedIn();
+    const wf = mock.seedWorkflow({
+      name: 'Parent',
+      nodes: [
+        trigger,
+        node('Shape', { id: 'n3', credentials: { httpBasicAuth: { id: 'gone', name: 'Old login' } } }),
+      ],
+      connections: {},
+    });
+    await openEditor(wf.id);
+    act(() => openCredential('gone'));
+    expect(await screen.findByText("Couldn't load the credential", {}, { timeout: 10_000 })).toBeTruthy();
+    expect(screen.queryByText('Unknown credential type')).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Name' })).toBeNull();
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('both commands are absent when the workflow has no targets', async () => {

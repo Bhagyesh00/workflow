@@ -214,6 +214,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
   );
 
   const loading = Boolean(credentialId) && existing.isLoading;
+  const loadFailed = Boolean(credentialId) && existing.isError;
   return (
     <Dialog
       open={open}
@@ -275,7 +276,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
             variant="primary"
             onClick={() => save.mutate()}
             loading={save.isPending}
-            disabled={!typeName}
+            disabled={!typeName || loadFailed}
           >
             Save
           </Button>
@@ -284,6 +285,10 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
     >
       {loading ? (
         <PageLoader />
+      ) : loadFailed ? (
+        <Callout tone="err" title="Couldn't load the credential">
+          {errorMessage(existing.error)}
+        </Callout>
       ) : !typeDescription ? (
         <Callout tone="err" title="Unknown credential type">
           The type “{typeName}” is not available on this server.
