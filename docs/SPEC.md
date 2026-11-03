@@ -31,11 +31,14 @@
 | Rename node rewrites `$('Name')` / `$node["Name"]` references                                                                       | M1  | ✅ (`renameNodeInDefinition`) · 🔨 UI |
 | Tags, workflow settings modal, version history panel with restore                                                                   | M1  | 🔨                                    |
 | Dark theme, white-label theming from tenant settings                                                                                | M1  | 🔨                                    |
-| Command bar (Cmd/Ctrl+K), context menu, auto-layout ("tidy up")                                                                     | M2  | 📋                                    |
-| Canvas groups, convert selection to sub-workflow                                                                                    | M2  | 📋                                    |
-| Dirty-node tracking so partial runs restart from the first changed node                                                             | M2  | 📋                                    |
-| Folders, favorites, archive (soft delete)                                                                                           | M2  | 📋                                    |
-| Binary previews (image/PDF/audio) in NDV                                                                                            | M2  | 📋                                    |
+| Command bar (Cmd/Ctrl+K), context menu, auto-layout ("tidy up")                                                                     | M2  | ✅                                    |
+| Canvas groups, convert selection to sub-workflow                                                                                    | M2  | ✅                                    |
+| Dirty-node tracking so partial runs restart from the first changed node                                                             | M2  | ✅                                    |
+| Folders, favorites, archive (soft delete)                                                                                           | M2  | ✅                                    |
+| Folder tags                                                                                                                         | M2  | ✅                                    |
+| Binary previews in NDV: image, PDF, audio, video, JSON, text, markdown, sandboxed HTML                                              | M2  | ✅                                    |
+| Import a workflow from a URL (fetched by the server, SSRF-guarded)                                                                  | M2  | ✅                                    |
+| Autosave of the draft                                                                                                               | M2  | ✅                                    |
 | UI localisation                                                                                                                     | M3  | 📋                                    |
 | Real-time co-editing; meanwhile a read-only lock while another user edits                                                           | M3  | 📋                                    |
 
@@ -90,16 +93,16 @@
 
 ### 1.5 Executions and debugging
 
-| Capability                                                                                                  | M   | Status                |
-| ----------------------------------------------------------------------------------------------------------- | --- | --------------------- |
-| Manual full runs, partial runs up to a node, pinned data                                                    | M1  | ✅ engine · 🔨 UI     |
-| Production executions from active triggers                                                                  | M1  | 🔨                    |
-| Execution list (filters: workflow, status), detail view with run data, retry, stop, delete                  | M1  | 🔨                    |
-| Custom execution data (10 keys)                                                                             | M1  | ✅                    |
-| Per-workflow settings: save success/error/manual/progress, timeout, timezone, error workflow, caller policy | M1  | ✅ engine · 🔨 server |
-| Cancellation and timeouts through the whole stack (including the Code sandbox)                              | M1  | ✅                    |
-| Debug a past run in the editor (load its data as pinned data)                                               | M2  | 📋                    |
-| Execution annotations, redaction policies                                                                   | M2  | 📋                    |
+| Capability                                                                                                  | M   | Status                        |
+| ----------------------------------------------------------------------------------------------------------- | --- | ----------------------------- |
+| Manual full runs, partial runs up to a node, pinned data                                                    | M1  | ✅ engine · 🔨 UI             |
+| Production executions from active triggers                                                                  | M1  | 🔨                            |
+| Execution list (filters: workflow, status), detail view with run data, retry, stop, delete                  | M1  | 🔨                            |
+| Custom execution data (10 keys)                                                                             | M1  | ✅                            |
+| Per-workflow settings: save success/error/manual/progress, timeout, timezone, error workflow, caller policy | M1  | ✅ engine · 🔨 server         |
+| Cancellation and timeouts through the whole stack (including the Code sandbox)                              | M1  | ✅                            |
+| Debug a past run in the editor (load its data as pinned data)                                               | M2  | 📋                            |
+| Execution annotations (tags, rating), redaction policies                                                    | M2  | ✅ annotations · 📋 redaction |
 
 ### 1.6 Error handling
 
@@ -198,10 +201,12 @@
 | Capability                                                                        | M   | Status |
 | --------------------------------------------------------------------------------- | --- | ------ |
 | Version on every save, restore, optimistic concurrency (409)                      | M1  | 🔨     |
-| Semantic diff, named versions, publish vs save, in-flight version pinning (NF-10) | M1  | 📋     |
+| Semantic diff, named versions, publish vs save, in-flight version pinning (NF-10) | M1  | ✅     |
 | Git sync, workflow-as-code SDK and CLI (NF-11)                                    | M2  | 📋     |
 | Environments / workspace forks with credential bindings (NF-13)                   | M3  | 📋     |
-| Workflow reviews/approvals before publish                                         | M3  | 📋     |
+| Workflow reviews/approvals before publish                                         | M3  | ✅     |
+| Publish timeline                                                                  | M2  | ✅     |
+| Version history compaction (hourly optimize, daily trim)                          | M2  | ✅     |
 
 ### 1.15 Observability, scaling, APIs
 
@@ -211,6 +216,7 @@
 | Regular mode and queue mode (BullMQ workers), Redis pub/sub push         | M1  | 🔨     |
 | Execution pruning                                                        | M1  | 🔨     |
 | Public REST API `/api/v1` with OpenAPI document                          | M1  | 🔨     |
+| Public API folder routes                                                 | M2  | ✅     |
 | Docker image + docker-compose (Postgres+pgvector, Redis, main, worker)   | M1  | 🔨     |
 | Insights dashboard (runs, failures, duration, time saved)                | M2  | 📋     |
 | OpenTelemetry traces, log streaming (webhook/syslog/Sentry)              | M2  | 📋     |
