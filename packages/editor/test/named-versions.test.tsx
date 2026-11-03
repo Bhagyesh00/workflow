@@ -73,11 +73,35 @@ describe('P3-10 publish vs save', () => {
 
     await waitFor(() => expect(useWorkflowStore.getState().meta.publishedVersionId).toBe(wf.versionId));
     const activate = requests().find((r) => r.method === 'POST' && r.path.endsWith('/activate'));
-    expect(activate?.body).toEqual({ versionName: 'Launch', description: 'First live version' });
+    expect(activate?.body).toEqual({
+      versionId: wf.versionId,
+      versionName: 'Launch',
+      description: 'First live version',
+    });
     const stored = backend().versions.find((v) => v.versionId === wf.versionId);
     expect(stored).toMatchObject({ versionName: 'Launch', description: 'First live version' });
     expect(chip().textContent).toBe('Published');
     expect(screen.queryByRole('dialog', { name: 'Publish workflow' })).toBeNull();
+  });
+
+  it('publishes the version the editor shows, not a draft someone else saved in the meantime', async () => {
+    const user = userEvent.setup();
+    const wf = seed();
+    await openEditor(wf.id);
+    await user.click(screen.getByRole('button', { name: 'Publish' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Publish workflow' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Version name' }), 'Release 3');
+
+    // another editor saves a new draft while the dialog is open
+    const stored = backend().workflows[0];
+    const mine = backend().versions.find((v) => v.versionId === wf.versionId)!;
+    backend().versions.push({ ...mine, versionId: 'their-draft', versionName: null });
+    stored.versionId = 'their-draft';
+
+    await user.click(within(dialog).getByRole('button', { name: 'Publish' }));
+    await waitFor(() => expect(stored.publishedVersionId).toBe(wf.versionId));
+    expect(backend().versions.find((v) => v.versionId === wf.versionId)?.versionName).toBe('Release 3');
+    expect(backend().versions.find((v) => v.versionId === 'their-draft')?.versionName).toBeNull();
   });
 
   it('a save of a published workflow makes no activate call and shows that the draft has changes', async () => {

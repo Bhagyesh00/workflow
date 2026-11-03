@@ -52,12 +52,16 @@ export async function requestPublish(versionId: string | null = null): Promise<v
   useUiStore.getState().setPublishDialogOpen(true);
 }
 
-/** the saved id of the open workflow; unsaved changes are saved first (the draft is what goes live) */
-async function savedId(deps: EditorDeps): Promise<string | null> {
+/**
+ * The saved id and version of the open workflow; unsaved changes are saved first (the draft is what
+ * goes live). The version is the one this editor shows, so a draft someone else saves meanwhile is
+ * not published under this user's name and description.
+ */
+async function savedDraft(deps: EditorDeps): Promise<{ id: string; versionId?: string } | null> {
   const s = useWorkflowStore.getState();
-  if (s.meta.id && !s.dirty) return s.meta.id;
+  if (s.meta.id && !s.dirty) return { id: s.meta.id, versionId: s.meta.versionId };
   const dto = await saveWorkflow(deps);
-  return dto?.id ?? null;
+  return dto ? { id: dto.id, versionId: dto.versionId } : null;
 }
 
 function bumpRevision() {
@@ -67,10 +71,15 @@ function bumpRevision() {
 /** Resolves true when the workflow is published afterwards. */
 export async function publishWorkflow(deps: EditorDeps, body: PublishBody = {}): Promise<boolean> {
   // publishing a named earlier version leaves the draft alone
-  const id = body.versionId ? useWorkflowStore.getState().meta.id : await savedId(deps);
-  if (!id) return false;
+  const target = body.versionId
+    ? { id: useWorkflowStore.getState().meta.id, versionId: body.versionId }
+    : await savedDraft(deps);
+  if (!target?.id) return false;
   try {
-    const dto = await workflowsApi.activate(id, body);
+    const dto = await workflowsApi.activate(
+      target.id,
+      target.versionId ? { ...body, versionId: target.versionId } : body,
+    );
     useWorkflowStore.getState().setPublished(dto.publishedVersionId, dto.versionId);
     useUiStore.getState().setActivationErrors(null);
     toast.success('Workflow published');
