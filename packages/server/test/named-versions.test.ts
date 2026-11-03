@@ -159,6 +159,40 @@ describe('P3-10 save vs publish', () => {
     expect((await server.ctx.repos.workflows.get(tenant.id, wf.id))?.active).toBe(false);
   });
 
+  it('a publish whose version compaction deletes while it waits for the workflow row rolls back', async () => {
+    const { client, tenant } = await signup(server.app);
+    const wf = await createWorkflow(client, answering('pruned', 'v1'));
+    await save(client, wf.id, answering('pruned', 'v2'));
+    // history compaction (P3-18) holds the workflow row and has deleted v1, not committed yet
+    const compaction = await server.ctx.database.pool.connect();
+    let publishing: ReturnType<Client['post']> | undefined;
+    try {
+      await compaction.query('BEGIN');
+      await compaction.query('SELECT 1 FROM workflows WHERE id = $1 FOR UPDATE', [wf.id]);
+      await compaction.query('DELETE FROM workflow_versions WHERE id = $1', [wf.versionId]);
+      publishing = client.post(`/rest/workflows/${wf.id}/activate`, { versionId: wf.versionId });
+      await waitFor(
+        async () => {
+          const { rows } = await server.ctx.database.pool.query(
+            `SELECT count(*)::int AS waiting FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+          );
+          return rows[0].waiting > 0;
+        },
+        { message: 'the publish waiting for the workflow row' },
+      );
+      await compaction.query('COMMIT');
+    } finally {
+      compaction.release();
+    }
+    expect((await publishing)?.statusCode).toBe(404);
+    expect(await server.ctx.repos.workflows.get(tenant.id, wf.id)).toMatchObject({
+      active: false,
+      publishedVersionId: null,
+    });
+    expect((await hit(tenant.slug, 'pruned')).statusCode).toBe(404);
+  });
+
   it('applies a settings change of a published workflow without a publish', async () => {
     const { client, tenant } = await signup(server.app);
     const handler = await createWorkflow(client, {

@@ -484,6 +484,9 @@ export class ActiveWorkflowManager {
         })),
       );
       await r.workflows.setPublished(tenantId, workflowId, versionId);
+      // history compaction deletes versions under this row lock (P3-18): a version it removed before
+      // the pointer write is gone now, so the publish rolls back instead of pointing at a missing row
+      if (!(await r.versions.get(tenantId, workflowId, versionId))) throw ApiError.notFound('Version');
     });
   }
 
