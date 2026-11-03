@@ -815,6 +815,13 @@ export class MockBackend {
         'OAuth2 sign-in needs a running server; it is not available in this demo.',
       );
     });
+    this.on('GET', '/oauth1/authorize', () => {
+      throw new HttpError(
+        400,
+        'not_available',
+        'OAuth1 sign-in needs a running server; it is not available in this demo.',
+      );
+    });
 
     // --- tags, variables -----------------------------------------------------------------------------
     this.on('GET', '/tags', () => {

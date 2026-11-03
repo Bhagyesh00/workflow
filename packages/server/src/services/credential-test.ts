@@ -10,8 +10,10 @@ import {
   oauth2Request,
 } from '@workflow/core';
 import {
+  assertCredentialUrlAllowed,
   type DataObject,
   evaluateSimple,
+  getCredentialAllowedDomains,
   type HttpFullResponse,
   type HttpRequestOptions,
   isExpression,
@@ -47,7 +49,14 @@ export async function testCredential(
   const resolvedType = credentials.resolvedType(type);
   const full = credentials.withDefaults(type, data);
   const isOAuth2 = credentials.types.isA(type, 'oAuth2Api');
+  const isOAuth1 = credentials.types.isA(type, 'oAuth1Api');
   if (!resolvedType.test) {
+    if (isOAuth1) {
+      const connected = Boolean((full.oauthTokenData as DataObject | undefined)?.oauth_token);
+      return connected
+        ? { status: 'OK', message: 'The account is connected' }
+        : { status: 'Error', message: 'The account is not connected yet' };
+    }
     if (isOAuth2) {
       const connected = Boolean((full.oauthTokenData as DataObject | undefined)?.access_token);
       return connected
@@ -64,6 +73,11 @@ export async function testCredential(
       ignoreHttpStatusErrors: true,
       returnFullResponse: true,
     };
+    // the credential's allowed domains hold for its own test request too: the first URL here, and
+    // every redirect hop in the client (`none` does not apply: the test URL is not a user-typed URL)
+    const allowedDomains = getCredentialAllowedDomains(full, { userUrl: false });
+    assertCredentialUrlAllowed(base.url, allowedDomains);
+    if (allowedDomains) base.allowedDomains = allowedDomains;
     let response: HttpFullResponse;
     if (isOAuth2) {
       response = (await oauth2Request(http, full as OAuth2Data, base, async () => {})) as HttpFullResponse;

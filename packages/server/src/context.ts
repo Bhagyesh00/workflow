@@ -17,6 +17,7 @@ import { CredentialService } from './services/credentials';
 import { ExecutionService } from './services/executions';
 import { Pruner, WaitTracker } from './services/maintenance';
 import { Metrics } from './services/metrics';
+import { OAuth1Service } from './services/oauth1';
 import { OAuth2Service } from './services/oauth2';
 import { ExecutionQueue, type Leadership, RedisLeader, SingleLeader } from './services/queue';
 import {
@@ -43,6 +44,7 @@ export interface ServerContext {
   metrics: Metrics;
   credentials: CredentialService;
   auth: AuthService;
+  oauth1: OAuth1Service;
   oauth2: OAuth2Service;
   executions: ExecutionService;
   activeWorkflows: ActiveWorkflowManager;
@@ -109,6 +111,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   });
   const credentials = new CredentialService(repos, cipher, registries.credentialTypes);
   const auth = new AuthService(config, database, repos);
+  const oauth1 = new OAuth1Service(config, repos, credentials, cipher, http, redis);
   const oauth2 = new OAuth2Service(config, repos, credentials, cipher, http);
   const executions = new ExecutionService({
     config,
@@ -173,6 +176,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     metrics,
     credentials,
     auth,
+    oauth1,
     oauth2,
     executions,
     activeWorkflows,

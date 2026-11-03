@@ -808,6 +808,7 @@ export const demoCredentialTypes: CredentialTypeDescription[] = [
     ],
     hasAuthenticate: true,
     isOAuth2: false,
+    isOAuth1: false,
     test: { request: { url: 'https://example.com' } },
   },
   {
@@ -820,6 +821,7 @@ export const demoCredentialTypes: CredentialTypeDescription[] = [
     ],
     hasAuthenticate: true,
     isOAuth2: false,
+    isOAuth1: false,
   },
   {
     name: 'crmApi',
@@ -846,6 +848,7 @@ export const demoCredentialTypes: CredentialTypeDescription[] = [
     ],
     hasAuthenticate: true,
     isOAuth2: false,
+    isOAuth1: false,
     test: { request: { url: 'https://crm.example.com/me' } },
   },
   {
@@ -866,6 +869,28 @@ export const demoCredentialTypes: CredentialTypeDescription[] = [
     ],
     hasAuthenticate: false,
     isOAuth2: true,
+    isOAuth1: false,
+  },
+  {
+    name: 'oAuth1Api',
+    displayName: 'OAuth1 API',
+    icon: 'lucide:shield-check',
+    properties: [
+      { displayName: 'Consumer Key', name: 'consumerKey', type: 'string', default: '' },
+      {
+        displayName: 'Consumer Secret',
+        name: 'consumerSecret',
+        type: 'string',
+        default: '',
+        typeOptions: { password: true },
+      },
+      { displayName: 'Request Token URL', name: 'requestTokenUrl', type: 'string', default: '' },
+      { displayName: 'Authorization URL', name: 'authUrl', type: 'string', default: '' },
+      { displayName: 'Access Token URL', name: 'accessTokenUrl', type: 'string', default: '' },
+    ],
+    hasAuthenticate: false,
+    isOAuth2: false,
+    isOAuth1: true,
   },
 ];
 

@@ -74,9 +74,11 @@ export function CredentialTypePicker({
                   <span className="block truncate text-xs text-ink-3">
                     {t.isOAuth2
                       ? 'OAuth2 sign-in'
-                      : t.properties.some((p) => p.typeOptions?.password)
-                        ? 'API key or password'
-                        : 'Connection settings'}
+                      : t.isOAuth1
+                        ? 'OAuth1 sign-in'
+                        : t.properties.some((p) => p.typeOptions?.password)
+                          ? 'API key or password'
+                          : 'Connection settings'}
                   </span>
                 </span>
               </button>

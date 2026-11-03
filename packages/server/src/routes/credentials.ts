@@ -1,7 +1,7 @@
 /** /rest/credentials/* and /rest/oauth2/* */
 import { randomBytes } from 'node:crypto';
 import type { DataObject } from '@workflow/workflow';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import type { CredentialRow } from '../db/schema';
@@ -133,6 +133,57 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     }
     credentials.resolvedType(body.type);
     return { data: await testCredential(credentials, ctx.http, body.type, data) };
+  });
+
+  app.get('/oauth1/authorize', async (request) => {
+    const auth = requireRole(request, 'editor');
+    const { credentialId } = parse(z.object({ credentialId: z.uuid() }), request.query);
+    return { data: { url: await ctx.oauth1.authorizeUrl(auth.tenant.id, auth.user.id, credentialId) } };
+  });
+
+  const popupReply = (reply: FastifyReply, status: number, nonce: string, body: string) =>
+    reply
+      .status(status)
+      .header('content-type', 'text/html; charset=utf-8')
+      .header('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; base-uri 'none'`)
+      .header('cache-control', 'no-store')
+      // the page came back from the provider's origin: keep its opener so it can post the result
+      .header('cross-origin-opener-policy', 'unsafe-none')
+      .send(body);
+
+  // the provider redirects the popup here; the signed state (not the session) identifies the tenant
+  app.get('/oauth1/callback', { logLevel: 'warn' }, async (request, reply) => {
+    const query = parse(
+      z.object({
+        oauth_token: z.string().max(1024).optional(),
+        oauth_verifier: z.string().max(1024).optional(),
+        denied: z.string().max(1024).optional(),
+        state: z.string().max(8192).optional(),
+      }),
+      request.query,
+    );
+    const nonce = randomBytes(16).toString('base64');
+    const origin = new URL(config.baseUrl).origin;
+    try {
+      if (!query.state) throw ApiError.badRequest('The authorization response is incomplete');
+      const result = await ctx.oauth1.callback(query, query.state);
+      return popupReply(
+        reply,
+        200,
+        nonce,
+        oauthCallbackPage(origin, nonce, { status: 'success', credentialId: result.credentialId }),
+      );
+    } catch (error) {
+      return popupReply(
+        reply,
+        400,
+        nonce,
+        oauthCallbackPage(origin, nonce, {
+          status: 'error',
+          message: (error as Error).message.slice(0, 300),
+        }),
+      );
+    }
   });
 
   app.get('/oauth2/authorize', async (request) => {

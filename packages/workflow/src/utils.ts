@@ -85,3 +85,23 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     );
   });
 }
+
+/**
+ * The name/value pairs of a form-urlencoded body: one rule for the HTTP client that sends it and the
+ * OAuth1 signer that signs it. A string is parsed as a query string; for an object, undefined values
+ * are left out, null is an empty value, arrays repeat the name, and objects are sent as JSON.
+ */
+export function formEntries(body: unknown): Array<[string, string]> {
+  if (body === undefined || body === null) return [];
+  if (typeof body === 'string' || body instanceof URLSearchParams) return [...new URLSearchParams(body)];
+  if (typeof body !== 'object') return [];
+  const out: Array<[string, string]> = [];
+  const text = (value: unknown) =>
+    value === null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+  for (const [name, value] of Object.entries(body as Record<string, unknown>)) {
+    for (const entry of Array.isArray(value) ? value : [value]) {
+      if (entry !== undefined) out.push([name, text(entry)]);
+    }
+  }
+  return out;
+}

@@ -1,7 +1,7 @@
 /**
  * Create / edit a credential. The form is rendered from the credential type's properties;
  * secrets come back as `__REDACTED__` and are sent back unchanged unless replaced.
- * OAuth2 types connect through a popup (GET /oauth2/authorize, then a window message).
+ * OAuth2 and OAuth1 types connect through a popup (GET /oauth2/authorize or /oauth1/authorize, then a window message).
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type NodeParameters, resolveNodeParameters, type WorkflowNode } from '@workflow/workflow';
@@ -62,6 +62,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
   });
   const typeName = existing.data?.type ?? type ?? '';
   const typeDescription = credentialTypes.get(typeName);
+  const isOAuth = Boolean(typeDescription?.isOAuth2 || typeDescription?.isOAuth1);
   const properties = useMemo(() => credentialTypes.properties(typeName), [credentialTypes, typeName]);
 
   const [name, setName] = useState('');
@@ -110,7 +111,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
       await queryClient.invalidateQueries({ queryKey: queryKeys.credential(credential.id) });
       toast.success('Credential saved', credential.name);
       onSaved?.(credential);
-      if (!typeDescription?.isOAuth2) onClose();
+      if (!isOAuth) onClose();
     },
     onError: (error) => toast.error('Could not save the credential', errorMessage(error)),
   });
@@ -125,7 +126,9 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
     if (!savedId) return;
     cleanupRef.current?.();
     try {
-      const { url } = await credentialsApi.oauth2Authorize(savedId);
+      const { url } = await (typeDescription?.isOAuth1
+        ? credentialsApi.oauth1Authorize(savedId)
+        : credentialsApi.oauth2Authorize(savedId));
       const target = new URL(url, window.location.origin);
       if (target.protocol !== 'https:' && target.protocol !== 'http:')
         throw new Error('Unsupported authorization URL');
@@ -259,7 +262,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
               Test connection
             </Button>
           )}
-          {typeDescription?.isOAuth2 && savedId && (
+          {isOAuth && savedId && (
             <Button
               icon={<Link2 size={14} />}
               onClick={() => void connectOAuth()}
@@ -295,7 +298,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
           <ParameterContext.Provider value={context}>
             <ParameterList properties={properties} values={data} path={[]} />
           </ParameterContext.Provider>
-          {typeDescription.isOAuth2 && !savedId && (
+          {isOAuth && !savedId && (
             <Callout tone="info">Save the credential first, then connect your account.</Callout>
           )}
           {oauthState === 'connected' && <Callout tone="ok">Account connected.</Callout>}

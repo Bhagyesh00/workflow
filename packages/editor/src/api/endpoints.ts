@@ -129,6 +129,7 @@ export const credentialsApi = {
   remove: (id: string) => api.delete<{ ok: true }>(`/credentials/${enc(id)}`),
   test: (body: { type: string; data: Record<string, unknown>; id?: string }) =>
     api.post<CredentialTestResult>('/credentials/test', body),
+  oauth1Authorize: (credentialId: string) => api.get<{ url: string }>('/oauth1/authorize', { credentialId }),
   oauth2Authorize: (credentialId: string) => api.get<{ url: string }>('/oauth2/authorize', { credentialId }),
 };
 

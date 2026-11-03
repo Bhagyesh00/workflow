@@ -5,7 +5,13 @@
  */
 import dns from 'node:dns';
 import net from 'node:net';
-import type { AllowedHost, HttpFullResponse, HttpRequestOptions, ResolvedAddress } from '@workflow/workflow';
+import {
+  type AllowedHost,
+  formEntries,
+  type HttpFullResponse,
+  type HttpRequestOptions,
+  type ResolvedAddress,
+} from '@workflow/workflow';
 import ipaddr from 'ipaddr.js';
 import {
   Agent,
@@ -307,10 +313,8 @@ export class HttpClient {
         body = JSON.stringify(options.body);
         headers['content-type'] ??= 'application/json';
       } else if (bodyType === 'form-urlencoded') {
-        body = new URLSearchParams();
-        for (const [k, v] of Object.entries((options.body ?? {}) as Record<string, unknown>)) {
-          for (const entry of Array.isArray(v) ? v : [v]) body.append(k, String(entry));
-        }
+        // the same pairs the OAuth1 signer signs (formEntries)
+        body = new URLSearchParams(formEntries(options.body));
         headers['content-type'] ??= 'application/x-www-form-urlencoded';
       } else if (bodyType === 'multipart') {
         const form = new FormData();

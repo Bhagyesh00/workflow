@@ -177,6 +177,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         ...rest,
         extends: type.extends,
         hasAuthenticate: Boolean(authenticate),
+        isOAuth1: registries.credentialTypes.isA(type.name, 'oAuth1Api'),
         isOAuth2: registries.credentialTypes.isA(type.name, 'oAuth2Api'),
       }) as CredentialTypeDescription;
     });
