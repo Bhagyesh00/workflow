@@ -354,6 +354,26 @@ export const webhookIdempotency = pgTable(
   ],
 );
 
+/**
+ * Last cron slot a Schedule Trigger rule fired or dropped, so a restart can find the missed slots
+ * and two leaders cannot both run one. `rule_key` is a hash of the cron expression and timezone.
+ */
+export const scheduleSlots = pgTable(
+  'schedule_slots',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    workflowId: uuid('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    nodeName: text('node_name').notNull(),
+    ruleKey: text('rule_key').notNull(),
+    lastSlot: timestamp('last_slot', { withTimezone: true }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workflowId, t.nodeName, t.ruleKey] })],
+);
+
 export type Role = 'owner' | 'admin' | 'editor' | 'viewer';
 
 export type TenantRow = typeof tenants.$inferSelect;

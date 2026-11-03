@@ -85,14 +85,6 @@ describe('Phase 2 repository stubs', () => {
     expect(typeof repos.staticData.merge).toBe('function');
     expect(typeof repos.scheduleSlots.storeFor).toBe('function');
   });
-
-  it('gives an unrestricted slot store until missed schedules are built', async () => {
-    const store = repos.scheduleSlots.storeFor('t1', 'w1', 'Schedule', 45);
-    expect(store.defaultGraceSeconds).toBe(45);
-    expect(await store.last('rule')).toBeUndefined();
-    expect(await store.claim('rule', new Date())).toBe(true);
-    await expect(store.reset('rule', new Date())).resolves.toBeUndefined();
-  });
 });
 
 // ---------------------------------------------------------------------------------------------
