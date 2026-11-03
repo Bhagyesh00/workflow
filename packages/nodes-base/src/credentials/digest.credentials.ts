@@ -1,7 +1,5 @@
 /**
- * Digest Auth credential.
- *
- * STUB from the Phase 2 contract step (C0a); lane L6 writes `authenticate` (auth scheme `digest`).
+ * Digest Auth credential: the HTTP client answers the server's Digest challenge with one retry.
  */
 import type { CredentialType } from '@workflow/workflow';
 
@@ -19,4 +17,12 @@ export const httpDigestAuth: CredentialType = {
       typeOptions: { password: true },
     },
   ],
+  authenticate: async (credentials, request) => ({
+    ...request,
+    auth: {
+      username: String(credentials.user ?? ''),
+      password: String(credentials.password ?? ''),
+      scheme: 'digest',
+    },
+  }),
 };
