@@ -140,20 +140,26 @@ function TableView({ items, source }: { items: Item[]; source?: DragSource }) {
   );
 }
 
+/** entries an open JSON node shows; the rest is a count */
+export const JSON_SHOWN_ENTRIES = 200;
+
 export function JsonNode({
   name,
   value,
   path,
   source,
   depth,
+  openDepth = 3,
 }: {
   name?: string | number;
   value: unknown;
   path: Array<string | number>;
   source?: DragSource;
   depth: number;
+  /** nodes above this depth start open */
+  openDepth?: number;
 }) {
-  const [open, setOpen] = useState(depth < 3);
+  const [open, setOpen] = useState(depth < openDepth);
   const kind = kindOf(value);
   const label =
     name === undefined ? null : (
@@ -190,7 +196,7 @@ export function JsonNode({
         {open && (
           <>
             <div className="ml-4 border-l border-line pl-2">
-              {entries.slice(0, 200).map(([k, v]) => (
+              {entries.slice(0, JSON_SHOWN_ENTRIES).map(([k, v]) => (
                 <JsonNode
                   key={String(k)}
                   name={k}
@@ -198,9 +204,12 @@ export function JsonNode({
                   path={[...path, k]}
                   source={source}
                   depth={depth + 1}
+                  openDepth={openDepth}
                 />
               ))}
-              {entries.length > 200 && <div className="text-ink-3">… {entries.length - 200} more</div>}
+              {entries.length > JSON_SHOWN_ENTRIES && (
+                <div className="text-ink-3">… {entries.length - JSON_SHOWN_ENTRIES} more</div>
+              )}
             </div>
             <span className="text-ink-2">{brackets[1]}</span>
           </>

@@ -6,8 +6,13 @@
  */
 import type { ReactNode } from 'react';
 
+/**
+ * Each alternative stops at the next character that could start another match of itself: a label
+ * never holds `[` and a link target never holds `[`, so a long line of `[`, `![` or `[a](` is
+ * scanned once, not once per start position (linear, not quadratic).
+ */
 const INLINE =
-  /(!\[[^\]]*\]\([^)\s]+\)|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*\s][^*]*\*|_[^_\s][^_]*_|`[^`]+`|\[[^\]]+\]\([^)\s]+\))/g;
+  /(!\[[^[\]]*\]\([^)\s[]+\)|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*\s][^*]*\*|_[^_\s][^_]*_|`[^`]+`|\[[^[\]]+\]\([^)\s[]+\))/g;
 
 /** blockquotes nest at most this deep; deeper markers stay text */
 const MAX_QUOTE_DEPTH = 8;
@@ -40,7 +45,7 @@ export function renderInline(text: string, keyPrefix = 'i'): ReactNode[] {
     if ((part.startsWith('*') && part.endsWith('*')) || (part.startsWith('_') && part.endsWith('_'))) {
       if (part.length > 2) return <em key={key}>{part.slice(1, -1)}</em>;
     }
-    const link = part.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
+    const link = part.match(/^\[([^[\]]+)\]\(([^)\s[]+)\)$/);
     if (link) {
       const href = safeHref(link[2]);
       return href ? (

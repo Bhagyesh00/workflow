@@ -94,6 +94,27 @@ describe('rich preview dialog', () => {
     expect(within(dialog).getByText('"deep"')).toBeTruthy();
   });
 
+  it('caps the JSON tree it mounts: a wide nested file opens fewer levels', async () => {
+    // 25 x 25 x 25 numbers: three open levels would mount over 16 000 nodes
+    const cube = Array.from({ length: 25 }, () => Array.from({ length: 25 }, () => Array(25).fill(7)));
+    const { container } = render(
+      <RichPreview
+        binary={bin({ mimeType: 'application/json', fileName: 'cube.json' })}
+        blob={new Blob([JSON.stringify(cube)], { type: 'application/json' })}
+      />,
+    );
+    await waitFor(() => expect(container.querySelector('button')).not.toBeNull());
+    expect(container.querySelectorAll('div').length).toBeLessThan(2500);
+    // the first two levels are open, the third is collapsed and opens on a click
+    expect(screen.getAllByText(/25 items/).length).toBe(625);
+    // leaf values (depth 3) are not mounted until their array opens
+    const leaves = () =>
+      [...container.querySelectorAll('span')].filter((el) => el.textContent === '7').length;
+    expect(leaves()).toBe(0);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Expand' })[0]);
+    expect(leaves()).toBe(25);
+  });
+
   it('shows invalid JSON as text', async () => {
     const dialog = await open(bin({ mimeType: 'text/json', fileName: 'broken.json', data: b64('{"a": ') }));
     expect(await within(dialog).findByText(/not valid JSON/)).toBeTruthy();
@@ -195,6 +216,33 @@ describe('markdown additions', () => {
     expect(cells[1].style.textAlign).toBe('right');
     expect(cells[1].querySelector('del')?.textContent).toBe('y');
     expect([...container.querySelectorAll('del')].map((d) => d.textContent)).toEqual(['y', 'gone']);
+  });
+
+  it('parses inline markup in linear time: long lines of [ and ![ do not freeze the tab', () => {
+    for (const line of [
+      '['.repeat(100_000),
+      '!['.repeat(50_000),
+      '[a]('.repeat(25_000),
+      '![a]('.repeat(20_000),
+    ]) {
+      const started = performance.now();
+      const { container, unmount } = render(<Markdown source={line} />);
+      expect(performance.now() - started).toBeLessThan(2000);
+      expect(container.textContent).toBe(line);
+      unmount();
+    }
+  });
+
+  it('still renders links and images as before', () => {
+    const { container } = render(
+      <Markdown source="see [docs](https://example.com/a_(b)) and ![logo](https://example.com/l.png) [x](javascript:alert(1))" />,
+    );
+    const link = container.querySelector('a');
+    expect(link?.getAttribute('href')).toBe('https://example.com/a_(b');
+    expect(link?.textContent).toBe('docs');
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.textContent).toContain('![logo](https://example.com/l.png)');
+    expect(container.querySelectorAll('a')).toHaveLength(1);
   });
 
   it('keeps deep blockquote nesting bounded', () => {

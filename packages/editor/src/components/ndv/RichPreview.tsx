@@ -1,13 +1,14 @@
 /**
  * Previews of video, JSON, text, markdown and HTML binaries (P3-14): kind from the base mime type,
  * never fileType; HTML in `<iframe sandbox="" srcdoc referrerpolicy="no-referrer">` with the CSP
- * meta (lib/html-preview.ts). Used by BinaryPreview, which has already checked the 25 MB cap and
- * typed the blob with the allow-listed mime type.
+ * meta (lib/html-preview.ts), or as text when the strip does not settle. Used by BinaryPreview,
+ * which has already checked the 25 MB cap and typed the blob with the allow-listed mime type.
  *
  * Video plays from an object URL in a native `<video controls>` (no autoplay), revoked on unmount.
- * JSON is the run data tree (RunDataView's JsonNode, three levels open); invalid JSON is shown as
- * text. Markdown renders through lib/markdown.tsx as React elements, so raw HTML and images stay
- * text. Other text/* is a `<pre>` block. Nothing here sets HTML on the editor page.
+ * JSON is the run data tree (RunDataView's JsonNode, three levels open, fewer when that would mount
+ * more than 2 000 nodes); invalid JSON is shown as text. Markdown renders through lib/markdown.tsx
+ * as React elements, so raw HTML and images stay text. Other text/* is a `<pre>` block. Nothing
+ * here sets HTML on the editor page.
  */
 import type { BinaryData } from '@workflow/workflow';
 import { useEffect, useMemo, useState } from 'react';
@@ -15,7 +16,7 @@ import { previewKind, readBlobText } from '../../lib/binary-preview';
 import { buildHtmlPreview } from '../../lib/html-preview';
 import { Markdown } from '../../lib/markdown';
 import { Spinner } from '../ui/misc';
-import { JsonNode } from './RunDataView';
+import { JSON_SHOWN_ENTRIES, JsonNode } from './RunDataView';
 
 export interface RichPreviewProps {
   binary: BinaryData;
@@ -69,12 +70,41 @@ function VideoPreview({ blob }: { blob: Blob }) {
 const textBlock =
   'wf-scroll max-h-[70vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-surface-2 p-3 font-mono text-xs leading-5 text-ink';
 
-type ParsedJson = { ok: true; value: unknown } | { ok: false };
+type ParsedJson = { ok: true; value: unknown; openDepth: number } | { ok: false };
+
+/** JSON nodes the preview mounts at most when it opens (a file under 25 MB can hold millions) */
+const JSON_NODE_BUDGET = 2000;
+const JSON_OPEN_LEVELS = 3;
+
+/**
+ * How many levels of `value` open at first: three, or fewer when opening a level would mount more
+ * than JSON_NODE_BUDGET nodes (an open node mounts up to JSON_SHOWN_ENTRIES children). The root
+ * always opens. The walk stops as soon as the budget is spent.
+ */
+function openLevels(value: unknown): number {
+  let level: unknown[] = [value];
+  let mounted = 1;
+  for (let depth = 0; depth < JSON_OPEN_LEVELS; depth++) {
+    const next: unknown[] = [];
+    for (const node of level) {
+      if (!node || typeof node !== 'object') continue;
+      const children = Array.isArray(node) ? node : Object.values(node);
+      for (const child of children.slice(0, JSON_SHOWN_ENTRIES)) {
+        next.push(child);
+        if (mounted + next.length > JSON_NODE_BUDGET) return Math.max(depth, 1);
+      }
+    }
+    mounted += next.length;
+    level = next;
+  }
+  return JSON_OPEN_LEVELS;
+}
 
 function JsonPreview({ text }: { text: string }) {
   const parsed = useMemo<ParsedJson>(() => {
     try {
-      return { ok: true, value: JSON.parse(text) as unknown };
+      const value = JSON.parse(text) as unknown;
+      return { ok: true, value, openDepth: openLevels(value) };
     } catch {
       return { ok: false };
     }
@@ -89,7 +119,7 @@ function JsonPreview({ text }: { text: string }) {
   }
   return (
     <div className="wf-scroll max-h-[70vh] overflow-auto rounded-lg border border-line bg-surface-2 p-2 font-mono text-xs leading-5">
-      <JsonNode value={parsed.value} path={[]} depth={0} />
+      <JsonNode value={parsed.value} path={[]} depth={0} openDepth={parsed.openDepth} />
     </div>
   );
 }
@@ -102,6 +132,14 @@ const markdownBody = [
 
 function HtmlPreview({ text, title }: { text: string; title: string }) {
   const srcDoc = useMemo(() => buildHtmlPreview(text), [text]);
+  if (srcDoc === null) {
+    return (
+      <div className="space-y-2">
+        <p className="text-xs text-ink-3">This HTML file can't be shown safely, so it is shown as text.</p>
+        <pre className={textBlock}>{text}</pre>
+      </div>
+    );
+  }
   return (
     <iframe
       title={title}

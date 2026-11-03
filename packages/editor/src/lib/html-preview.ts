@@ -6,7 +6,8 @@
  * from the network (only inline styles and data: images), and a DOMParser strip of active
  * elements and attributes, so scripts, frames, plugins, forms, base and meta tags, event
  * handlers and link targets never reach the frame. DOMParser builds an inert document: nothing in
- * it runs or loads while it is cleaned.
+ * it runs or loads while it is cleaned. The strip runs again on its own output until a parse finds
+ * nothing to remove (at most three rounds, else the file is shown as text).
  */
 
 /** The policy of the preview frame. */
@@ -38,21 +39,49 @@ const ACTIVE_ELEMENTS = [
 /** attributes that navigate, submit or ping (event handlers `on*` are removed too) */
 const ACTIVE_ATTRIBUTES = new Set(['href', 'xlink:href', 'target', 'ping', 'action', 'formaction', 'srcdoc']);
 
-/** The head and body markup of `html` with every active element and attribute removed. */
-export function stripActiveHtml(html: string): string {
+/** strip and serialize rounds before a file that keeps changing is shown as text */
+const MAX_STRIP_ROUNDS = 3;
+
+/** One parse and strip: the head and body markup, and whether anything was removed. */
+function stripOnce(html: string): { markup: string; removed: boolean } {
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  for (const element of [...doc.querySelectorAll(ACTIVE_ELEMENTS.join(','))]) element.remove();
+  let removed = false;
+  for (const element of [...doc.querySelectorAll(ACTIVE_ELEMENTS.join(','))]) {
+    element.remove();
+    removed = true;
+  }
   for (const element of [...doc.querySelectorAll('*')]) {
     for (const { name } of [...element.attributes]) {
       const lower = name.toLowerCase();
-      if (lower.startsWith('on') || ACTIVE_ATTRIBUTES.has(lower)) element.removeAttribute(name);
+      if (lower.startsWith('on') || ACTIVE_ATTRIBUTES.has(lower)) {
+        element.removeAttribute(name);
+        removed = true;
+      }
     }
   }
   // a frameset document has no body once the frameset is removed
-  return (doc.head?.innerHTML ?? '') + (doc.body?.innerHTML ?? '');
+  return { markup: (doc.head?.innerHTML ?? '') + (doc.body?.innerHTML ?? ''), removed };
 }
 
-/** The srcdoc of the preview frame: the CSP meta first, then the stripped document. */
-export function buildHtmlPreview(html: string): string {
-  return CSP_META + stripActiveHtml(html);
+/**
+ * The head and body markup of `html` with every active element and attribute removed, or null
+ * when no clean markup is reached within three rounds. The frame parses the serialized markup
+ * again, and a second parse can build a different tree (mutation XSS through math, svg and style),
+ * so each serialized result is parsed and stripped again until a parse finds nothing to remove.
+ */
+export function stripActiveHtml(html: string): string | null {
+  let current = html;
+  for (let round = 0; round < MAX_STRIP_ROUNDS; round++) {
+    const { markup, removed } = stripOnce(current);
+    // the input itself is never the srcdoc, so round 0 always serializes
+    if (round > 0 && !removed) return current;
+    current = markup;
+  }
+  return null;
+}
+
+/** The srcdoc of the preview frame (the CSP meta first, then the stripped document), or null. */
+export function buildHtmlPreview(html: string): string | null {
+  const stripped = stripActiveHtml(html);
+  return stripped === null ? null : CSP_META + stripped;
 }

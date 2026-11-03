@@ -6,7 +6,7 @@
  *
  * The HTML checks are the behaviour the unit tests cannot show: the frame is an opaque origin (the
  * editor cannot reach into it, so it cannot reach the editor), no script runs, the remote image,
- * `@import` and `url(https:)` never load, and a clicked link does not navigate.
+ * `@import` and `url(https:)` never load, a clicked link does not navigate, and the form is gone.
  */
 import { expect, type Page, test } from '@playwright/test';
 
@@ -103,7 +103,9 @@ test('video, JSON, markdown, text and sandboxed HTML previews under the real CSP
     // not a playable file: the check is the element, not playback
     video: `data:video/mp4;base64,${b64('not a real video')}`,
   });
+  // the server's CSRF check wants the app origin on cookie-authenticated writes
   const created = await page.request.post('/rest/workflows', {
+    headers: { origin: new URL(page.url()).origin },
     data: {
       name: `Rich previews ${id}`,
       nodes: [
@@ -182,9 +184,11 @@ test('video, JSON, markdown, text and sandboxed HTML previews under the real CSP
   ).toBe(true);
   // the remote image never loaded
   expect(await frame.locator('#remote-img').evaluate((el) => (el as HTMLImageElement).naturalWidth)).toBe(0);
-  // a click on the (stripped) link and the (stripped) form go nowhere
+  // a click on the (stripped) link goes nowhere; the strip removes the form with its button, so
+  // there is nothing to submit (the probe check at the end shows no request to /form either)
   await frame.getByText('Open the report site').click();
-  await frame.getByRole('button', { name: 'Send' }).click();
+  await expect(frame.locator('form')).toHaveCount(0);
+  await expect(frame.getByRole('button', { name: 'Send' })).toHaveCount(0);
   await page.waitForTimeout(1000);
   expect(page.url()).toBe(editorUrl);
   expect(await page.title()).toBe(editorTitle);
