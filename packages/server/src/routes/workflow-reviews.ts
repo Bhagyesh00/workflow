@@ -1,10 +1,97 @@
 /**
  * /rest/workflow-reviews and /rest/inbox (P3-19).
  *
- * C0 STUB: lane L14 registers the routes here. Every route checks access with requireRole
- * (viewer 403 on writes) and scopes by tenant (other tenant 404).
+ * Every route checks access with requireRole and scopes by tenant (another tenant's request is
+ * 404). Submitting needs editor; the request routes take any member and then apply the review read
+ * gate (404 unless author, assigned reviewer or admin) and the decision rules (403) in the service.
  */
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { z } from 'zod';
 import type { ServerContext } from '../context';
+import { type AuthContext, requireRole } from '../http/auth';
+import { parse } from '../http/errors';
+import {
+  activityQuerySchema,
+  inboxQuerySchema,
+  type ReviewCaller,
+  reviewCommentSchema,
+  reviewCreateSchema,
+  reviewDecisionSchema,
+  reviewListQuerySchema,
+  reviewUpdateVersionSchema,
+} from '../services/workflow-reviews';
 
-export function registerWorkflowReviewRoutes(_app: FastifyInstance, _ctx: ServerContext): void {}
+/** a malformed id answers 404 like a missing one */
+const reviewParams = z.object({ id: z.string().max(64) });
+
+const eligibleQuery = z.object({ workflowId: z.uuid().optional() });
+
+export function registerWorkflowReviewRoutes(app: FastifyInstance, ctx: ServerContext): void {
+  const { reviews } = ctx;
+  const caller = (auth: AuthContext, request: FastifyRequest): ReviewCaller => ({
+    userId: auth.user.id,
+    role: auth.role,
+    ip: request.ip,
+  });
+
+  app.get('/workflow-reviews', async (request) => {
+    const auth = requireRole(request, 'viewer');
+    return reviews.list(auth.tenant.id, caller(auth, request), parse(reviewListQuerySchema, request.query));
+  });
+
+  app.get('/workflow-reviews/eligible-reviewers', async (request) => {
+    const auth = requireRole(request, 'editor');
+    const { workflowId } = parse(eligibleQuery, request.query);
+    return { data: await reviews.eligibleReviewers(auth.tenant.id, caller(auth, request), workflowId) };
+  });
+
+  app.post('/workflow-reviews', async (request) => {
+    const auth = requireRole(request, 'editor');
+    const body = parse(reviewCreateSchema, request.body);
+    return { data: await reviews.create(auth.tenant.id, body, caller(auth, request)) };
+  });
+
+  app.get('/workflow-reviews/:id', async (request) => {
+    const auth = requireRole(request, 'viewer');
+    const { id } = parse(reviewParams, request.params);
+    return { data: await reviews.get(auth.tenant.id, id, caller(auth, request)) };
+  });
+
+  app.post('/workflow-reviews/:id/update-version', async (request) => {
+    const auth = requireRole(request, 'viewer');
+    const { id } = parse(reviewParams, request.params);
+    const body = parse(reviewUpdateVersionSchema, request.body);
+    return { data: await reviews.updateVersion(auth.tenant.id, id, body, caller(auth, request)) };
+  });
+
+  app.post('/workflow-reviews/:id/decision', async (request) => {
+    const auth = requireRole(request, 'viewer');
+    const { id } = parse(reviewParams, request.params);
+    const body = parse(reviewDecisionSchema, request.body);
+    return { data: await reviews.decide(auth.tenant.id, id, body, caller(auth, request)) };
+  });
+
+  app.get('/workflow-reviews/:id/activity', async (request) => {
+    const auth = requireRole(request, 'viewer');
+    const { id } = parse(reviewParams, request.params);
+    const { cursor } = parse(activityQuerySchema, request.query);
+    return reviews.activity(auth.tenant.id, id, caller(auth, request), cursor);
+  });
+
+  app.post('/workflow-reviews/:id/comments', async (request) => {
+    const auth = requireRole(request, 'viewer');
+    const { id } = parse(reviewParams, request.params);
+    const { body } = parse(reviewCommentSchema, request.body);
+    return { data: await reviews.comment(auth.tenant.id, id, body, caller(auth, request)) };
+  });
+
+  app.get('/inbox', async (request) => {
+    const auth = requireRole(request, 'viewer');
+    return reviews.inbox(auth.tenant.id, caller(auth, request), parse(inboxQuerySchema, request.query));
+  });
+
+  app.get('/inbox/summary', async (request) => {
+    const auth = requireRole(request, 'viewer');
+    return { data: await reviews.inboxSummary(auth.tenant.id, caller(auth, request)) };
+  });
+}
