@@ -60,7 +60,8 @@ export function PublishTimeline({ workflowId }: { workflowId?: string }) {
   const timeline = useInfiniteQuery({
     queryKey: [...queryKeys.publishTimeline(workflowId ?? 'new'), 'list'],
     initialPageParam: 0,
-    queryFn: ({ pageParam }) => workflowsApi.publishTimeline(workflowId!, { skip: pageParam, take: PAGE_SIZE }),
+    queryFn: ({ pageParam }) =>
+      workflowsApi.publishTimeline(workflowId!, { skip: pageParam, take: PAGE_SIZE }),
     getNextPageParam: (last, pages) =>
       last.length < PAGE_SIZE ? undefined : pages.reduce((sum, page) => sum + page.length, 0),
     enabled: Boolean(workflowId),
@@ -68,7 +69,10 @@ export function PublishTimeline({ workflowId }: { workflowId?: string }) {
 
   if (!workflowId) {
     return (
-      <EmptyState title="Not saved yet" description="The publish timeline appears once the workflow has been saved." />
+      <EmptyState
+        title="Not saved yet"
+        description="The publish timeline appears once the workflow has been saved."
+      />
     );
   }
   if (timeline.isLoading) return <PageLoader />;
@@ -92,7 +96,11 @@ export function PublishTimeline({ workflowId }: { workflowId?: string }) {
     <div className="px-4 py-3">
       <ol aria-label="Publish timeline" className="relative">
         {entries.map((entry, i) => (
-          <TimelineRow key={entry.id} entry={entry} last={i === entries.length - 1 && !timeline.hasNextPage} />
+          <TimelineRow
+            key={entry.id}
+            entry={entry}
+            last={i === entries.length - 1 && !timeline.hasNextPage}
+          />
         ))}
       </ol>
       {timeline.hasNextPage && (

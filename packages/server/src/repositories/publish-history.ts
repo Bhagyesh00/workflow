@@ -75,7 +75,9 @@ export class PublishHistoryRepository {
         ),
       )
       .leftJoin(users, eq(users.id, workflowPublishHistory.userId))
-      .where(and(eq(workflowPublishHistory.tenantId, tenantId), eq(workflowPublishHistory.workflowId, workflowId)))
+      .where(
+        and(eq(workflowPublishHistory.tenantId, tenantId), eq(workflowPublishHistory.workflowId, workflowId)),
+      )
       .orderBy(desc(workflowPublishHistory.id))
       .offset(page.skip)
       .limit(page.take);

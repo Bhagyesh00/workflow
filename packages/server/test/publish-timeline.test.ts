@@ -46,7 +46,9 @@ const published = (path: string) => ({
 
 async function viewerOf(owner: Owner) {
   const email = `viewer-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await owner.client.data(owner.client.post('/rest/members/invite', { email, role: 'viewer' }));
+  const invite = await owner.client.data(
+    owner.client.post('/rest/members/invite', { email, role: 'viewer' }),
+  );
   const client = new TestClient(server.app);
   await client.data(
     client.post(`/rest/invitations/${invite.token}/accept`, { name: 'Vera Viewer', password: 'Passw0rd!' }),
@@ -62,7 +64,9 @@ describe('P3-16 publish timeline', () => {
     const owner = await signup(server.app, { name: 'Pat Owner' });
     const wf = await createWorkflow(owner.client, published('timeline-a'));
     const before = Date.now();
-    await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/activate`, { versionName: 'Launch' }));
+    await owner.client.data(
+      owner.client.post(`/rest/workflows/${wf.id}/activate`, { versionName: 'Launch' }),
+    );
     await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/deactivate`));
 
     const rows = await timeline(owner.client, wf.id);
@@ -102,9 +106,9 @@ describe('P3-16 publish timeline', () => {
 
     const other = await signup(server.app);
     expect((await other.client.get(`/rest/workflows/${wf.id}/publish-timeline`)).statusCode).toBe(404);
-    expect((await new TestClient(server.app).get(`/rest/workflows/${wf.id}/publish-timeline`)).statusCode).toBe(
-      401,
-    );
+    expect(
+      (await new TestClient(server.app).get(`/rest/workflows/${wf.id}/publish-timeline`)).statusCode,
+    ).toBe(401);
   });
 
   it('a row whose version was pruned keeps the event with versionId null', async () => {
@@ -126,7 +130,11 @@ describe('P3-16 publish timeline', () => {
     const { publishHistory } = server.ctx;
 
     // another tenant's workflow id: nothing is written
-    await publishHistory.record('activated', { tenantId: other.tenant.id, workflowId: wf.id, versionId: wf.versionId });
+    await publishHistory.record('activated', {
+      tenantId: other.tenant.id,
+      workflowId: wf.id,
+      versionId: wf.versionId,
+    });
     expect((await publishHistory.list(owner.tenant.id, wf.id, { skip: 0, take: 20 })).data).toEqual([]);
     expect((await publishHistory.list(other.tenant.id, wf.id, { skip: 0, take: 20 })).data).toEqual([]);
 
@@ -151,7 +159,11 @@ describe('P3-16 publish timeline', () => {
 
     // a workflow that no longer exists: resolves, nothing stored
     await expect(
-      publishHistory.record('activated', { tenantId: owner.tenant.id, workflowId: randomUUID(), versionId: null }),
+      publishHistory.record('activated', {
+        tenantId: owner.tenant.id,
+        workflowId: randomUUID(),
+        versionId: null,
+      }),
     ).resolves.toBeUndefined();
     const { rows: count } = await server.ctx.database.pool.query(
       'SELECT count(*)::int AS n FROM workflow_publish_history',
