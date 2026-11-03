@@ -9,6 +9,8 @@ export interface MenuItem {
   danger?: boolean;
   disabled?: boolean;
   hint?: ReactNode;
+  /** native tooltip, e.g. the reason an item is disabled */
+  title?: string;
 }
 
 /** Click-to-open popover with arrow-key navigation. */
@@ -113,4 +115,36 @@ export function Menu({
       )}
     </div>
   );
+}
+
+/** One menu row, shared with the right-click ContextMenu (P3-02): `onDone` runs before `onSelect`. */
+export function MenuItemButton({ item, onDone }: { item: MenuItem; onDone: () => void }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={item.disabled}
+      title={item.title}
+      onClick={() => {
+        onDone();
+        item.onSelect();
+      }}
+      className={cx(
+        'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-sm outline-none focus:bg-surface-3 hover:bg-surface-3 disabled:opacity-40',
+        item.danger ? 'text-err' : 'text-ink',
+      )}
+    >
+      {item.icon && <span className="shrink-0 text-ink-2">{item.icon}</span>}
+      <span className="flex-1">{item.label}</span>
+      {item.hint && (
+        <span aria-hidden="true" className="text-xs text-ink-3">
+          {item.hint}
+        </span>
+      )}
+    </button>
+  );
+}
+
+export function MenuSeparator() {
+  return <hr className="my-1 border-0 border-t border-line" />;
 }

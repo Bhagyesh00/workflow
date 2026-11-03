@@ -3,6 +3,8 @@ import { type NodeProps, NodeResizer } from '@xyflow/react';
 import { Pencil, Trash2 } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
 import { Markdown } from '../../lib/markdown';
+import { useUiStore } from '../../stores/ui-store';
+import { useWorkflowStore } from '../../stores/workflow-store';
 import { cx } from '../ui/cx';
 import { useCanvasActions } from './actions';
 import type { StickyFlowNode } from './flow-elements';
@@ -22,6 +24,39 @@ export const StickyNode = memo(function StickyNode({ data, selected }: NodeProps
   useEffect(() => {
     if (editing) textareaRef.current?.focus();
   }, [editing]);
+
+  const rootRef = useRef<HTMLDivElement>(null);
+  const stickyAction = useUiStore((s) => s.stickyAction);
+
+  // context menu "Edit sticky note" / "Change color" (P3-02)
+  useEffect(() => {
+    if (!stickyAction || stickyAction.id !== sticky.id) return;
+    useUiStore.getState().setStickyAction(null);
+    if (readOnly) return;
+    if (stickyAction.action === 'edit') setEditing(true);
+    else rootRef.current?.querySelector<HTMLElement>('[aria-label^="Sticky colour"]')?.focus();
+  }, [stickyAction, sticky.id, readOnly]);
+
+  // Enter edits the selected sticky (the menu shows the shortcut), when it is the only selection
+  useEffect(() => {
+    if (!selected || readOnly || editing) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest('input, textarea, select, button, [contenteditable="true"], .cm-editor')
+      )
+        return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      const sel = useWorkflowStore.getState().selection;
+      if (sel.nodes.length || sel.stickies.length !== 1 || sel.stickies[0] !== sticky.id) return;
+      event.preventDefault();
+      setEditing(true);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selected, readOnly, editing, sticky.id]);
 
   const finish = () => {
     setEditing(false);
@@ -44,6 +79,7 @@ export const StickyNode = memo(function StickyNode({ data, selected }: NodeProps
       />
       {/* biome-ignore lint/a11y/noStaticElementInteractions: double-click is a shortcut; the Edit button in the toolbar is the accessible path */}
       <div
+        ref={rootRef}
         className="wf-sticky group relative flex flex-col"
         style={{ ['--wf-sticky' as string]: sticky.color ?? STICKY_COLORS[0] }}
         onDoubleClick={() => !readOnly && setEditing(true)}
