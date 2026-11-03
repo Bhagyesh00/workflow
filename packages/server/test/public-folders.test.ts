@@ -100,7 +100,9 @@ describe('public API folders', () => {
     expect((await api(mine.key, 'GET', `/folders/${f.id}`)).statusCode).toBe(404);
     expect((await api(mine.key, 'PATCH', `/folders/${f.id}`, { name: 'x' })).statusCode).toBe(404);
     expect((await api(mine.key, 'DELETE', `/folders/${f.id}`)).statusCode).toBe(404);
-    expect((await api(mine.key, 'POST', '/folders', { name: 'c', parentFolderId: f.id })).statusCode).toBe(404);
+    expect((await api(mine.key, 'POST', '/folders', { name: 'c', parentFolderId: f.id })).statusCode).toBe(
+      404,
+    );
     expect((await api(mine.key, 'GET', '/folders')).json().data).toEqual([]);
     expect((await api(theirs.key, 'GET', `/folders/${f.id}`)).json().data.name).toBe('theirs');
   });
