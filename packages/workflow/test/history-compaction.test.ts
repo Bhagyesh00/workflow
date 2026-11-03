@@ -118,9 +118,9 @@ describe('isAdditiveChange (workflow fields)', () => {
   });
 
   it('a new setting, sticky or group only adds; fields a caller leaves out do not count', () => {
-    expect(
-      isAdditiveChange({ ...base, settings: {} }, { ...base, settings: { timezone: 'UTC' } }),
-    ).toBe(true);
+    expect(isAdditiveChange({ ...base, settings: {} }, { ...base, settings: { timezone: 'UTC' } })).toBe(
+      true,
+    );
     expect(
       isAdditiveChange(
         { ...base, stickyNotes: [], nodeGroups: [] },
@@ -145,7 +145,11 @@ describe('selectRedundantVersions (optimize)', () => {
   it('drops a version whose successor only adds to it within 20 minutes', () => {
     const a = version(ago(60 * MIN), { nodes: [trigger] });
     const b = version(ago(55 * MIN), { nodes: [trigger, setNode('a')] });
-    const c = version(ago(50 * MIN), { nodes: [trigger, setNode('abc')], connections: linked, isCurrent: true });
+    const c = version(ago(50 * MIN), {
+      nodes: [trigger, setNode('abc')],
+      connections: linked,
+      isCurrent: true,
+    });
     expect(selectRedundantVersions([c, a, b], { mode: 'optimize', now: NOW }).sort()).toEqual(
       [a.id, b.id].sort(),
     );
@@ -153,7 +157,10 @@ describe('selectRedundantVersions (optimize)', () => {
 
   it('keeps a version when the gap to its successor is 20 minutes or more', () => {
     const a = version(ago(90 * MIN));
-    const b = version(ago(90 * MIN - OPTIMIZE_MAX_GAP_MS), { nodes: [trigger, setNode('a')], isCurrent: true });
+    const b = version(ago(90 * MIN - OPTIMIZE_MAX_GAP_MS), {
+      nodes: [trigger, setNode('a')],
+      isCurrent: true,
+    });
     expect(selectRedundantVersions([a, b], { mode: 'optimize', now: NOW })).toEqual([]);
   });
 
@@ -198,10 +205,13 @@ describe('selectRedundantVersions (optimize)', () => {
     }
     // the newest version has no successor: nothing contains it
     expect(
-      selectRedundantVersions([version(ago(60 * MIN)), version(ago(58 * MIN), { nodes: [trigger, setNode('a')] })], {
-        mode: 'optimize',
-        now: NOW,
-      }),
+      selectRedundantVersions(
+        [version(ago(60 * MIN)), version(ago(58 * MIN), { nodes: [trigger, setNode('a')] })],
+        {
+          mode: 'optimize',
+          now: NOW,
+        },
+      ),
     ).toHaveLength(1);
     expect(
       selectRedundantVersions([version(ago(60 * MIN), { isCurrent: true })], { mode: 'optimize', now: NOW }),
@@ -257,10 +267,13 @@ describe('selectRedundantVersions (trim)', () => {
     const plain = version(at(6), { authorId: 'u2' });
     const last = version(at(7), { authorId: 'u2' });
     const current = version(ago(MIN), { isCurrent: true, authorId: 'u2' });
-    const dropped = selectRedundantVersions([named, described, published, beforeOther, other, plain, last, current], {
-      mode: 'trim',
-      now: NOW,
-    });
+    const dropped = selectRedundantVersions(
+      [named, described, published, beforeOther, other, plain, last, current],
+      {
+        mode: 'trim',
+        now: NOW,
+      },
+    );
     expect(dropped.sort()).toEqual([other.id, plain.id].sort());
   });
 

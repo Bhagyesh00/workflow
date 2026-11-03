@@ -4,14 +4,15 @@
  *
  * A pass reads the versions of one workflow at a time, tenant by tenant, lets
  * `selectRedundantVersions` pick the redundant ones and deletes them in batches. The delete
- * re-checks every rule in SQL, so a version that became current, published, named, described or
- * pinned by an open review between the read and the delete stays. Timeline rows and review
- * requests that point at a removed version keep their row (FK set null); executions keep the id.
+ * re-checks every rule in SQL under the workflow row lock, so a version that became current,
+ * published, named, described or pinned by an open review between the read and the delete stays.
+ * Versions of closed reviews may go. Timeline rows that point at a removed version keep their row
+ * (FK set null); review requests and executions keep the id.
  */
 import {
   type CompactionVersion,
-  compactionWindow,
   type Connections,
+  compactionWindow,
   type HistoryCompactionMode,
   selectRedundantVersions,
   type WorkflowNode,
@@ -164,7 +165,13 @@ export class HistoryCompactionService {
     const inWindow = await db
       .select(columns)
       .from(workflowVersions)
-      .where(and(scope, gte(workflowVersions.createdAt, window.start), lte(workflowVersions.createdAt, window.end)))
+      .where(
+        and(
+          scope,
+          gte(workflowVersions.createdAt, window.start),
+          lte(workflowVersions.createdAt, window.end),
+        ),
+      )
       .orderBy(...order);
     if (!inWindow.length) return [];
     const successor = await db
@@ -211,10 +218,21 @@ export class HistoryCompactionService {
     return selectRedundantVersions(versions, options).filter((id) => !pinned.has(id));
   }
 
-  /** deletes the given versions of one workflow, re-checking every rule; returns how many went */
+  /**
+   * Deletes the given versions of one workflow, re-checking every rule; returns how many went.
+   * It first locks the workflow row, as a publish does when it writes its pointer: a publish that
+   * committed while the lock was awaited is seen by the DELETE (a new statement), and a publish
+   * that comes after the DELETE finds its version gone and rolls back.
+   */
   private async deleteVersions(tenantId: string, workflowId: string, ids: string[]): Promise<number> {
     if (!ids.length) return 0;
-    const result = await this.deps.database.db.execute(sql`
+    return this.deps.database.db.transaction(async (tx) => {
+      const locked = await tx.execute(sql`
+        SELECT 1 FROM workflows
+        WHERE tenant_id = ${tenantId}::uuid AND id = ${workflowId}::uuid
+        FOR UPDATE`);
+      if (!locked.rows.length) return 0;
+      const result = await tx.execute(sql`
       DELETE FROM workflow_versions v
       WHERE v.tenant_id = ${tenantId}::uuid
         AND v.workflow_id = ${workflowId}::uuid
@@ -231,7 +249,8 @@ export class HistoryCompactionService {
         AND NOT EXISTS (
           SELECT 1 FROM workflow_review_requests r
           WHERE r.tenant_id = v.tenant_id AND r.workflow_version_id = v.id AND r.state = 'open')`);
-    return result.rowCount ?? 0;
+      return result.rowCount ?? 0;
+    });
   }
 
   private async pause(ms: number): Promise<void> {

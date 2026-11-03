@@ -59,10 +59,11 @@ const DAY = 24 * HOUR;
 /** optimize: a version is only merged into a successor saved less than this later */
 export const OPTIMIZE_MAX_GAP_MS = 20 * MINUTE;
 
-export const COMPACTION_DEFAULTS: Record<HistoryCompactionMode, { minimumAgeMs: number; windowMs: number }> = {
-  optimize: { minimumAgeMs: 0.25 * HOUR, windowMs: 2 * HOUR },
-  trim: { minimumAgeMs: 6 * DAY, windowMs: 2 * DAY },
-};
+export const COMPACTION_DEFAULTS: Record<HistoryCompactionMode, { minimumAgeMs: number; windowMs: number }> =
+  {
+    optimize: { minimumAgeMs: 0.25 * HOUR, windowMs: 2 * HOUR },
+    trim: { minimumAgeMs: 6 * DAY, windowMs: 2 * DAY },
+  };
 
 /** trim: the bucket size by the number of versions in the window (largest threshold first) */
 export const TRIM_BUCKETS: ReadonlyArray<{ minVersions: number; bucketMs: number }> = [
@@ -148,7 +149,12 @@ export function isAdditiveChange(before: CompactionContent, after: CompactionCon
   const afterById = new Map(after.nodes.map((n) => [n.id, n]));
   for (const node of before.nodes) {
     const next = afterById.get(node.id);
-    if (!next || next.name !== node.name || next.type !== node.type || next.typeVersion !== node.typeVersion) {
+    if (
+      !next ||
+      next.name !== node.name ||
+      next.type !== node.type ||
+      next.typeVersion !== node.typeVersion
+    ) {
       return false;
     }
     const { position: _p, ...beforeContent } = node;

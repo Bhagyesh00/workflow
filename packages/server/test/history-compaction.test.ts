@@ -90,7 +90,10 @@ async function versionIds(workflowId: string): Promise<string[]> {
 }
 
 const setPointer = (column: 'version_id' | 'published_version_id', workflowId: string, versionId: string) =>
-  server.ctx.database.pool.query(`UPDATE workflows SET ${column} = $1 WHERE id = $2`, [versionId, workflowId]);
+  server.ctx.database.pool.query(`UPDATE workflows SET ${column} = $1 WHERE id = $2`, [
+    versionId,
+    workflowId,
+  ]);
 
 describe('P3-18 history compaction (optimize)', () => {
   it('removes redundant versions in every tenant; published, described, named and other-author ones stay', async () => {
@@ -102,13 +105,19 @@ describe('P3-18 history compaction (optimize)', () => {
 
     // tenant A: v1 -> v2 only adds (2 min): v1 goes; v2 published; v3 described; v4 followed by b's user
     const v1 = await addVersion(a.tenant.id, wfA.id, ago(60 * MIN), { authorId: u, nodes: [trigger] });
-    const v2 = await addVersion(a.tenant.id, wfA.id, ago(58 * MIN), { authorId: u, nodes: [trigger, set('a')] });
+    const v2 = await addVersion(a.tenant.id, wfA.id, ago(58 * MIN), {
+      authorId: u,
+      nodes: [trigger, set('a')],
+    });
     const v3 = await addVersion(a.tenant.id, wfA.id, ago(56 * MIN), {
       authorId: u,
       nodes: [trigger, set('ab')],
       description: 'before the API change',
     });
-    const v4 = await addVersion(a.tenant.id, wfA.id, ago(54 * MIN), { authorId: u, nodes: [trigger, set('abc')] });
+    const v4 = await addVersion(a.tenant.id, wfA.id, ago(54 * MIN), {
+      authorId: u,
+      nodes: [trigger, set('abc')],
+    });
     const v5 = await addVersion(a.tenant.id, wfA.id, ago(52 * MIN), {
       authorId: b.user.id,
       nodes: [trigger, set('abcd')],
@@ -131,6 +140,7 @@ describe('P3-18 history compaction (optimize)', () => {
     expect(await server.ctx.historyCompaction.runOnce('optimize', NOW)).toBe(2);
     expect(await versionIds(wfA.id)).toEqual([v2, v3, v4, v5, wfA.versionId]);
     expect(await versionIds(wfB.id)).toEqual([w1, w3, wfB.versionId]);
+    expect(await versionIds(wfB.id)).not.toContain(w2);
     const timeline = await server.ctx.publishHistory.list(a.tenant.id, wfA.id, { skip: 0, take: 20 });
     expect(timeline.data).toMatchObject([{ event: 'activated', versionId: null }]);
 
@@ -158,6 +168,41 @@ describe('P3-18 history compaction (optimize)', () => {
 
     expect(await server.ctx.historyCompaction.runOnce('optimize', NOW)).toBe(0);
     expect(await versionIds(wf.id)).toEqual(before);
+  });
+
+  it('waits for a publish that holds the workflow row and keeps the version it published', async () => {
+    const owner = await signup(server.app);
+    const wf = await workflowOf(owner);
+    // v1 -> v2 only adds (2 min): v1 is redundant until a publish points at it
+    const v1 = await addVersion(owner.tenant.id, wf.id, ago(60 * MIN));
+    await addVersion(owner.tenant.id, wf.id, ago(58 * MIN), { nodes: [trigger, set('a')] });
+
+    // a publish of v1 that has written its pointer but not committed yet
+    const publish = await server.ctx.database.pool.connect();
+    let pass: Promise<number> | undefined;
+    try {
+      await publish.query('BEGIN');
+      await publish.query('UPDATE workflows SET published_version_id = $1 WHERE id = $2', [v1, wf.id]);
+      let settled = false;
+      pass = server.ctx.historyCompaction.runOnce('optimize', NOW).finally(() => {
+        settled = true;
+      });
+      // the pass either ends (it did not wait) or blocks on the workflow row lock
+      for (let i = 0; i < 250 && !settled; i++) {
+        const { rows } = await server.ctx.database.pool.query(
+          `SELECT count(*)::int AS waiting FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        if (rows[0].waiting > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await publish.query('COMMIT');
+    } finally {
+      publish.release();
+    }
+
+    expect(await pass).toBe(0);
+    expect(await versionIds(wf.id)).toContain(v1);
   });
 
   it('leaves versions younger than 15 minutes and older than 2.25 hours alone', async () => {
@@ -198,7 +243,13 @@ describe('P3-18 history compaction (schedule)', () => {
   it('optimize runs hourly and trim daily until stop()', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
     const { config, database, repos, logger } = server.ctx;
-    const service = new HistoryCompactionService({ config, database, repos, logger, context: () => server.ctx });
+    const service = new HistoryCompactionService({
+      config,
+      database,
+      repos,
+      logger,
+      context: () => server.ctx,
+    });
     const run = vi.spyOn(service, 'runOnce').mockResolvedValue(0);
 
     service.start();
@@ -218,13 +269,22 @@ describe('P3-18 history compaction (schedule)', () => {
   it('a failed pass is logged and the next one still runs', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
     const { config, database, repos, logger } = server.ctx;
-    const service = new HistoryCompactionService({ config, database, repos, logger, context: () => server.ctx });
+    const service = new HistoryCompactionService({
+      config,
+      database,
+      repos,
+      logger,
+      context: () => server.ctx,
+    });
     const warn = vi.spyOn(logger, 'warn');
     const run = vi.spyOn(service, 'runOnce').mockRejectedValueOnce(new Error('db down')).mockResolvedValue(0);
     service.start();
     await vi.advanceTimersByTimeAsync(2 * 60 * MIN);
     expect(run).toHaveBeenCalledTimes(2);
-    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ mode: 'optimize' }), 'History compaction failed');
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'optimize' }),
+      'History compaction failed',
+    );
     service.stop();
   });
 });
