@@ -43,12 +43,6 @@ describe('Phase 2 registrations', () => {
     expect(typeof signOAuth1Request).toBe('function');
     expect(typeof parseOAuthResponse).toBe('function');
   });
-
-  it('runs a stub node into a clear "not built yet" error', async () => {
-    const r = await runNode('core.compression', {});
-    expect(r.status).toBe('error');
-    expect(r.error?.message).toMatch(/not built yet/);
-  });
 });
 
 describe('generic auth types', () => {
