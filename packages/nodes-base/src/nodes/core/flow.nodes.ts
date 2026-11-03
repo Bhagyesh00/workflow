@@ -476,6 +476,25 @@ function forSubWorkflow(item: Item): Item {
   return { json: item.json, ...(item.binary ? { binary: item.binary } : {}) };
 }
 
+/**
+ * The item sent to the called workflow (P3-05, as n8n's workflowInputs): the item's fields plus the
+ * "Workflow Inputs" values evaluated for this item. No inputs: the item as it is.
+ */
+function withWorkflowInputs(ctx: ExecuteContext, item: Item, itemIndex: number): Item {
+  const base = forSubWorkflow(item);
+  const values = ctx.getNodeParameter('workflowInputs.values', itemIndex, []) as unknown;
+  if (!Array.isArray(values) || values.length === 0) return base;
+  const json: DataObject = { ...base.json };
+  let mapped = false;
+  for (const entry of values as Array<{ name?: unknown; value?: unknown }>) {
+    const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+    if (!name) continue;
+    json[name] = entry.value === undefined ? null : (deepCopy(entry.value) as DataObject[string]);
+    mapped = true;
+  }
+  return mapped ? { ...base, json } : base;
+}
+
 export const ExecuteWorkflowNode: NodeType = {
   description: {
     name: 'core.executeWorkflow',
@@ -538,6 +557,26 @@ export const ExecuteWorkflowNode: NodeType = {
         displayOptions: { show: { source: ['parameter'] } },
       },
       {
+        displayName: 'Workflow Inputs',
+        name: 'workflowInputs',
+        type: 'fixedCollection',
+        default: { values: [] },
+        placeholder: 'Add input',
+        description:
+          'Fields to send to the called workflow, evaluated per item and added to its fields. A "When Executed by Another Workflow" trigger with typed inputs keeps only the fields it declares.',
+        typeOptions: { multipleValues: true, sortable: true },
+        options: [
+          {
+            displayName: 'Values',
+            name: 'values',
+            values: [
+              { displayName: 'Name', name: 'name', type: 'string', default: '', placeholder: 'customerId' },
+              { displayName: 'Value', name: 'value', type: 'string', default: '' },
+            ],
+          },
+        ],
+      },
+      {
         displayName: 'Mode',
         name: 'mode',
         type: 'options',
@@ -575,7 +614,8 @@ export const ExecuteWorkflowNode: NodeType = {
 
     if (mode === 'once') {
       try {
-        const result = await ctx.executeWorkflow(subWorkflowSource(ctx, 0), items.map(forSubWorkflow), {
+        const sent = items.map((item, i) => withWorkflowInputs(ctx, item, i));
+        const result = await ctx.executeWorkflow(subWorkflowSource(ctx, 0), sent, {
           doNotWaitToFinish: !wait,
         });
         if (!wait) return [items.map((item, i) => ({ ...item, pairedItem: { item: i } }))];
@@ -601,9 +641,13 @@ export const ExecuteWorkflowNode: NodeType = {
     const out: Item[] = [];
     for (let i = 0; i < items.length; i++) {
       try {
-        const result = await ctx.executeWorkflow(subWorkflowSource(ctx, i), [forSubWorkflow(items[i])], {
-          doNotWaitToFinish: !wait,
-        });
+        const result = await ctx.executeWorkflow(
+          subWorkflowSource(ctx, i),
+          [withWorkflowInputs(ctx, items[i], i)],
+          {
+            doNotWaitToFinish: !wait,
+          },
+        );
         if (!wait) {
           out.push({ ...items[i], pairedItem: { item: i } });
           continue;
