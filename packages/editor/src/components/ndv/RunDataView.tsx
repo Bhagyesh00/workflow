@@ -1,9 +1,10 @@
 /**
  * Item data in three views: table, JSON and schema. In the input pane every field can be
  * dragged onto a parameter, which inserts `{{ $json.path }}` (or `$('Node')...` for non-direct parents).
+ * Binary properties show as file cards with previews (BinaryPreview.tsx, P3-08).
  */
 import type { Item } from '@workflow/workflow';
-import { ChevronDown, ChevronRight, FileBox } from 'lucide-react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import {
   accessPath,
@@ -17,6 +18,7 @@ import {
 } from '../../lib/data';
 import { FIELD_DRAG_TYPE } from '../parameters/context';
 import { cx } from '../ui/cx';
+import { BinaryFiles } from './BinaryPreview';
 
 export type DataViewMode = 'table' | 'json' | 'schema';
 
@@ -295,33 +297,6 @@ function SchemaView({ items, source }: { items: Item[]; source?: DragSource }) {
   );
 }
 
-function BinaryStrip({ items }: { items: Item[] }) {
-  const files = items.flatMap((item, i) =>
-    Object.entries(item.binary ?? {}).map(([key, b]) => ({
-      key: `${i}-${key}`,
-      item: i,
-      property: key,
-      binary: b,
-    })),
-  );
-  if (!files.length) return null;
-  return (
-    <div className="flex flex-wrap gap-1.5 border-b border-line px-2 py-1.5">
-      {files.slice(0, 12).map((f) => (
-        <span
-          key={f.key}
-          className="inline-flex items-center gap-1 rounded-md bg-surface-3 px-1.5 py-0.5 text-2xs text-ink-2"
-          title={f.binary.mimeType}
-        >
-          <FileBox size={11} />
-          <span className="font-semibold text-ink">{f.binary.fileName ?? f.property}</span>
-          <span>{f.binary.mimeType}</span>
-        </span>
-      ))}
-    </div>
-  );
-}
-
 export function RunDataView({
   items,
   mode,
@@ -336,7 +311,7 @@ export function RunDataView({
   if (!items.length) return <>{empty}</>;
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <BinaryStrip items={items} />
+      <BinaryFiles items={items} />
       <div className="min-h-0 flex-1">
         {mode === 'table' && <TableView items={items} source={source} />}
         {mode === 'json' && <JsonView items={items} source={source} />}
