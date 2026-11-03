@@ -10,6 +10,7 @@ import {
   type NodeConnections,
   renameNodeInDefinition,
   type StickyNote,
+  validateSelectionForGrouping,
   type WorkflowDefinition,
   type WorkflowNode,
   type WorkflowNodeGroup,
@@ -59,6 +60,17 @@ export function uniqueNodeName(base: string, taken: Iterable<string>): string {
   return `${stem}${i}`;
 }
 
+/** `Group` -> `Group 2` -> `Group 3` ... (first free number; group names are unique) */
+export function uniqueGroupName(base: string, taken: Iterable<string>): string {
+  const names = new Set(taken);
+  const trimmed = base.trim() || 'Group';
+  if (!names.has(trimmed)) return trimmed;
+  const stem = trimmed.replace(/ \d+$/, '') || trimmed;
+  let i = 2;
+  while (names.has(`${stem} ${i}`)) i++;
+  return `${stem} ${i}`;
+}
+
 export function getNode(graph: WorkflowGraph, name: string): WorkflowNode | undefined {
   return graph.nodes.find((n) => n.name === name);
 }
@@ -106,17 +118,56 @@ function removeFromConnections(connections: Connections, names: Set<string>): Co
   return result;
 }
 
+/** the group without the `removed` ids, or null when no node of `nodeIds` is left in it */
+function shrinkGroup(
+  group: WorkflowNodeGroup,
+  removed: Set<string>,
+  nodeIds: Set<string>,
+): WorkflowNodeGroup | null {
+  const left = group.nodeIds.filter((id) => !removed.has(id));
+  if (!left.some((id) => nodeIds.has(id))) return null;
+  return left.length === group.nodeIds.length ? group : { ...group, nodeIds: left };
+}
+
+/** does the group form one valid section (structure only: node types are not needed here)? */
+function groupIsValid(graph: WorkflowGraph, group: WorkflowNodeGroup): boolean {
+  const definition: WorkflowDefinition = {
+    name: '',
+    nodes: graph.nodes,
+    connections: graph.connections,
+    stickyNotes: graph.stickyNotes,
+    nodeGroups: graph.nodeGroups.filter((g) => g.id !== group.id),
+  };
+  return validateSelectionForGrouping(definition, group.nodeIds).length === 0;
+}
+
+/**
+ * Remove nodes with their cables and pinned data. Groups lose the removed members; a group left
+ * without a node is removed, and a valid group the removal breaks (split in two, for example) is
+ * dissolved with its nodes kept, so a saved group always passes the server's checks.
+ */
 export function removeNodes(graph: WorkflowGraph, names: string[]): WorkflowGraph {
   if (!names.length) return graph;
   const set = new Set(names);
   const pinData = { ...graph.pinData };
   for (const name of names) delete pinData[name];
-  return {
+  const removedIds = new Set(graph.nodes.filter((n) => set.has(n.name)).map((n) => n.id));
+  const next: WorkflowGraph = {
     ...graph,
     nodes: graph.nodes.filter((n) => !set.has(n.name)),
     connections: removeFromConnections(graph.connections, set),
     pinData,
   };
+  if (!graph.nodeGroups.length || !removedIds.size) return next;
+  const nodeIds = new Set(next.nodes.map((n) => n.id));
+  const nodeGroups: WorkflowNodeGroup[] = [];
+  for (const group of graph.nodeGroups) {
+    const shrunk = shrinkGroup(group, removedIds, nodeIds);
+    if (!shrunk) continue;
+    if (shrunk !== group && groupIsValid(graph, group) && !groupIsValid(next, shrunk)) continue;
+    nodeGroups.push(shrunk);
+  }
+  return { ...next, nodeGroups };
 }
 
 export function updateNode(
@@ -288,13 +339,29 @@ export function listConnections(connections: Connections): ConnectionRef[] {
   return result;
 }
 
-/** Replace the cable `ref` with `source -> node -> target` (node uses main input/output 0). */
+/**
+ * Replace the cable `ref` with `source -> node -> target` (node uses main input/output 0). A node
+ * put on a cable between two members of one group joins that group.
+ */
 export function insertNodeOnConnection(
   graph: WorkflowGraph,
   ref: ConnectionRef,
   nodeName: string,
 ): WorkflowGraph {
   let next = disconnect(graph, ref);
+  const idOf = (name: string) => graph.nodes.find((n) => n.name === name)?.id;
+  const [sourceId, targetId, insertedId] = [idOf(ref.source), idOf(ref.target), idOf(nodeName)];
+  const inside = graph.nodeGroups.find(
+    (g) => sourceId && targetId && g.nodeIds.includes(sourceId) && g.nodeIds.includes(targetId),
+  );
+  if (inside && insertedId && !graph.nodeGroups.some((g) => g.nodeIds.includes(insertedId))) {
+    next = {
+      ...next,
+      nodeGroups: graph.nodeGroups.map((g) =>
+        g.id === inside.id ? { ...g, nodeIds: [...g.nodeIds, insertedId] } : g,
+      ),
+    };
+  }
   next = connect(next, { ...ref, target: nodeName, targetIndex: 0, targetType: ref.sourceType });
   next = connect(next, {
     source: nodeName,
@@ -360,7 +427,11 @@ export function updateSticky(
 
 export function removeStickies(graph: WorkflowGraph, ids: string[]): WorkflowGraph {
   const set = new Set(ids);
-  return { ...graph, stickyNotes: graph.stickyNotes.filter((s) => !set.has(s.id)) };
+  const nodeIds = new Set(graph.nodes.map((n) => n.id));
+  const nodeGroups = graph.nodeGroups.some((g) => g.nodeIds.some((id) => set.has(id)))
+    ? graph.nodeGroups.flatMap((g) => shrinkGroup(g, set, nodeIds) ?? [])
+    : graph.nodeGroups;
+  return { ...graph, stickyNotes: graph.stickyNotes.filter((s) => !set.has(s.id)), nodeGroups };
 }
 
 export function setPinData(graph: WorkflowGraph, nodeName: string, items: Item[] | null): WorkflowGraph {
@@ -380,9 +451,11 @@ export interface ClipboardPayload {
   connections: Connections;
   pinData?: Record<string, Item[]>;
   stickyNotes?: StickyNote[];
+  /** groups whose every member node is in the payload (P3-04) */
+  nodeGroups?: WorkflowNodeGroup[];
 }
 
-/** Selected nodes plus the connections between them (and their pinned data). */
+/** Selected nodes plus the connections between them (their pinned data and whole groups too). */
 export function extractSubgraph(
   graph: WorkflowGraph,
   names: string[],
@@ -397,13 +470,34 @@ export function extractSubgraph(
   }
   const pinData = Object.fromEntries(Object.entries(graph.pinData).filter(([k]) => set.has(k)));
   const stickies = new Set(stickyIds);
+  const copied = new Set([...nodes.map((n) => n.id), ...stickies]);
+  const allNodeIds = new Set(graph.nodes.map((n) => n.id));
+  const nodeGroups = graph.nodeGroups
+    .filter((g) => {
+      const members = g.nodeIds.filter((id) => allNodeIds.has(id));
+      return members.length > 0 && members.every((id) => copied.has(id));
+    })
+    .map((g) => ({ ...g, nodeIds: g.nodeIds.filter((id) => copied.has(id)) }));
   return {
     kind: 'workflow-clipboard',
     nodes,
     connections,
     pinData,
     stickyNotes: graph.stickyNotes.filter((s) => stickies.has(s.id)),
+    nodeGroups,
   };
+}
+
+function isNodeGroup(value: unknown): value is WorkflowNodeGroup {
+  if (!value || typeof value !== 'object') return false;
+  const g = value as Partial<WorkflowNodeGroup>;
+  return (
+    typeof g.id === 'string' &&
+    typeof g.name === 'string' &&
+    Array.isArray(g.nodeIds) &&
+    g.nodeIds.every((id) => typeof id === 'string') &&
+    (g.description === undefined || typeof g.description === 'string')
+  );
 }
 
 /** Accepts our clipboard JSON or a bare `{ nodes, connections }` workflow export. */
@@ -433,6 +527,7 @@ export function parseClipboard(text: string): ClipboardPayload | null {
     connections: value.connections && typeof value.connections === 'object' ? value.connections : {},
     pinData: value.pinData && typeof value.pinData === 'object' ? value.pinData : {},
     stickyNotes: Array.isArray(value.stickyNotes) ? value.stickyNotes : [],
+    nodeGroups: Array.isArray(value.nodeGroups) ? value.nodeGroups.filter(isNodeGroup) : [],
   };
 }
 
@@ -492,13 +587,30 @@ export function pasteSubgraph(
     position: [s.position[0] + offset[0], s.position[1] + offset[1]] as [number, number],
   }));
 
+  // a group comes along only when all its members did; it gets a new id and a unique name
+  const newIds = new Map<string, string>();
+  payload.nodes.forEach((n, i) => {
+    if (n.id) newIds.set(n.id, nodes[i].id);
+  });
+  (payload.stickyNotes ?? []).forEach((s, i) => {
+    newIds.set(s.id, stickies[i].id);
+  });
+  const groupNames = graph.nodeGroups.map((g) => g.name);
+  const pastedGroups: WorkflowNodeGroup[] = [];
+  for (const g of payload.nodeGroups ?? []) {
+    if (!g.nodeIds.length || !g.nodeIds.every((id) => newIds.has(id))) continue;
+    const name = uniqueGroupName(g.name, groupNames);
+    groupNames.push(name);
+    pastedGroups.push({ ...g, id: newId(), name, nodeIds: g.nodeIds.map((id) => newIds.get(id) as string) });
+  }
+
   return {
     graph: {
       nodes: [...graph.nodes, ...nodes],
       connections: { ...graph.connections, ...definition.connections },
       pinData: { ...graph.pinData, ...(definition.pinData ?? {}) },
       stickyNotes: [...graph.stickyNotes, ...stickies],
-      nodeGroups: graph.nodeGroups,
+      nodeGroups: [...graph.nodeGroups, ...pastedGroups],
     },
     names: finalNames,
     stickyIds: stickies.map((s) => s.id),

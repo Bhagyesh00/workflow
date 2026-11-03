@@ -20,6 +20,8 @@ import {
 } from '@xyflow/react';
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DoctorIssue } from '../../lib/doctor';
+import { GROUP_VIEW_EVENT } from '../../lib/group-layout-push';
+import { isGroupDescriptionPinned, isGroupExpanded } from '../../lib/group-view';
 import { canConnect, deriveNodePorts, parseHandleId } from '../../lib/ports';
 import {
   type ConnectionRef,
@@ -33,9 +35,10 @@ import { type CanvasActions, CanvasActionsContext } from './actions';
 import { CanvasEdge } from './CanvasEdge';
 import { CanvasNode } from './CanvasNode';
 import { buildFlowElements, type CableEdge, type FlowNode } from './flow-elements';
+import { GroupNode } from './GroupNode';
 import { StickyNode } from './StickyNode';
 
-const nodeTypes: NodeTypes = { workflowNode: CanvasNode, sticky: StickyNode };
+const nodeTypes: NodeTypes = { workflowNode: CanvasNode, sticky: StickyNode, nodeGroup: GroupNode };
 const edgeTypes: EdgeTypes = { cable: CanvasEdge };
 
 export interface FlowCanvasProps {
@@ -91,6 +94,21 @@ export function FlowCanvas({
   const measured = useRef(new Map<string, { width: number; height: number }>());
   const [measureTick, setMeasureTick] = useState(0);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
+  // P3-04: the group view (expanded, pinned descriptions) lives in this browser, outside the graph
+  const [groupViewTick, setGroupViewTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setGroupViewTick((t) => t + 1);
+    window.addEventListener(GROUP_VIEW_EVENT, bump);
+    return () => window.removeEventListener(GROUP_VIEW_EVENT, bump);
+  }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: groupViewTick re-reads the view state when it changes
+  const groupView = useMemo(
+    () => ({
+      expanded: new Set(graph.nodeGroups.filter((g) => isGroupExpanded(g.id)).map((g) => g.id)),
+      pinned: new Set(graph.nodeGroups.filter((g) => isGroupDescriptionPinned(g.id)).map((g) => g.id)),
+    }),
+    [graph.nodeGroups, groupViewTick],
+  );
 
   const byId = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph.nodes]);
   const portsOf = useCallback(
@@ -117,9 +135,12 @@ export function FlowCanvas({
         measured: measured.current,
         readOnly,
         dirtyNodes,
+        expandedGroups: groupView.expanded,
+        pinnedGroupDescriptions: groupView.pinned,
       }),
     [
       graph,
+      groupView,
       descriptions,
       runData,
       runningNodes,
@@ -147,6 +168,25 @@ export function FlowCanvas({
       const selectedNodes = new Set(selection.nodes);
       const selectedStickies = new Set(selection.stickies);
       for (const change of changes) {
+        if ('id' in change && change.id.startsWith('group:')) {
+          // a group frame is computed from its members: dragging it moves every member by the same step
+          if (change.type !== 'position' || !change.position || readOnly) continue;
+          const groupId = change.id.slice(6);
+          const shown = nodes.find((n) => n.id === change.id);
+          const group = graph.nodeGroups.find((g) => g.id === groupId);
+          if (!shown || !group) continue;
+          const dx = Math.round(change.position.x - shown.position.x);
+          const dy = Math.round(change.position.y - shown.position.y);
+          if (!dx && !dy) continue;
+          const members = new Set(group.nodeIds);
+          for (const n of graph.nodes) {
+            if (members.has(n.id)) positions[n.name] = [n.position[0] + dx, n.position[1] + dy];
+          }
+          for (const st of graph.stickyNotes) {
+            if (members.has(st.id)) stickyPositions[st.id] = [st.position[0] + dx, st.position[1] + dy];
+          }
+          continue;
+        }
         if (change.type === 'dimensions' && change.dimensions) {
           const prev = measured.current.get(change.id);
           if (!prev || prev.width !== change.dimensions.width || prev.height !== change.dimensions.height) {
@@ -180,7 +220,18 @@ export function FlowCanvas({
       if (selectionChanged)
         onSelectionChange?.({ nodes: [...selectedNodes], stickies: [...selectedStickies] });
     },
-    [byId, onMove, onSelectionChange, readOnly, selection.nodes, selection.stickies],
+    [
+      byId,
+      graph.nodeGroups,
+      graph.nodes,
+      graph.stickyNotes,
+      nodes,
+      onMove,
+      onSelectionChange,
+      readOnly,
+      selection.nodes,
+      selection.stickies,
+    ],
   );
 
   const onEdgesChange = useCallback(
@@ -263,6 +314,18 @@ export function FlowCanvas({
       if (!onContextMenu) return;
       event.preventDefault();
       const at = { x: event.clientX, y: event.clientY };
+      if (node.type === 'nodeGroup') {
+        // the group's title bar or card: its members become the selection the menu acts on
+        const groupId = node.data.group.id;
+        const members = new Set(node.data.group.nodeIds);
+        onSelectionChange?.({
+          nodes: graph.nodes.filter((n) => members.has(n.id)).map((n) => n.name),
+          stickies: [],
+          edges: [],
+        });
+        onContextMenu({ ...at, target: { type: 'group', groupId } });
+        return;
+      }
       if (node.type === 'sticky') {
         const stickyId = node.data.sticky.id;
         if (!selection.stickies.includes(stickyId))
@@ -281,7 +344,7 @@ export function FlowCanvas({
             : { type: 'node', nodeName: name },
       });
     },
-    [onContextMenu, onSelectionChange, selection.nodes, selection.stickies],
+    [graph.nodes, onContextMenu, onSelectionChange, selection.nodes, selection.stickies],
   );
 
   const handleSelectionContextMenu = useCallback(
@@ -367,7 +430,11 @@ export function FlowCanvas({
             zoomable
             nodeBorderRadius={6}
             nodeColor={(n) =>
-              n.type === 'sticky' ? 'color-mix(in oklab, #f2c94c 45%, transparent)' : 'var(--wf-line-strong)'
+              n.type === 'sticky'
+                ? 'color-mix(in oklab, #f2c94c 45%, transparent)'
+                : n.type === 'nodeGroup'
+                  ? 'color-mix(in oklab, var(--wf-brand) 14%, transparent)'
+                  : 'var(--wf-line-strong)'
             }
             ariaLabel="Mini map"
           />
