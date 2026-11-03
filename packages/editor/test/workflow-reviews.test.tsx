@@ -3,7 +3,7 @@
  * (diff of published vs pinned, approved baseline once closed), decision rules and the Security
  * settings switch, against the demo backend's review routes.
  */
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { WorkflowNode } from '@workflow/workflow';
 import { createMemoryRouter } from 'react-router';
@@ -316,6 +316,76 @@ describe('review detail', () => {
     expect(backend().requests.some((r) => r.path.endsWith('/diff'))).toBe(false);
   });
 
+  it('shows the short id of a pruned baseline, never "nothing was published before"', async () => {
+    const s = await scene();
+    const review = await submitRequest(s);
+    actAs(s.reviewer);
+    await reviewsApi.decide(review.id, { decision: 'approved' });
+    // compaction pruned the baseline: the request keeps its id (no FK)
+    const versions = backend().versions;
+    versions.splice(
+      versions.findIndex((v) => v.versionId === s.baselineId),
+      1,
+    );
+    renderApp(`/inbox/${review.id}`);
+    const short = (s.baselineId as string).slice(0, 8);
+    expect(await screen.findByText(`Version ${short} was pruned, so there is no comparison.`)).toBeTruthy();
+    expect(screen.queryByText(/Nothing was published before/)).toBeNull();
+    expect(screen.queryByText(/Nothing is published yet/)).toBeNull();
+  });
+
+  it('shows the short id of a pruned pinned version', async () => {
+    const s = await scene();
+    const review = await submitRequest(s);
+    const versions = backend().versions;
+    versions.splice(
+      versions.findIndex((v) => v.versionId === s.pinnedId),
+      1,
+    );
+    actAs(s.reviewer);
+    renderApp(`/inbox/${review.id}`);
+    const short = s.pinnedId.slice(0, 8);
+    expect(await screen.findByText(`Version ${short} was pruned`)).toBeTruthy();
+    expect(await screen.findByText(`Version ${short} was pruned, so there is no comparison.`)).toBeTruthy();
+  });
+
+  it('offers Review and Update version to an assigned reviewer who can publish', async () => {
+    const s = await scene();
+    const review = await submitRequest(s);
+    actAs(s.reviewer);
+    renderApp(`/inbox/${review.id}`);
+    expect(await screen.findByRole('button', { name: 'Review' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Update version' })).toBeTruthy();
+    // updating makes them an author (n8n), so they can no longer decide
+    const moved = await reviewsApi.updateVersion(review.id, { versionName: 'By the reviewer' });
+    expect(moved.authors.map((a) => a.id).sort()).toEqual([s.editor, s.reviewer].sort());
+    expect((await failure(reviewsApi.decide(review.id, { decision: 'approved' }))).status).toBe(403);
+  });
+
+  it('offers neither button to a reviewer who can no longer publish', async () => {
+    const s = await scene();
+    const review = await submitRequest(s);
+    const membership = backend().memberships.find((m) => m.userId === s.reviewer);
+    if (membership) membership.role = 'viewer';
+    actAs(s.reviewer);
+    renderApp(`/inbox/${review.id}`);
+    expect(await screen.findByRole('heading', { name: /Ship version two/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Review' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Update version' })).toBeNull();
+    const refused = await failure(reviewsApi.updateVersion(review.id, { versionName: 'x' }));
+    expect(refused.status).toBe(403);
+    expect(refused.message).toBe('Only members who can publish this workflow can update the request');
+  });
+
+  it('offers Update version to an admin who is not an author', async () => {
+    const s = await scene();
+    const review = await submitRequest(s);
+    actAs(s.owner);
+    renderApp(`/inbox/${review.id}`);
+    expect(await screen.findByRole('button', { name: 'Update version' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review' })).toBeTruthy();
+  });
+
   it('requires a note for changes, then approves and publishes the pinned version', async () => {
     const user = userEvent.setup();
     const s = await scene();
@@ -398,6 +468,19 @@ describe('review detail', () => {
     await user.click(screen.getByRole('button', { name: 'Comment' }));
     expect(await screen.findByText('Looks fine to me')).toBeTruthy();
     expect(screen.getByText('Rae commented')).toBeTruthy();
+  });
+
+  it('refuses a comment with control characters before it is sent', async () => {
+    const s = await scene();
+    const review = await submitRequest(s);
+    actAs(s.reviewer);
+    renderApp(`/inbox/${review.id}`);
+    fireEvent.change(await screen.findByLabelText('Comment'), { target: { value: 'Ring \u0007 bell' } });
+    expect(screen.getByRole('alert').textContent).toBe('The comment has characters that are not allowed.');
+    expect((screen.getByRole('button', { name: 'Comment' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Ring the bell' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Comment' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
 

@@ -254,8 +254,11 @@ export class ReviewRepository {
     const conditions = this.conditions(tenantId, filter);
     if (!conditions) return [];
     if (filter.cursor) {
+      // a crafted cursor (not a uuid, not a date) matches nothing instead of failing the cast
+      const at = new Date(filter.cursor.value);
+      if (!isUuid(filter.cursor.id) || Number.isNaN(at.getTime())) return [];
       conditions.push(
-        sql`(${r.updatedAt}, ${r.id}) < (${filter.cursor.value}::timestamptz, ${filter.cursor.id}::uuid)`,
+        sql`(${r.updatedAt}, ${r.id}) < (${at.toISOString()}::timestamptz, ${filter.cursor.id}::uuid)`,
       );
     }
     return this.db

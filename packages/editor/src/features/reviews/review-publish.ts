@@ -4,7 +4,7 @@
  * publishing. features/editor/publish-actions.ts awaits it before the publish dialog.
  *
  * Also holds the small ui store the dialog host (ReviewStatusBanner, mounted in the editor page)
- * reads, and the labels the review screens share.
+ * reads, and the labels and text checks the review screens share.
  */
 import { create } from 'zustand';
 import { reviewsApi, settingsApi } from '../../api/endpoints';
@@ -81,6 +81,15 @@ export const useReviewUi = create<ReviewUiState>()((set, get) => ({
   setSubmitOpen: (submitOpen) => set({ submitOpen }),
   setUpdateFor: (updateFor) => set({ updateFor }),
 }));
+
+/** control characters other than tab, newline and carriage return are refused (as the server does) */
+export function hasControlChars(value: string): boolean {
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127) return true;
+  }
+  return false;
+}
 
 export function decisionLabel(review: Pick<WorkflowReviewDTO, 'state' | 'decision'>): string {
   if (review.state === 'closed') return review.decision === 'approved' ? 'Approved' : 'Closed';

@@ -9,6 +9,7 @@ import { TextArea } from '../../components/ui/Field';
 import { Callout, PageLoader } from '../../components/ui/misc';
 import { formatRelative } from '../../lib/format';
 import { toast } from '../../stores/ui-store';
+import { hasControlChars } from './review-publish';
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
 
@@ -58,9 +59,11 @@ export function ReviewActivityFeed({
     onError: (error) => toast.error('Could not post the comment', errorMessage(error)),
   });
   const entries = feed.data?.pages.flatMap((p) => p.data) ?? [];
+  // the server refuses control characters in a comment; say so here instead of a failed post
+  const bodyError = hasControlChars(body) ? 'The comment has characters that are not allowed.' : undefined;
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
-    if (body.trim()) post.mutate();
+    if (body.trim() && !bodyError) post.mutate();
   };
 
   return (
@@ -69,14 +72,26 @@ export function ReviewActivityFeed({
         <form onSubmit={onSubmit} className="flex flex-col gap-2">
           <TextArea
             aria-label="Comment"
+            aria-invalid={bodyError ? true : undefined}
+            aria-describedby={bodyError ? `comment-error-${reviewId}` : undefined}
             rows={3}
             maxLength={10000}
             placeholder="Write a comment"
             value={body}
             onChange={(event) => setBody(event.target.value)}
           />
+          {bodyError && (
+            <p id={`comment-error-${reviewId}`} role="alert" className="text-xs text-err">
+              {bodyError}
+            </p>
+          )}
           <div className="flex justify-end">
-            <Button type="submit" variant="primary" loading={post.isPending} disabled={!body.trim()}>
+            <Button
+              type="submit"
+              variant="primary"
+              loading={post.isPending}
+              disabled={!body.trim() || Boolean(bodyError)}
+            >
               Comment
             </Button>
           </div>

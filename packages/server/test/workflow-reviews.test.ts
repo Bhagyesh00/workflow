@@ -354,7 +354,31 @@ describe('the publish guard and decisions', () => {
       status: 'failed',
       message: 'The reviewed workflow version no longer exists',
     });
-    expect(missing.review).toMatchObject({ state: 'closed', decision: 'approved' });
+    expect(missing.review).toMatchObject({
+      state: 'closed',
+      decision: 'approved',
+      // no FK: the id stays when the version row is gone, the name does not
+      workflowVersionId: b.versionId,
+      versionName: null,
+    });
+  });
+
+  it('keeps the approved baseline id when compaction prunes that version', async () => {
+    const owner = await workspace();
+    const editor = await member(owner, 'editor');
+    const wf = await createWorkflow(owner.client, manual());
+    await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/activate`));
+    const next = await save(owner.client, wf.id, 'v2');
+    const review = await openReview(owner.client, wf.id, [editor.id], { versionId: next.versionId });
+    await editor.client.data(decide(editor.client, review.id, { decision: 'approved' }));
+    await server.ctx.database.pool.query('delete from workflow_versions where id = $1', [wf.versionId]);
+    expect((await dbReview(review.id)).approved_baseline_version_id).toBe(wf.versionId);
+    const dto = await owner.client.data(owner.client.get(`/rest/workflow-reviews/${review.id}`));
+    expect(dto).toMatchObject({
+      approvedBaselineVersionId: wf.versionId,
+      workflowVersionId: next.versionId,
+      versionName: 'v1',
+    });
   });
 
   it('a closed request takes no more decisions', async () => {
@@ -387,11 +411,14 @@ describe('read gate, tenants and comments', () => {
         (await client.post(`/rest/workflow-reviews/${review.id}/comments`, { body: 'hi' })).statusCode,
       ).toBe(404);
       expect((await decide(client, review.id, { decision: 'approved' })).statusCode).toBe(404);
+      expect((await client.data(client.get('/rest/workflow-reviews'))).length).toBe(0);
+    }
+    // update-version is open to any member who can publish (n8n), so only these two get 404
+    for (const client of [viewer.client, other.client]) {
       expect(
         (await client.post(`/rest/workflow-reviews/${review.id}/update-version`, { versionName: 'x' }))
           .statusCode,
       ).toBe(404);
-      expect((await client.data(client.get('/rest/workflow-reviews'))).length).toBe(0);
     }
     expect((await other.client.get('/rest/workflow-reviews/not-a-uuid')).statusCode).toBe(404);
     // participants and admins read it
@@ -509,40 +536,71 @@ describe('update-version, archive, delete and the inbox', () => {
     expect(blocked.json().error.details).toMatchObject({ reason: 'review_pending' });
   });
 
-  it('only an author or an admin moves a request to another version', async () => {
+  it('any member who can publish moves a request to another version and becomes an author (n8n)', async () => {
     const owner = await workspace();
     const author = await member(owner, 'editor');
     const reviewer = await member(owner, 'editor');
+    const outsider = await member(owner, 'editor');
     const wf = await createWorkflow(author.client, manual());
     const review = await openReview(author.client, wf.id, [reviewer.id]);
-    const refused = await reviewer.client.post(`/rest/workflow-reviews/${review.id}/update-version`, {
-      versionName: 'x',
-    });
+    const authorsOf = (dto: { authors: Array<{ id: string }> }) => dto.authors.map((u) => u.id).sort();
+    const update = (client: TestClient, versionName: string) =>
+      client.post(`/rest/workflow-reviews/${review.id}/update-version`, { versionName });
+
+    // an assigned reviewer may update it; as an author now, they can no longer decide
+    const byReviewer = await reviewer.client.data(update(reviewer.client, 'By reviewer'));
+    expect(authorsOf(byReviewer)).toEqual([author.id, reviewer.id].sort());
+    expect((await decide(reviewer.client, review.id, { decision: 'approved' })).statusCode).toBe(403);
+
+    // an editor who is not a participant may update it too, and can read it afterwards
+    const byOutsider = await outsider.client.data(update(outsider.client, 'By outsider'));
+    expect(authorsOf(byOutsider)).toEqual([author.id, reviewer.id, outsider.id].sort());
+    expect((await outsider.client.get(`/rest/workflow-reviews/${review.id}`)).statusCode).toBe(200);
+
+    // an author who can no longer publish is refused
+    await owner.client.data(owner.client.patch(`/rest/members/${author.id}`, { role: 'viewer' }));
+    const refused = await update(author.client, 'x');
     expect(refused.statusCode).toBe(403);
-    expect(refused.json().error.message).toBe('Only an author can update the request');
-    await save(author.client, wf.id, 'v2');
+    expect(refused.json().error.message).toBe(
+      'Only members who can publish this workflow can update the request',
+    );
+    await save(owner.client, wf.id, 'v2');
     const moved = await owner.client.data(
       owner.client.post(`/rest/workflow-reviews/${review.id}/update-version`, { versionName: 'By admin' }),
     );
     // the admin who synced the version is now an author too, and as an admin may still decide
-    expect(moved.authors.map((u: { id: string }) => u.id).sort()).toEqual([author.id, owner.user.id].sort());
+    expect(authorsOf(moved)).toEqual([author.id, reviewer.id, outsider.id, owner.user.id].sort());
     expect((await decide(owner.client, review.id, { decision: 'approved' })).statusCode).toBe(200);
   });
 
-  it('with reviews turned off, publishing passes the guard and closes the open request', async () => {
+  it('with reviews turned off, publishing passes the guard and closes nothing (n8n)', async () => {
     const owner = await workspace();
     const reviewer = await member(owner, 'editor');
     const wf = await createWorkflow(owner.client, manual());
     const review = await openReview(owner.client, wf.id, [reviewer.id]);
     await owner.client.data(owner.client.patch('/rest/settings', { workflowReviews: { enabled: false } }));
+    const next = await save(owner.client, wf.id, 'v2');
     expect((await owner.client.post(`/rest/workflows/${wf.id}/activate`)).statusCode).toBe(200);
-    expect(await dbReview(review.id)).toMatchObject({
-      state: 'closed',
-      decision: 'pending',
-      closed_by: null,
-    });
-    // a later approval cannot publish the older pinned version over it
-    expect((await decide(reviewer.client, review.id, { decision: 'approved' })).statusCode).toBe(409);
+    expect(await dbReview(review.id)).toMatchObject({ state: 'open', decision: 'pending', closed_by: null });
+    const feed = (await owner.client.get(`/rest/workflow-reviews/${review.id}/activity`)).json();
+    expect(feed.data.map((a: { type: string }) => a.type)).toEqual(['created']);
+    // the request stays decidable; its approval publishes the pinned version
+    const result = await reviewer.client.data(decide(reviewer.client, review.id, { decision: 'approved' }));
+    expect(result.autoPublish).toEqual({ status: 'published' });
+    expect(result.review.approvedBaselineVersionId).toBe(next.versionId);
+    expect((await server.ctx.repos.workflows.get(owner.tenant.id, wf.id))?.publishedVersionId).toBe(
+      review.workflowVersionId,
+    );
+  });
+
+  it('the publish hook leaves a request opened during the publish open (reviews on)', async () => {
+    const owner = await workspace();
+    const reviewer = await member(owner, 'editor');
+    const wf = await createWorkflow(owner.client, manual());
+    const review = await openReview(owner.client, wf.id, [reviewer.id]);
+    // what a publish that passed the guard just before this request was created runs last
+    await server.ctx.reviews.afterWorkflowPublished(owner.tenant.id, wf.id, wf.versionId);
+    expect(await dbReview(review.id)).toMatchObject({ state: 'open', closed_by: null });
   });
 
   it('public DELETE (force) closes an open request and the inbox no longer lists it', async () => {
@@ -626,6 +684,26 @@ describe('update-version, archive, delete and the inbox', () => {
     unsubscribe();
     const changes = events.filter((e) => e.type === 'workflowReviewChanged');
     expect(changes.length).toBeGreaterThanOrEqual(3);
-    expect(changes[0].data).toEqual({ workflowId: wf.id, requestId: review.id });
+    // the stream reaches every tenant member, so it names nothing: listeners refetch the gated lists
+    for (const change of changes) expect(change.data).toEqual({ workflowId: '', requestId: '' });
+    expect(JSON.stringify(changes)).not.toContain(review.id);
+  });
+
+  it('answers an empty page to a crafted list or inbox cursor', async () => {
+    const owner = await workspace();
+    const reviewer = await member(owner, 'editor');
+    await openReview(owner.client, (await createWorkflow(owner.client, manual())).id, [reviewer.id]);
+    const crafted = (value: string, id: string) =>
+      Buffer.from(JSON.stringify([value, id])).toString('base64url');
+    for (const cursor of [
+      crafted('2026-01-01T00:00:00.000Z', 'x'),
+      crafted('not a date', '00000000-0000-4000-8000-000000000001'),
+    ]) {
+      for (const path of ['/rest/inbox', '/rest/workflow-reviews']) {
+        const res = await owner.client.get(`${path}?cursor=${cursor}`);
+        expect(res.statusCode).toBe(200);
+        expect(res.json().data).toEqual([]);
+      }
+    }
   });
 });

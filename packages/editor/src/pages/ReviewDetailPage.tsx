@@ -1,6 +1,10 @@
 /**
  * /inbox/:reviewId (P3-19): metadata, changes (published vs pinned while open; approved baseline
  * vs pinned once closed, none for a null baseline), activity, comments, decision.
+ *
+ * The request keeps its version ids when compaction prunes a version (no FK), so a pruned version
+ * shows its short id. The buttons follow the server rules: decide = an admin, or an assigned
+ * reviewer who can publish and is not an author; update = any member who can publish (n8n).
  */
 import { useQuery } from '@tanstack/react-query';
 import type { WorkflowDiff } from '@workflow/workflow';
@@ -33,6 +37,8 @@ function invertDiff(diff: WorkflowDiff): WorkflowDiff {
   };
 }
 
+const shortId = (id: string) => id.slice(0, 8);
+
 function Changes({ review }: { review: WorkflowReviewDTO }) {
   const open = review.state === 'open';
   // open: what the live version lacks; closed: what the approval changed (a null baseline: no diff)
@@ -56,10 +62,17 @@ function Changes({ review }: { review: WorkflowReviewDTO }) {
   }
   if (diff.isLoading) return <PageLoader label="Loading changes" />;
   if (diff.error) {
-    return diff.error instanceof ApiError && diff.error.status === 404 ? (
-      <p className="text-sm text-ink-2">Nothing is published yet, so there is no comparison.</p>
-    ) : (
-      <Callout tone="err">{errorMessage(diff.error)}</Callout>
+    if (!(diff.error instanceof ApiError && diff.error.status === 404))
+      return <Callout tone="err">{errorMessage(diff.error)}</Callout>;
+    // a 404 names a version that is gone: the pinned one (it has no name left) or the baseline
+    const pruned =
+      review.versionName === null ? review.workflowVersionId : open ? null : review.approvedBaselineVersionId;
+    return (
+      <p className="text-sm text-ink-2">
+        {pruned
+          ? `Version ${shortId(pruned)} was pruned, so there is no comparison.`
+          : 'Nothing is published yet, so there is no comparison.'}
+      </p>
     );
   }
   return diff.data ? <WorkflowDiffSummary diff={invertDiff(diff.data)} /> : null;
@@ -79,7 +92,8 @@ export function ReviewDetailPage() {
   const me = useMe().data;
   const [updating, setUpdating] = useState<WorkflowReviewDTO | null>(null);
   const query = useQuery({
-    queryKey: ['workflow-review', reviewId],
+    // under 'workflow-reviews' so a push event (it names no request) refreshes it
+    queryKey: ['workflow-reviews', 'detail', reviewId],
     queryFn: () => reviewsApi.get(reviewId),
     retry: false,
   });
@@ -101,9 +115,11 @@ export function ReviewDetailPage() {
   const open = review.state === 'open';
   const userId = me?.user.id;
   const isAdmin = me?.role === 'owner' || me?.role === 'admin';
+  const canPublish = isAdmin || me?.role === 'editor';
   const isAuthor = Boolean(userId && review.authors.some((a) => a.id === userId));
   const isReviewer = Boolean(userId && review.reviewers.some((r) => r.id === userId));
-  const canDecide = open && (isAdmin || (isReviewer && !isAuthor));
+  const canDecide = open && (isAdmin || (isReviewer && !isAuthor && canPublish));
+  const canUpdate = open && canPublish;
   const canComment = isAuthor || canDecide;
 
   return (
@@ -121,7 +137,7 @@ export function ReviewDetailPage() {
             {review.description && <p className="mt-1 text-sm text-ink-2">{review.description}</p>}
           </div>
           <div className="flex items-center gap-2">
-            {open && isAuthor && <Button onClick={() => setUpdating(review)}>Update version</Button>}
+            {canUpdate && <Button onClick={() => setUpdating(review)}>Update version</Button>}
             {canDecide && <ReviewDecisionPopover review={review} />}
           </div>
         </div>
@@ -145,7 +161,12 @@ export function ReviewDetailPage() {
         </div>
         <div>
           <dt className="text-xs text-ink-2">Version</dt>
-          <dd className="text-sm text-ink">{review.versionName ?? 'Removed version'}</dd>
+          <dd className="text-sm text-ink">
+            {review.versionName ??
+              (review.workflowVersionId
+                ? `Version ${shortId(review.workflowVersionId)} was pruned`
+                : 'Removed version')}
+          </dd>
         </div>
         <People label="Authors" users={review.authors} />
         <People label="Reviewers" users={review.reviewers} />

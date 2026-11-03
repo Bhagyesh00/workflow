@@ -11,7 +11,10 @@
  * - Approval closes the request under the row lock (storing the published version before the
  *   auto-publish as the baseline), then publishes the pinned version as the requester. A failed
  *   auto-publish is reported and the decision stays.
- * - Archive and delete close the open request (a system close, closed_by NULL).
+ * - Archive and delete close the open request (a system close, closed_by NULL). A publish closes
+ *   nothing (n8n): with reviews off, an open request stays open and its approval still publishes.
+ * - Any member who can publish may move an open request to another version and becomes an author.
+ * - Push events name no request or workflow (every tenant member gets them); listeners refetch.
  *
  * The hooks below are called by the publish, archive and delete paths.
  */
@@ -189,12 +192,11 @@ export class WorkflowReviewService {
   }
 
   /**
-   * A publish that passed the guard while a request is still open (reviews turned off) makes the
-   * request moot: it is closed, so a later approval cannot publish an older version over it.
+   * A publish closes no request (as n8n): with reviews on the guard has just shown that none was
+   * open, so one found now was opened during the publish and must stay open; with reviews off an
+   * open request stays open and its approval still publishes the pinned version.
    */
-  async afterWorkflowPublished(tenantId: string, workflowId: string, versionId: string): Promise<void> {
-    await this.systemClose(tenantId, workflowId, { reason: 'published', versionId });
-  }
+  async afterWorkflowPublished(_tenantId: string, _workflowId: string, _versionId: string): Promise<void> {}
 
   /** closes the open request */
   async afterWorkflowArchived(tenantId: string, workflowId: string): Promise<void> {
@@ -308,7 +310,7 @@ export class WorkflowReviewService {
       workflowId: workflow.id,
       versionId,
     });
-    this.emit(tenantId, row);
+    this.emit(tenantId);
     return this.dto(tenantId, row);
   }
 
@@ -319,10 +321,13 @@ export class WorkflowReviewService {
     input: ReviewUpdateVersionInput,
     caller: ReviewCaller,
   ): Promise<WorkflowReviewDTO> {
-    const { row: current, participant } = await this.readable(tenantId, id, caller);
-    if (!canPublish(caller.role) || !(participant.author || isAdmin(caller.role))) {
-      throw ApiError.forbidden('Only an author can update the request');
+    // any member who can publish the workflow may move it (n8n); they become an author below
+    if (!canPublish(caller.role)) {
+      await this.readable(tenantId, id, caller); // 404 for a non-participant
+      throw ApiError.forbidden('Only members who can publish this workflow can update the request');
     }
+    const current = await this.repos.reviews.get(tenantId, id);
+    if (!current) throw ApiError.notFound('Review request');
     if (current.state !== 'open' || !current.workflowId) throw this.closed();
     const workflow = await this.deps.context().workflows.get(tenantId, current.workflowId);
     const versionId = input.versionId ?? workflow.versionId;
@@ -349,7 +354,7 @@ export class WorkflowReviewService {
       return updated as WorkflowReviewRequestRow;
     });
     await this.audit(tenantId, caller, 'workflow_review.version_updated', id, { versionId });
-    this.emit(tenantId, row);
+    this.emit(tenantId);
     return this.dto(tenantId, row);
   }
 
@@ -406,7 +411,7 @@ export class WorkflowReviewService {
       return closed as WorkflowReviewRequestRow;
     });
     await this.audit(tenantId, caller, 'workflow_review.decided', id, { decision: input.decision });
-    this.emit(tenantId, row);
+    this.emit(tenantId);
 
     if (input.decision === 'changes_requested') return { review: await this.dto(tenantId, row) };
     const autoPublish = await this.autoPublish(tenantId, row, requester);
@@ -436,7 +441,7 @@ export class WorkflowReviewService {
       await repos.reviews.update(tenantId, id, {});
       return added;
     });
-    this.emit(tenantId, current);
+    this.emit(tenantId);
     const [dto] = await this.activityDtos([record]);
     return dto;
   }
@@ -521,7 +526,7 @@ export class WorkflowReviewService {
         await repos.reviews.addActivity(tenantId, closed.id, { type: 'closed', data, createdBy: null });
       return closed;
     });
-    if (row) this.emit(tenantId, row);
+    if (row) this.emit(tenantId);
   }
 
   private inboxFilter(caller: ReviewCaller, tab: 'to_review' | 'mine'): Omit<ReviewListFilter, 'limit'> {
@@ -604,11 +609,13 @@ export class WorkflowReviewService {
     }));
   }
 
-  private emit(tenantId: string, row: Pick<WorkflowReviewRequestRow, 'id' | 'workflowId'>): void {
-    this.deps.context().push.send(tenantId, 'workflowReviewChanged', {
-      workflowId: row.workflowId ?? '',
-      requestId: row.id,
-    });
+  /**
+   * The push stream reaches every tenant member, and a non-participant must not learn that a
+   * request exists, so the event names neither the request nor its workflow: listeners refetch
+   * through the gated list, inbox and detail endpoints.
+   */
+  private emit(tenantId: string): void {
+    this.deps.context().push.send(tenantId, 'workflowReviewChanged', { workflowId: '', requestId: '' });
   }
 
   private async audit(

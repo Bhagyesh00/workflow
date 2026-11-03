@@ -1,12 +1,15 @@
 /**
  * Demo routes for workflow reviews and the inbox (P3-19), registered by the MockBackend
  * constructor: /workflow-reviews (list, eligible-reviewers, create, get, update-version, decision,
- * activity, comments), /inbox and /inbox/summary. Changes emit `workflowReviewChanged`.
+ * activity, comments), /inbox and /inbox/summary. Changes emit `workflowReviewChanged`, which names
+ * no request or workflow (every member gets it).
  *
  * The rules follow the server: one open request per workflow, reviewers are editors and up and never
  * the requester, decisions by an assigned reviewer or an admin (never another author), reads limited
- * to authors, assigned reviewers and admins, approval stores the published version as the baseline
- * and publishes the pinned version, and a pending request blocks publishing (see mock-publish).
+ * to authors, assigned reviewers and admins, any member who can publish may update the version and
+ * becomes an author (n8n), approval stores the published version as the baseline and publishes the
+ * pinned version, and a pending request blocks publishing (see mock-publish). A pruned version keeps
+ * its id on the request and loses its name.
  * State lives in `backend.ext.reviews`.
  */
 import type { ReviewActivity, ReviewUser, WorkflowReviewDTO } from '../api/types';
@@ -61,11 +64,8 @@ export function registerReviewRoutes(backend: MockBackend): void {
   };
   const isAdmin = (role: keyof typeof RANK) => RANK[role] >= RANK.admin;
 
-  const emit = (r: StoredReview) =>
-    backend.emit({
-      type: 'workflowReviewChanged',
-      data: { workflowId: r.workflowId ?? '', requestId: r.id },
-    });
+  const emit = (_r: StoredReview) =>
+    backend.emit({ type: 'workflowReviewChanged', data: { workflowId: '', requestId: '' } });
   const log = (
     r: StoredReview,
     type: string,
@@ -85,7 +85,13 @@ export function registerReviewRoutes(backend: MockBackend): void {
     store(backend).activity.push(entry);
     return entry;
   };
-  const dto = ({ tenantId: _t, ...rest }: StoredReview): WorkflowReviewDTO => copy(rest);
+  /** the version name is read from the version (null once it is pruned), as the server does */
+  const dto = ({ tenantId: _t, ...rest }: StoredReview): WorkflowReviewDTO => {
+    const version = backend.versions.find(
+      (v) => v.workflowId === rest.workflowId && v.versionId === rest.workflowVersionId,
+    );
+    return copy({ ...rest, versionName: version ? (version.versionName ?? null) : null });
+  };
 
   /** a participant (author, assigned reviewer, admin) or a 404, as the server answers */
   const readable = (id: string) => {
@@ -195,9 +201,18 @@ export function registerReviewRoutes(backend: MockBackend): void {
   backend.on('GET', '/workflow-reviews/:id', ({ params }) => dto(readable(params[0]).r));
 
   backend.on('POST', '/workflow-reviews/:id/update-version', ({ params, body }) => {
-    const { r, me, role } = readable(params[0]);
-    if (!r.authors.some((a) => a.id === me.id) && !isAdmin(role))
-      throw new HttpError(403, 'forbidden', 'Only an author can update the request');
+    const { user: me, tenant, role } = backend.auth();
+    // any member who can publish may move it (n8n); others get 404 (non-participant) or 403
+    if (RANK[role] < RANK.editor) {
+      readable(params[0]);
+      throw new HttpError(
+        403,
+        'forbidden',
+        'Only members who can publish this workflow can update the request',
+      );
+    }
+    const r = store(backend).requests.find((x) => x.id === params[0] && x.tenantId === tenant.id);
+    if (!r) throw new HttpError(404, 'not_found', 'Review request not found');
     if (r.state !== 'open') throw new HttpError(409, 'conflict', 'The review request is closed');
     const versionName = typeof body.versionName === 'string' ? body.versionName.trim() : '';
     if (versionName.length < 1 || versionName.length > 128)
@@ -212,6 +227,7 @@ export function registerReviewRoutes(backend: MockBackend): void {
     r.decision = 'pending';
     r.updatedBy = user(me.id);
     r.updatedAt = now();
+    if (!r.authors.some((a) => a.id === me.id)) r.authors.push(user(me.id));
     log(r, 'version_updated', { versionId, versionName }, me.id);
     emit(r);
     return dto(r);
@@ -290,6 +306,8 @@ export function registerReviewRoutes(backend: MockBackend): void {
       throw new HttpError(403, 'forbidden', 'You cannot comment on this review request');
     if (r.state !== 'open') throw new HttpError(409, 'conflict', 'The review request is closed');
     const text = typeof body.body === 'string' ? body.body.trim() : '';
+    if (hasControlChars(text))
+      throw new HttpError(400, 'bad_request', 'The comment cannot contain control characters');
     if (text.length < 1 || text.length > 10000)
       throw new HttpError(400, 'bad_request', 'The comment must be 1 to 10000 characters');
     const entry = log(r, 'comment', {}, me.id, { id: newId(), body: text });

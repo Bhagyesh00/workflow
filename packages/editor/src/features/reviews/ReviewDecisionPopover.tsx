@@ -7,15 +7,7 @@ import type { ReviewDecisionBody, WorkflowReviewDTO } from '../../api/types';
 import { Button } from '../../components/ui/Button';
 import { FormField, TextArea } from '../../components/ui/Field';
 import { toast } from '../../stores/ui-store';
-
-/** control characters other than tab, newline and carriage return are refused (as the server does) */
-function hasControlChars(value: string): boolean {
-  for (const ch of value) {
-    const code = ch.codePointAt(0) ?? 0;
-    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127) return true;
-  }
-  return false;
-}
+import { hasControlChars } from './review-publish';
 
 export function ReviewDecisionPopover({ review }: { review: WorkflowReviewDTO }) {
   const queryClient = useQueryClient();
