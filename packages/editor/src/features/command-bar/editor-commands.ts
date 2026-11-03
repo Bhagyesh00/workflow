@@ -3,7 +3,8 @@
  * sticky, nodes in workflow, test workflow, tidy up, select all, rename, add tag, settings,
  * duplicate, download, import, publish / unpublish, archive (unarchive / delete when archived),
  * import from URL (P3-13). Write commands are hidden for read-only. There is no Save command (as
- * in n8n). Open sub-workflow and credential (P3-12) are added by that item.
+ * in n8n). Open sub-workflow and Open credential (P3-12) list one child per target and are hidden
+ * when there is none.
  */
 import { useQueryClient } from '@tanstack/react-query';
 import type { ReactFlowInstance } from '@xyflow/react';
@@ -13,6 +14,12 @@ import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { addNodeFromDescription } from '../editor/add-node';
 import type { EditorDeps } from '../editor/editor-actions';
+import {
+  credentialTargets,
+  openCredential,
+  openSubWorkflow,
+  subWorkflowTargets,
+} from '../editor/open-resources';
 import { publishWorkflow, unpublishWorkflow } from '../editor/publish-actions';
 import { tidyUp } from '../editor/tidy-up';
 import { addStickyAt, downloadWorkflow, duplicateWorkflow } from '../editor/workflow-commands';
@@ -33,6 +40,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
   const workflowId = useWorkflowStore((s) => s.meta.id);
   const published = useWorkflowStore((s) => s.meta.active);
   const archived = useWorkflowStore((s) => s.meta.isArchived);
+  const nodes = useWorkflowStore((s) => s.nodes);
   const viewer = useMe().data?.role === 'viewer';
   const queryClient = useQueryClient();
 
@@ -91,6 +99,34 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
           },
         })),
     });
+    const subWorkflows = subWorkflowTargets(nodes);
+    if (subWorkflows.length)
+      add({
+        id: 'open-sub-workflow',
+        title: 'Open sub-workflow',
+        keywords: ['execute workflow', 'child workflow'],
+        children: () =>
+          subWorkflows.map((target) => ({
+            id: `sub-workflow:${target.nodeName}`,
+            title: target.label,
+            description: target.nodeName,
+            run: () => openSubWorkflow(target.nodeName),
+          })),
+      });
+    const credentials = viewer ? [] : credentialTargets(nodes);
+    if (credentials.length)
+      add({
+        id: 'open-credential',
+        title: 'Open credential',
+        keywords: ['credentials', 'secret', 'connection'],
+        children: () =>
+          credentials.map((target) => ({
+            id: `credential:${target.id}`,
+            title: target.name,
+            description: target.type,
+            run: () => openCredential(target.id),
+          })),
+      });
     if (!readOnly) {
       add({
         id: 'test-workflow',
@@ -208,7 +244,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
       }
     }
     return list;
-  }, [deps, flow, execute, queryClient, readOnly, workflowId, published, archived, viewer]);
+  }, [deps, flow, execute, queryClient, readOnly, workflowId, published, archived, viewer, nodes]);
 
   useEffect(() => registerCommands('editor', commands), [commands]);
 }
