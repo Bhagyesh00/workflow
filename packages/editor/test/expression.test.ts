@@ -125,6 +125,13 @@ describe('completion', () => {
     expect(result.from).toBe(0);
   });
 
+  it('offers $getWorkflowStaticData only in the Code node editor, not in {{ }} expressions', () => {
+    expect(completeExpression('$getW', data)).toBeNull();
+    const code = completeExpression('$getW', data, { codeNode: true })!;
+    expect(code.options.map((o) => o.label)).toEqual(['$getWorkflowStaticData']);
+    expect(code.options[0].apply).toBe("$getWorkflowStaticData('");
+  });
+
   it('suggests $json fields at any depth', () => {
     expect(completeExpression('$json.', data)!.options.map((o) => o.label)).toEqual([
       'name',

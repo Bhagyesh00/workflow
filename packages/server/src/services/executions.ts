@@ -673,6 +673,23 @@ export class ExecutionService {
     else if (status === 'success') keep = settings.saveDataSuccessExecution !== 'none';
     else keep = settings.saveDataErrorExecution !== 'none';
 
+    // static data written by nodes (poll cursors, counters) is persisted for production runs, BEFORE the
+    // final status: a client or trigger that sees the run finished must not start from the old data. A
+    // failed write is logged and never leaves the row in 'running'.
+    if (row.mode !== 'manual' && row.workflowId) {
+      const after = definition.staticData ?? {};
+      if (JSON.stringify(after) !== staticBefore) {
+        await repos.staticData
+          .merge(tenant.id, row.workflowId, JSON.parse(staticBefore), after)
+          .catch((e) =>
+            logger.warn(
+              { err: e, tenantId: tenant.id, executionId: row.id, workflowId: row.workflowId },
+              'Static data could not be saved',
+            ),
+          );
+      }
+    }
+
     // linked before the final status is written: whoever sees the retry finished also sees the link
     if (status === 'success' && row.retryOf) {
       await repos.executions.update(tenant.id, row.retryOf, { retrySuccessId: row.id });
@@ -697,14 +714,6 @@ export class ExecutionService {
     if (status !== 'waiting') {
       await repos.usage.increment(tenant.id, currentPeriod(), 0, durationMs);
       metrics.recordExecution(status, row.mode, durationMs);
-    }
-
-    // static data written by nodes (poll cursors, counters) is persisted for production runs
-    if (row.mode !== 'manual' && row.workflowId) {
-      const after = definition.staticData ?? {};
-      if (JSON.stringify(after) !== staticBefore) {
-        await repos.staticData.merge(tenant.id, row.workflowId, JSON.parse(staticBefore), after);
-      }
     }
 
     push.send(tenant.id, 'executionFinished', {
@@ -1086,7 +1095,13 @@ export class ExecutionService {
       }
       const retryState = clone(state);
       const pinData = clone(runOptions.pinData);
-      return launch({ ...origin, pinData, retryState }, retryState, origin.triggerItems, origin.runData, pinData);
+      return launch(
+        { ...origin, pinData, retryState },
+        retryState,
+        origin.triggerItems,
+        origin.runData,
+        pinData,
+      );
     }
     // a timeout, a stop or a crash names no failed node: the nodes that already succeeded are
     // pinned so the retry continues after them without repeating side effects; multi-output and

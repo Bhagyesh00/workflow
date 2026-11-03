@@ -27,6 +27,16 @@ export interface CompletionResult {
   options: Suggestion[];
 }
 
+/** only in the Code node editor (as in n8n): expressions cannot read or write static data */
+const CODE_ROOTS: Suggestion[] = [
+  {
+    label: '$getWorkflowStaticData',
+    apply: "$getWorkflowStaticData('",
+    type: 'function',
+    detail: "Data kept between runs ('global' or 'node')",
+  },
+];
+
 const ROOTS: Suggestion[] = [
   { label: '$json', type: 'variable', detail: 'Current item data' },
   { label: '$input', type: 'variable', detail: 'Input items of this node' },
@@ -125,7 +135,11 @@ function filter(options: Suggestion[], prefix: string): Suggestion[] {
  * Suggestions for the code just before the cursor (`before` is the text inside `{{ }}` or in a
  * code editor up to the cursor).
  */
-export function completeExpression(before: string, data: CompletionData): CompletionResult | null {
+export function completeExpression(
+  before: string,
+  data: CompletionData,
+  options: { codeNode?: boolean } = {},
+): CompletionResult | null {
   // $('Partial  -> node names
   const nodeName = before.match(/\$\(\s*(['"])([^'"]*)$/);
   if (nodeName) {
@@ -195,8 +209,8 @@ export function completeExpression(before: string, data: CompletionData): Comple
   const word = before.match(/(\$?[A-Za-z_][\w$]*|\$)$/);
   if (word) {
     const typed = word[1];
-    const options = filter(ROOTS, typed);
-    return options.length ? { from: before.length - typed.length, options } : null;
+    const roots = filter(options.codeNode ? [...ROOTS, ...CODE_ROOTS] : ROOTS, typed);
+    return roots.length ? { from: before.length - typed.length, options: roots } : null;
   }
   return null;
 }

@@ -199,7 +199,9 @@ export class ActiveWorkflowManager {
     );
     await bus
       .publish('control', { ...answer, tenantId, workflowId, requestId })
-      .catch((error) => logger.warn({ err: error, tenantId, workflowId }, 'Could not answer a trigger start'));
+      .catch((error) =>
+        logger.warn({ err: error, tenantId, workflowId }, 'Could not answer a trigger start'),
+      );
   }
 
   /**
@@ -480,7 +482,7 @@ export class ActiveWorkflowManager {
     action: 'create' | 'delete',
     options: { only?: (node: WorkflowNode) => boolean; testUrls?: boolean } = {},
   ) {
-    const before = JSON.stringify(workflow.staticData);
+    const before = structuredClone(workflow.staticData);
     for (const node of Object.values(workflow.nodes)) {
       if (node.disabled || (options.only && !options.only(node))) continue;
       const type = this.deps.nodeTypes.get(node.type);
@@ -500,8 +502,8 @@ export class ActiveWorkflowManager {
         }
       }
     }
-    if (!options.testUrls && workflow.id && JSON.stringify(workflow.staticData) !== before) {
-      await this.deps.repos.workflows.setStaticData(tenant.id, workflow.id, workflow.staticData);
+    if (!options.testUrls && workflow.id) {
+      await this.deps.repos.staticData.merge(tenant.id, workflow.id, before, workflow.staticData);
     }
   }
 
@@ -568,9 +570,18 @@ export class ActiveWorkflowManager {
   async unregisterTestWebhook(tenantId: string, workflowId: string, nodeName: string): Promise<void> {
     await this.unregisterTestWebhooks(`${tenantId}:${workflowId}:${nodeName}`);
     await this.deps.bus
-      .publish('control', { type: 'test-webhooks:clear', tenantId, workflowId, nodeName, origin: this.mainId })
+      .publish('control', {
+        type: 'test-webhooks:clear',
+        tenantId,
+        workflowId,
+        nodeName,
+        origin: this.mainId,
+      })
       .catch((error) =>
-        this.deps.logger.warn({ err: error, tenantId, workflowId }, 'Could not ask the other mains to stop listening'),
+        this.deps.logger.warn(
+          { err: error, tenantId, workflowId },
+          'Could not ask the other mains to stop listening',
+        ),
       );
   }
 
@@ -771,6 +782,20 @@ export class ActiveWorkflowManager {
     }
   }
 
+  /**
+   * A fresh copy of a running workflow's static data as stored in the database (another run, poll or
+   * main may have saved it since the triggers started), or of the in-memory one for an unsaved
+   * workflow. Each poll and each emitted run gets its own copy: the scope objects of the running
+   * workflow are never swapped under a poll that is still writing into them.
+   */
+  private async storedStaticData(tenantId: string, workflow: Workflow): Promise<DataObject> {
+    if (workflow.id) {
+      const stored = await this.deps.repos.staticData.get(tenantId, workflow.id);
+      if (stored) return structuredClone(stored);
+    }
+    return structuredClone(workflow.staticData);
+  }
+
   private startPoller(
     tenant: TenantRow,
     entry: RunningTriggers,
@@ -788,16 +813,16 @@ export class ActiveWorkflowManager {
       const executionId = randomUUID();
       let started = false;
       try {
-        const deps = await this.contextDeps(tenant, entry.workflow, node, entry.abort.signal, executionId);
-        const before = JSON.stringify(entry.workflow.staticData);
+        const own = await this.storedStaticData(tenant.id, entry.workflow);
+        const before = structuredClone(own);
+        const view = withStaticData(entry.workflow, own);
+        const deps = await this.contextDeps(tenant, view, node, entry.abort.signal, executionId);
         const result = await type.poll!(createPollContext(deps, mode));
-        if (entry.workflow.id && JSON.stringify(entry.workflow.staticData) !== before) {
-          await this.deps.repos.workflows.setStaticData(
-            tenant.id,
-            entry.workflow.id,
-            entry.workflow.staticData,
-          );
+        if (entry.workflow.id) {
+          await this.deps.repos.staticData.merge(tenant.id, entry.workflow.id, before, own);
         }
+        // keep the in-memory copy current for an unsaved workflow and for trigger contexts
+        applyStaticDataChanges(entry.workflow.staticData, before, own);
         const items = result?.[0] ?? [];
         if (items.length) {
           started = await this.startFromTrigger(tenant, entry, node, items, undefined, executionId);
@@ -832,8 +857,9 @@ export class ActiveWorkflowManager {
     let begun = false;
     try {
       if (!pollExecutionId) await this.moveStagedBinaryData(tenant.id, entry.stagingId, executionId, items);
+      // another run, poll or main may have saved static data since this trigger started
       const definition = JSON.parse(JSON.stringify(entry.workflow.definition)) as WorkflowDefinition;
-      definition.staticData = JSON.parse(JSON.stringify(entry.workflow.staticData));
+      definition.staticData = await this.storedStaticData(tenant.id, entry.workflow);
       const started = await this.deps.executions.start({
         tenantId: tenant.id,
         workflow: definition,
@@ -892,5 +918,20 @@ export class ActiveWorkflowManager {
       for (const child of Object.values(value)) await walk(child);
     };
     await walk(items);
+  }
+}
+
+/** a view of `workflow` whose static data is `staticData` (everything else is the workflow's own) */
+function withStaticData(workflow: Workflow, staticData: DataObject): Workflow {
+  const view = Object.create(workflow) as Workflow;
+  Object.defineProperty(view, 'staticData', { value: staticData, enumerable: true });
+  return view;
+}
+
+/** copy the top-level keys a run changed (`before` -> `after`) into `target`, deleting removed keys */
+function applyStaticDataChanges(target: DataObject, before: DataObject, after: DataObject): void {
+  for (const key of Object.keys(before)) if (!(key in after)) delete target[key];
+  for (const [key, value] of Object.entries(after)) {
+    if (JSON.stringify(value) !== JSON.stringify(before[key])) target[key] = structuredClone(value);
   }
 }

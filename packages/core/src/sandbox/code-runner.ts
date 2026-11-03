@@ -63,6 +63,12 @@ const $workflow = Object.freeze(__data.workflow);
 const $execution = Object.freeze(__data.execution);
 const $now = DateTime.now().setZone(__data.timezone);
 const $today = $now.startOf('day');
+const __sd = __data.staticData;
+const $getWorkflowStaticData = (type) => {
+  if (type === 'global') return __sd.global;
+  if (type === 'node') return __sd.node;
+  throw new Error("$getWorkflowStaticData expects 'global' or 'node'");
+};
 const $env = new Proxy({}, { get() { throw new Error('Access to environment variables is disabled. Use $vars instead.'); } });
 `;
 
@@ -99,6 +105,9 @@ function normalizeResult(result: unknown, mode: CodeRunnerInput['mode'], itemInd
   return result.map((v, i) => toItem(v, i));
 }
 
+/** the most static data (global and node scope together, as JSON) one Code run may leave behind */
+export const MAX_STATIC_DATA_BYTES = 1024 * 1024;
+
 export class IsolatedVmCodeRunner implements CodeRunner {
   private readonly memoryLimitMb: number;
   private readonly timeoutMs: number;
@@ -111,6 +120,21 @@ export class IsolatedVmCodeRunner implements CodeRunner {
     this.maxPayloadBytes = options.maxPayloadBytes ?? 64 * 1024 * 1024;
   }
 
+  /** hand changed static data to the host after a finished run; the host copy is never touched otherwise */
+  private saveStaticData(input: CodeRunnerInput, after: { global: DataObject; node: DataObject }): void {
+    if (!input.onStaticData) return;
+    const next = JSON.stringify({ global: after.global ?? {}, node: after.node ?? {} });
+    const previous = JSON.stringify({
+      global: input.staticData?.global ?? {},
+      node: input.staticData?.node ?? {},
+    });
+    if (next === previous) return;
+    if (Buffer.byteLength(next) > MAX_STATIC_DATA_BYTES) {
+      throw new CodeExecutionError('Workflow static data is larger than the 1 MB limit');
+    }
+    input.onStaticData({ global: after.global ?? {}, node: after.node ?? {} });
+  }
+
   async run(input: CodeRunnerInput): Promise<Item[]> {
     const payload = JSON.stringify({
       items: input.items,
@@ -119,6 +143,7 @@ export class IsolatedVmCodeRunner implements CodeRunner {
       workflow: input.workflow,
       execution: input.execution,
       timezone: input.timezone,
+      staticData: { global: input.staticData?.global ?? {}, node: input.staticData?.node ?? {} },
     });
     if (payload.length > this.maxPayloadBytes) {
       throw new CodeExecutionError('Input data is too large for the Code node sandbox');
@@ -176,7 +201,7 @@ return await (async () => {
 ${input.code}
 })();`;
 
-      const source = `${PRELUDE}\n(async () => {\n${userFn}\n})().then((r) => JSON.stringify(r === undefined ? null : r))`;
+      const source = `${PRELUDE}\n(async () => {\n${userFn}\n})().then((r) => JSON.stringify({ r: r === undefined ? null : r, s: __sd }))`;
       const run = context.eval(source, { promise: true, timeout: this.timeoutMs, filename: 'code-node.js' });
       let timer: NodeJS.Timeout | undefined;
       const timeout = new Promise<never>((_, reject) => {
@@ -192,11 +217,15 @@ ${input.code}
       } finally {
         clearTimeout(timer);
       }
-      const result = JSON.parse(json) as unknown;
-      if (input.mode === 'runOnceForEachItem') {
-        return (result as unknown[]).flatMap((r, i) => (r === null ? [] : normalizeResult(r, input.mode, i)));
-      }
-      return normalizeResult(result, input.mode);
+      const parsed = JSON.parse(json) as { r: unknown; s: { global: DataObject; node: DataObject } };
+      const result = parsed.r;
+      // the result is checked first: a run that fails on its result shape leaves static data as it was
+      const items =
+        input.mode === 'runOnceForEachItem'
+          ? (result as unknown[]).flatMap((r, i) => (r === null ? [] : normalizeResult(r, input.mode, i)))
+          : normalizeResult(result, input.mode);
+      this.saveStaticData(input, parsed.s);
+      return items;
     } catch (error) {
       if (error instanceof CodeExecutionError) throw error;
       if (input.signal?.aborted) throw new CodeExecutionError('Code execution was cancelled');

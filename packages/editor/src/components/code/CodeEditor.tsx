@@ -132,7 +132,8 @@ function toCompletionSource(
       start = context.state.doc.lineAt(context.pos).from;
     }
     const before = doc.slice(start, context.pos);
-    const result = completeExpression(before, data);
+    // the whole document is code only in the Code node editor; `{{ }}` fields are expressions
+    const result = completeExpression(before, data, { codeNode: !insideBracesOnly });
     if (!result) return null;
     if (
       !context.explicit &&
