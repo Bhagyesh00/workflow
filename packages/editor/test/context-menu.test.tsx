@@ -272,7 +272,7 @@ describe('context menu (P3-02)', () => {
     await openEditor(wf.id);
     act(() => useWorkflowStore.setState({ readOnly: true }));
     openMenu({ type: 'node', nodeName: 'Shape' });
-    for (const name of ['Rename', 'Deactivate', 'Duplicate', 'Delete'])
+    for (const name of ['Test step', 'Rename', 'Deactivate', 'Duplicate', 'Delete'])
       expect(item(name).hasAttribute('disabled'), name).toBe(true);
     expect(item('Copy').hasAttribute('disabled')).toBe(false);
     openMenu({ type: 'canvas', position: [0, 0] });
@@ -347,5 +347,33 @@ describe('context menu (P3-02)', () => {
     expect(document.activeElement).toBe(items[items.length - 1]);
     fireEvent.keyDown(menu(), { key: 'Home' });
     expect(document.activeElement).toBe(items[0]);
+  });
+
+  it('Enter on a focused row runs that row and keeps the editor shortcuts out (canvas-b-1)', async () => {
+    const user = userEvent.setup();
+    const wf = seed();
+    await openEditor(wf.id);
+    select(['Shape']);
+    openMenu({ type: 'node', nodeName: 'Shape' });
+    const items = within(menu()).getAllByRole('menuitem');
+    await waitFor(() => expect(document.activeElement).toBe(items[0]));
+    act(() => item('Deactivate').focus());
+    await user.keyboard('{Enter}');
+    expect(node2('Shape')?.disabled).toBe(true);
+    // Enter did not also open the NDV of the selected node
+    expect(useUiStore.getState().ndvNode).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('plain keys typed in the menu do not reach the editor shortcuts (canvas-b-1)', async () => {
+    const user = userEvent.setup();
+    const wf = seed();
+    await openEditor(wf.id);
+    select(['Shape']);
+    openMenu({ type: 'node', nodeName: 'Shape' });
+    await waitFor(() => expect(document.activeElement?.getAttribute('role')).toBe('menuitem'));
+    await user.keyboard('d');
+    expect(node2('Shape')?.disabled).toBeFalsy();
+    expect(store().nodes.length).toBe(4);
   });
 });

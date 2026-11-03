@@ -233,7 +233,7 @@ function nodeSections(input: MenuInputs, a: MenuActions, name: string): MenuEntr
   const kinds = urlKinds(node, input);
   const head: MenuEntry[] = [
     { key: 'open', label: 'Open', shortcut: 'Enter', run: () => a.open(name) },
-    { key: 'test-step', label: 'Test step', run: () => a.testStep(name) },
+    write(input, { key: 'test-step', label: 'Test step', run: () => a.testStep(name) }),
   ];
   if (kinds.test)
     head.push({

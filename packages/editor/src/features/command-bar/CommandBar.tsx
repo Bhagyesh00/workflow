@@ -369,6 +369,9 @@ function CommandBarPanel() {
       close();
       if (!nodeAdder) return;
       try {
+        // the node panel may still be in replace mode (R); a node picked here is added, never swapped in
+        const ui = useUiStore.getState();
+        if (ui.replaceTarget) ui.setSidePanel(null);
         nodeAdder(row.entry.description);
       } catch (error) {
         toast.error(`Could not add ${row.entry.description.displayName}`, errorMessage(error));

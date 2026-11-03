@@ -185,9 +185,18 @@ describe('node menu (single node)', () => {
 
   it('read-only disables every write entry but not Copy, Open or Select all', () => {
     const model = buildMenu(inputs({ readOnly: true }), actions());
-    for (const label of ['Rename', 'Replace', 'Deactivate', 'Pin', 'Duplicate', 'Tidy up', 'Delete'])
+    for (const label of [
+      'Test step',
+      'Rename',
+      'Replace',
+      'Deactivate',
+      'Pin',
+      'Duplicate',
+      'Tidy up',
+      'Delete',
+    ])
       expect(find(model, label)?.disabled, label).toBe(true);
-    for (const label of ['Open', 'Copy', 'Select all', 'Deselect all', 'Test step'])
+    for (const label of ['Open', 'Copy', 'Select all', 'Deselect all'])
       expect(find(model, label)?.disabled, label).toBeFalsy();
   });
 

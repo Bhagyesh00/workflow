@@ -4,7 +4,7 @@
  * the context menu entry; one undo step.
  */
 
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Connections, NodeTypeDescription, WorkflowNode } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -203,5 +203,27 @@ describe('replace mode in the editor', () => {
         .getByRole('menuitem', { name: /^Replace/ })
         .hasAttribute('disabled'),
     ).toBe(true);
+  });
+
+  it('a node picked in the command bar is added, not swapped in, while the panel is in replace mode', async () => {
+    await openEditor([mk('n1', 'Start', 'core.manualTrigger', 0), mk('n2', 'Shape', 'core.set', 300)], {
+      Start: { main: [[to('Shape')]] },
+    });
+    act(() => {
+      useWorkflowStore.getState().select({ nodes: ['Shape'], stickies: [], edges: [] });
+      useUiStore.getState().openCreator();
+      useUiStore.getState().setReplaceTarget('Shape');
+    });
+    act(() => {
+      fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true });
+    });
+    const bar = await screen.findByRole('dialog', { name: 'Command bar' });
+    const user = userEvent.setup();
+    await user.type(within(bar).getByRole('combobox', { name: 'Search the command bar' }), 'edit fields');
+    await within(bar).findByRole('option', { name: /Edit Fields \(Set\)/ });
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(useWorkflowStore.getState().nodes).toHaveLength(3));
+    expect(useWorkflowStore.getState().nodes.some((n) => n.name === 'Shape')).toBe(true);
+    expect(useUiStore.getState()).toMatchObject({ replaceTarget: null, sidePanel: null });
   });
 });

@@ -65,6 +65,10 @@ export function ContextMenu({
   }, []);
 
   const onListKey = (event: React.KeyboardEvent) => {
+    // keys typed in the menu belong to the menu: without this the editor's window shortcuts see them too
+    // (Enter would open the node details and cancel the row's click; D, R, Delete would act on the selection).
+    // Ctrl / Alt / Meta combinations stay free so the shortcut hints shown on the rows still work.
+    if (!event.ctrlKey && !event.metaKey && !event.altKey) event.stopPropagation();
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const nodes = [

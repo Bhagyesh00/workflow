@@ -48,8 +48,23 @@ test('right-click menus on a node and on the canvas', async ({ page }) => {
   await expect(page.getByText('Kick off').first()).toBeVisible();
 
   // canvas menu: Add sticky note
+  // the node sits near the middle of the pane, and a node is a child of the pane, so a fixed
+  // point can land on the node (and open the node menu); aim at empty canvas right of the node
   const pane = page.locator('.react-flow__pane');
-  await pane.click({ button: 'right', position: { x: 400, y: 300 } });
+  const paneBox = await pane.boundingBox();
+  const nodeBox = await node.boundingBox();
+  if (!paneBox || !nodeBox) throw new Error('canvas not laid out');
+  const emptyX = Math.min(nodeBox.x + nodeBox.width + 200 - paneBox.x, paneBox.width - 100);
+  const emptyY = nodeBox.y + nodeBox.height / 2 - paneBox.y;
+  // React Flow only calls onPaneContextMenu when the event target is the pane element itself, so the
+  // point must resolve to the pane, not to a node or an overlay inside it; fail here with that reason
+  // instead of at the menu assertion
+  const hit = await page.evaluate(
+    ([x, y]) => document.elementFromPoint(x, y)?.className ?? null,
+    [paneBox.x + emptyX, paneBox.y + emptyY],
+  );
+  expect(String(hit)).toContain('react-flow__pane');
+  await pane.click({ button: 'right', position: { x: emptyX, y: emptyY } });
   await expect(menu.getByRole('menuitem', { name: 'Add node' })).toBeVisible();
   await menu.getByRole('menuitem', { name: 'Add sticky note' }).click();
   await expect(page.locator('.react-flow__node-sticky, [data-testid="sticky"]').first()).toBeVisible();
