@@ -180,6 +180,10 @@ The interpreter's security rules are in `packages/workflow/src/expression/interp
 
 All node HTTP goes through `HttpClient`. Every TCP connection is resolved and checked: only public unicast addresses are allowed. Loopback, private, link-local (cloud metadata), CGNAT, ULA and IPv4-mapped variants are all blocked. `SSRF_PROTECTION=false` (single-tenant self-host only) and `SSRF_ALLOW` (hosts/CIDRs) adjust this. Responses are capped at 100 MB, and timeouts default to 300 s. Only `http`/`https` URLs are accepted.
 
+FTP, SFTP and SSH do not use HTTP. Their host is resolved and checked once with `resolveAllowedHost` (helpers in `packages/nodes-base/src/utils/remote-connect.ts`), and they connect only to the checked addresses: FTP dials a checked IP itself, and SFTP and SSH use `connectSocket`, which pins the socket's `lookup` to them. A name that rebinds after the check cannot reach a blocked address, and an FTP passive reply that names another host is refused.
+
+A credential can limit where it is sent ("Allowed HTTP Request Domains": all, a list, or none). The check runs on the first URL and on every redirect hop, for HTTP Request, GraphQL, the HTTP Request Tool, the MCP Client Tool, OAuth1 and OAuth2 token calls and Test connection. The Authorization header is dropped when a redirect leaves the origin.
+
 ## 13. Node SDK (contract in `packages/workflow/src/node-types.ts`)
 
 - **Naming:** type ids are `core.<camel>` for core nodes, `app.<camel>` for integrations (`app.slack`) and `ai.<camel>` for AI nodes (`ai.agent`, `ai.lmChatOpenAi`). Credential type names are camelCase (`slackApi`, `googleOAuth2Api`).
