@@ -1,8 +1,12 @@
 import { screen, waitFor } from '@testing-library/react';
 import type { WorkflowNode } from '@workflow/workflow';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { HttpResponse, http } from 'msw';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { saveWorkflow } from '../src/features/editor/editor-actions';
+import { useToastStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
 import { backend, signedIn } from './backend';
+import { server } from './setup';
 import { renderApp } from './utils';
 
 const trigger: WorkflowNode = {
@@ -14,7 +18,8 @@ const trigger: WorkflowNode = {
   parameters: {},
 };
 
-const patches = () => backend().requests.filter((r) => r.method === 'PATCH' && /^\/workflows\/[^/]+$/.test(r.path));
+const patches = () =>
+  backend().requests.filter((r) => r.method === 'PATCH' && /^\/workflows\/[^/]+$/.test(r.path));
 
 async function openEditor(active = false) {
   signedIn();
@@ -39,7 +44,9 @@ describe('autosave (P3-17)', () => {
     await waitFor(() => expect(patches()).toHaveLength(1), { timeout: 6000 });
     expect(patches()[0].body).toMatchObject({ autosaved: true });
     expect(backend().requests.some((r) => r.path.endsWith('/activate'))).toBe(false);
-    expect(backend().requests.some((r) => JSON.stringify(r.body ?? '').includes('publishIfActive'))).toBe(false);
+    expect(backend().requests.some((r) => JSON.stringify(r.body ?? '').includes('publishIfActive'))).toBe(
+      false,
+    );
     await waitFor(() => expect(useWorkflowStore.getState().dirty).toBe(false));
     await screen.findByText('Autosaved');
   }, 60_000);
@@ -47,12 +54,38 @@ describe('autosave (P3-17)', () => {
   it('saves at most 5 s after the first unsaved change while edits keep coming', async () => {
     await openEditor();
     const start = Date.now();
+    let beforeMaxWait = -1;
+    let atMaxWait = -1;
+    // edits every 900 ms never leave the 1.5 s pause: only the 5 s max wait can save in the loop
     for (let i = 1; i <= 8; i++) {
       useWorkflowStore.getState().moveNodes({ Start: [i * 10, 0] });
       await new Promise((r) => setTimeout(r, 900));
+      const elapsed = Date.now() - start;
+      if (elapsed < 4500) beforeMaxWait = patches().length;
+      if (elapsed >= 5400 && atMaxWait < 0) atMaxWait = patches().length;
     }
-    await waitFor(() => expect(patches().length).toBeGreaterThanOrEqual(1), { timeout: 3000 });
-    expect(Date.now() - start).toBeLessThan(8000);
+    expect(beforeMaxWait).toBe(0);
+    expect(atMaxWait).toBeGreaterThanOrEqual(1);
+  }, 60_000);
+
+  it('a failed autosave shows the error and the retry in the status, with no toast, and clears when saved another way', async () => {
+    await openEditor();
+    server.use(
+      http.patch('/rest/workflows/:id', () =>
+        HttpResponse.json({ error: { code: 'down', message: 'Server is down.' } }, { status: 500 }),
+      ),
+    );
+    useWorkflowStore.getState().moveNodes({ Start: [30, 30] });
+    await screen.findByText('Autosave failed: Server is down. Retrying in 2s', {}, { timeout: 6000 });
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+    // the retry fails the same way: still no toast
+    await screen.findByText(/Autosave failed: Server is down\. Retrying in 4s/, {}, { timeout: 6000 });
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+    // Ctrl+S saves the draft by another path: the failure goes away at once, not at the next retry
+    server.resetHandlers();
+    const saved = await saveWorkflow({ navigate: vi.fn(), descriptions: { get: () => undefined } });
+    expect(saved).not.toBeNull();
+    await waitFor(() => expect(screen.queryByText(/Autosave failed/)).toBeNull(), { timeout: 1000 });
   }, 60_000);
 
   it('does nothing for a read-only (archived) workflow', async () => {

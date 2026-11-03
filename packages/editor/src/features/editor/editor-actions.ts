@@ -28,6 +28,11 @@ export interface EditorDeps {
 export interface SaveOptions {
   /** P3-17: the version this save creates is an autosave (useAutosave) */
   autosaved?: boolean;
+  /**
+   * A failed autosave raises no toast (D4): it reports the error here and useAutosave shows it in
+   * the header status with the retry countdown. A manual save keeps its toast.
+   */
+  onError?: (message: string) => void;
 }
 
 function patchBody(options: SaveOptions = {}): WorkflowPatchBody {
@@ -82,7 +87,8 @@ async function doSave(deps: EditorDeps, options: SaveOptions): Promise<WorkflowD
       useUiStore.getState().setSaveConflict(true);
       return null;
     }
-    toast.error('Could not save the workflow', errorMessage(error));
+    if (options.autosaved) options.onError?.(errorMessage(error));
+    else toast.error('Could not save the workflow', errorMessage(error));
     return null;
   }
 }
