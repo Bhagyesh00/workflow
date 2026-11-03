@@ -21,6 +21,8 @@ import {
   VariableRepository,
   WebhookRepository,
 } from './resources';
+import { ScheduleSlotRepository } from './schedule-slots';
+import { StaticDataRepository } from './static-data';
 import { TagRepository, WorkflowRepository, WorkflowVersionRepository } from './workflows';
 
 export interface Repositories {
@@ -40,6 +42,8 @@ export interface Repositories {
   audit: AuditRepository;
   usage: UsageRepository;
   idempotency: IdempotencyRepository;
+  staticData: StaticDataRepository;
+  scheduleSlots: ScheduleSlotRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -60,6 +64,8 @@ export function createRepositories(db: DbOrTx): Repositories {
     audit: new AuditRepository(db),
     usage: new UsageRepository(db),
     idempotency: new IdempotencyRepository(db),
+    staticData: new StaticDataRepository(db),
+    scheduleSlots: new ScheduleSlotRepository(db),
   };
 }
 

@@ -9,6 +9,8 @@ import {
   smtp,
   telegramApi,
 } from './credentials/apps.credentials';
+import { httpDigestAuth } from './credentials/digest.credentials';
+import { ftp, sftp } from './credentials/ftp.credentials';
 import {
   httpBasicAuth,
   httpBearerAuth,
@@ -17,6 +19,8 @@ import {
   httpQueryAuth,
   webhookSigningSecret,
 } from './credentials/http.credentials';
+import { jwtAuth } from './credentials/jwt.credentials';
+import { oAuth1Api } from './credentials/oauth1.credentials';
 import {
   gmailOAuth2,
   googleOAuth2Api,
@@ -24,6 +28,8 @@ import {
   oAuth2Api,
   slackOAuth2Api,
 } from './credentials/oauth2.credentials';
+import { sshPassword, sshPrivateKey } from './credentials/ssh.credentials';
+import { totpApi } from './credentials/totp.credentials';
 import { AirtableNode } from './nodes/apps/Airtable.node';
 import { GmailNode, GmailTriggerNode } from './nodes/apps/google/Gmail.node';
 import { GoogleSheetsNode } from './nodes/apps/google/GoogleSheets.node';
@@ -32,6 +38,7 @@ import { SlackNode } from './nodes/apps/Slack.node';
 import { MySqlNode } from './nodes/apps/sql/MySql.node';
 import { PostgresNode } from './nodes/apps/sql/Postgres.node';
 import { TelegramNode, TelegramTriggerNode } from './nodes/apps/Telegram.node';
+import { CompressionNode } from './nodes/core/Compression.node';
 import { CryptoNode } from './nodes/core/Crypto.node';
 import { FilterNode, IfNode, SwitchNode } from './nodes/core/conditions.nodes';
 import { DateTimeNode } from './nodes/core/DateTime.node';
@@ -45,6 +52,8 @@ import {
   SplitOutNode,
   SummarizeNode,
 } from './nodes/core/data.nodes';
+import { EditImageNode } from './nodes/core/EditImage.node';
+import { FtpNode } from './nodes/core/Ftp.node';
 import { ConvertToFileNode, ExtractFromFileNode } from './nodes/core/files.nodes';
 import {
   ErrorTriggerNode,
@@ -55,10 +64,12 @@ import {
   WaitNode,
 } from './nodes/core/flow.nodes';
 import { HttpRequestNode } from './nodes/core/HttpRequest.node';
+import { JwtNode } from './nodes/core/Jwt.node';
 import { MergeNode } from './nodes/core/Merge.node';
 import { HtmlNode, MarkdownNode, XmlNode } from './nodes/core/markup.nodes';
 import { ScheduleTriggerNode } from './nodes/core/ScheduleTrigger.node';
 import { SendEmailNode } from './nodes/core/SendEmail.node';
+import { SshNode } from './nodes/core/Ssh.node';
 import {
   CodeNode,
   ManualTriggerNode,
@@ -66,6 +77,7 @@ import {
   RespondToWebhookNode,
   SetNode,
 } from './nodes/core/simple.nodes';
+import { TotpNode } from './nodes/core/Totp.node';
 import { WebhookNode } from './nodes/core/Webhook.node';
 import { GraphqlNode, RssFeedReadNode } from './nodes/core/web.nodes';
 
@@ -106,6 +118,12 @@ export const coreNodes: NodeType[] = [
   SendEmailNode,
   RssFeedReadNode,
   GraphqlNode,
+  JwtNode,
+  TotpNode,
+  CompressionNode,
+  EditImageNode,
+  FtpNode,
+  SshNode,
 ];
 
 export const appNodes: NodeType[] = [
@@ -143,6 +161,14 @@ export const credentials: CredentialType[] = [
   airtableTokenApi,
   telegramApi,
   smtp,
+  jwtAuth,
+  totpApi,
+  ftp,
+  sftp,
+  sshPassword,
+  sshPrivateKey,
+  oAuth1Api,
+  httpDigestAuth,
 ];
 
 export const nodesBasePackage: NodePackage = { name: '@workflow/nodes-base', nodes, credentials };
@@ -156,4 +182,5 @@ export {
   OPERATIONS_BY_TYPE,
   SINGLE_VALUE_OPERATIONS,
 } from './utils/filter';
+export { parseOAuthResponse, signOAuth1Request } from './utils/oauth1';
 export { verifyWebhookSignature } from './utils/webhook-signature';

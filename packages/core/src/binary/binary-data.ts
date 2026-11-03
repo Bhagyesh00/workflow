@@ -24,6 +24,13 @@ const EXTENSIONS: Record<string, string> = {
   'video/mp4': 'mp4',
   'application/zip': 'zip',
   'application/xml': 'xml',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.oasis.opendocument.spreadsheet': 'ods',
+  'image/bmp': 'bmp',
+  'image/tiff': 'tiff',
+  'application/gzip': 'gz',
+  'application/x-tar': 'tar',
 };
 
 export function fileTypeOf(mimeType: string): BinaryData['fileType'] {

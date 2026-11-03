@@ -7,7 +7,17 @@ import dns from 'node:dns';
 import net from 'node:net';
 import type { AllowedHost, HttpFullResponse, HttpRequestOptions, ResolvedAddress } from '@workflow/workflow';
 import ipaddr from 'ipaddr.js';
-import { Agent, buildConnector, type Dispatcher, FormData, fetch } from 'undici';
+import {
+  Agent,
+  buildConnector,
+  type Dispatcher,
+  FormData,
+  fetch,
+  type RequestInit,
+  type Response as UndiciResponse,
+} from 'undici';
+import { fetchWithCredentialDomains } from './credential-redirects';
+import { digestAuthorization } from './digest';
 
 export class SsrfBlockedError extends Error {
   constructor(host: string, address: string) {
@@ -282,7 +292,9 @@ export class HttpClient {
       'user-agent': this.userAgent,
       ...lowerKeys(options.headers ?? {}),
     };
-    if (options.auth) {
+    // the digest scheme sends no credentials until the server's challenge names its nonce
+    const digest = options.auth?.scheme === 'digest';
+    if (options.auth && !digest) {
       headers.authorization = `Basic ${Buffer.from(`${options.auth.username}:${options.auth.password}`).toString('base64')}`;
     }
 
@@ -335,20 +347,26 @@ export class HttpClient {
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const dispatcher: Dispatcher = options.skipSslCertificateValidation ? this.insecureAgent : this.agent;
 
-    const response = await fetch(url, {
+    const init: RequestInit = {
       method,
       headers: Object.entries(headers).flatMap(([k, v]) =>
         (Array.isArray(v) ? v : [v]).map((value) => [k, value] as [string, string]),
       ),
-      body: body as any,
+      body: body as RequestInit['body'],
       dispatcher,
       redirect: options.followRedirects === false ? 'manual' : 'follow',
       signal: combined,
-    }).catch((error: unknown) => {
-      // a connect-time block reaches fetch as `TypeError('fetch failed')`; surface the real reason
-      if (error instanceof Error && error.cause instanceof SsrfBlockedError) throw error.cause;
-      throw error;
-    });
+    };
+    const { allowedDomains } = options;
+    const fetchOnce = (target: URL, requestInit: RequestInit) =>
+      allowedDomains !== undefined
+        ? fetchWithCredentialDomains(target, requestInit, allowedDomains, (u, i) => this.send(u, i))
+        : this.send(target, requestInit);
+
+    let response = await fetchOnce(url, init);
+    if (digest && options.auth && response.status === 401) {
+      response = await this.answerDigest(response, url, init, options.auth, fetchOnce);
+    }
 
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((v, k) => {
@@ -387,6 +405,43 @@ export class HttpClient {
       };
     }
     return parsed as T;
+  }
+
+  /** one fetch on the guarded dispatcher; a connect-time block surfaces as the SsrfBlockedError */
+  private async send(url: URL, init: RequestInit): Promise<UndiciResponse> {
+    return fetch(url, init).catch((error: unknown) => {
+      // a connect-time block reaches fetch as `TypeError('fetch failed')`; surface the real reason
+      if (error instanceof Error && error.cause instanceof SsrfBlockedError) throw error.cause;
+      throw error;
+    });
+  }
+
+  /**
+   * Answer a 401 Digest challenge once: the same request goes again with the Authorization header,
+   * and whatever comes back is the result (never a loop). Without a Digest challenge, an answer, or
+   * when a redirect ended on another origin, the 401 is returned as it is.
+   */
+  private async answerDigest(
+    response: UndiciResponse,
+    url: URL,
+    init: RequestInit,
+    auth: { username: string; password: string },
+    fetchOnce: (target: URL, init: RequestInit) => Promise<UndiciResponse>,
+  ): Promise<UndiciResponse> {
+    const challenge = response.headers.get('www-authenticate');
+    if (!challenge || !/(?:^|,)\s*digest\s/i.test(challenge)) return response;
+    const target = response.url ? new URL(response.url) : url;
+    if (target.origin !== url.origin) return response;
+    const authorization = digestAuthorization(challenge, {
+      method: init.method ?? 'GET',
+      uri: `${target.pathname}${target.search}`,
+      username: auth.username,
+      password: auth.password,
+    });
+    if (!authorization) return response;
+    await response.body?.cancel().catch(() => undefined);
+    const headers = (init.headers as Array<[string, string]>).filter(([k]) => k !== 'authorization');
+    return fetchOnce(target, { ...init, headers: [...headers, ['authorization', authorization]] });
   }
 
   async close(): Promise<void> {

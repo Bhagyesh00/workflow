@@ -142,8 +142,8 @@ describe('R34 Schedule Trigger honours Weeks Between Triggers', () => {
     );
     const spied = {
       ...ctx,
-      registerCron: (_expression: string, onTick: () => void) => {
-        ticks.push(onTick);
+      registerCron: (_expression: string, onTick: (slot: Date) => void) => {
+        ticks.push(() => onTick(new Date()));
         return () => undefined;
       },
     };

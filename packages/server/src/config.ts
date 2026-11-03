@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MasterKey } from '@workflow/core';
+import type { InstanceLimits } from '@workflow/workflow';
 import { z } from 'zod';
 
 const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,6 +26,8 @@ const list = z
       .map((s) => s.trim())
       .filter(Boolean),
   );
+
+const MB = 1024 * 1024;
 
 const int = (fallback: number, min = 0) => z.coerce.number().int().min(min).default(fallback);
 
@@ -67,6 +70,15 @@ const envSchema = z.object({
   /** directory of the built editor SPA */
   EDITOR_DIST: z.string().optional(),
   TRUST_PROXY: bool(false),
+  /** size caps for file, archive, image and spreadsheet nodes (`helpers.getInstanceLimits()`) */
+  NODE_DECOMPRESS_MAX_MB: int(100, 1),
+  NODE_ARCHIVE_MAX_ENTRIES: int(1000, 1),
+  NODE_IMAGE_MAX_MEGAPIXELS: int(50, 1),
+  NODE_IMAGE_MAX_INPUT_MB: int(25, 1),
+  NODE_SHEET_MAX_CELLS: int(1_000_000, 1),
+  NODE_REMOTE_FILE_MAX_MB: int(100, 1),
+  /** seconds a schedule slot may be late before it counts as missed (a node setting >= 1 replaces it) */
+  SCHEDULE_MISFIRE_GRACE_S: int(60, 0),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -101,6 +113,10 @@ export interface Config {
   editorDist: string;
   trustProxy: boolean;
   cookieSecure: boolean;
+  /** instance size caps handed to nodes through ExecutionServices.nodeLimits */
+  nodeLimits: InstanceLimits;
+  /** default misfire grace of the Schedule Trigger in seconds */
+  scheduleMisfireGraceS: number;
 }
 
 export class ConfigError extends Error {
@@ -197,6 +213,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     editorDist: path.resolve(e.EDITOR_DIST ?? path.join(PACKAGE_DIR, '..', 'editor', 'dist')),
     trustProxy: e.TRUST_PROXY,
     cookieSecure: baseUrl.startsWith('https://'),
+    nodeLimits: {
+      maxDecompressedBytes: e.NODE_DECOMPRESS_MAX_MB * MB,
+      maxArchiveEntries: e.NODE_ARCHIVE_MAX_ENTRIES,
+      maxImagePixels: e.NODE_IMAGE_MAX_MEGAPIXELS * 1_000_000,
+      maxImageInputBytes: e.NODE_IMAGE_MAX_INPUT_MB * MB,
+      maxSpreadsheetCells: e.NODE_SHEET_MAX_CELLS,
+      maxRemoteFileBytes: e.NODE_REMOTE_FILE_MAX_MB * MB,
+    },
+    scheduleMisfireGraceS: e.SCHEDULE_MISFIRE_GRACE_S,
   };
 }
 

@@ -741,8 +741,18 @@ export class ActiveWorkflowManager {
     mode: ActivationMode,
   ): Promise<void> {
     const deps = await this.contextDeps(tenant, entry.workflow, node, entry.abort.signal, entry.stagingId);
+    const workflowId = entry.workflow.id;
     const ctx = createTriggerContext(deps, {
       activationMode: mode,
+      // missed schedules need a saved workflow: the slots are stored per workflow and node
+      scheduleSlots: workflowId
+        ? this.deps.repos.scheduleSlots.storeFor(
+            tenant.id,
+            workflowId,
+            node.name,
+            this.deps.config.scheduleMisfireGraceS,
+          )
+        : undefined,
       emit: (data, responsePromise) => {
         void this.startFromTrigger(tenant, entry, node, data?.[0] ?? [], responsePromise);
       },

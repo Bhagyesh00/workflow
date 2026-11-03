@@ -12,7 +12,9 @@ export const GENERIC_AUTH_TYPES = [
   { name: 'Basic Auth', value: 'httpBasicAuth' },
   { name: 'Bearer Auth', value: 'httpBearerAuth' },
   { name: 'Custom Auth', value: 'httpCustomAuth' },
+  { name: 'Digest Auth', value: 'httpDigestAuth' },
   { name: 'Header Auth', value: 'httpHeaderAuth' },
+  { name: 'OAuth1', value: 'oAuth1Api' },
   { name: 'OAuth2', value: 'oAuth2Api' },
   { name: 'Query Auth', value: 'httpQueryAuth' },
 ];
@@ -40,7 +42,7 @@ export const authProperties: NodeProperty[] = [
       {
         name: 'Generic Credential Type',
         value: 'genericCredentialType',
-        description: 'Basic, header, query, bearer, OAuth2 or custom authentication',
+        description: 'Basic, digest, header, query, bearer, OAuth1, OAuth2 or custom authentication',
       },
     ],
   },
@@ -65,12 +67,17 @@ export const authProperties: NodeProperty[] = [
   },
 ];
 
-/** Send a request with the authentication configured on the node for item `itemIndex`. */
+/**
+ * Send a request with the authentication configured on the node for item `itemIndex`. The URL is
+ * typed by the user, so credentials are sent with `credentialScope: 'userUrl'` (their `none` domain
+ * mode applies here only).
+ */
 export async function authenticatedRequest<T = unknown>(
   ctx: ExecuteContext,
   itemIndex: number,
-  options: HttpRequestOptions,
+  request: HttpRequestOptions,
 ): Promise<T | HttpFullResponse<T>> {
+  const options: HttpRequestOptions = { ...request, credentialScope: 'userUrl' };
   const authentication = ctx.getNodeParameter('authentication', itemIndex, 'none') as string;
   if (authentication === 'predefinedCredentialType') {
     const type = String(ctx.getNodeParameter('nodeCredentialType', itemIndex, '') ?? '');
@@ -89,5 +96,5 @@ export async function authenticatedRequest<T = unknown>(
     }
     return ctx.helpers.httpRequestWithAuthentication<T>(type, options, itemIndex);
   }
-  return ctx.helpers.httpRequest<T>(options);
+  return ctx.helpers.httpRequest<T>(request);
 }

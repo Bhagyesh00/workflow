@@ -12,7 +12,10 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@napi-rs/canvas": "1.1.0",
+    "@napi-rs/image": "1.16.0",
     "@workflow/workflow": "workspace:*",
+    "basic-ftp": "6.2.5",
     "cheerio": "1.2.0",
     "fast-xml-parser": "5.11.2",
     "luxon": "3.7.2",
@@ -20,14 +23,20 @@
     "mysql2": "3.24.6",
     "nodemailer": "10.3.1",
     "papaparse": "5.7.0",
+    "pdfjs-dist": "6.5.438",
     "pg": "8.23.1",
-    "turndown": "7.2.4"
+    "ssh2": "1.17.0",
+    "ssh2-sftp-client": "12.1.1",
+    "turndown": "7.2.4",
+    "xlsx": "file:../../vendor/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@types/luxon": "3.7.6",
     "@types/node": "24.19.2",
     "@types/papaparse": "5.5.2",
     "@types/pg": "8.23.1",
+    "@types/ssh2": "1.15.6",
+    "@types/ssh2-sftp-client": "9.0.6",
     "@types/turndown": "5.0.6",
     "@workflow/core": "workspace:*",
     "typescript": "7.0.2",

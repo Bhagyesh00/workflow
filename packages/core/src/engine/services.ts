@@ -12,6 +12,7 @@ import type {
   ExecutionMode,
   ExecutionResult,
   ExecutionState,
+  InstanceLimits,
   Item,
   Logger,
   NodeCredentialRef,
@@ -62,6 +63,13 @@ export interface CodeRunnerInput {
   timezone: string;
   onConsole?: (level: string, args: unknown[]) => void;
   signal?: AbortSignal;
+  /**
+   * copies of the workflow static data for `$getWorkflowStaticData`: `global` is the workflow scope,
+   * `node` this node's scope
+   */
+  staticData?: { global: DataObject; node: DataObject };
+  /** called once after a finished run when the code changed the static data, with the new contents */
+  onStaticData?(data: { global: DataObject; node: DataObject }): void;
 }
 
 export interface CodeRunner {
@@ -120,5 +128,7 @@ export interface ExecutionServices {
   logger: Logger;
   hooks?: ExecutionHooks;
   limits?: Partial<ExecutionLimits>;
+  /** instance size caps for nodes (`helpers.getInstanceLimits()`); unset fields use the defaults */
+  nodeLimits?: Partial<InstanceLimits>;
   executeSubWorkflow?(request: SubWorkflowRequest): Promise<{ executionId: string; data: Item[][] | null }>;
 }

@@ -1,4 +1,5 @@
 export * from './ai-types';
+export * from './credential-domain-restrictions';
 export * from './diff';
 export * from './errors';
 export * from './expression/data-proxy';

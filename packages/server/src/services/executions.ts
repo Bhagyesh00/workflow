@@ -701,9 +701,9 @@ export class ExecutionService {
 
     // static data written by nodes (poll cursors, counters) is persisted for production runs
     if (row.mode !== 'manual' && row.workflowId) {
-      const after = JSON.stringify(definition.staticData ?? {});
-      if (after !== staticBefore) {
-        await repos.workflows.setStaticData(tenant.id, row.workflowId, definition.staticData ?? {});
+      const after = definition.staticData ?? {};
+      if (JSON.stringify(after) !== staticBefore) {
+        await repos.staticData.merge(tenant.id, row.workflowId, JSON.parse(staticBefore), after);
       }
     }
 
@@ -820,6 +820,7 @@ export class ExecutionService {
       ),
       hooks: input.hooks,
       limits: { maxTries: 5 },
+      nodeLimits: config.nodeLimits,
       executeSubWorkflow: (request) =>
         this.executeSubWorkflow(request, depth, input.errorChain === true, input.signal),
     };

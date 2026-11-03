@@ -4,9 +4,11 @@
  * expression evaluator.
  */
 import {
+  assertCredentialUrlAllowed,
   type BaseContext,
   type BinaryData,
   type ConnectionType,
+  CredentialDomainError,
   type DataObject,
   type ExecuteContext,
   type ExecuteData,
@@ -15,9 +17,11 @@ import {
   type ExpressionEvaluator,
   type GetNodeParameterOptions,
   getByPath,
+  getCredentialAllowedDomains,
   type HttpFullResponse,
   type HttpRequestOptions,
   type HttpResponseStream,
+  type InstanceLimits,
   type Item,
   isResourceLocatorValue,
   type Logger,
@@ -30,6 +34,7 @@ import {
   type NodeType,
   type PollContext,
   resolveNodeParameters,
+  type ScheduleSlotStore,
   type TriggerContext,
   toItems,
   type WebhookContext,
@@ -55,7 +60,39 @@ const MIME_BY_EXT: Record<string, string> = {
   svg: 'image/svg+xml',
   xml: 'application/xml',
   zip: 'application/zip',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  xls: 'application/vnd.ms-excel',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  tif: 'image/tiff',
+  tiff: 'image/tiff',
+  gz: 'application/gzip',
+  tgz: 'application/gzip',
+  tar: 'application/x-tar',
 };
+
+const MB = 1024 * 1024;
+
+/** instance size caps used when the host sets none (server env overrides them) */
+export const DEFAULT_INSTANCE_LIMITS: Readonly<InstanceLimits> = Object.freeze({
+  maxDecompressedBytes: 100 * MB,
+  maxArchiveEntries: 1000,
+  maxImagePixels: 50_000_000,
+  maxImageInputBytes: 25 * MB,
+  maxSpreadsheetCells: 1_000_000,
+  maxRemoteFileBytes: 100 * MB,
+});
+
+/** the defaults overlaid by the host's values; a missing, non-finite or non-positive value keeps the default */
+export function getInstanceLimits(overrides?: Partial<InstanceLimits>): InstanceLimits {
+  const limits: InstanceLimits = { ...DEFAULT_INSTANCE_LIMITS };
+  for (const key of Object.keys(limits) as Array<keyof InstanceLimits>) {
+    const value = overrides?.[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) limits[key] = value;
+  }
+  return limits;
+}
 
 export function guessMimeType(fileName?: string): string {
   const ext = fileName?.split('.').pop()?.toLowerCase();
@@ -86,6 +123,9 @@ export function toNodeApiError(node: WorkflowNode, error: unknown): Error {
     });
   }
   if (error instanceof SsrfBlockedError) return new NodeApiError(node, error.message, { cause: error });
+  if (error instanceof CredentialDomainError) {
+    return new NodeApiError(node, error.message, { description: error.description, cause: error });
+  }
   if (error instanceof Error && error.name === 'TimeoutError') {
     return new NodeApiError(node, 'The request timed out', { cause: error });
   }
@@ -99,7 +139,8 @@ export function toNodeApiError(node: WorkflowNode, error: unknown): Error {
 function mapStreamErrors<T>(node: WorkflowNode, options: HttpRequestOptions, response: T): T {
   if (options.responseType !== 'stream') return response;
   const wrap = (body: unknown): unknown => {
-    if (typeof (body as Partial<HttpResponseStream> | null)?.[Symbol.asyncIterator] !== 'function') return body;
+    if (typeof (body as Partial<HttpResponseStream> | null)?.[Symbol.asyncIterator] !== 'function')
+      return body;
     const stream = body as HttpResponseStream;
     return {
       async *[Symbol.asyncIterator]() {
@@ -274,11 +315,19 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
     const ref = resolveCredentialRef(deps, credentialType, itemIndex);
     const data = await getCredentials(credentialType, itemIndex);
     try {
+      // the credential's allowed domains are checked before anything signs the request, and the list
+      // goes with it so HttpClient checks every redirect hop too
+      const allowedDomains = getCredentialAllowedDomains(data, {
+        userUrl: options.credentialScope === 'userUrl',
+      });
+      assertCredentialUrlAllowed(options.url, allowedDomains);
+      const request: HttpRequestOptions =
+        allowedDomains === undefined ? options : { ...options, allowedDomains };
       if (services.credentialTypes.isA(credentialType, 'oAuth2Api')) {
         const response = await oauth2Request(
           services.http,
           data as OAuth2Data,
-          options,
+          request,
           (updated) => services.credentials.update(ref, credentialType, updated),
           deps.signal,
         );
@@ -286,7 +335,7 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
       }
       const type = services.credentialTypes.getResolved(credentialType);
       if (!type) throw new NodeOperationError(node, `Unknown credential type "${credentialType}"`);
-      const authenticated = await applyAuthentication(type, data, options);
+      const authenticated = await applyAuthentication(type, data, request);
       return mapStreamErrors(node, options, await services.http.request(authenticated, deps.signal));
     } catch (error) {
       throw toNodeApiError(node, error);
@@ -322,6 +371,7 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
         throw toNodeApiError(node, error);
       }
     },
+    getInstanceLimits: () => getInstanceLimits(services.nodeLimits),
   } as NodeHelpers;
 }
 
@@ -386,8 +436,8 @@ export function createBaseContext(deps: ContextDeps): BaseContext {
     evaluateExpression: (expression, itemIndex) =>
       evaluator.evaluate(expression, buildExpressionContext(deps, itemIndex)),
     getWorkflowStaticData(type) {
-      if (type === 'global') return workflow.staticData;
-      const key = `node:${node.name}`;
+      // n8n's layout: the workflow scope under `global`, each node's scope under `node:<name>`
+      const key = type === 'global' ? 'global' : `node:${node.name}`;
       return ((workflow.staticData[key] as DataObject | undefined) ??= {});
     },
     getInstanceBaseUrl: () => services.instanceBaseUrl,
@@ -429,6 +479,8 @@ export function createSubWorkflowCaller(deps: ContextDeps): ExecuteContext['exec
 /** `runCode` shared by execute and supply-data contexts */
 export function createCodeRunnerCall(deps: ContextDeps, base: BaseContext): ExecuteContext['runCode'] {
   const { services, node, state } = deps;
+  const staticData = deps.workflow.staticData;
+  const nodeKey = `node:${node.name}`;
   return async (options) => {
     const nodeOutputs: Record<string, Item[]> = {};
     for (const [name, runs] of Object.entries(state?.resultData.runData ?? {})) {
@@ -450,8 +502,34 @@ export function createCodeRunnerCall(deps: ContextDeps, base: BaseContext): Exec
         if (services.mode === 'manual') services.hooks?.sendMessageToUI?.(node.name, args);
       },
       signal: deps.signal,
+      staticData: { global: copyScope(staticData, 'global'), node: copyScope(staticData, nodeKey) },
+      onStaticData: (data) => {
+        replaceScope(staticData, 'global', data.global);
+        replaceScope(staticData, nodeKey, data.node);
+      },
     });
   };
+}
+
+/** a copy of one static data scope; a missing scope is an empty object and is not created */
+function copyScope(staticData: DataObject, key: string): DataObject {
+  const scope = staticData[key];
+  return scope && typeof scope === 'object' && !Array.isArray(scope)
+    ? structuredClone(scope as DataObject)
+    : {};
+}
+
+/** replace the contents of one static data scope, keeping the object other holders already have */
+function replaceScope(staticData: DataObject, key: string, contents: DataObject): void {
+  const current = staticData[key];
+  if (current && typeof current === 'object' && !Array.isArray(current)) {
+    const scope = current as DataObject;
+    if (JSON.stringify(scope) === JSON.stringify(contents)) return;
+    for (const k of Object.keys(scope)) delete scope[k];
+    Object.assign(scope, structuredClone(contents));
+  } else if (Object.keys(contents).length) {
+    staticData[key] = structuredClone(contents);
+  }
 }
 
 export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContextCallbacks): ExecuteContext {
@@ -490,6 +568,21 @@ export interface TriggerCallbacks {
   emit(data: Item[][], responsePromise?: { resolve(value: unknown): void; reject(err: Error): void }): void;
   emitError(error: Error): void;
   activationMode: 'init' | 'create' | 'update' | 'activate' | 'manual';
+  /** the slot store for missed schedules; the host gives one only for a saved workflow */
+  scheduleSlots?: ScheduleSlotStore;
+}
+
+/** the most slots getCronSlots returns */
+const MAX_CRON_SLOTS = 100;
+
+/**
+ * The scheduled time a tick of `expression` belongs to: the latest run at or before `fired`. A
+ * timer fires a little after its slot (later under load), and two leaders must claim the same slot.
+ */
+export function scheduledSlot(expression: string, fired: Date, timezone: string): Date {
+  // croner's previousRuns excludes the reference second, so start one second after `fired`
+  const reference = new Date(Math.floor(fired.getTime() / 1000) * 1000 + 1000);
+  return new Cron(expression, { timezone }).previousRuns(1, reference)[0] ?? fired;
 }
 
 export function createTriggerContext(deps: ContextDeps, callbacks: TriggerCallbacks): TriggerContext {
@@ -499,16 +592,25 @@ export function createTriggerContext(deps: ContextDeps, callbacks: TriggerCallba
     emit: callbacks.emit,
     emitError: callbacks.emitError,
     getActivationMode: () => callbacks.activationMode,
-    registerCron(expression: string, onTick: () => void) {
-      const job = new Cron(expression, { timezone: base.getTimezone(), protect: true }, () => {
+    registerCron(expression: string, onTick: (slot: Date) => void) {
+      const timezone = base.getTimezone();
+      const job = new Cron(expression, { timezone, protect: true }, (self) => {
         try {
-          onTick();
+          onTick(scheduledSlot(expression, self.currentRun() ?? new Date(), timezone));
         } catch (error) {
           callbacks.emitError(error as Error);
         }
       });
       return () => job.stop();
     },
+    getCronSlots(expression: string, after: Date, before: Date, max = MAX_CRON_SLOTS) {
+      const limit = Math.min(Math.floor(max), MAX_CRON_SLOTS);
+      if (!(limit > 0) || before.getTime() <= after.getTime()) return [];
+      return new Cron(expression, { timezone: base.getTimezone() })
+        .nextRuns(limit, after)
+        .filter((slot) => slot.getTime() > after.getTime() && slot.getTime() < before.getTime());
+    },
+    scheduleSlots: callbacks.scheduleSlots,
   };
 }
 

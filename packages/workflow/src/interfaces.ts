@@ -452,12 +452,16 @@ export interface CredentialType {
   test?: CredentialTestRequest;
   /** e.g. exchange a key for a short-lived session token before requests */
   preAuthentication?: (credentials: DataObject) => Promise<DataObject>;
+  /** true: the "Allowed HTTP Request Domains" fields are not added to this type */
+  hideDomainRestrictionFields?: boolean;
 }
 
 /** what the editor receives (functions stripped) */
 export type CredentialTypeDescription = Omit<CredentialType, 'authenticate' | 'preAuthentication'> & {
   hasAuthenticate: boolean;
   isOAuth2: boolean;
+  /** the type is or extends oAuth1Api (the editor shows Connect) */
+  isOAuth1?: boolean;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -486,7 +490,18 @@ export interface HttpRequestOptions {
   timeout?: number;
   /** do not throw on non-2xx */
   ignoreHttpStatusErrors?: boolean;
-  auth?: { username: string; password: string };
+  /** `scheme` defaults to `basic`; `digest` answers a 401 Digest challenge with one retry */
+  auth?: { username: string; password: string; scheme?: 'basic' | 'digest' };
+  /**
+   * hosts the credential may be sent to (first URL and every redirect hop are checked);
+   * undefined = unrestricted
+   */
+  allowedDomains?: string[];
+  /**
+   * `userUrl`: the URL was typed by the user (HTTP Request, GraphQL, HTTP Request Tool, MCP Client Tool),
+   * so the credential's `none` domain mode applies
+   */
+  credentialScope?: 'userUrl';
   skipSslCertificateValidation?: boolean;
   followRedirects?: boolean;
   maxRedirects?: number;

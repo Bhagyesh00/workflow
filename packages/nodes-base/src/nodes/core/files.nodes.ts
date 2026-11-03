@@ -10,7 +10,16 @@ import {
 import { load } from 'cheerio';
 import Papa from 'papaparse';
 import { errorItem, getField, ItemList, mapItems, safeKey, setField } from '../../utils/utilities';
+import { keepSourceMode, keepSourceOption, keptSource } from './extract/keep-source';
+import { extractPdf, pdfOptionFields } from './extract/pdf';
+import {
+  extractSpreadsheet,
+  type SpreadsheetOperation,
+  spreadsheetOptionFields,
+} from './extract/spreadsheet';
 import { itemsToHtmlTable } from './markup.nodes';
+
+const SPREADSHEET_OPERATIONS: string[] = ['xlsx', 'xls', 'ods'];
 
 const ENCODINGS = ['utf8', 'utf16le', 'latin1', 'ascii'] as const;
 type Encoding = (typeof ENCODINGS)[number];
@@ -323,7 +332,7 @@ export const ExtractFromFileNode: NodeType = {
   description: {
     name: 'core.extractFromFile',
     displayName: 'Extract from File',
-    description: 'Read CSV, HTML tables, JSON, text or base64 out of binary files',
+    description: 'Read CSV, spreadsheets, PDF, HTML tables, JSON, text or base64 out of binary files',
     icon: 'lucide:file-input',
     group: ['transform'],
     version: 1,
@@ -331,7 +340,19 @@ export const ExtractFromFileNode: NodeType = {
     inputs: ['main'],
     outputs: ['main'],
     categories: ['Core', 'Files'],
-    alias: ['csv', 'import', 'parse', 'file', 'base64', 'read file', 'spreadsheet', 'html table'],
+    alias: [
+      'csv',
+      'import',
+      'parse',
+      'file',
+      'base64',
+      'read file',
+      'spreadsheet',
+      'html table',
+      'excel',
+      'xlsx',
+      'pdf',
+    ],
     subtitle: '={{ $parameter.operation }}',
     properties: [
       {
@@ -344,7 +365,11 @@ export const ExtractFromFileNode: NodeType = {
           { name: 'Extract From CSV', value: 'csv', action: 'Extract rows from a CSV file' },
           { name: 'Extract From HTML Table', value: 'html', action: 'Extract rows from an HTML table' },
           { name: 'Extract From JSON', value: 'fromJson', action: 'Extract data from a JSON file' },
+          { name: 'Extract From ODS', value: 'ods', action: 'Extract rows from an ODS file' },
+          { name: 'Extract From PDF', value: 'pdf', action: 'Extract text from a PDF file' },
           { name: 'Extract From Text File', value: 'text', action: 'Extract text from a file' },
+          { name: 'Extract From XLS', value: 'xls', action: 'Extract rows from an XLS file' },
+          { name: 'Extract From XLSX', value: 'xlsx', action: 'Extract rows from an XLSX file' },
           {
             name: 'Move File to Base64 String',
             value: 'binaryToPropery',
@@ -387,7 +412,7 @@ export const ExtractFromFileNode: NodeType = {
             type: 'boolean',
             default: true,
             description: 'Whether the first row holds the column names',
-            displayOptions: { show: { '/operation': ['csv'] } },
+            displayOptions: { show: { '/operation': ['csv', ...SPREADSHEET_OPERATIONS] } },
           },
           {
             displayName: 'Starting Line',
@@ -403,14 +428,14 @@ export const ExtractFromFileNode: NodeType = {
             type: 'number',
             default: -1,
             description: '-1 reads every row',
-            displayOptions: { show: { '/operation': ['csv'] } },
+            displayOptions: { show: { '/operation': ['csv', ...SPREADSHEET_OPERATIONS] } },
           },
           {
             displayName: 'Include Empty Cells',
             name: 'includeEmptyCells',
             type: 'boolean',
             default: true,
-            displayOptions: { show: { '/operation': ['csv'] } },
+            displayOptions: { show: { '/operation': ['csv', ...SPREADSHEET_OPERATIONS] } },
           },
           {
             displayName: 'Table Selector',
@@ -420,14 +445,9 @@ export const ExtractFromFileNode: NodeType = {
             description: 'CSS selector of the table to read; the first match is used',
             displayOptions: { show: { '/operation': ['html'] } },
           },
-          {
-            displayName: 'Keep Source',
-            name: 'keepSource',
-            type: 'boolean',
-            default: false,
-            description: 'Whether the input fields and file are kept on the output item',
-            displayOptions: { show: { '/operation': ['fromJson', 'text', 'binaryToPropery'] } },
-          },
+          keepSourceOption,
+          ...spreadsheetOptionFields,
+          ...pdfOptionFields,
           {
             ...encodingOption,
             displayOptions: { show: { '/operation': ['csv', 'html', 'fromJson', 'text'] } },
@@ -493,8 +513,20 @@ export const ExtractFromFileNode: NodeType = {
           continue;
         }
 
+        if (SPREADSHEET_OPERATIONS.includes(operation)) {
+          const rows = await extractSpreadsheet(ctx, i, operation as SpreadsheetOperation, options);
+          for (const json of rows) out.push({ json, pairedItem: { item: i } });
+          continue;
+        }
+
+        if (operation === 'pdf') {
+          out.push({ pairedItem: { item: i }, ...(await extractPdf(ctx, i, options, items[i])) });
+          continue;
+        }
+
         const destination = String(ctx.getNodeParameter('destinationKey', i, 'data') || 'data');
-        const json: DataObject = options.keepSource ? deepCopy(items[i].json) : {};
+        const kept = keptSource(keepSourceMode(options.keepSource), items[i]);
+        const json: DataObject = kept.json;
         if (operation === 'fromJson') {
           const text = await readText(ctx, i, property, encoding);
           let parsed: unknown;
@@ -516,7 +548,7 @@ export const ExtractFromFileNode: NodeType = {
           throw new NodeOperationError(ctx.getNode(), `Unknown operation "${operation}"`, { itemIndex: i });
         }
         const item: Item = { json, pairedItem: { item: i } };
-        if (options.keepSource && items[i].binary) item.binary = items[i].binary;
+        if (kept.binary) item.binary = kept.binary;
         out.push(item);
       } catch (error) {
         if (!ctx.continueOnFail()) throw error;
