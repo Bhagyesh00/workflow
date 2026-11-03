@@ -44,6 +44,8 @@ export interface MenuActions {
   copyUrl(nodeName: string, kind: WebhookUrlKind): void;
   openSubWorkflow(nodeName: string): void;
   rename(nodeName: string): void;
+  /** P3-11: open the node panel in replace mode for this node */
+  replace(nodeName: string): void;
   toggleDisabled(names: string[]): void;
   pin(names: string[]): void;
   unpin(names: string[]): void;
@@ -255,6 +257,7 @@ function nodeSections(input: MenuInputs, a: MenuActions, name: string): MenuEntr
       run: () => a.openSubWorkflow(name),
     });
   head.push(write(input, { key: 'rename', label: 'Rename', shortcut: 'F2', run: () => a.rename(name) }));
+  head.push(write(input, { key: 'replace', label: 'Replace', shortcut: 'R', run: () => a.replace(name) }));
   head.push(...stateEntries(input, a, [name], false));
 
   const groupIds = groupsOfNodes(input.graph, [name]);

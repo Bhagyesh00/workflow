@@ -3,7 +3,8 @@ import type { ConnectionType, NodeParameters, NodeTypeDescription } from '@workf
 import { ChevronLeft, ChevronRight, Search, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { buildCatalog, type CatalogEntry, filterCatalog } from '../../lib/node-catalog';
-import { AI_PORT_LABELS } from '../../lib/ports';
+import { AI_PORT_LABELS, isTriggerDescription } from '../../lib/ports';
+import { useWorkflowStore } from '../../stores/workflow-store';
 import { NodeIcon } from '../NodeIcon';
 import { cx } from '../ui/cx';
 import { EmptyState } from '../ui/misc';
@@ -32,7 +33,19 @@ export function NodeCreator({
   const [expanded, setExpanded] = useState<CatalogEntry | null>(null);
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
-  const catalog = useMemo(() => buildCatalog(nodeTypes), [nodeTypes]);
+  // replace mode (P3-11): a trigger is replaced by triggers only, any other node by non-triggers
+  const replacedType = useWorkflowStore((s) =>
+    replaceFor ? s.nodes.find((n) => n.name === replaceFor)?.type : undefined,
+  );
+  const replaceTriggers = replacedType
+    ? isTriggerDescription(nodeTypes.find((d) => d.name === replacedType))
+    : undefined;
+  const catalog = useMemo(() => {
+    const all = buildCatalog(nodeTypes);
+    return replaceFor && replaceTriggers !== undefined
+      ? all.filter((e) => e.isTrigger === replaceTriggers)
+      : all;
+  }, [nodeTypes, replaceFor, replaceTriggers]);
   const sections = useMemo(
     () => filterCatalog(catalog, { query, needsMainInput, outputType, noTriggerYet }),
     [catalog, query, needsMainInput, outputType, noTriggerYet],

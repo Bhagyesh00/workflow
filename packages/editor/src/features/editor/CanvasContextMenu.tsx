@@ -78,6 +78,10 @@ export function CanvasContextMenu({ deps }: CanvasContextMenuProps) {
       copyUrl: (name, kind) => void copyNodeWebhookUrl(name, kind),
       openSubWorkflow: (name) => openSubWorkflow(name),
       rename: (name) => startRename(name),
+      replace: (name) => {
+        useUiStore.getState().openCreator();
+        useUiStore.getState().setReplaceTarget(name);
+      },
       toggleDisabled: (names) => useWorkflowStore.getState().toggleDisabled(names),
       pin: (names) => void pinNodes(names, deps.descriptions, useRunStore.getState().runData),
       unpin: (names) => void unpinNodes(names),

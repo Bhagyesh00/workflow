@@ -107,6 +107,7 @@ describe('node menu (single node)', () => {
       'Open',
       'Test step',
       'Rename',
+      'Replace',
       'Deactivate',
       'Pin',
       'Copy',
@@ -118,6 +119,7 @@ describe('node menu (single node)', () => {
     ]);
     expect(find(model, 'Open')?.shortcut).toBe('Enter');
     expect(find(model, 'Rename')?.shortcut).toBe('F2');
+    expect(find(model, 'Replace')?.shortcut).toBe('R');
     expect(find(model, 'Deactivate')?.shortcut).toBe('D');
     expect(find(model, 'Pin')?.shortcut).toBe('P');
     expect(find(model, 'Copy')?.shortcut).toBe('Ctrl+C');
@@ -183,7 +185,7 @@ describe('node menu (single node)', () => {
 
   it('read-only disables every write entry but not Copy, Open or Select all', () => {
     const model = buildMenu(inputs({ readOnly: true }), actions());
-    for (const label of ['Rename', 'Deactivate', 'Pin', 'Duplicate', 'Tidy up', 'Delete'])
+    for (const label of ['Rename', 'Replace', 'Deactivate', 'Pin', 'Duplicate', 'Tidy up', 'Delete'])
       expect(find(model, label)?.disabled, label).toBe(true);
     for (const label of ['Open', 'Copy', 'Select all', 'Deselect all', 'Test step'])
       expect(find(model, label)?.disabled, label).toBeFalsy();
@@ -204,6 +206,7 @@ describe('node menu (single node)', () => {
       'Open',
       'Test step',
       'Rename',
+      'Replace',
       'Deactivate',
       'Pin',
       'Copy',
@@ -217,6 +220,7 @@ describe('node menu (single node)', () => {
     expect(a.open).toHaveBeenCalledWith('A');
     expect(a.testStep).toHaveBeenCalledWith('A');
     expect(a.rename).toHaveBeenCalledWith('A');
+    expect(a.replace).toHaveBeenCalledWith('A');
     expect(a.toggleDisabled).toHaveBeenCalledWith(['A']);
     expect(a.pin).toHaveBeenCalledWith(['A']);
     expect(a.copy).toHaveBeenCalled();
