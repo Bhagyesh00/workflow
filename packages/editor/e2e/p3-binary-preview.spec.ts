@@ -86,7 +86,9 @@ test('PNG, WAV and PDF previews under the real CSP', async ({ page }) => {
     wav: `data:audio/wav;base64,${wavBase64()}`,
     pdf: `data:application/pdf;base64,${pdfBase64()}`,
   });
+  // the server's CSRF check wants the app origin on cookie-authenticated writes
   const created = await page.request.post('/rest/workflows', {
+    headers: { origin: new URL(page.url()).origin },
     data: {
       name: `Binary previews ${id}`,
       nodes: [
@@ -149,12 +151,14 @@ test('PNG, WAV and PDF previews under the real CSP', async ({ page }) => {
   expect(await audio.evaluate((el) => (el as HTMLAudioElement).paused)).toBe(true);
   await preview.getByRole('button', { name: 'Close' }).click();
 
-  // PDF: sandboxed frame from a blob: URL
+  // PDF: a frame from a blob: URL, without sandbox (Chromium's PDF viewer never runs in a
+  // sandboxed frame); the %PDF- check and the application/pdf blob type keep it a PDF
   await output.getByRole('group', { name: 'page.pdf' }).getByRole('button', { name: 'View' }).click();
   preview = page.getByRole('dialog', { name: 'page.pdf' });
   const frame = preview.locator('iframe');
   await expect(frame).toHaveAttribute('src', /^blob:/);
-  await expect(frame).toHaveAttribute('sandbox', '');
+  await expect(frame).not.toHaveAttribute('sandbox');
+  await expect(frame).toHaveAttribute('referrerpolicy', 'no-referrer');
   await page.waitForTimeout(1500);
   // report for the end checks (plan note 5): any CSP refusal while the PDF loaded
   test.info().annotations.push({

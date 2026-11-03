@@ -5,8 +5,8 @@
  *
  * Previews never point the page at /rest/binary-data: the bytes are fetched (or decoded when
  * inline), wrapped in a Blob typed with the allow-listed mime type (lib/binary-preview.ts) and
- * shown through an object URL in a native <img>, <audio> or the browser's PDF viewer. A PDF must
- * start with `%PDF-`. Object URLs are revoked when the preview or the card goes away. Rich kinds
+ * shown through an object URL in a native <img>, <audio> or the browser's PDF viewer (an iframe
+ * without sandbox, which the viewer needs). A PDF must start with `%PDF-`. Object URLs are revoked when the preview or the card goes away. Rich kinds
  * get the typed Blob itself (RichPreview reads text or makes its own video URL).
  */
 import type { BinaryData, Item } from '@workflow/workflow';
@@ -29,7 +29,8 @@ import { Dialog } from '../ui/Dialog';
 import { Spinner } from '../ui/misc';
 import { RichPreview } from './RichPreview';
 
-const MAX_CARDS = 12;
+/** cards shown at first and added per "Show more" click (each image card loads a thumbnail) */
+const CARD_PAGE = 12;
 
 interface BinaryFile {
   key: string;
@@ -176,11 +177,13 @@ function PreviewBody({
       <audio src={loaded.url} controls preload="metadata" className="w-full" />
     );
   }
+  // No sandbox here: Chromium never runs its PDF viewer in a sandboxed frame (as n8n's PDF frame).
+  // The blob is typed application/pdf from the allow-list and made only after the %PDF- check, so
+  // the browser shows it as a PDF and never renders it as HTML.
   return (
     <iframe
       src={loaded.url}
       title={name}
-      sandbox=""
       referrerPolicy="no-referrer"
       className="h-[70vh] w-full rounded-lg border border-line bg-surface-2"
     />
@@ -266,8 +269,12 @@ function BinaryFileCard({ file }: { file: BinaryFile }) {
   );
 }
 
-/** File cards for every binary property of `items` (input and output panes). */
+/**
+ * File cards for every binary property of `items` (input and output panes): the first 12, then 12
+ * more per click, so every file can be viewed and downloaded.
+ */
 export function BinaryFiles({ items }: { items: Item[] }) {
+  const [limit, setLimit] = useState(CARD_PAGE);
   const files: BinaryFile[] = items.flatMap((item, index) =>
     Object.entries(item.binary ?? {}).map(([property, binary]) => ({
       key: `${index}-${property}`,
@@ -278,11 +285,17 @@ export function BinaryFiles({ items }: { items: Item[] }) {
   if (!files.length) return null;
   return (
     <div className="flex flex-wrap gap-1.5 border-b border-line px-2 py-1.5">
-      {files.slice(0, MAX_CARDS).map((file) => (
+      {files.slice(0, limit).map((file) => (
         <BinaryFileCard key={file.key} file={file} />
       ))}
-      {files.length > MAX_CARDS && (
-        <span className="self-center text-2xs text-ink-3">{files.length - MAX_CARDS} more files</span>
+      {files.length > limit && (
+        <button
+          type="button"
+          onClick={() => setLimit((shown) => shown + CARD_PAGE)}
+          className="self-center text-2xs font-semibold text-brand"
+        >
+          Show {Math.min(CARD_PAGE, files.length - limit)} more of {files.length} files
+        </button>
       )}
     </div>
   );

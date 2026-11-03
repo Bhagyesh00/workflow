@@ -1,8 +1,8 @@
 /**
- * P3-08 binary previews: file cards, the preview dialog (image, audio, PDF from typed Blobs),
- * the allow-list (SVG is Download only; HTML goes to the sandboxed rich preview of P3-14, see
- * rich-preview.test.tsx; fileType never picks the renderer), the size caps, the %PDF- check,
- * object URL revoking, and the input pane.
+ * P3-08 binary previews: file cards (12 at first, more on request), the preview dialog (image,
+ * audio, PDF from typed Blobs), the allow-list (SVG is Download only; HTML goes to the sandboxed
+ * rich preview of P3-14, see rich-preview.test.tsx; fileType never picks the renderer), the size
+ * caps, the %PDF- check, object URL revoking, and the input pane.
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { BinaryData, Item, RunData, WorkflowNode } from '@workflow/workflow';
@@ -127,15 +127,32 @@ describe('binary file cards and preview dialog', () => {
     expect(audio.getAttribute('src')).toMatch(/^blob:/);
   });
 
-  it('shows a PDF in a sandboxed iframe from a blob URL', async () => {
+  it('shows a PDF in an iframe from a blob URL, without sandbox so the browser PDF viewer runs', async () => {
     show(bin({ mimeType: 'application/pdf', fileName: 'doc.pdf', data: b64('%PDF-1.4\nbody') }));
     fireEvent.click(screen.getByRole('button', { name: 'View' }));
     const dialog = await screen.findByRole('dialog', { name: 'doc.pdf' });
     const frame = await within(dialog).findByTitle('doc.pdf');
     expect(frame.tagName).toBe('IFRAME');
     expect(frame.getAttribute('src')).toMatch(/^blob:/);
-    expect(frame.hasAttribute('sandbox')).toBe(true);
+    // Chromium's PDF viewer never runs in a sandboxed frame; the %PDF- check and the
+    // application/pdf blob type keep this frame a PDF (as n8n's PDF frame)
+    expect(frame.hasAttribute('sandbox')).toBe(false);
     expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer');
+  });
+
+  it('shows more cards on request, so every file can be viewed and downloaded', () => {
+    const binary: Record<string, BinaryData> = {};
+    for (let n = 1; n <= 30; n++) binary[`file${n}`] = bin({ mimeType: 'text/plain', fileName: `f${n}.txt` });
+    withProviders(<RunDataView items={[{ json: {}, binary }]} mode="table" />);
+    expect(screen.getByRole('group', { name: 'f12.txt' })).toBeTruthy();
+    expect(screen.queryByRole('group', { name: 'f13.txt' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show 12 more of 30 files' }));
+    expect(screen.getByRole('group', { name: 'f24.txt' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Show 6 more of 30 files' }));
+    const last = screen.getByRole('group', { name: 'f30.txt' });
+    expect(within(last).getByRole('button', { name: 'View' })).toBeTruthy();
+    expect(within(last).getByRole('button', { name: 'Download' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /more of 30 files/ })).toBeNull();
   });
 
   it('refuses a "PDF" whose bytes do not start with %PDF-', async () => {
