@@ -185,6 +185,7 @@ export function joinUrl(base: URL, ...segments: string[]): string {
  */
 export abstract class MemoryProvider implements SecretProvider {
   protected secrets = new Map<string, unknown>();
+  private updating?: Promise<void>;
 
   constructor(
     protected readonly settings: SecretProviderSettings,
@@ -198,8 +199,16 @@ export abstract class MemoryProvider implements SecretProvider {
   /** drop tokens held in memory */
   protected abstract forget(): void;
 
-  async update(): Promise<void> {
-    this.secrets = await this.readAll();
+  /** one read at a time: overlapping callers share it, so an older read never overwrites a newer one */
+  update(): Promise<void> {
+    this.updating ??= this.readAll()
+      .then((secrets) => {
+        this.secrets = secrets;
+      })
+      .finally(() => {
+        this.updating = undefined;
+      });
+    return this.updating;
   }
 
   async test(): Promise<SecretProviderTestResult> {

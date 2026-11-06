@@ -1,7 +1,8 @@
 /**
  * HashiCorp Vault (P4-08) over REST: token, username and password, or AppRole; KV version 1 and 2;
  * mounts given or found through sys/mounts; an optional namespace. Folders are listed with
- * `GET ...?list=true`, and a secret's value is its key/value object (`$secrets.<connection>.<path>.<key>`).
+ * `GET ...?list=true`, and a secret's value is its key/value object. A secret's name always starts with
+ * its mount, as n8n: `$secrets.<connection>['<mount>/<path>'].<key>`.
  * A token that has a lifetime is renewed at half of it, or the sign-in is repeated.
  */
 
@@ -237,11 +238,7 @@ class VaultProvider extends MemoryProvider {
     refs.forEach((ref, index) => {
       const value = values[index];
       if (!value) return;
-      // with several mounts found, the mount name keeps equal paths apart
-      secrets.set(
-        this.explicitMount || mounts.length === 1 ? ref.path : `${ref.mount.path}/${ref.path}`,
-        value,
-      );
+      secrets.set(`${ref.mount.path}/${ref.path}`, value);
     });
     return secrets;
   }

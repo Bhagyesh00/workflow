@@ -4,6 +4,7 @@ import { HttpClient } from '@workflow/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SECRET_PROVIDER_TYPES } from '../src/services/secrets/providers';
 import { awsHost } from '../src/services/secrets/providers/aws';
+import { MemoryProvider } from '../src/services/secrets/providers/errors';
 import { GCP_TOKEN_URL } from '../src/services/secrets/providers/gcp';
 import type { SecretProvider, SecretProviderDeps, SecretProviderType } from '../src/services/secrets/types';
 import {
@@ -402,6 +403,22 @@ describe('HashiCorp Vault', () => {
     expect(server.requests.every((r) => r.headers['x-vault-token'] === 'root-token')).toBe(true);
   });
 
+  it('starts every name with the mount, also when only one mount is found', async () => {
+    const handler = vaultHandler({ token: 't', mounts: { secret: mounts.secret } });
+    const server = await fake(handler);
+    const provider = await ready(
+      type('vault').create(
+        { url: `${server.origin}/v1/`, authMethod: 'token', token: 't' },
+        deps(allowLocal()),
+      ),
+    );
+    expect(provider.getSecretNames().sort()).toEqual([
+      'secret/app',
+      'secret/team/db',
+      'secret/team/deep/key',
+    ]);
+  });
+
   it('uses a given mount without sys/mounts, a start folder, a namespace and prefer-get', async () => {
     const handler = vaultHandler({ token: 't', namespace: 'team-a', mounts });
     const server = await fake(handler);
@@ -419,7 +436,7 @@ describe('HashiCorp Vault', () => {
         deps(allowLocal(), { preferGet: true }),
       ),
     );
-    expect(provider.getSecretNames().sort()).toEqual(['team/db', 'team/deep/key']);
+    expect(provider.getSecretNames().sort()).toEqual(['secret/team/db', 'secret/team/deep/key']);
     expect(server.requests.some((r) => r.path === '/v1/sys/mounts')).toBe(false);
     expect(server.requests.every((r) => r.headers['x-vault-namespace'] === 'team-a')).toBe(true);
   });
@@ -446,7 +463,7 @@ describe('HashiCorp Vault', () => {
         deps(allowLocal()),
       ),
     );
-    expect(viaUser.getSecret('old')).toEqual({ token: 'o1' });
+    expect(viaUser.getSecret('legacy/old')).toEqual({ token: 'o1' });
     expect(server.requests[0].path).toBe('/v1/auth/userpass/login/dev%20user');
     const viaRole = await ready(
       type('vault').create(
@@ -461,7 +478,7 @@ describe('HashiCorp Vault', () => {
         deps(allowLocal()),
       ),
     );
-    expect(viaRole.getSecret('old')).toEqual({ token: 'o1' });
+    expect(viaRole.getSecret('legacy/old')).toEqual({ token: 'o1' });
     const wrong = type('vault').create(
       { url: `${server.origin}/v1/`, authMethod: 'appRole', roleId: 'role-1', secretId: 'bad' },
       deps(allowLocal()),
@@ -489,7 +506,7 @@ describe('HashiCorp Vault', () => {
     await new Promise((r) => setTimeout(r, 650));
     await provider.update();
     expect(handler.renewals()).toBe(1);
-    expect(provider.getSecret('old')).toEqual({ token: 'o1' });
+    expect(provider.getSecret('legacy/old')).toEqual({ token: 'o1' });
   });
 
   it('says what is missing for a wrong base URL and for sys/mounts', async () => {
@@ -610,6 +627,47 @@ describe('Infisical', () => {
       .create({ siteUrl: server.origin, ...base, clientSecret: 'nope' }, deps(allowLocal()))
       .test();
     expect(result).toEqual({ success: false, error: 'The vault answered 401' });
+  });
+});
+
+describe('refreshes of one provider', () => {
+  /** every read waits until the test ends it */
+  class HeldProvider extends MemoryProvider {
+    reads: Array<{ finish: (value: string) => void; fail: () => void }> = [];
+    async init() {}
+    async connect() {}
+    protected forget() {}
+    protected readAll() {
+      return new Promise<Map<string, unknown>>((resolve, reject) => {
+        this.reads.push({
+          finish: (value) => resolve(new Map([['key', value]])),
+          fail: () => reject(new Error('the vault failed')),
+        });
+      });
+    }
+  }
+  const held = () => new HeldProvider({}, deps(allowLocal()));
+
+  it('overlapping refreshes share one read, so an older read cannot overwrite a newer one', async () => {
+    const provider = held();
+    const first = provider.update();
+    const second = provider.update();
+    expect(provider.reads).toHaveLength(1);
+    provider.reads[0].finish('new');
+    await Promise.all([first, second]);
+    expect(provider.getSecret('key')).toBe('new');
+  });
+
+  it('reads again after a read ended, also one that failed', async () => {
+    const provider = held();
+    const failed = provider.update();
+    provider.reads[0].fail();
+    await expect(failed).rejects.toThrow('the vault failed');
+    const next = provider.update();
+    expect(provider.reads).toHaveLength(2);
+    provider.reads[1].finish('again');
+    await next;
+    expect(provider.getSecret('key')).toBe('again');
   });
 });
 
