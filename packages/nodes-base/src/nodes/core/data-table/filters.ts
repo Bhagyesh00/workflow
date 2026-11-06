@@ -14,6 +14,7 @@ import {
   type DataTableInputValue,
   type ExecuteContext,
   NodeOperationError,
+  parseDataTableDate,
 } from '@workflow/workflow';
 
 /** the conditions the editor offers; isTrue and isFalse are eq with true and false */
@@ -71,9 +72,18 @@ export function typedValue(
       throw fail(DATA_TABLE_ERRORS.valueTypeMismatch(value, type));
     }
     case 'date': {
-      const date = value instanceof Date ? value : new Date(String(value));
-      if (Number.isNaN(date.getTime())) throw fail(DATA_TABLE_ERRORS.invalidDate(String(value), column));
-      return date;
+      // Date and Luxon values are instants; text goes to the service as it is, which reads a text with
+      // no zone as UTC, as it does for a stored cell (new Date would read it as server time)
+      const luxon = (value as { toJSDate?: () => Date }).toJSDate;
+      const instant =
+        value instanceof Date ? value : typeof luxon === 'function' ? luxon.call(value) : undefined;
+      if (instant) {
+        if (Number.isNaN(instant.getTime())) throw fail(DATA_TABLE_ERRORS.invalidDate(String(value), column));
+        return instant;
+      }
+      const text = String(value);
+      if (!parseDataTableDate(text)) throw fail(DATA_TABLE_ERRORS.invalidDate(text, column));
+      return text;
     }
     default:
       return typeof value === 'string' ? value : String(value);

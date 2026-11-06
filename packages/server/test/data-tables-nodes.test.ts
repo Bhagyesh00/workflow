@@ -57,7 +57,9 @@ async function runTableNode(owner: Owner, parameters: Record<string, unknown>, i
     owner.client.post(`/rest/workflows/${wf.id}/run`, input ? { triggerItems: input } : {}),
   );
   const row = await waitForExecution(server.ctx, owner.tenant.id, executionId);
-  const execution = await owner.client.data<{ state: any }>(owner.client.get(`/rest/executions/${executionId}`));
+  const execution = await owner.client.data<{ state: any }>(
+    owner.client.get(`/rest/executions/${executionId}`),
+  );
   const result = execution.state.resultData;
   return {
     status: row.status,
@@ -116,7 +118,9 @@ describe('Data Table node on the server', () => {
     const owner = await signup();
     const table = await makeTable(owner);
     const base = { resource: 'row', dataTableId: locator('id', table.id) };
-    const where = (title: string) => ({ conditions: [{ keyName: 'title', condition: 'eq', keyValue: title }] });
+    const where = (title: string) => ({
+      conditions: [{ keyName: 'title', condition: 'eq', keyValue: title }],
+    });
     const fields = (title: string, qty: string) => ({
       fieldValues: [
         { columnName: 'title', value: title },
@@ -194,16 +198,19 @@ describe('Data Table node on the server', () => {
 
     const id = created.json[0]!.id as string;
     const ref = { dataTableId: locator('id', id) };
-    expect((await runTableNode(owner, { resource: 'table', operation: 'list', returnAll: true })).json).toHaveLength(1);
-    expect((await runTableNode(owner, { resource: 'table', operation: 'update', newName: 'Renamed', ...ref })).json).toEqual([
-      { success: true, name: 'Renamed' },
-    ]);
+    expect(
+      (await runTableNode(owner, { resource: 'table', operation: 'list', returnAll: true })).json,
+    ).toHaveLength(1);
+    expect(
+      (await runTableNode(owner, { resource: 'table', operation: 'update', newName: 'Renamed', ...ref }))
+        .json,
+    ).toEqual([{ success: true, name: 'Renamed' }]);
     expect((await runTableNode(owner, { resource: 'table', operation: 'clear', ...ref })).json).toEqual([
       { success: true, deletedCount: 0 },
     ]);
-    expect((await runTableNode(owner, { resource: 'table', operation: 'deleteTable', ...ref })).json).toEqual([
-      { success: true, deletedTableId: id },
-    ]);
+    expect((await runTableNode(owner, { resource: 'table', operation: 'deleteTable', ...ref })).json).toEqual(
+      [{ success: true, deletedTableId: id }],
+    );
   });
 
   it("answers another workspace's table id with n8n's not-found text, and a part of a name finds nothing", async () => {
@@ -244,7 +251,14 @@ describe('Data Table node on the server', () => {
         nodeType: 'core.dataTable',
         kind: 'listSearch',
         method: 'tableSearch',
-        node: { id: 'n', name: 'Table', type: 'core.dataTable', typeVersion: 1, position: [0, 0], parameters: {} },
+        node: {
+          id: 'n',
+          name: 'Table',
+          type: 'core.dataTable',
+          typeVersion: 1,
+          position: [0, 0],
+          parameters: {},
+        },
         filter: 'ord',
       }),
     );
@@ -266,5 +280,44 @@ describe('Data Table node on the server', () => {
       }),
     );
     expect(columns.map((c) => c.value)).toEqual(['title', 'qty', 'id', 'createdAt', 'updatedAt']);
+  });
+});
+
+describe('date conditions read text as UTC, like a stored cell', () => {
+  const previousZone = process.env.TZ;
+  afterAll(() => {
+    if (previousZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousZone;
+  });
+
+  it('finds a row by the same zone-less text on a server that is not on UTC, and refuses text that is no date', async () => {
+    process.env.TZ = 'Asia/Kolkata';
+    const owner = await signup();
+    const table = await owner.client.data<{ id: string }>(
+      owner.client.post('/rest/data-tables', {
+        name: 'Events',
+        columns: [{ name: 'due', type: 'date' }],
+      }),
+    );
+    await owner.client.data(
+      owner.client.post(`/rest/data-tables/${table.id}/insert`, { data: [{ due: '2024-01-15T10:00:00' }] }),
+    );
+    const get = (keyValue: string, condition = 'eq') =>
+      runTableNode(owner, {
+        resource: 'row',
+        operation: 'get',
+        dataTableId: locator('id', table.id),
+        returnAll: true,
+        filters: { conditions: [{ keyName: 'due', condition, keyValue }] },
+      });
+    const same = await get('2024-01-15T10:00:00');
+    expect(same.status).toBe('success');
+    expect(same.json).toHaveLength(1);
+    expect((await get('2024-01-15T10:00:00', 'gt')).json).toHaveLength(0);
+    expect((await get('2024-01-15T10:00:01', 'gt')).json).toHaveLength(0);
+    expect((await get('2024-01-15T09:59:59', 'gt')).json).toHaveLength(1);
+    const bad = await get('Room 5');
+    expect(bad.status).toBe('error');
+    expect(bad.error).toContain(DATA_TABLE_ERRORS.invalidDate('Room 5', 'due'));
   });
 });
