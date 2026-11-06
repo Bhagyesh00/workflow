@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { nodes } from '../src';
 import { node, nodeTypes, testServices } from './harness';
 import { localHttp } from './servers';
+import { startSshServer } from './ssh-server';
 
 const URL = 'postgres://postgres:postgres@127.0.0.1:5432/nodes_test';
 const creds = {
@@ -47,13 +48,14 @@ function build(
   );
   const emitted: DataObject[] = [];
   const errors: Error[] = [];
+  const abort = new AbortController();
   const ctx = createTriggerContext(
     {
       workflow,
       node: wfNode,
       services: testServices(credentials, { mode: mode === 'manual' ? 'manual' : 'trigger', http }),
       evaluator: new ExpressionEvaluator(),
-      signal: new AbortController().signal,
+      signal: abort.signal,
     },
     {
       activationMode: mode,
@@ -61,7 +63,7 @@ function build(
       emitError: (error) => void errors.push(error),
     },
   );
-  return { ctx, emitted, errors };
+  return { ctx, emitted, errors, abort };
 }
 
 async function start(
@@ -379,5 +381,108 @@ describe('connection', () => {
       ]),
     ).rejects.toBeDefined();
     expect(lookup.mock.calls.some(([host]) => host === REBIND)).toBe(false);
+  });
+});
+
+describe('clean-up', () => {
+  it('refuses a name of more than 63 characters, because pg_notify would fail every write', async () => {
+    const long = 'c'.repeat(64);
+    await expect(start(rowParams('INSERT', { channelName: long }))).rejects.toThrow(
+      'Channel Name must be 63 characters or fewer',
+    );
+    await expect(start({ triggerMode: 'listenTrigger', channelName: long })).rejects.toThrow(
+      'Channel Name must be 63 characters or fewer',
+    );
+    await expect(start(rowParams('INSERT', { functionName: 'f'.repeat(70) }))).rejects.toThrow(
+      'Function Name must be 63 characters or fewer',
+    );
+    // 63 is the largest that works
+    const ok = await start(rowParams('INSERT', { channelName: 'd'.repeat(63) }));
+    await admin.query(`INSERT INTO "${schema}".people (name) VALUES ('long')`);
+    await waitFor(() => ok.emitted.length === 1);
+    await ok.response.closeFunction!();
+  });
+
+  it('default names from a long node ID fit in 63 characters and the test names stay apart', async () => {
+    const id = '6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f';
+    const real = await start(rowParams('INSERT'), 'activate', id);
+    const test = await start(rowParams('INSERT'), 'manual', id);
+    const names = (
+      await admin.query(
+        `SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname LIKE 'n8n_trigger_function_%' ORDER BY 1`,
+        [schema],
+      )
+    ).rows.map((r) => r.proname as string);
+    expect(names).toHaveLength(2);
+    for (const name of names) expect(Buffer.byteLength(name)).toBeLessThanOrEqual(63);
+    expect(names[0]).not.toBe(names[1]);
+    expect(names.some((name) => name.endsWith('_manual'))).toBe(true);
+    await real.response.closeFunction!();
+    await test.response.closeFunction!();
+    expect(await fnCount('n8n_trigger_function_%')).toBe(0);
+  });
+
+  it('leaves a function that another trigger still uses, and only logs the failure', async () => {
+    const names = `u${rand()}`;
+    await admin.query(`CREATE TABLE "${schema}".other_${names} (id int)`);
+    await admin.query(
+      `CREATE FUNCTION "${schema}"."fn_${names}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$`,
+    );
+    await admin.query(
+      `CREATE TRIGGER tgo_${names} AFTER INSERT ON "${schema}".other_${names} FOR EACH ROW EXECUTE FUNCTION "${schema}"."fn_${names}"()`,
+    );
+    const t = await start(
+      rowParams('INSERT', { functionName: `fn_${names}`, triggerName: `tg_${names}`, replaceIfExists: true }),
+    );
+    await t.response.closeFunction!();
+    expect(await triggerCount(`tg_${names}`)).toBe(0);
+    // the other trigger and the function it uses are still there
+    expect(await triggerCount(`tgo_${names}`)).toBe(1);
+    expect(await fnCount(`fn_${names}`)).toBe(1);
+  });
+
+  it('after a lost connection, close still drops what it made, so a restart with the same custom names works', async () => {
+    const names = `l${rand()}`;
+    const extra = { functionName: `fn_${names}`, triggerName: `tg_${names}`, channelName: `ch_${names}` };
+    const first = await start(rowParams('INSERT', extra));
+    await admin.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'nodes_test' AND pid <> pg_backend_pid() AND query LIKE 'LISTEN%ch_${names}%'`,
+    );
+    await waitFor(() => first.errors.length >= 1);
+    // the objects are still in the database; the runtime now stops the trigger and starts it again
+    expect(await fnCount(`fn_${names}`)).toBe(1);
+    await first.response.closeFunction!();
+    expect(await fnCount(`fn_${names}`)).toBe(0);
+    expect(await triggerCount(`tg_${names}`)).toBe(0);
+    const again = await start(rowParams('INSERT', extra));
+    await admin.query(`INSERT INTO "${schema}".people (name) VALUES ('back')`);
+    await waitFor(() => again.emitted.length === 1);
+    await again.response.closeFunction!();
+  });
+
+  it('with an SSH tunnel, the clean-up still works after the run signal has aborted', async () => {
+    const ssh = await startSshServer({ password: 'tunnel-pw' });
+    closers.push(() => ssh.close());
+    const tunneled = {
+      postgres: {
+        ...creds.postgres,
+        sshTunnel: true,
+        sshAuthenticateWith: 'password',
+        sshHost: '127.0.0.1',
+        sshPort: ssh.port,
+        sshUser: 'tester',
+        sshPassword: 'tunnel-pw',
+      },
+    };
+    const id = `t${rand()}`;
+    const { ctx, abort } = build(rowParams('INSERT'), 'activate', id, tunneled);
+    const response = (await typeOf().trigger!(ctx)) as TriggerResponse;
+    expect(await fnCount(`n8n_trigger_function_${id}`)).toBe(1);
+    expect(ssh.forwards.length).toBeGreaterThan(0);
+    // the runtime aborts first and closes afterwards
+    abort.abort();
+    await response.closeFunction!();
+    expect(await fnCount(`n8n_trigger_function_${id}`)).toBe(0);
+    expect(await triggerCount(`n8n_trigger_${id}`)).toBe(0);
   });
 });

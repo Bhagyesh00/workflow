@@ -18,6 +18,8 @@ import { postgresPool } from './Postgres.node';
 import { postgresDialect, tableRef } from './sql';
 
 const NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+/** Postgres cuts an identifier at 63 bytes; pg_notify refuses a channel of 64 bytes or more */
+const MAX_NAME_BYTES = 63;
 const MANUAL_WAIT_MS = 60_000;
 const quote = postgresDialect.quote;
 
@@ -32,7 +34,14 @@ function checkName(value: string, label: string): string {
     throw new Error(
       `${label} must start with a letter or underscore and contain only letters, digits, and underscores`,
     );
+  if (Buffer.byteLength(value) > MAX_NAME_BYTES)
+    throw new Error(`${label} must be ${MAX_NAME_BYTES} characters or fewer`);
   return value;
+}
+
+/** a default name from the node ID, cut so that the whole name fits and the suffix stays */
+function defaultName(prefix: string, id: string, suffix: string): string {
+  return prefix + id.slice(0, Math.max(1, MAX_NAME_BYTES - prefix.length - suffix.length)) + suffix;
 }
 
 const rl = (name: string, displayName: string, list: string, def: string, placeholder: string) =>
@@ -250,9 +259,9 @@ export const PostgresTriggerNode: NodeType = {
       const suffix = manual ? '_manual' : '';
       const fnGiven = text('functionName').replace(/\(\)$/, '');
       const triggerGiven = text('triggerName');
-      channel = checkName(text('channelName') || `n8n_channel_${id}${suffix}`, 'Channel Name');
-      const fn = checkName(fnGiven || `n8n_trigger_function_${id}${suffix}`, 'Function Name');
-      const trigger = checkName(triggerGiven || `n8n_trigger_${id}${suffix}`, 'Trigger Name');
+      channel = checkName(text('channelName') || defaultName('n8n_channel_', id, suffix), 'Channel Name');
+      const fn = checkName(fnGiven || defaultName('n8n_trigger_function_', id, suffix), 'Function Name');
+      const trigger = checkName(triggerGiven || defaultName('n8n_trigger_', id, suffix), 'Trigger Name');
       const raw = String(ctx.getNodeParameter('firesOn', 0, 'INSERT')).toUpperCase();
       if (raw !== 'INSERT' && raw !== 'UPDATE' && raw !== 'DELETE')
         throw new Error('Event to Listen For must be Insert, Update or Delete');
@@ -267,10 +276,19 @@ export const PostgresTriggerNode: NodeType = {
     }
 
     const keepAlive = opt('delayClosingIdleConnection', 0);
-    const pool = await postgresPool(ctx, {
-      connectionTimeoutSeconds: opt('connectionTimeout', 30),
-      ...(keepAlive > 0 ? { keepAliveDelayMs: keepAlive * 1000 } : {}),
-    });
+    // The pool does not get the run's abort signal: with an SSH tunnel the signal would close the
+    // tunnel before closeFunction runs (the runtime aborts first), and the clean-up could not reach
+    // the database. closeFunction ends the pool, and that closes the tunnel.
+    const pool = await postgresPool(
+      {
+        getCredentials: ((name: string) => ctx.getCredentials(name)) as typeof ctx.getCredentials,
+        helpers: ctx.helpers,
+      },
+      {
+        connectionTimeoutSeconds: opt('connectionTimeout', 30),
+        ...(keepAlive > 0 ? { keepAliveDelayMs: keepAlive * 1000 } : {}),
+      },
+    );
     let client: pg.PoolClient;
     try {
       client = await pool.connect();
@@ -282,26 +300,46 @@ export const PostgresTriggerNode: NodeType = {
     const setup: Setup = { channel };
     let closed = false;
     let failed = false;
+    /** the listening connection ended or broke */
+    let dead = false;
 
     const closeFunction = async (): Promise<void> => {
       if (closed) return;
       closed = true;
-      const attempt = async (text: string) => {
+      // The listening connection is used while it lives. After a lost connection the objects are still
+      // in the database, so they are dropped on a new connection from the pool: a restart with the
+      // same custom names would otherwise fail with "already exists".
+      let databaseDown = false;
+      const attempt = async (text: string, viaPool: boolean) => {
+        if (databaseDown) return;
         try {
-          await client.query(text);
-        } catch {
-          // a dead connection or a missing object must not stop the rest of the clean-up
+          if (viaPool) await pool.query(text);
+          else await client.query(text);
+        } catch (error) {
+          // a missing object or a database that is gone must not stop the rest of the clean-up; an
+          // error without an SQLSTATE code means no connection could be made, so skip the rest
+          const code = (error as { code?: unknown }).code;
+          if (viaPool && !(typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code))) databaseDown = true;
           ctx.logger.warn('Postgres Trigger could not finish its clean-up');
         }
       };
-      await attempt(`UNLISTEN ${quote(setup.channel)}`);
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        client.removeAllListeners('notification');
+        client.release(true);
+      };
+      if (dead) release();
+      else await attempt(`UNLISTEN ${quote(setup.channel)}`, false);
       if (setup.created) {
         const { table, fn, trigger } = setup.created;
-        await attempt(`DROP FUNCTION IF EXISTS ${fn}() CASCADE`);
-        await attempt(`DROP TRIGGER IF EXISTS ${quote(trigger)} ON ${table}`);
+        // The trigger first, then the function without CASCADE: a function that other triggers still
+        // use (a name the user gave for one that existed) stays, and the failure is only logged.
+        await attempt(`DROP TRIGGER IF EXISTS ${quote(trigger)} ON ${table}`, dead);
+        await attempt(`DROP FUNCTION IF EXISTS ${fn}()`, dead);
       }
-      client.removeAllListeners('notification');
-      client.release(true);
+      release();
       await pool.end().catch(() => undefined);
     };
 
@@ -313,8 +351,14 @@ export const PostgresTriggerNode: NodeType = {
       );
     };
     // without these listeners an error on the connection would end the process
-    client.on('error', (error) => lost(error.message));
-    client.on('end', () => lost());
+    client.on('error', (error) => {
+      dead = true;
+      lost(error.message);
+    });
+    client.on('end', () => {
+      dead = true;
+      lost();
+    });
 
     try {
       if (create) {
