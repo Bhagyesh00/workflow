@@ -27,6 +27,23 @@ interface MySqlCredentials extends DataObject {
   connectTimeout?: number;
 }
 
+/**
+ * TLS options for mysql2. It reads only the chain settings and `verifyIdentity`: under `require` the
+ * certificate must match the host name the user entered. With an IP address as the host mysql2 has no
+ * name to check (it would check "localhost"), so there only the chain is verified.
+ */
+function mysqlSsl(creds: MySqlCredentials, host: string): mysql.SslOptions | undefined {
+  const tls = sqlTlsOptions(creds, host);
+  if (!tls) return undefined;
+  return {
+    rejectUnauthorized: tls.rejectUnauthorized,
+    ...(tls.ca === undefined ? {} : { ca: tls.ca as string }),
+    ...(tls.key === undefined ? {} : { key: tls.key as string }),
+    ...(tls.cert === undefined ? {} : { cert: tls.cert as string }),
+    ...(creds.ssl === 'require' && !net.isIP(host) ? { verifyIdentity: true } : {}),
+  };
+}
+
 /** Build a pool whose connections go only to addresses that passed the SSRF policy. */
 export async function mysqlPool(
   ctx: Pick<BaseContext, 'getCredentials' | 'helpers'> & {
@@ -45,11 +62,10 @@ export async function mysqlPool(
     : undefined;
   try {
     const allowed = tunnel ? undefined : await ctx.helpers.resolveAllowedHost(host);
-    const ssl = sqlTlsOptions(creds, host) as mysql.SslOptions | undefined;
     const pool = mysql.createPool({
-      // mysql2 takes the TLS server name from `host`, so it stays the name the user entered (the TLS
-      // options carry it explicitly when the socket goes to the tunnel)
-      host: tunnel ? tunnel.host : host,
+      // mysql2 takes the TLS server name from `host` and ignores the server name and name check of the
+      // TLS options, so `host` stays the name the user entered; the `stream` below does the connecting
+      host,
       port: tunnel ? tunnel.port : port,
       // every connection goes only to the checked addresses: mysql2 resolving the name again could be
       // sent elsewhere by a DNS rebind
@@ -67,7 +83,7 @@ export async function mysqlPool(
       database: creds.database ? String(creds.database) : undefined,
       user: creds.user ? String(creds.user) : undefined,
       password: creds.password ? String(creds.password) : undefined,
-      ssl,
+      ssl: mysqlSsl(creds, host),
       connectionLimit: 5,
       connectTimeout: options.connectionTimeoutSeconds
         ? options.connectionTimeoutSeconds * 1000
