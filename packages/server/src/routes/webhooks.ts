@@ -4,8 +4,8 @@
  * with the node's CORS headers; multipart uploads become `WebhookRequest.files`.
  *
  * Responses are produced by tenant workflows but served from the platform origin, so they are
- * sandboxed: `Set-Cookie` is dropped and a `CSP: sandbox` header puts any HTML into an opaque
- * origin that cannot call the authenticated API.
+ * sandboxed: `Set-Cookie` is dropped (only the form sign-in's own cookie passes) and a `CSP: sandbox`
+ * header puts any HTML into an opaque origin that cannot call the authenticated API.
  */
 import { Readable } from 'node:stream';
 import multipart from '@fastify/multipart';
@@ -32,6 +32,8 @@ const DROPPED_HEADERS = new Set([
   'transfer-encoding',
   'connection',
 ]);
+/** the cookie of a form with User Auth (form/user-auth.ts); it can never name the session cookie */
+const FORM_AUTH_COOKIE = /^ncb-form-auth-(wf|ex)-[^=;\s]+=/;
 
 function parseJson(text: string): unknown {
   if (!text.trim()) return {};
@@ -104,7 +106,18 @@ async function readBody(stream: Readable, declaredLength: unknown, bodyLimit: nu
   return Buffer.concat(chunks);
 }
 
-async function toWebhookRequest(request: FastifyRequest, bodyLimit: number): Promise<WebhookRequest> {
+/** what the browser used: the first x-forwarded-proto value, which counts only when the server trusts its proxy */
+function cameOverHttps(request: FastifyRequest, trustProxy: boolean): boolean {
+  const forwarded = trustProxy ? request.headers['x-forwarded-proto'] : undefined;
+  const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0].trim();
+  return (first || request.protocol) === 'https';
+}
+
+async function toWebhookRequest(
+  request: FastifyRequest,
+  bodyLimit: number,
+  trustProxy: boolean,
+): Promise<WebhookRequest> {
   const headers = withoutSessionCookie(request.headers);
   let body: unknown = {};
   let rawBody: Uint8Array | undefined;
@@ -152,13 +165,26 @@ async function toWebhookRequest(request: FastifyRequest, bodyLimit: number): Pro
   for (const [k, v] of Object.entries((request.query ?? {}) as Record<string, unknown>)) {
     if (!BLOCKED_KEYS.has(k)) query[k] = v;
   }
-  return { method: request.method, headers, query, params: {}, body, rawBody, ip: request.ip, files };
+  return {
+    method: request.method,
+    url: request.url,
+    secure: cameOverHttps(request, trustProxy),
+    headers,
+    query,
+    params: {},
+    body,
+    rawBody,
+    ip: request.ip,
+    files,
+  };
 }
 
 function send(reply: FastifyReply, result: WebhookReply) {
   reply.status(result.statusCode);
   for (const [name, value] of Object.entries(result.headers)) {
-    if (DROPPED_HEADERS.has(name.toLowerCase())) continue;
+    const lower = name.toLowerCase();
+    const formCookie = lower === 'set-cookie' && FORM_AUTH_COOKIE.test(String(value));
+    if (DROPPED_HEADERS.has(lower) && !formCookie) continue;
     try {
       reply.header(name, value);
     } catch {
@@ -215,7 +241,7 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
     method: request.method,
     path,
     headers: withoutSessionCookie(request.headers),
-    read: () => toWebhookRequest(request, bodyLimit).catch(asBodyError),
+    read: () => toWebhookRequest(request, bodyLimit, ctx.config.trustProxy).catch(asBodyError),
   });
 
   const respond = async (reply: FastifyReply, result: () => Promise<WebhookReply>) => {

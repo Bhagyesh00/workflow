@@ -305,12 +305,12 @@ describe('TriggerContext.emit', () => {
 });
 
 describe('HttpClient streamNoTotalTimeout', () => {
-  /** `/slow` sends its headers and first chunk at once and the rest after 500 ms */
+  /** `/slow` sends its headers and first chunk at once and the rest after 500 ms, `/slow-long` after 1500 ms */
   const server = http.createServer((req, res) => {
-    if (req.url === '/slow') {
+    if (req.url === '/slow' || req.url === '/slow-long') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.write('first');
-      const timer = setTimeout(() => res.end('-last'), 500);
+      const timer = setTimeout(() => res.end('-last'), req.url === '/slow' ? 500 : 1500);
       res.once('close', () => clearTimeout(timer));
     } else if (req.url === '/forever') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -348,11 +348,12 @@ describe('HttpClient streamNoTotalTimeout', () => {
   };
 
   it('a stream outlives the timeout once the headers are in', async () => {
+    // the timeout is for the headers, so it is long enough for a busy machine; the body takes longer
     const stream = (await client().request<HttpResponseStream>({
-      url: `${base}/slow`,
+      url: `${base}/slow-long`,
       responseType: 'stream',
       streamNoTotalTimeout: true,
-      timeout: 150,
+      timeout: 700,
     })) as HttpResponseStream;
     await expect(text(stream)).resolves.toBe('first-last');
   });

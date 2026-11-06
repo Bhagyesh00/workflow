@@ -132,11 +132,12 @@ const definitionOf = (graph: WorkflowGraph): WorkflowDefinition => ({
   nodeGroups: graph.nodeGroups,
 });
 
-/** the webhook URLs a node has: none, or (test URL too unless every hook is a resume hook) */
+/** the webhook URLs a node has: a resume hook has no URL of its own, it comes with the waiting run */
 function urlKinds(node: WorkflowNode, input: MenuInputs): { test: boolean; production: boolean } {
   const hooks = input.descriptions.get(node.type)?.webhooks ?? [];
   if (!hooks.length) return { test: false, production: false };
-  return { test: hooks.some((h) => !h.restartWebhook), production: input.published };
+  const startsRuns = hooks.some((h) => !h.restartWebhook);
+  return { test: startsRuns, production: input.published && startsRuns };
 }
 
 // ---- sections shared by node, selection and group menus --------------------------------------------

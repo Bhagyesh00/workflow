@@ -93,6 +93,14 @@ describe('parameter form renders every property type', () => {
     });
     expect(node.current.parameters.text).toBe('=Hi {{ $json.name }}');
   });
+
+  it('a pasted expression that already starts with = keeps one =', async () => {
+    const { node } = renderParameters(kitchenSink);
+    fireEvent.change(within(field('text')).getByRole('textbox'), {
+      target: { value: '={{ $json.name }}' },
+    });
+    expect(node.current.parameters.text).toBe('={{ $json.name }}');
+  });
 });
 
 describe('display options', () => {

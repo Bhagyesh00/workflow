@@ -275,6 +275,10 @@ export interface WebhookRequest {
   body: unknown;
   rawBody?: Uint8Array;
   ip?: string;
+  /** the path and query the caller asked for */
+  url?: string;
+  /** the caller came over https; a proxy's word counts only when the server trusts proxies */
+  secure?: boolean;
   /** uploaded files (multipart) */
   files?: Array<{ fieldName: string; fileName: string; mimeType: string; data: Uint8Array }>;
 }

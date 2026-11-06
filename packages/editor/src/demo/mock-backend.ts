@@ -12,6 +12,7 @@ import {
   type RunData,
   resolveNodeParameters,
   type StickyNote,
+  splitTemplate,
   type WorkflowNode,
   type WorkflowNodeGroup,
   type WorkflowSettings,
@@ -987,8 +988,13 @@ export class MockBackend {
     this.on('GET', '/credentials/:id', ({ params }) => {
       const c = credential(params[0]);
       const secrets = secretKeys(c.type);
+      // as the server: a saved expression stays visible, it is a reference and not the secret
+      const isExpression = (v: unknown) =>
+        typeof v === 'string' &&
+        v.startsWith('=') &&
+        splitTemplate(v.slice(1)).some((segment) => segment.type === 'code');
       const data = Object.fromEntries(
-        Object.entries(c.data).map(([k, v]) => [k, secrets.has(k) && v ? REDACTED : v]),
+        Object.entries(c.data).map(([k, v]) => [k, secrets.has(k) && v && !isExpression(v) ? REDACTED : v]),
       );
       return { id: c.id, name: c.name, type: c.type, data };
     });

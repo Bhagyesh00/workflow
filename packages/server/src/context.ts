@@ -41,6 +41,9 @@ import { WorkflowImportUrlService } from './services/workflow-import-url';
 import { WorkflowReviewService } from './services/workflow-reviews';
 import { WorkflowService } from './services/workflows';
 
+/** the Python Code node's decided cap; CODE_MEMORY_MB can raise it, and alone sets the JavaScript cap */
+const MIN_PYTHON_MEMORY_MB = 256;
+
 export interface ServerContext {
   config: Config;
   logger: PinoLogger;
@@ -140,7 +143,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   });
   const pythonRunner = config.python.enabled
     ? new PyodideCodeRunner({
-        memoryLimitMb: config.code.memoryMb,
+        memoryLimitMb: Math.max(config.code.memoryMb, MIN_PYTHON_MEMORY_MB),
         timeoutMs: config.code.timeoutMs,
         maxConcurrency: config.python.maxConcurrency,
         stdlibAllow: config.python.stdlibAllow,

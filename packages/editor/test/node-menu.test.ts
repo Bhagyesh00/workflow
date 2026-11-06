@@ -157,7 +157,7 @@ describe('node menu (single node)', () => {
     expect(l.indexOf('Copy test URL')).toBe(l.indexOf('Test step') + 1);
     expect(l.indexOf('Copy production URL')).toBe(l.indexOf('Copy test URL') + 1);
 
-    // a production-only webhook (resume URL) has no test URL
+    // a resume hook has no URL of its own: neither entry could give one
     const wait = buildMenu(
       inputs({
         target: { type: 'node', nodeName: 'Z' },
@@ -168,7 +168,7 @@ describe('node menu (single node)', () => {
       actions(),
     );
     expect(labels(wait)).not.toContain('Copy test URL');
-    expect(labels(wait)).toContain('Copy production URL');
+    expect(labels(wait)).not.toContain('Copy production URL');
 
     // no URL entries for a node without a webhook
     expect(labels(buildMenu(inputs({ published: true }), actions())).join()).not.toContain('URL');

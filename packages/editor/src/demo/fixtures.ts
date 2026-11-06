@@ -555,6 +555,9 @@ const form: NodeTypeDescription = {
   ],
 };
 
+/** the row operations that pick rows by conditions */
+const dataTableFilterOperations = ['get', 'update', 'upsert', 'deleteRows', 'rowExists', 'rowNotExists'];
+
 const dataTable: NodeTypeDescription = {
   name: 'core.dataTable',
   displayName: 'Data Table',
@@ -580,6 +583,8 @@ const dataTable: NodeTypeDescription = {
         { name: 'Update', value: 'update', action: 'Update rows' },
         { name: 'Upsert', value: 'upsert', action: 'Upsert row' },
         { name: 'Delete', value: 'deleteRows', action: 'Delete rows' },
+        { name: 'If Row Exists', value: 'rowExists', action: 'If row exists' },
+        { name: 'If Row Does Not Exist', value: 'rowNotExists', action: 'If row does not exist' },
       ],
     },
     {
@@ -633,11 +638,110 @@ const dataTable: NodeTypeDescription = {
       ],
     },
     {
-      displayName: 'Limit',
+      displayName: 'Match Type',
+      name: 'matchType',
+      type: 'options',
+      default: 'anyCondition',
+      displayOptions: { show: { operation: dataTableFilterOperations } },
+      options: [
+        { name: 'Any Condition', value: 'anyCondition' },
+        { name: 'All Conditions', value: 'allConditions' },
+      ],
+    },
+    {
+      displayName: 'Conditions',
+      name: 'filters',
+      type: 'fixedCollection',
+      default: {},
+      placeholder: 'Add condition',
+      typeOptions: { multipleValues: true },
+      description: 'Update, upsert, delete and the exists checks need at least one condition',
+      displayOptions: { show: { operation: dataTableFilterOperations } },
+      options: [
+        {
+          displayName: 'Condition',
+          name: 'conditions',
+          values: [
+            { displayName: 'Column', name: 'keyName', type: 'string', default: '' },
+            {
+              displayName: 'Condition',
+              name: 'condition',
+              type: 'options',
+              default: 'eq',
+              options: [
+                { name: 'Equals', value: 'eq' },
+                { name: 'Not Equal', value: 'neq' },
+                { name: 'Contains (Case-Sensitive)', value: 'like' },
+                { name: 'Contains (Case-Insensitive)', value: 'ilike' },
+                { name: 'Greater Than', value: 'gt' },
+                { name: 'Greater Than or Equal', value: 'gte' },
+                { name: 'Less Than', value: 'lt' },
+                { name: 'Less Than or Equal', value: 'lte' },
+                { name: 'Is Empty', value: 'isEmpty' },
+                { name: 'Is Not Empty', value: 'isNotEmpty' },
+              ],
+            },
+            { displayName: 'Value', name: 'keyValue', type: 'string', default: '' },
+          ],
+        },
+      ],
+    },
+    {
+      displayName: 'Return All',
+      name: 'returnAll',
+      type: 'boolean',
+      default: false,
+      displayOptions: { show: { operation: ['get'] } },
+    },
+    {
+      displayName: 'Limit Per Input Row',
       name: 'limit',
       type: 'number',
       default: 50,
+      displayOptions: { show: { operation: ['get'], returnAll: [false] } },
+    },
+    {
+      displayName: 'Order by Column',
+      name: 'orderBy',
+      type: 'boolean',
+      default: false,
       displayOptions: { show: { operation: ['get'] } },
+    },
+    {
+      displayName: 'Order By',
+      name: 'orderByColumn',
+      type: 'string',
+      default: 'createdAt',
+      displayOptions: { show: { operation: ['get'], orderBy: [true] } },
+    },
+    {
+      displayName: 'Direction',
+      name: 'orderByDirection',
+      type: 'options',
+      default: 'DESC',
+      options: [
+        { name: 'Ascending', value: 'ASC' },
+        { name: 'Descending', value: 'DESC' },
+      ],
+      displayOptions: { show: { operation: ['get'], orderBy: [true] } },
+    },
+    {
+      displayName: 'Options',
+      name: 'options',
+      type: 'collection',
+      default: {},
+      placeholder: 'Add option',
+      displayOptions: { show: { operation: ['update', 'upsert', 'deleteRows'] } },
+      options: [
+        {
+          displayName: 'Dry Run',
+          name: 'dryRun',
+          type: 'boolean',
+          default: false,
+          description:
+            'Whether to return the rows before and after the change (marked in dryRunState) without changing anything',
+        },
+      ],
     },
   ],
 };

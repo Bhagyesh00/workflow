@@ -45,11 +45,14 @@ const SECRET_PATHS: RegExp[] = [
   /^(\/+form-waiting\/+).+/,
 ];
 
-/** the request URL with every token-bearing path segment replaced; the query string is kept */
+/** a form's address carries the sign-in's one-time code in its query when the visitor comes back */
+const FORM_PATH = /^\/+form(?:-test|-waiting)?\//;
+
+/** the request URL with every token-bearing path segment and form sign-in code replaced; the rest of the query is kept */
 export function redactUrl(url: string): string {
   const queryAt = url.indexOf('?');
   const rawPath = queryAt === -1 ? url : url.slice(0, queryAt);
-  const query = queryAt === -1 ? '' : url.slice(queryAt);
+  const rawQuery = queryAt === -1 ? '' : url.slice(queryAt);
   let decoded = rawPath;
   try {
     // the router matches the decoded path, so `/%69nvitation/<token>` reaches the same route
@@ -57,10 +60,11 @@ export function redactUrl(url: string): string {
   } catch {
     // an invalid escape never matches a route; the raw path is checked as is
   }
+  const query = FORM_PATH.test(decoded) ? rawQuery.replace(/([?&]code=)[^&]*/g, '$1[redacted]') : rawQuery;
   for (const pattern of SECRET_PATHS) {
     if (pattern.test(decoded)) return `${decoded.replace(pattern, '$1[redacted]')}${query}`;
   }
-  return url;
+  return `${rawPath}${query}`;
 }
 
 /** Fastify's request fields for the `incoming request` and error lines, with the URL redacted */
@@ -82,7 +86,11 @@ function serializeRequest(request: {
   };
 }
 
-export function createLogger(level: string, base: DataObject = {}, destination?: DestinationStream): PinoLogger {
+export function createLogger(
+  level: string,
+  base: DataObject = {},
+  destination?: DestinationStream,
+): PinoLogger {
   return pino(
     {
       level,

@@ -131,7 +131,7 @@ export function SmartInput({
       readOnly={ctx.readOnly}
       onChange={(event) => {
         const next = event.target.value;
-        onChange(ctx.allowExpressions && next.includes('{{') ? `=${next}` : next);
+        onChange(ctx.allowExpressions && next.includes('{{') && !next.startsWith('=') ? `=${next}` : next);
       }}
       onDragOver={(event) => {
         if (ctx.allowExpressions && event.dataTransfer.types.includes(FIELD_DRAG_TYPE))

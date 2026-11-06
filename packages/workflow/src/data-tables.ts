@@ -47,6 +47,42 @@ export const DATA_TABLE_ERRORS = {
   noColumnsHint: 'The selected data table has no columns.',
 } as const;
 
+// ---- dates: one reader for the server and the Data Table node, so a filter and a stored cell agree ----
+
+export const DATA_TABLE_LATEST_DATE_MS = Date.UTC(9999, 11, 31, 23, 59, 59, 999);
+export const DATA_TABLE_EARLIEST_DATE_MS = Date.parse('0000-01-01T00:00:00.000Z');
+
+const ISO_DATE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?\s?(Z|z|[+-]\d{2}(?::?\d{2})?)?)?$/;
+const MAIL_DATE =
+  /^(?:[A-Za-z]{3},\s*)?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}(?::\d{2})?\s+(?:GMT|UTC|[+-]\d{4})$/;
+
+function parseIsoDate(match: RegExpExecArray): Date | undefined {
+  const [, y, mo, d, h = '00', mi = '00', s = '00', fraction = '', zone = 'Z'] = match;
+  const day = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d)));
+  // Date would carry 02-31 over to March
+  if (day.getUTCMonth() !== Number(mo) - 1 || day.getUTCDate() !== Number(d)) return undefined;
+  const offset = /^[zZ]$/.test(zone) ? 'Z' : `${zone.slice(0, 3)}:${zone.slice(3).replace(':', '') || '00'}`;
+  const millis = fraction.padEnd(3, '0').slice(0, 3);
+  const date = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}.${millis}${offset}`);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+/**
+ * ISO 8601, SQL style and RFC 2822 dates; no zone means UTC. Not Date.parse alone: its fallback takes
+ * "Room 5" as a date, and CSV type detection relies on this.
+ */
+export function parseDataTableDate(text: string): Date | undefined {
+  const trimmed = text.trim();
+  const iso = ISO_DATE.exec(trimmed);
+  let date: Date | undefined;
+  if (iso) date = parseIsoDate(iso);
+  else if (MAIL_DATE.test(trimmed)) date = new Date(trimmed);
+  if (!date || Number.isNaN(date.getTime())) return undefined;
+  const time = date.getTime();
+  return time < DATA_TABLE_EARLIEST_DATE_MS || time > DATA_TABLE_LATEST_DATE_MS ? undefined : date;
+}
+
 export const DATA_TABLE_FILTER_CONDITIONS = [
   'eq',
   'neq',
@@ -82,6 +118,11 @@ export interface DataTableFilter {
 export interface DataTableColumnInput {
   name: string;
   type: DataTableColumnType;
+}
+
+/** a column of a new table; `csvColumnName` is the header of the CSV column that fills it */
+export interface DataTableCreateColumn extends DataTableColumnInput {
+  csvColumnName?: string;
 }
 
 export interface DataTableColumn extends DataTableColumnInput {
@@ -131,7 +172,7 @@ export type DataTableSortDirection = 'asc' | 'desc';
 export interface DataTableListQuery {
   /** case-insensitive part of the name */
   name?: string;
-  sortBy?: { column: 'name' | 'createdAt' | 'updatedAt'; direction: DataTableSortDirection };
+  sortBy?: { column: 'name' | 'createdAt' | 'updatedAt' | 'size'; direction: DataTableSortDirection };
   take?: number;
   skip?: number;
 }

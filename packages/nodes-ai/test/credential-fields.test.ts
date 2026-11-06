@@ -14,7 +14,7 @@ describe('credential field names match what nodes-ai reads', () => {
   });
 
   it('redis fields are read by redisCredentials', () => {
-    expect(names(redis)).toEqual(['host', 'port', 'user', 'password', 'database', 'ssl']);
+    expect(names(redis)).toEqual(['host', 'port', 'user', 'password', 'database', 'ssl', 'disableTlsVerification']);
     const creds = redisCredentials({
       host: 'cache.example.com',
       port: 6380,
@@ -30,6 +30,18 @@ describe('credential field names match what nodes-ai reads', () => {
       password: 'pw',
       db: 3,
       tls: true,
+    });
+  });
+
+  it('Disable TLS Verification counts only with SSL on', () => {
+    expect(redisCredentials({ ssl: true, disableTlsVerification: true })).toMatchObject({
+      tls: true,
+      tlsInsecure: true,
+    });
+    expect(redisCredentials({ ssl: true })).toMatchObject({ tls: true, tlsInsecure: undefined });
+    expect(redisCredentials({ ssl: false, disableTlsVerification: true })).toMatchObject({
+      tls: false,
+      tlsInsecure: undefined,
     });
   });
 

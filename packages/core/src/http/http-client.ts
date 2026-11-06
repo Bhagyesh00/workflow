@@ -447,6 +447,10 @@ export class HttpClient {
     return fetch(url, init).catch((error: unknown) => {
       // a connect-time block reaches fetch as `TypeError('fetch failed')`; surface the real reason
       if (error instanceof Error && error.cause instanceof SsrfBlockedError) throw error.cause;
+      // undici quotes a bad header, or a character of it, and the value can be a resolved secret
+      if (error instanceof TypeError && /^Headers\.append:|ByteString/.test(error.message)) {
+        throw new TypeError('A request header has a name or value that cannot be sent');
+      }
       throw error;
     });
   }

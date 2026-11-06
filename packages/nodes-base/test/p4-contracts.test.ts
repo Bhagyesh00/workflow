@@ -111,11 +111,9 @@ describe('P4 node stubs', () => {
     );
   });
 
-  it.each(STUB_NODES)('%s throws until its lane builds it', async (name, runs) => {
+  it.each(STUB_NODES)('%s has the entry point its kind needs', (name, runs) => {
     const type = nodeType(name);
-    const run = type[runs] as ((...args: unknown[]) => Promise<unknown>) | undefined;
-    expect(run, runs).toBeTypeOf('function');
-    await expect(run!.call(type, {} as never)).rejects.toThrow('Not built yet');
+    expect(type[runs], runs).toBeTypeOf('function');
   });
 
   it('Form Trigger serves a GET setup and a POST default hook, both form hooks on one full path', () => {
@@ -353,27 +351,23 @@ describe('moved helpers', () => {
   });
 });
 
-describe('helper stubs', () => {
-  it('form user auth exports its properties and throws until L2', async () => {
+describe('helper exports', () => {
+  it('form user auth exports its properties and its check', async () => {
     const { checkFormUserAuth, userAuthProperties } = await import('../src/nodes/core/form/user-auth');
     expect(Array.isArray(userAuthProperties)).toBe(true);
-    await expect(
-      checkFormUserAuth({} as never, { scope: 'trigger', requireExecuteAccess: false }),
-    ).rejects.toThrow('not implemented (L2)');
+    expect(checkFormUserAuth).toBeTypeOf('function');
   });
 
-  it('broker-connect exports its three helpers and throws until L12', async () => {
+  it('broker-connect exports its three helpers', async () => {
     const { connectGuarded, guardedLookup, tlsOptions } = await import('../src/utils/broker-connect');
-    const { ctx } = pinnedContext();
-    await expect(guardedLookup(ctx, 'h')).rejects.toThrow('not implemented (L12)');
-    await expect(connectGuarded(ctx, { host: 'h', port: 1 })).rejects.toThrow('not implemented (L12)');
-    expect(() => tlsOptions({})).toThrow('not implemented (L12)');
+    expect(connectGuarded).toBeTypeOf('function');
+    expect(guardedLookup).toBeTypeOf('function');
+    expect(tlsOptions).toBeTypeOf('function');
   });
 
-  it('redis-connect exports openRedis and throws until L15', async () => {
+  it('redis-connect exports openRedis', async () => {
     const { openRedis } = await import('../src/utils/redis-connect');
-    const { ctx } = pinnedContext();
-    await expect(openRedis(ctx, { host: 'h' }, {})).rejects.toThrow('not implemented (L15)');
+    expect(openRedis).toBeTypeOf('function');
   });
 });
 

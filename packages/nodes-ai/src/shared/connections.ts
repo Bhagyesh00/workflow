@@ -122,6 +122,8 @@ export interface RedisCredentials {
   username?: string;
   db: number;
   tls: boolean;
+  /** accept a certificate that cannot be verified (the credential's Disable TLS Verification, with SSL on) */
+  tlsInsecure?: boolean;
 }
 
 /** Read a `redis` credential (field names as defined by the nodes-base credential type). */
@@ -133,6 +135,7 @@ export function redisCredentials(data: DataObject): RedisCredentials {
     username: data.user ? String(data.user) : undefined,
     db: Number(data.database ?? 0),
     tls: Boolean(data.ssl ?? false),
+    tlsInsecure: data.ssl === true && data.disableTlsVerification === true ? true : undefined,
   };
 }
 
@@ -145,7 +148,12 @@ async function openRedis(ctx: BaseContext, creds: RedisCredentials): Promise<Red
     password: creds.password,
     username: creds.username,
     db: creds.db,
-    tls: creds.tls ? { servername: net.isIP(creds.host) ? undefined : creds.host } : undefined,
+    tls: creds.tls
+      ? {
+          servername: net.isIP(creds.host) ? undefined : creds.host,
+          ...(creds.tlsInsecure ? { rejectUnauthorized: false } : {}),
+        }
+      : undefined,
     lazyConnect: true,
     connectTimeout: 10_000,
     maxRetriesPerRequest: 2,
