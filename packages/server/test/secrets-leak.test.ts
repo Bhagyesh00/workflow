@@ -224,6 +224,47 @@ describe('the vault value stays out of everything but the outgoing request', () 
     expectNoLeak(logLines.join('\n'));
   });
 
+  it.each([
+    ['a line break', (secret: string) => `${secret}\nsecond-line`],
+    ['a character outside latin-1', (secret: string) => `${secret}\u20ac`],
+  ])('a header value the request cannot send: %s', async (_label, shape) => {
+    secretsStore = { key: shape(VALUE) };
+    const owner = await workspace();
+    const credential = await owner.client.data(
+      owner.client.post('/rest/credentials', {
+        name: 'Header',
+        type: 'httpHeaderAuth',
+        data: { name: 'x-from-vault', value: '={{ $secrets.main.key }}' },
+      }),
+    );
+    const wf = await createWorkflow(owner.client, {
+      nodes: [
+        node('Start', 'core.manualTrigger'),
+        node(
+          'Call',
+          'core.httpRequest',
+          {
+            url: `${remoteUrl}/never`,
+            authentication: 'genericCredentialType',
+            genericAuthType: 'httpHeaderAuth',
+          },
+          [200, 0],
+          { credentials: { httpHeaderAuth: { id: credential.id, name: 'Header' } } },
+        ),
+      ],
+      connections: chain('Start', 'Call'),
+    });
+    const { executionId } = await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/run`, {}));
+    await waitForExecution(ctx, owner.tenant.id, executionId, ['error']);
+    const all = await everything(owner, executionId);
+    expect(all).toContain('A request header has a name or value that cannot be sent');
+    expectNoLeak(all);
+    expect(all).not.toContain('second-line');
+    expect(all).not.toContain('8364');
+    expectNoLeak(pushed.join('\n'));
+    expectNoLeak(logLines.join('\n'));
+  });
+
   it('a failed request with the value in its query string', async () => {
     const owner = await workspace();
     remoteStatus = 500;

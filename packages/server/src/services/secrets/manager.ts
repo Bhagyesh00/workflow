@@ -95,6 +95,8 @@ export class SecretsManager {
   private running = false;
   private stopped = false;
   private ticking = false;
+  /** a stop ends the background part of the load that began before it */
+  private loadRun = 0;
 
   constructor(
     readonly deps: ServiceDeps,
@@ -107,7 +109,8 @@ export class SecretsManager {
 
   /**
    * Load the cache, start the refresh timer and the bus reload. Runs before jobs start. A vault or
-   * database that fails here must not stop the server: the timer picks it up.
+   * database that fails here must not stop the server: the timer picks it up. Vaults that do not answer
+   * must not hold it up either: the wait has a limit, and what is left connects in the background.
    */
   async start(): Promise<void> {
     if (this.running) return;
@@ -124,16 +127,32 @@ export class SecretsManager {
         this.deps.config.externalSecrets.updateIntervalS * 1000,
       );
       this.timer.unref();
-      await this.loadEnabled();
+      await this.loadWithinLimit();
     } catch (error) {
-      this.deps.logger?.error({ code: pgErrorCode(error) }, 'Could not load the external secret connections');
+      this.logLoadFailure(error);
     }
+  }
+
+  private logLoadFailure(error: unknown): void {
+    this.deps.logger?.error({ code: pgErrorCode(error) }, 'Could not load the external secret connections');
+  }
+
+  private async loadWithinLimit(): Promise<void> {
+    const load = this.loadEnabled().catch((error: unknown) => this.logLoadFailure(error));
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.connectTimeoutMs() + this.refreshTimeoutMs());
+      timer.unref();
+    });
+    await Promise.race([load, limit]);
+    clearTimeout(timer);
   }
 
   /** Stop the timer and disconnect every provider. */
   async stop(): Promise<void> {
     this.running = false;
     this.stopped = true;
+    this.loadRun++;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.unsubscribe?.();
@@ -576,8 +595,11 @@ export class SecretsManager {
   }
 
   private async loadEnabled(): Promise<void> {
+    const run = this.loadRun;
     const rows = await this.deps.repos.secrets.listAllEnabled();
-    await this.mapLimit(rows, (row) => this.connect(row));
+    await this.mapLimit(rows, async (row) => {
+      if (run === this.loadRun) await this.connect(row);
+    });
   }
 
   /**

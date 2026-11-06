@@ -61,9 +61,11 @@ export function StringInput({ prop, value, onChange, id }: InputProps) {
           data-redacted={redacted || undefined}
           onChange={(e) => {
             const next = e.target.value;
-            // typing `{{` makes the field an expression (a credential field reading `$secrets`), which then shows its text
-            if (ctx.allowExpressions && !prop.noDataExpression && next.includes('{{'))
-              return onChange(`=${next}`);
+            // `{{` or `={{` at the start makes the field an expression (a credential field reading `$secrets`),
+            // which then shows its text; braces further on are part of a password and stay masked
+            const trimmed = next.trimStart();
+            if (ctx.allowExpressions && !prop.noDataExpression && /^=?\{\{/.test(trimmed))
+              return onChange(trimmed.startsWith('=') ? trimmed : `=${trimmed}`);
             onChange(next === '' && ctx.keepSecretOnEmpty ? REDACTED : next);
           }}
         />
@@ -88,7 +90,8 @@ export function StringInput({ prop, value, onChange, id }: InputProps) {
       onChange={(e) => {
         const next = e.target.value;
         // typing `{{` switches the field to an expression, like the expression toggle
-        onChange(ctx.allowExpressions && !prop.noDataExpression && next.includes('{{') ? `=${next}` : next);
+        const toExpression = ctx.allowExpressions && !prop.noDataExpression && next.includes('{{');
+        onChange(toExpression && !next.startsWith('=') ? `=${next}` : next);
       }}
     />
   );

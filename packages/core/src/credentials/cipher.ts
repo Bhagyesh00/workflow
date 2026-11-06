@@ -6,6 +6,7 @@
  * Format: `v1.<keyId>.<iv b64url>.<tag b64url>.<ciphertext b64url>`
  */
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
+import { splitTemplate } from '@workflow/workflow';
 
 export interface MasterKey {
   id: string;
@@ -87,11 +88,15 @@ export class CredentialCipher {
 export const REDACTED = '__REDACTED__';
 
 /**
- * An expression in a credential field: `=` and at least one `{{ }}`. A value without braces is a literal,
- * because a typed password may begin with `=`.
+ * An expression in a credential field: `=` and at least one closed `{{ }}`. Anything else is a literal,
+ * because a typed password may begin with `=` or hold an open `{{`.
  */
 export function isCredentialExpression(value: unknown): value is string {
-  return typeof value === 'string' && value.startsWith('=') && value.includes('{{');
+  return (
+    typeof value === 'string' &&
+    value.startsWith('=') &&
+    splitTemplate(value.slice(1)).some((segment) => segment.type === 'code')
+  );
 }
 
 /** An expression stays visible: it is a reference such as `={{ $secrets.vault.key }}`, not the secret. */

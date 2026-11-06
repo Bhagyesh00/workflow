@@ -1,13 +1,11 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { HttpResponse, http } from 'msw';
 import { afterEach, describe, expect, it } from 'vitest';
 import { setCurrentTenant } from '../src/api/client';
 import { secretsApi } from '../src/api/endpoints';
 import { type CompletionData, completeExpression } from '../src/components/code/completions';
 import { CredentialModal } from '../src/components/credentials/CredentialModal';
 import { signedIn } from './backend';
-import { server } from './setup';
 import { withProviders } from './utils';
 
 afterEach(() => setCurrentTenant(null));
@@ -115,6 +113,65 @@ describe('credential modal: expression toggle (P4-07)', () => {
     );
   });
 
+  it('a password with {{ further on stays masked and is saved as typed', async () => {
+    const user = userEvent.setup();
+    const mock = await withConnection();
+    withProviders(<CredentialModal open type="httpHeaderAuth" onClose={() => undefined} />);
+    const input = await waitFor(() => {
+      const el = document.querySelector('input[type="password"]');
+      if (!el) throw new Error('no password field');
+      return el;
+    });
+    fireEvent.change(input, { target: { value: 'aB{{9x' } });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(document.querySelector('input[type="password"]')).not.toBeNull();
+    expect(screen.queryByTestId('code-editor-expression')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(postedValue(mock)).toBe('aB{{9x'));
+  });
+
+  it.each([
+    ['={{ $secrets.vault.apiKey }}'],
+    ['  ={{ $secrets.vault.apiKey }}'],
+    ['  {{ $secrets.vault.apiKey }}'],
+  ])('pasting %j saves one = and no leading spaces', async (pasted) => {
+    const user = userEvent.setup();
+    const mock = await withConnection();
+    withProviders(<CredentialModal open type="httpHeaderAuth" onClose={() => undefined} />);
+    const input = await waitFor(() => {
+      const el = document.querySelector('input[type="password"]');
+      if (!el) throw new Error('no password field');
+      return el;
+    });
+    fireEvent.change(input, { target: { value: pasted } });
+    await screen.findByTestId('code-editor-expression');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(postedValue(mock)).toBe('={{ $secrets.vault.apiKey }}'));
+  });
+
+  it('the demo backend keeps a saved expression visible and masks a password with braces', async () => {
+    const mock = await withConnection();
+    const now = new Date().toISOString();
+    const add = (id: string, value: string) =>
+      mock.credentials.push({
+        id,
+        tenantId: mock.session!.tenantId,
+        name: id,
+        type: 'httpHeaderAuth',
+        data: { name: 'X-Key', value },
+        createdAt: now,
+        updatedAt: now,
+      });
+    add('expr', '={{ $secrets.vault.apiKey }}');
+    add('braces', '=aB{{9x');
+    add('plain', 'hunter2');
+    const value = async (id: string) =>
+      (await fetch(`/rest/credentials/${id}`).then((r) => r.json())).data.data.value as string;
+    expect(await value('expr')).toBe('={{ $secrets.vault.apiKey }}');
+    expect(await value('braces')).toBe('__REDACTED__');
+    expect(await value('plain')).toBe('__REDACTED__');
+  });
+
   it('keeps a saved expression visible in a password field', async () => {
     const mock = await withConnection();
     const now = new Date().toISOString();
@@ -127,21 +184,6 @@ describe('credential modal: expression toggle (P4-07)', () => {
       createdAt: now,
       updatedAt: now,
     });
-    // the server keeps an expression visible in a password field (the demo backend masks every password)
-    server.use(
-      http.get('/rest/credentials/cx', () =>
-        HttpResponse.json({
-          data: {
-            id: 'cx',
-            name: 'Expr',
-            type: 'httpHeaderAuth',
-            data: { name: 'X-Key', value: '={{ $secrets.vault.apiKey }}' },
-            createdAt: now,
-            updatedAt: now,
-          },
-        }),
-      ),
-    );
     withProviders(<CredentialModal open credentialId="cx" onClose={() => undefined} />);
     await screen.findByDisplayValue('Expr', {}, { timeout: 10_000 });
     expect((await screen.findByTestId('code-editor-expression')).textContent).toContain(

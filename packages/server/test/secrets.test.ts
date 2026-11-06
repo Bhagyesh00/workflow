@@ -328,6 +328,11 @@ describe('resolver.ts', () => {
     expect(resolved.password).toBe('=abc');
   });
 
+  it('keeps a value with an unclosed {{ as typed: a password may hold braces', async () => {
+    const resolved = await resolveCredentialData({ password: '=aB{{9x' }, options());
+    expect(resolved.password).toBe('=aB{{9x');
+  });
+
   it('never evaluates token material or a value a secret returned', async () => {
     const resolved = await resolveCredentialData(
       { oauthTokenData: { access_token: '={{ $secrets.v.key }}' }, apiKey: '={{ $secrets.v.tricky }}' },
@@ -833,6 +838,44 @@ describe('states, retries and refresh', () => {
   });
 });
 
+describe('startup limit', () => {
+  it('start waits a bounded time for vaults that never answer, and stop ends what is left', async () => {
+    const owner = await signup(server.app);
+    const { dto } = await connection(owner, 'main', { key: 'value' });
+    const row = await server.ctx.repos.secrets.get(owner.tenant.id, dto.providerKey);
+    const fresh = await createContext({
+      config: testConfig({ EXTERNAL_SECRETS_CONNECT_TIMEOUT: '1', EXTERNAL_SECRETS_REFRESH_TIMEOUT: '1' }),
+      nodePackages: [nodesBasePackage, testPackage],
+      secretProviderTypes: [fakeType],
+      http: new HttpClient({ ssrf: { enabled: true, allow: ['127.0.0.1'], deny: [] } }),
+      migrate: false,
+    });
+    // 60 rows at 10 at a time and 1 s each: about 6 s without the limit of 2 s
+    const rows = Array.from({ length: 60 }, (_, i) => ({ ...row!, providerKey: `slow${i}` }));
+    vi.spyOn(fresh.repos.secrets, 'listAllEnabled').mockResolvedValue(rows);
+    try {
+      vaultHangMs = 10_000;
+      const started = Date.now();
+      await fresh.secrets.start();
+      const waited = Date.now() - started;
+      expect(waited).toBeGreaterThanOrEqual(1900);
+      expect(waited).toBeLessThan(4000);
+      // the connects go on in the background until stop
+      const hits = vaultHits;
+      await new Promise((r) => setTimeout(r, 1100));
+      expect(vaultHits).toBeGreaterThan(hits);
+      await fresh.secrets.stop();
+      await new Promise((r) => setTimeout(r, 100));
+      const afterStop = vaultHits;
+      await new Promise((r) => setTimeout(r, 1100));
+      expect(vaultHits).toBe(afterStop);
+    } finally {
+      vaultHangMs = 0;
+      await fresh.close();
+    }
+  });
+});
+
 describe('bus reload', () => {
   it('a change on one instance reaches another', async () => {
     await flushRedis();
@@ -944,13 +987,25 @@ describe('credentials read secrets', () => {
       '__REDACTED__',
     );
 
+    const braces = await owner.client.data(
+      owner.client.post('/rest/credentials', { name: 'Braces', type: 'testApi', data: { apiKey: '=aB{{9x' } }),
+    );
+    expect((await owner.client.data(owner.client.get(`/rest/credentials/${braces.id}`))).data.apiKey).toBe(
+      '__REDACTED__',
+    );
+
     expect(
-      redactCredentialData({ a: '={{ $x }}', b: 's', c: '', d: 5 }, new Set(['a', 'b', 'c', 'd'])),
+      redactCredentialData(
+        { a: '={{ $x }}', b: 's', c: '', d: 5, e: '=aB{{9x', f: '=Bearer {{ $x }}' },
+        new Set(['a', 'b', 'c', 'd', 'e', 'f']),
+      ),
     ).toEqual({
       a: '={{ $x }}',
       b: '__REDACTED__',
       c: '',
       d: '__REDACTED__',
+      e: '__REDACTED__',
+      f: '=Bearer {{ $x }}',
     });
   });
 
