@@ -53,7 +53,8 @@
 | Built-ins: `$json $binary $input $() $node $items $prevNode $parameter $runIndex $itemIndex $now $today $vars $execution(.customData) $workflow $jmespath $if $ifEmpty $min $max`, Luxon | M1  | ✅                                      |
 | Data transformation methods (strings, numbers, arrays, objects, booleans, dates)                                                                                                         | M1  | ✅ (~80)                                |
 | Sandboxed evaluation: no eval/vm, per-expression step and time budget, frozen shared state                                                                                               | M1  | ✅                                      |
-| `$secrets` (external vaults), `$fromAI()` for agent tool parameters                                                                                                                      | M2  | 📋                                      |
+| `$secrets` (external vaults)                                                                                                                                                             | M2  | ✅                                      |
+| `$fromAI()` for agent tool parameters                                                                                                                                                    | M2  | 📋                                      |
 | `$getWorkflowStaticData` in the Code node (as in n8n), saved after runs from active triggers                                                                                             | M2  | ✅                                      |
 | Execution order v1 (depth-first by position)                                                                                                                                             | M1  | ✅ (the legacy v0 order is ⛔)          |
 
@@ -71,8 +72,11 @@
 | GraphQL, RSS Read, Send Email (SMTP)                                                              | M1  | 🔨                                                     |
 | Execute Workflow / Execute Workflow Trigger, Error Trigger                                        | M1  | 🔨                                                     |
 | JWT, TOTP, Compression, XLSX/PDF extract, Edit Image                                              | M2  | ✅                                                     |
-| Form Trigger + Form node (multi-step, hosted on the sandbox origin)                               | M2  | 📋                                                     |
-| Data tables + Data Table node                                                                     | M2  | 📋                                                     |
+| Form Trigger + Form node (multi-step, hosted on the sandbox origin)                               | M2  | ✅                                                     |
+| Form user auth (basic auth, or sign-in with a form-only cookie)                                   | M2  | ✅                                                     |
+| Send and wait (Slack, Telegram, Email and others: approval and free-text replies)                 | M2  | ✅                                                     |
+| Data tables + Data Table node                                                                     | M2  | ✅                                                     |
+| Data table public API (REST, scoped API keys)                                                     | M2  | ✅                                                     |
 | FTP/SFTP, SSH to remote hosts (SSRF-guarded)                                                      | M2  | ✅                                                     |
 | Execute Command, Read/Write Files from Disk, local Git, local file trigger                        | —   | ⛔ host access is unsafe in multi-tenant SaaS (see §4) |
 
@@ -87,7 +91,11 @@
 | Polling triggers (Gmail) with persisted cursor                                                                       | M1  | 🔨                  |
 | Third-party webhook registration lifecycle (Telegram)                                                                | M1  | 🔨                  |
 | Chat Trigger (public or authenticated, allowed origins, streaming)                                                   | M1  | 🔨                  |
-| Event/stream triggers: Postgres LISTEN, Redis, Kafka, RabbitMQ, MQTT, IMAP, SSE                                      | M2  | 📋                  |
+| Event/stream triggers: Postgres LISTEN, Redis, Kafka, RabbitMQ, MQTT, IMAP, SSE                                      | M2  | ✅                  |
+| Trigger restart with backoff and test listen (up to 120 s) for event triggers                                        | M2  | ✅                  |
+| RSS Feed Trigger                                                                                                     | M2  | ✅                  |
+| Redis, Kafka, RabbitMQ and MQTT nodes                                                                                | M2  | ✅                  |
+| AMQP Trigger and Sender                                                                                              | M2  | ✅                  |
 | Missed-schedule policy (catch-up), durable scheduler leases                                                          | M2  | ✅                  |
 | MCP Server Trigger (expose a workflow as MCP tools)                                                                  | M2  | 📋                  |
 
@@ -129,7 +137,9 @@
 | Code node (JavaScript, all-items / per-item, `$input`, `$()`, `$vars`, Luxon, console to editor) in isolated-vm with memory and time caps | M1  | ✅                          |
 | Code tool for agents                                                                                                                      | M1  | 🔨                          |
 | Runner moved to a separate, unprivileged process or container (defence in depth)                                                          | M2  | 📋                          |
-| Python                                                                                                                                    | M2  | 📋 (Pyodide in the sandbox) |
+| Python                                                                                                                                    | M2  | ✅ (Pyodide in the sandbox) |
+| Python Code tool for agents                                                                                                               | M2  | ✅                          |
+| Python packages (Pyodide or pure-Python wheels from a server folder)                                                                      | M2  | ✅                          |
 | Allowlisted npm packages per tenant                                                                                                       | M3  | 📋 (NF-32)                  |
 
 ### 1.9 Credentials and secrets
@@ -139,11 +149,13 @@
 | Typed credential schemas, AES-256-GCM per-tenant encryption bound to tenant+credential, key rotation               | M1    | ✅                                                 |
 | Redacted API output, merge-on-update                                                                               | M1    | ✅ helpers · 🔨 server                             |
 | Credential test                                                                                                    | M1    | 🔨                                                 |
+| Credential tests for every credential type                                                                         | M2    | ✅                                                 |
+| Postgres and MySQL SSL and SSH tunnel                                                                              | M2    | ✅                                                 |
 | Generic auth: Basic, Header, Query, Bearer, Custom JSON, OAuth2 (auth code, client credentials, PKCE) with refresh | M1    | ✅ OAuth2 refresh · 🔨 types and flow              |
 | Reuse any integration credential in HTTP Request                                                                   | M1    | 🔨                                                 |
 | Allowed domains per credential                                                                                     | M2    | ✅                                                 |
 | OAuth1, Digest auth                                                                                                | M2    | ✅                                                 |
-| External secret vaults (AWS, GCP, Azure, Vault, 1Password), `$secrets`                                             | M2    | 📋                                                 |
+| External secret vaults (AWS, GCP, Azure, Vault, 1Password), `$secrets`                                             | M2    | ✅                                                 |
 | End-user credentials / per-customer credential slots (see NF-05)                                                   | M1/M2 | 📋                                                 |
 | Credential sharing between users/projects                                                                          | M2    | 📋 (tenants share by default; projects come in M2) |
 
