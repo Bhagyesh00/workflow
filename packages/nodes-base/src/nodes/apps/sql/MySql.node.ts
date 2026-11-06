@@ -10,6 +10,7 @@ import type {
 } from '@workflow/workflow';
 import mysql from 'mysql2/promise';
 import { mysqlCredentialTest } from '../../../credential-tests/mysql';
+import { openSshTunnel, type SshTunnel, sqlTlsOptions, sshTunnelEnabled } from '../../../utils/ssh-tunnel';
 import { runSql, type SqlPool } from './runner';
 import { mysqlDialect, sqlProperties } from './sql';
 
@@ -21,50 +22,79 @@ interface MySqlCredentials extends DataObject {
   password?: string;
   ssl?: 'disable' | 'allow' | 'require';
   caCertificate?: string;
+  clientPrivateKey?: string;
+  clientCertificate?: string;
   connectTimeout?: number;
 }
 
 /** Build a pool whose connections go only to addresses that passed the SSRF policy. */
 export async function mysqlPool(
-  ctx: Pick<BaseContext, 'getCredentials' | 'helpers'>,
+  ctx: Pick<BaseContext, 'getCredentials' | 'helpers'> & {
+    signal?: AbortSignal;
+  },
   options: { connectionTimeoutSeconds?: number } = {},
 ): Promise<mysql.Pool> {
   const creds = await ctx.getCredentials<MySqlCredentials>('mySql');
   const host = String(creds.host ?? '').trim();
   if (!host) throw new Error('The MySQL credential has no host');
-  const allowed = await ctx.helpers.resolveAllowedHost(host);
   const port = Number(creds.port ?? 3306);
-  let ssl: mysql.PoolOptions['ssl'];
-  if (creds.ssl === 'allow') ssl = { rejectUnauthorized: false };
-  if (creds.ssl === 'require')
-    ssl = { rejectUnauthorized: true, ...(creds.caCertificate ? { ca: String(creds.caCertificate) } : {}) };
-  return mysql.createPool({
-    // mysql2 takes the TLS server name from `host`, so it stays the name the user entered
-    host,
-    port,
-    // every connection goes only to the checked addresses: mysql2 resolving the name again could be
-    // sent elsewhere by a DNS rebind
-    stream: () => {
-      const socket = net.connect({ host, port, lookup: allowed.lookup, autoSelectFamily: true });
-      socket.setNoDelay(true);
-      socket.setKeepAlive(true);
-      return socket;
-    },
-    database: creds.database ? String(creds.database) : undefined,
-    user: creds.user ? String(creds.user) : undefined,
-    password: creds.password ? String(creds.password) : undefined,
-    ssl,
-    connectionLimit: 5,
-    connectTimeout: options.connectionTimeoutSeconds
-      ? options.connectionTimeoutSeconds * 1000
-      : Number(creds.connectTimeout ?? 10_000),
-    // values are always bound as parameters; never let objects expand into SQL fragments
-    stringifyObjects: true,
-    multipleStatements: false,
-    dateStrings: false,
-    supportBigNumbers: true,
-    bigNumberStrings: true,
-  });
+  // through an SSH tunnel the database host is resolved by the SSH server (the SSH host was checked
+  // when the tunnel opened); otherwise every connection goes only to addresses that passed the policy
+  const tunnel: SshTunnel | undefined = sshTunnelEnabled(creds)
+    ? await openSshTunnel(ctx, creds, { host, port })
+    : undefined;
+  try {
+    const allowed = tunnel ? undefined : await ctx.helpers.resolveAllowedHost(host);
+    const ssl = sqlTlsOptions(creds, host) as mysql.SslOptions | undefined;
+    const pool = mysql.createPool({
+      // mysql2 takes the TLS server name from `host`, so it stays the name the user entered (the TLS
+      // options carry it explicitly when the socket goes to the tunnel)
+      host: tunnel ? tunnel.host : host,
+      port: tunnel ? tunnel.port : port,
+      // every connection goes only to the checked addresses: mysql2 resolving the name again could be
+      // sent elsewhere by a DNS rebind
+      stream: () => {
+        const socket = net.connect({
+          host: tunnel ? tunnel.host : host,
+          port: tunnel ? tunnel.port : port,
+          ...(allowed ? { lookup: allowed.lookup } : {}),
+          autoSelectFamily: true,
+        });
+        socket.setNoDelay(true);
+        socket.setKeepAlive(true);
+        return socket;
+      },
+      database: creds.database ? String(creds.database) : undefined,
+      user: creds.user ? String(creds.user) : undefined,
+      password: creds.password ? String(creds.password) : undefined,
+      ssl,
+      connectionLimit: 5,
+      connectTimeout: options.connectionTimeoutSeconds
+        ? options.connectionTimeoutSeconds * 1000
+        : Number(creds.connectTimeout ?? 10_000),
+      // values are always bound as parameters; never let objects expand into SQL fragments
+      stringifyObjects: true,
+      multipleStatements: false,
+      dateStrings: false,
+      supportBigNumbers: true,
+      bigNumberStrings: true,
+    });
+    if (tunnel) {
+      // ending the pool closes the tunnel
+      const end = pool.end.bind(pool);
+      pool.end = (async () => {
+        try {
+          await end();
+        } finally {
+          await tunnel.close();
+        }
+      }) as typeof pool.end;
+    }
+    return pool;
+  } catch (error) {
+    await tunnel?.close();
+    throw error;
+  }
 }
 
 function wrapPool(pool: mysql.Pool): SqlPool {
@@ -78,7 +108,11 @@ function wrapPool(pool: mysql.Pool): SqlPool {
             return { rows: result as DataObject[], rowCount: result.length };
           }
           const header = result as mysql.ResultSetHeader;
-          return { rows: [], rowCount: header.affectedRows ?? 0, insertId: header.insertId || undefined };
+          return {
+            rows: [],
+            rowCount: header.affectedRows ?? 0,
+            insertId: header.insertId || undefined,
+          };
         },
         release: () => connection.release(),
       };
@@ -124,7 +158,9 @@ export const MySqlNode: NodeType = {
 
   async execute(ctx) {
     const timeout = Number(ctx.getNodeParameter('options.connectionTimeout', 0, 0));
-    const pool = await mysqlPool(ctx, { connectionTimeoutSeconds: timeout || undefined });
+    const pool = await mysqlPool(ctx, {
+      connectionTimeoutSeconds: timeout || undefined,
+    });
     try {
       return await runSql(ctx, wrapPool(pool), mysqlDialect, false);
     } finally {
@@ -142,7 +178,10 @@ export const MySqlNode: NodeType = {
             [filter ?? '', filter ?? ''],
           );
           return {
-            results: (rows as DataObject[]).map((r) => ({ name: String(r.name), value: String(r.name) })),
+            results: (rows as DataObject[]).map((r) => ({
+              name: String(r.name),
+              value: String(r.name),
+            })),
           };
         });
       },

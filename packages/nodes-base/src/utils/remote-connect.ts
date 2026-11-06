@@ -6,7 +6,7 @@
  */
 import net from 'node:net';
 import type { Readable } from 'node:stream';
-import type { DataObject, ExecuteContext, ResolvedAddress } from '@workflow/workflow';
+import type { BaseContext, DataObject, ExecuteContext, ResolvedAddress } from '@workflow/workflow';
 import type { AuthenticationType } from 'ssh2';
 import { formatPemBlock } from './pem';
 
@@ -39,18 +39,23 @@ export async function checkedAddresses(ctx: ExecuteContext, host: string): Promi
  * the socket is destroyed when the execution is cancelled. Callers hand it to ssh2 as `sock`.
  */
 export async function connectSocket(
-  ctx: ExecuteContext,
+  ctx: Pick<BaseContext, 'helpers'> & { signal?: AbortSignal },
   host: string,
   port: number,
   timeoutMs: number,
 ): Promise<net.Socket> {
   const allowed = await ctx.helpers.resolveAllowedHost(host);
   const signal = ctx.signal;
-  if (signal.aborted) throw new Error('The execution was cancelled');
-  const socket = net.connect({ host, port, lookup: allowed.lookup, autoSelectFamily: true });
+  if (signal?.aborted) throw new Error('The execution was cancelled');
+  const socket = net.connect({
+    host,
+    port,
+    lookup: allowed.lookup,
+    autoSelectFamily: true,
+  });
   const onAbort = () => socket.destroy(new Error('The execution was cancelled'));
-  signal.addEventListener('abort', onAbort, { once: true });
-  socket.once('close', () => signal.removeEventListener('abort', onAbort));
+  signal?.addEventListener('abort', onAbort, { once: true });
+  socket.once('close', () => signal?.removeEventListener('abort', onAbort));
   try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(

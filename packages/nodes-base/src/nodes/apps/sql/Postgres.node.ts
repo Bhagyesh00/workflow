@@ -10,6 +10,7 @@ import type {
 } from '@workflow/workflow';
 import pg from 'pg';
 import { postgresCredentialTest } from '../../../credential-tests/postgres';
+import { openSshTunnel, type SshTunnel, sqlTlsOptions, sshTunnelEnabled } from '../../../utils/ssh-tunnel';
 import { runSql, type SqlPool } from './runner';
 import { postgresDialect, sqlProperties } from './sql';
 
@@ -21,55 +22,85 @@ interface PostgresCredentials extends DataObject {
   password?: string;
   ssl?: 'disable' | 'allow' | 'require';
   caCertificate?: string;
+  clientPrivateKey?: string;
+  clientCertificate?: string;
   maxConnections?: number;
 }
 
 /** Build a pool whose connections go only to addresses that passed the SSRF policy. */
 export async function postgresPool(
-  ctx: Pick<BaseContext, 'getCredentials' | 'helpers'>,
-  options: { connectionTimeoutSeconds?: number; keepAliveDelayMs?: number } = {},
+  ctx: Pick<BaseContext, 'getCredentials' | 'helpers'> & {
+    signal?: AbortSignal;
+  },
+  options: {
+    connectionTimeoutSeconds?: number;
+    keepAliveDelayMs?: number;
+  } = {},
 ): Promise<pg.Pool> {
   const creds = await ctx.getCredentials<PostgresCredentials>('postgres');
   const host = String(creds.host ?? '').trim();
   if (!host) throw new Error('The Postgres credential has no host');
-  const allowed = await ctx.helpers.resolveAllowedHost(host);
-  let ssl: pg.PoolConfig['ssl'] = false;
-  if (creds.ssl === 'allow') ssl = { rejectUnauthorized: false };
-  if (creds.ssl === 'require')
-    ssl = { rejectUnauthorized: true, ...(creds.caCertificate ? { ca: String(creds.caCertificate) } : {}) };
-  const pool = new pg.Pool({
-    // pg takes the TLS server name from `host`, so it stays the name the user entered
-    host,
-    port: Number(creds.port ?? 5432),
-    // pg calls connect(port, host) on this socket itself: every connection goes only to the checked
-    // addresses (pg resolving the name again could be sent elsewhere by a DNS rebind)
-    stream: () => {
-      const socket = new net.Socket();
-      const connect = socket.connect.bind(socket);
-      socket.connect = ((port: number, name: string) =>
-        connect({
-          port,
-          host: name,
-          lookup: allowed.lookup,
-          autoSelectFamily: true,
-        })) as typeof socket.connect;
-      return socket;
-    },
-    database: creds.database ? String(creds.database) : undefined,
-    user: creds.user ? String(creds.user) : undefined,
-    password: creds.password ? String(creds.password) : undefined,
-    ssl,
-    max: Math.min(50, Math.max(1, Number(creds.maxConnections ?? 5))),
-    connectionTimeoutMillis: Math.max(1, Number(options.connectionTimeoutSeconds ?? 30)) * 1000,
-    ...(options.keepAliveDelayMs === undefined
-      ? {}
-      : { keepAlive: true, keepAliveInitialDelayMillis: options.keepAliveDelayMs }),
-    idleTimeoutMillis: 10_000,
-    application_name: 'workflow-platform',
-  });
-  // idle-client errors must not crash the process
-  pool.on('error', () => undefined);
-  return pool;
+  const port = Number(creds.port ?? 5432);
+  // through an SSH tunnel the database host is resolved by the SSH server (the SSH host was checked
+  // when the tunnel opened); otherwise every connection goes only to addresses that passed the policy
+  const tunnel: SshTunnel | undefined = sshTunnelEnabled(creds)
+    ? await openSshTunnel(ctx, creds, { host, port })
+    : undefined;
+  try {
+    const allowed = tunnel ? undefined : await ctx.helpers.resolveAllowedHost(host);
+    const ssl: pg.PoolConfig['ssl'] = sqlTlsOptions(creds, host) ?? false;
+    const pool = new pg.Pool({
+      // pg takes the TLS server name from `host`, so it stays the name the user entered (the TLS
+      // options carry it explicitly when the socket goes to the tunnel)
+      host: tunnel ? tunnel.host : host,
+      port: tunnel ? tunnel.port : port,
+      // pg calls connect(port, host) on this socket itself: every connection goes only to the checked
+      // addresses (pg resolving the name again could be sent elsewhere by a DNS rebind)
+      stream: () => {
+        const socket = new net.Socket();
+        const connect = socket.connect.bind(socket);
+        socket.connect = ((connectPort: number, name: string) =>
+          connect({
+            port: connectPort,
+            host: name,
+            ...(allowed ? { lookup: allowed.lookup } : {}),
+            autoSelectFamily: true,
+          })) as typeof socket.connect;
+        return socket;
+      },
+      database: creds.database ? String(creds.database) : undefined,
+      user: creds.user ? String(creds.user) : undefined,
+      password: creds.password ? String(creds.password) : undefined,
+      ssl,
+      max: Math.min(50, Math.max(1, Number(creds.maxConnections ?? 5))),
+      connectionTimeoutMillis: Math.max(1, Number(options.connectionTimeoutSeconds ?? 30)) * 1000,
+      ...(options.keepAliveDelayMs === undefined
+        ? {}
+        : {
+            keepAlive: true,
+            keepAliveInitialDelayMillis: options.keepAliveDelayMs,
+          }),
+      idleTimeoutMillis: 10_000,
+      application_name: 'workflow-platform',
+    });
+    if (tunnel) {
+      // ending the pool closes the tunnel
+      const end = pool.end.bind(pool);
+      pool.end = (async () => {
+        try {
+          await end();
+        } finally {
+          await tunnel.close();
+        }
+      }) as typeof pool.end;
+    }
+    // idle-client errors must not crash the process
+    pool.on('error', () => undefined);
+    return pool;
+  } catch (error) {
+    await tunnel?.close();
+    throw error;
+  }
 }
 
 function wrapPool(pool: pg.Pool): SqlPool {
@@ -78,7 +109,10 @@ function wrapPool(pool: pg.Pool): SqlPool {
       const client = await pool.connect();
       return {
         async query(q) {
-          const result = await client.query({ text: q.text, values: q.values as unknown[] });
+          const result = await client.query({
+            text: q.text,
+            values: q.values as unknown[],
+          });
           // multiple statements without parameters return one result per statement
           const results = Array.isArray(result) ? (result as pg.QueryResult[]) : [result];
           return {

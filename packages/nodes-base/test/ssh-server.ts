@@ -2,6 +2,7 @@
  * In-process SSH server on 127.0.0.1 for the SSH and SFTP node tests (ssh2's own Server, no outbound
  * network). Password and public key sign-in, scripted `exec` answers, and an in-memory SFTP subsystem
  * (open, read, write, stat, readdir, remove, rename, mkdir, rmdir, realpath) over one shared file tree.
+ * Port forwarding (`direct-tcpip`) is accepted to 127.0.0.1 only and refused for any other address.
  */
 import net, { type AddressInfo } from 'node:net';
 import path from 'node:path';
@@ -40,6 +41,10 @@ export interface SshServer {
   files: Map<string, MemoryEntry>;
   /** every exec command as received */
   commands: string[];
+  /** every accepted forward as `host:port` (127.0.0.1 only) */
+  forwards: string[];
+  /** forward requests refused because the target was not 127.0.0.1 */
+  refusedForwards: string[];
   /** TCP connections accepted */
   connections: number;
   close: () => Promise<void>;
@@ -48,10 +53,22 @@ export interface SshServer {
 /** a fixed time (2024-01-02T03:04:05Z) so list output can be compared exactly */
 export const FIXED_MTIME = Date.UTC(2024, 0, 2, 3, 4, 5) / 1000;
 
-const hostKey = utils.generateKeyPairSync('ed25519').private;
+/** ssh2's ed25519 key writer now and then produces a key it cannot read back: draw again until it parses */
+function newHostKey(): string {
+  for (;;) {
+    const { private: key } = utils.generateKeyPairSync('ed25519');
+    if (!(utils.parseKey(key) instanceof Error)) return key;
+  }
+}
+
+const hostKey = newHostKey();
 
 export function addFile(files: Map<string, MemoryEntry>, filePath: string, data: string | Buffer) {
-  files.set(filePath, { type: 'file', data: Buffer.from(data), mtime: FIXED_MTIME });
+  files.set(filePath, {
+    type: 'file',
+    data: Buffer.from(data),
+    mtime: FIXED_MTIME,
+  });
 }
 
 export function addDir(files: Map<string, MemoryEntry>, dirPath: string) {
@@ -165,7 +182,11 @@ function serveSftp(sftp: SFTPWrapper, files: Map<string, MemoryEntry>, home: str
     const names = childrenOf(files, state.path).map((key) => {
       const entry = files.get(key) as MemoryEntry;
       const name = path.posix.basename(key);
-      return { filename: name, longname: longnameOf(name, entry), attrs: attrsOf(entry) };
+      return {
+        filename: name,
+        longname: longnameOf(name, entry),
+        attrs: attrsOf(entry),
+      };
     });
     if (!names.length) return sftp.status(reqId, STATUS_CODE.EOF);
     sftp.name(reqId, names);
@@ -220,6 +241,9 @@ export async function startSshServer(options: SshServerOptions = {}): Promise<Ss
   addDir(files, '/home');
   addDir(files, home);
   const commands: string[] = [];
+  const forwards: string[] = [];
+  const refusedForwards: string[] = [];
+  const forwarded = new Set<net.Socket>();
   const clients = new Set<Connection>();
   const allowedKey = options.publicKey ? utils.parseKey(options.publicKey) : undefined;
   if (allowedKey instanceof Error) throw allowedKey;
@@ -245,6 +269,29 @@ export async function startSshServer(options: SshServerOptions = {}): Promise<Ss
         }
       }
       ctx.reject(both && keyDone ? ['password'] : ['password', 'publickey']);
+    });
+    client.on('tcpip', (accept, reject, info) => {
+      if (info.destIP !== '127.0.0.1') {
+        refusedForwards.push(`${info.destIP}:${info.destPort}`);
+        return reject();
+      }
+      const target = net.connect({ host: '127.0.0.1', port: info.destPort });
+      forwarded.add(target);
+      target.once('close', () => forwarded.delete(target));
+      target.on('error', () => undefined);
+      let answered = false;
+      target.once('connect', () => {
+        answered = true;
+        forwards.push(`127.0.0.1:${info.destPort}`);
+        const channel = accept();
+        channel.on('error', () => target.destroy());
+        channel.once('close', () => target.destroy());
+        target.once('close', () => channel.destroy());
+        channel.pipe(target).pipe(channel);
+      });
+      target.once('error', () => {
+        if (!answered) reject();
+      });
     });
     client.on('ready', () => {
       client.on('session', (acceptSession) => {
@@ -281,6 +328,8 @@ export async function startSshServer(options: SshServerOptions = {}): Promise<Ss
     port,
     files,
     commands,
+    forwards,
+    refusedForwards,
     get connections() {
       return state.connections;
     },
@@ -288,6 +337,7 @@ export async function startSshServer(options: SshServerOptions = {}): Promise<Ss
       new Promise<void>((resolve) => {
         for (const client of clients) client.end();
         for (const socket of sockets) socket.destroy();
+        for (const socket of forwarded) socket.destroy();
         tcp.close(() => resolve());
       }),
   };
