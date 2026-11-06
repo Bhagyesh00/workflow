@@ -24,6 +24,7 @@ import {
   type Item,
   isParameterDisplayed,
   type NodeType,
+  type TriggerContext,
   type TriggerRunResult,
   type WebhookLifecycleContext,
   type WebhookResponse,
@@ -40,10 +41,11 @@ import type { PinoLogger } from '../logger';
 import { effectiveLimits, type TenantSettings } from '../plans';
 import { createRepositories, isUniqueViolation, type Repositories } from '../repositories';
 import type { MessageBus } from './bus';
-import { binaryDirOf, type ExecutionService } from './executions';
+import { binaryDirOf, type ExecutionObserver, type ExecutionService } from './executions';
 import { loadPublishedDefinition, publishedDefinition } from './published-workflow';
 import type { Leadership } from './queue';
-import { TEST_WEBHOOK_TTL_MS } from './test-webhooks';
+import { TEST_TRIGGER_TTL_MS, TEST_WEBHOOK_TTL_MS } from './test-webhooks';
+import { closeBounded, TriggerRetryQueue } from './trigger-retry';
 import { type NodeWebhook, nodeWebhooks, webhookUrlBase, workflowWebhooks } from './webhook-paths';
 import { assertNotArchived } from './workflow-rules';
 
@@ -63,10 +65,17 @@ const TRIGGER_START_TIMEOUT_MS = 30_000;
 
 /**
  * messages on the `control` channel; the leader answers a start with `triggers:started` or `triggers:failed`.
- * `test-webhooks:clear` asks every other main to remove the provider hook it registered for a test listener.
+ * `test-webhooks:clear` asks every other main to remove the provider hook it registered for a test listener;
+ * `test-triggers:stop` asks them to close the trigger they started for one.
  */
 interface ControlMessage {
-  type: 'triggers:start' | 'triggers:stop' | 'triggers:started' | 'triggers:failed' | 'test-webhooks:clear';
+  type:
+    | 'triggers:start'
+    | 'triggers:stop'
+    | 'triggers:started'
+    | 'triggers:failed'
+    | 'test-webhooks:clear'
+    | 'test-triggers:stop';
   tenantId?: string;
   workflowId?: string;
   /** ties a start request to its answer */
@@ -76,17 +85,20 @@ interface ControlMessage {
   node?: string | null;
   /** the test listener's node of a `test-webhooks:clear` */
   nodeName?: string;
-  /** the main that sent a `test-webhooks:clear`, which has already removed its own hook */
+  /** the main that sent a `test-webhooks:clear` or `test-triggers:stop`, which has already done its own part */
   origin?: string;
 }
 
 interface RunningTriggers {
   tenantId: string;
+  workflowId: string;
   workflow: Workflow;
   abort: AbortController;
   closers: Array<() => Promise<void>>;
   /** binary data of trigger() contexts is staged under this id until an emit moves it to its execution */
   stagingId: string;
+  /** the static data as last saved: only what trigger contexts changed since then is merged */
+  savedStaticData: DataObject;
 }
 
 /** a "Listen for test event" registration with a third-party service, undone when it expires */
@@ -95,6 +107,34 @@ interface TestHooks {
   node: WorkflowNode;
   tenant: TenantRow;
   timer: NodeJS.Timeout;
+}
+
+/** a trigger() node started in manual mode until its first event, a stop or the time limit */
+interface TestTriggerListener {
+  key: string;
+  tenantId: string;
+  /** binary data is stored under this id, and the test run gets it */
+  executionId: string;
+  abort: AbortController;
+  timer?: NodeJS.Timeout;
+  close?: () => Promise<void>;
+  /** the first event has arrived: the test run owns the binary data, later events are refused */
+  consumed: boolean;
+  closed: boolean;
+  /** trigger() has not finished yet, so a failure is the answer to the listen call */
+  starting: boolean;
+  startError?: Error;
+  /** ends the wait of the listen call: a close, or a failure during the start */
+  wake(): void;
+}
+
+/** what the caller of listenTestTrigger hears after the call has answered */
+export interface TestTriggerEvents {
+  /** the first event started this test run */
+  onStarted(executionId: string): void;
+  /** the trigger failed, or the first event could not start a run */
+  onFailed(executionId: string, error: Error): void | Promise<void>;
+  userId?: string;
 }
 
 export const RESPOND_TO_WEBHOOK = 'core.respondToWebhook';
@@ -156,6 +196,8 @@ export interface ActiveWorkflowDeps {
   leadership: Leadership;
   /** wait for the leader's answer to a remote trigger start (default 30 seconds) */
   triggerStartTimeoutMs?: number;
+  /** how long a trigger listens for a test event (default 120 seconds) */
+  testTriggerTtlMs?: number;
 }
 
 export class ActiveWorkflowManager {
@@ -163,6 +205,12 @@ export class ActiveWorkflowManager {
   /** tail of the start/stop chain per workflow: starts and stops of one workflow never overlap */
   private readonly locks = new Map<string, Promise<void>>();
   private readonly testHooks = new Map<string, TestHooks>();
+  /** one listener per workflow, on the main that took the listen call */
+  private readonly testTriggers = new Map<string, TestTriggerListener>();
+  /** workflows whose triggers failed and wait for their next start */
+  private readonly retries = new TriggerRetryQueue();
+  /** why a workflow's triggers are down: in memory per main, as n8n's activation error cache */
+  private readonly activationErrors = new Map<string, string>();
   /** names this main on the `control` channel */
   private readonly mainId = randomUUID();
   private unsubscribe?: () => void;
@@ -178,6 +226,13 @@ export class ActiveWorkflowManager {
       if (message.type === 'test-webhooks:clear') {
         if (message.origin !== this.mainId && message.nodeName) {
           void this.unregisterTestWebhooks(`${message.tenantId}:${message.workflowId}:${message.nodeName}`);
+        }
+        return;
+      }
+      // a test listener runs on the main that took the call, leader or not
+      if (message.type === 'test-triggers:stop') {
+        if (message.origin !== this.mainId) {
+          void this.closeTestTrigger(testTriggerKey(message.tenantId, message.workflowId));
         }
         return;
       }
@@ -255,6 +310,11 @@ export class ActiveWorkflowManager {
 
   get runningWorkflowIds(): string[] {
     return [...this.running.keys()];
+  }
+
+  /** why the triggers of a workflow are down and being retried on this main */
+  activationErrorOf(workflowId: string): string | undefined {
+    return this.activationErrors.get(workflowId);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -684,6 +744,237 @@ export class ActiveWorkflowManager {
     );
   }
 
+  // -------------------------------------------------------------------------------------------
+  // "Listen for test event" for trigger() nodes, which have no URL to call
+
+  /**
+   * Start `node` in manual mode for up to the time limit. A listener for the same workflow, on any main,
+   * is replaced. Answers once trigger() has finished: a failure until then rejects, and a later one goes
+   * to `events.onFailed`. manualTriggerFunction is not waited for, as it can take as long as a group join.
+   */
+  async listenTestTrigger(
+    tenant: TenantRow,
+    workflow: Workflow,
+    node: WorkflowNode,
+    type: NodeType,
+    events: TestTriggerEvents,
+  ): Promise<{ expiresAt: string }> {
+    const workflowId = workflow.id ?? '';
+    await this.stopTestTrigger(tenant.id, workflowId);
+    const ttlMs = this.deps.testTriggerTtlMs ?? TEST_TRIGGER_TTL_MS;
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    let wake!: () => void;
+    const woken = new Promise<void>((resolve) => {
+      wake = resolve;
+    });
+    const listener: TestTriggerListener = {
+      key: testTriggerKey(tenant.id, workflowId),
+      tenantId: tenant.id,
+      executionId: randomUUID(),
+      abort: new AbortController(),
+      consumed: false,
+      closed: false,
+      starting: true,
+      wake,
+    };
+    listener.timer = setTimeout(() => void this.closeTestListener(listener), ttlMs);
+    listener.timer.unref();
+    this.testTriggers.set(listener.key, listener);
+    try {
+      const deps = await this.contextDeps(
+        tenant,
+        workflow,
+        node,
+        listener.abort.signal,
+        listener.executionId,
+        'manual',
+      );
+      const ctx = createTriggerContext(deps, {
+        activationMode: 'manual',
+        emit: (data, responsePromise, responseHook) => {
+          void this.testTriggerEvent(
+            tenant,
+            workflow,
+            node,
+            listener,
+            events,
+            data?.[0] ?? [],
+            responsePromise,
+            responseHook,
+          );
+        },
+        emitError: (error) => {
+          void this.testTriggerFailed(listener, events, error);
+        },
+      });
+      const starting = this.startTestListener(listener, type, ctx);
+      const response = await Promise.race([starting, woken.then(() => undefined)]);
+      if (listener.startError) throw listener.startError;
+      if (listener.closed && !listener.consumed) throw new Error('The test listener has stopped');
+      listener.starting = false;
+      if (response?.manualTriggerFunction && !listener.consumed && !listener.closed) {
+        const { manualTriggerFunction } = response;
+        void Promise.resolve()
+          .then(manualTriggerFunction)
+          .catch((error) => this.testTriggerFailed(listener, events, toError(error)));
+      }
+      return { expiresAt };
+    } catch (error) {
+      await this.closeTestListener(listener);
+      throw new ApiError(400, 'trigger_error', `${node.name}: ${toError(error).message}`);
+    }
+  }
+
+  /** run trigger(); a listener closed before it has finished closes what it opened right then */
+  private async startTestListener(listener: TestTriggerListener, type: NodeType, ctx: TriggerContext) {
+    const response = await type.trigger!(ctx);
+    const close = response?.closeFunction;
+    if (close) {
+      if (listener.closed) await this.runTestClose(listener, close);
+      else listener.close = close;
+    }
+    return response;
+  }
+
+  /** close the listener of a workflow on this main and on the others */
+  async stopTestTrigger(tenantId: string, workflowId: string): Promise<void> {
+    await this.closeTestTrigger(testTriggerKey(tenantId, workflowId));
+    await this.deps.bus
+      .publish('control', { type: 'test-triggers:stop', tenantId, workflowId, origin: this.mainId })
+      .catch((error) =>
+        this.deps.logger.warn(
+          { err: error, tenantId, workflowId },
+          'Could not ask the other mains to stop listening',
+        ),
+      );
+  }
+
+  private async closeTestTrigger(key: string): Promise<void> {
+    const listener = this.testTriggers.get(key);
+    if (listener) await this.closeTestListener(listener);
+  }
+
+  private async closeTestListener(listener: TestTriggerListener): Promise<void> {
+    if (listener.closed) return;
+    listener.closed = true;
+    clearTimeout(listener.timer);
+    if (this.testTriggers.get(listener.key) === listener) this.testTriggers.delete(listener.key);
+    listener.abort.abort();
+    listener.wake();
+    if (listener.close) await this.runTestClose(listener, listener.close);
+    // an event gave the binary data to its run
+    if (!listener.consumed) {
+      await this.deps.executions.removeBinaryData(listener.tenantId, listener.executionId).catch((error) =>
+        this.deps.logger.warn({ err: error, key: listener.key }, 'Removing test trigger data failed'),
+      );
+    }
+  }
+
+  private async runTestClose(listener: TestTriggerListener, close: () => Promise<void>): Promise<void> {
+    await closeBounded(close).catch((error) =>
+      this.deps.logger.warn({ err: error, key: listener.key }, 'Trigger close function failed'),
+    );
+  }
+
+  /** the first event starts the test run; a node that waits for its result keeps its connection until then */
+  private async testTriggerEvent(
+    tenant: TenantRow,
+    workflow: Workflow,
+    node: WorkflowNode,
+    listener: TestTriggerListener,
+    events: TestTriggerEvents,
+    items: Item[],
+    responsePromise?: { resolve(result: TriggerRunResult): void; reject(err: Error): void },
+    responseHook?: (response: WebhookResponse) => void,
+  ): Promise<void> {
+    if (listener.closed || listener.consumed) {
+      responsePromise?.reject(new Error('The test listener has stopped'));
+      return;
+    }
+    listener.consumed = true;
+    let begun = false;
+    try {
+      const started = await this.deps.executions.start({
+        tenantId: tenant.id,
+        workflow: workflow.definition,
+        workflowId: workflow.id,
+        mode: 'manual',
+        executionId: listener.executionId,
+        startNode: node.name,
+        triggerItems: JSON.parse(JSON.stringify(items.length ? items : [{ json: {} }])),
+        userId: events.userId,
+        wait: Boolean(responsePromise),
+        observer: this.responseObserver(tenant.id, workflow.id, node, responseHook),
+      });
+      begun = true;
+      events.onStarted(started.executionId);
+      const outcome = await started.finished;
+      if (responsePromise && outcome) {
+        const { executionId: id, status, error } = outcome;
+        responsePromise.resolve({ executionId: id, status, ...(error ? { error: error.message } : {}) });
+      }
+    } catch (error) {
+      responsePromise?.reject(toError(error));
+      if (!begun) {
+        await this.deps.executions.removeBinaryData(tenant.id, listener.executionId).catch(() => {});
+        await this.reportTestFailure(listener, events, toError(error));
+      }
+    } finally {
+      await this.closeTestListener(listener);
+    }
+  }
+
+  /** emitError or a failed manualTriggerFunction: while starting it answers the call, later the editor */
+  private async testTriggerFailed(
+    listener: TestTriggerListener,
+    events: TestTriggerEvents,
+    error: Error,
+  ): Promise<void> {
+    if (listener.closed || listener.consumed) {
+      this.deps.logger.warn({ err: error, key: listener.key }, 'A closed test trigger reported an error');
+      return;
+    }
+    if (listener.starting) {
+      listener.startError = error;
+      listener.wake();
+      return;
+    }
+    await this.closeTestListener(listener);
+    await this.reportTestFailure(listener, events, error);
+  }
+
+  private async reportTestFailure(
+    listener: TestTriggerListener,
+    events: TestTriggerEvents,
+    error: Error,
+  ): Promise<void> {
+    await Promise.resolve(events.onFailed(listener.executionId, error)).catch((failure) =>
+      this.deps.logger.warn({ err: failure, key: listener.key }, 'Could not report a test trigger failure'),
+    );
+  }
+
+  /** hand Respond to Webhook output to the node; its failure is not the run's */
+  private responseObserver(
+    tenantId: string,
+    workflowId: string | undefined,
+    node: WorkflowNode,
+    responseHook?: (response: WebhookResponse) => void,
+  ): ExecutionObserver | undefined {
+    if (!responseHook) return undefined;
+    return {
+      onResponse: (response) => {
+        try {
+          responseHook(response);
+        } catch (error) {
+          this.deps.logger.warn(
+            { err: error, tenantId, workflowId, node: node.name },
+            'The trigger could not take the response',
+          );
+        }
+      },
+    };
+  }
+
   private async lifecycleContext(
     tenant: TenantRow,
     workflow: Workflow,
@@ -712,11 +1003,12 @@ export class ActiveWorkflowManager {
     node: WorkflowNode,
     signal: AbortSignal,
     executionId = '',
+    mode: 'trigger' | 'manual' = 'trigger',
   ): Promise<ContextDeps> {
     const services = await this.deps.executions.buildServices({
       tenant,
       executionId,
-      mode: 'trigger',
+      mode,
       workflowId: workflow.id,
     });
     return { workflow, node, services, evaluator: this.evaluator, signal };
@@ -741,6 +1033,9 @@ export class ActiveWorkflowManager {
   }
 
   async stopAll(): Promise<void> {
+    // no longer the leader or shutting down: the next leader's startAll() starts these
+    this.retries.clearAll();
+    this.activationErrors.clear();
     // a workflow whose start is still queued or in progress is stopped once that start is done
     const ids = new Set([...this.running.keys(), ...this.locks.keys()]);
     await Promise.all([...ids].map((id) => this.stopTriggers(id)));
@@ -750,6 +1045,7 @@ export class ActiveWorkflowManager {
     this.unsubscribe?.();
     // the provider's hook id lives only in this process: remove the hooks now or never
     await Promise.all([...this.testHooks.keys()].map((key) => this.unregisterTestWebhooks(key)));
+    await Promise.all([...this.testTriggers.keys()].map((key) => this.closeTestTrigger(key)));
     await this.stopAll();
   }
 
@@ -759,11 +1055,19 @@ export class ActiveWorkflowManager {
     mode: ActivationMode,
     rethrow = false,
   ): Promise<void> {
-    return this.serialize(workflowId, () => this.startTriggersNow(tenantId, workflowId, mode, rethrow));
+    return this.serialize(workflowId, () => {
+      // this start takes the place of a queued retry
+      this.retries.clear(workflowId);
+      return this.startTriggersNow(tenantId, workflowId, mode, rethrow);
+    });
   }
 
   async stopTriggers(workflowId: string): Promise<void> {
-    return this.serialize(workflowId, () => this.stopTriggersNow(workflowId));
+    return this.serialize(workflowId, () => {
+      this.retries.clear(workflowId);
+      this.activationErrors.delete(workflowId);
+      return this.stopTriggersNow(workflowId);
+    });
   }
 
   /** run `task` after every start/stop of this workflow queued before it has settled */
@@ -781,14 +1085,86 @@ export class ActiveWorkflowManager {
     return result;
   }
 
+  /** `rethrow`: the caller answers a failure (a publish). Otherwise the workflow goes on the retry queue. */
   private async startTriggersNow(
     tenantId: string,
     workflowId: string,
     mode: ActivationMode,
     rethrow: boolean,
   ): Promise<void> {
+    try {
+      await this.startWorkflowTriggers(tenantId, workflowId, mode);
+      this.activationErrors.delete(workflowId);
+    } catch (error) {
+      if (rethrow) throw error;
+      this.triggerFailed(tenantId, workflowId, toError(error));
+    }
+  }
+
+  /**
+   * A trigger reported an error or a start failed (n8n's flow): record why, queue the next start and tell
+   * the error workflow. Only this first failure starts the error workflow, a failed retry does not.
+   */
+  private triggerFailed(tenantId: string, workflowId: string, error: Error): void {
+    const { logger, executions } = this.deps;
+    const node = (error as { node?: string }).node;
+    logger.warn({ err: error, tenantId, workflowId, node }, 'Trigger failed, it will be started again');
+    this.queueRetry(tenantId, workflowId, error);
+    void executions
+      .runActivationErrorWorkflow(tenantId, workflowId, {
+        message: error.message,
+        ...(node ? { node } : {}),
+      })
+      .catch((failure) =>
+        logger.warn({ err: failure, tenantId, workflowId }, 'Error workflow could not start'),
+      );
+  }
+
+  private queueRetry(tenantId: string, workflowId: string, error: Error): void {
+    this.activationErrors.set(workflowId, error.message);
+    // demoted meanwhile: stopAll() has run here and the new leader's startAll() starts the workflow
+    if (!this.deps.leadership.isLeader) return;
+    this.retries.schedule(workflowId, () => void this.retryStart(tenantId, workflowId));
+  }
+
+  private retryStart(tenantId: string, workflowId: string): Promise<void> {
+    return this.serialize(workflowId, async () => {
+      // cleared while this attempt waited behind a stop or a start
+      if (!this.retries.has(workflowId)) return;
+      if (!this.deps.leadership.isLeader) {
+        this.retries.clear(workflowId);
+        return;
+      }
+      try {
+        // as a start-up: the node may have missed events while it was down
+        await this.startTriggersNow(tenantId, workflowId, 'init', true);
+        this.retries.clear(workflowId);
+      } catch (error) {
+        this.deps.logger.warn({ err: error, tenantId, workflowId }, 'Trigger retry failed');
+        this.queueRetry(tenantId, workflowId, toError(error));
+      }
+    });
+  }
+
+  /** a running trigger reported an error: only the first report of a run of triggers counts */
+  private async onTriggerError(entry: RunningTriggers, node: WorkflowNode, error: Error): Promise<void> {
+    const { tenantId, workflowId } = entry;
+    await this.serialize(workflowId, async () => {
+      if (this.running.get(workflowId) !== entry) return;
+      await this.stopTriggersNow(workflowId);
+      this.triggerFailed(tenantId, workflowId, Object.assign(error, { node: node.name }));
+    }).catch((failure) =>
+      this.deps.logger.warn({ err: failure, tenantId, workflowId }, 'Trigger error could not be handled'),
+    );
+  }
+
+  private async startWorkflowTriggers(
+    tenantId: string,
+    workflowId: string,
+    mode: ActivationMode,
+  ): Promise<void> {
     await this.stopTriggersNow(workflowId);
-    const { repos, nodeTypes, logger } = this.deps;
+    const { repos, nodeTypes } = this.deps;
     const row = await repos.workflows.get(tenantId, workflowId);
     if (!row?.active) return;
     const tenant = await repos.tenants.get(tenantId);
@@ -798,10 +1174,12 @@ export class ActiveWorkflowManager {
     const workflow = new Workflow(definition, nodeTypes);
     const entry: RunningTriggers = {
       tenantId,
+      workflowId,
       workflow,
       abort: new AbortController(),
       closers: [],
       stagingId: randomUUID(),
+      savedStaticData: structuredClone(workflow.staticData),
     };
     // only serialized starts and stops touch this workflow's entry, so nothing can replace or
     // abort it before this start returns: every closer pushed below stays reachable for a stop
@@ -815,8 +1193,7 @@ export class ActiveWorkflowManager {
       }
     } catch (error) {
       await this.stopTriggersNow(workflowId);
-      if (rethrow) throw error;
-      logger.warn({ err: error, tenantId, workflowId }, 'Trigger failed to start');
+      throw error;
     }
   }
 
@@ -825,12 +1202,35 @@ export class ActiveWorkflowManager {
     if (!entry) return;
     this.running.delete(workflowId);
     entry.abort.abort();
-    for (const close of entry.closers) {
-      await close().catch((error) =>
-        this.deps.logger.warn({ err: error, workflowId }, 'Trigger close function failed'),
+    // side by side, so that the lock of this workflow is held for one bound at most
+    await Promise.all(
+      entry.closers.map((close) =>
+        closeBounded(close).catch((error) =>
+          this.deps.logger.warn({ err: error, workflowId }, 'Trigger close function failed'),
+        ),
+      ),
+    );
+    // the trigger's state survives the restart, also when it wrote it without an emit
+    await this.saveTriggerStaticData(entry);
+    await this.deps.executions.removeBinaryData(entry.tenantId, entry.stagingId);
+  }
+
+  /** merge what trigger contexts changed since the last save; keys only runs changed are left alone */
+  private async saveTriggerStaticData(entry: RunningTriggers): Promise<void> {
+    if (!entry.workflow.id) return;
+    const before = entry.savedStaticData;
+    try {
+      const after = structuredClone(entry.workflow.staticData);
+      entry.savedStaticData = after;
+      await this.deps.repos.staticData.merge(entry.tenantId, entry.workflow.id, before, after);
+    } catch (error) {
+      // a later emit or the stop tries again; the run or the stop itself goes on
+      entry.savedStaticData = before;
+      this.deps.logger.warn(
+        { err: error, tenantId: entry.tenantId, workflowId: entry.workflowId },
+        'Could not save the static data of a trigger',
       );
     }
-    await this.deps.executions.removeBinaryData(entry.tenantId, entry.stagingId);
   }
 
   private async startTriggerNode(
@@ -865,10 +1265,7 @@ export class ActiveWorkflowManager {
         );
       },
       emitError: (error) => {
-        this.deps.logger.warn(
-          { err: error, tenantId: tenant.id, workflowId: entry.workflow.id, node: node.name },
-          'Trigger reported an error',
-        );
+        void this.onTriggerError(entry, node, error);
       },
     });
     try {
@@ -920,6 +1317,7 @@ export class ActiveWorkflowManager {
         }
         // keep the in-memory copy current for an unsaved workflow and for trigger contexts
         applyStaticDataChanges(entry.workflow.staticData, before, own);
+        applyStaticDataChanges(entry.savedStaticData, before, own);
         const items = result?.[0] ?? [];
         if (items.length) {
           started = await this.startFromTrigger(tenant, entry, node, items, undefined, executionId);
@@ -947,15 +1345,21 @@ export class ActiveWorkflowManager {
     items: Item[],
     responsePromise?: { resolve(result: TriggerRunResult): void; reject(err: Error): void },
     pollExecutionId?: string,
-    /** n8n's sendResponse hook: unused until L12 */
-    _responseHook?: (response: WebhookResponse) => void,
+    /** n8n's sendResponse hook: gets the output of a Respond to Webhook node */
+    responseHook?: (response: WebhookResponse) => void,
   ): Promise<boolean> {
-    if (entry.abort.signal.aborted) return false;
+    if (entry.abort.signal.aborted) {
+      responsePromise?.reject(new Error('The trigger has stopped'));
+      return false;
+    }
     // a poll already stored its binary data under its execution id; trigger() emits move theirs there
     const executionId = pollExecutionId ?? randomUUID();
     let begun = false;
     try {
-      if (!pollExecutionId) await this.moveStagedBinaryData(tenant.id, entry.stagingId, executionId, items);
+      if (!pollExecutionId) {
+        await this.moveStagedBinaryData(tenant.id, entry.stagingId, executionId, items);
+        await this.saveTriggerStaticData(entry);
+      }
       // another run, poll or main may have saved static data since this trigger started
       const definition = JSON.parse(JSON.stringify(entry.workflow.definition)) as WorkflowDefinition;
       definition.staticData = await this.storedStaticData(tenant.id, entry.workflow);
@@ -968,16 +1372,13 @@ export class ActiveWorkflowManager {
         startNode: node.name,
         triggerItems: JSON.parse(JSON.stringify(items.length ? items : [{ json: {} }])),
         wait: Boolean(responsePromise),
+        observer: this.responseObserver(tenant.id, entry.workflowId, node, responseHook),
       });
       begun = true;
+      // a run that ends in an error still answers: only a run that never started rejects
       if (responsePromise && started.finished) {
-        const outcome = await started.finished;
-        if (outcome.status === 'error')
-          responsePromise.reject(new Error(outcome.error?.message ?? 'Execution failed'));
-        else {
-          const { executionId: id, status, error } = outcome;
-          responsePromise.resolve({ executionId: id, status, ...(error ? { error: error.message } : {}) });
-        }
+        const { executionId: id, status, error } = await started.finished;
+        responsePromise.resolve({ executionId: id, status, ...(error ? { error: error.message } : {}) });
       }
       return true;
     } catch (error) {
@@ -1022,6 +1423,10 @@ export class ActiveWorkflowManager {
     await walk(items);
   }
 }
+
+const testTriggerKey = (tenantId: string, workflowId: string) => `${tenantId}:${workflowId}`;
+
+const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
 
 /** a view of `workflow` whose static data is `staticData` (everything else is the workflow's own) */
 function withStaticData(workflow: Workflow, staticData: DataObject): Workflow {

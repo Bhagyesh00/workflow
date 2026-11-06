@@ -25,7 +25,8 @@ export interface LogEntry {
 
 export interface TestWebhookState {
   nodeName: string;
-  testUrl: string;
+  /** absent for a trigger without a URL (Kafka, IMAP, ...): it waits for an event of its own */
+  testUrl?: string;
   expiresAt: string;
 }
 
@@ -218,6 +219,8 @@ export interface RunState extends RunSnapshot {
   receive(event: PushEvent, openWorkflowId: string | null): void;
   fail(error: ExecutionErrorShape): void;
   stopListening(): void;
+  /** the listen call answered after the listening state began; nothing when that state has ended */
+  setListenExpiry(expiresAt: string): void;
   loadExecution(detail: ExecutionDetail): void;
   clearLogs(): void;
   reset(): void;
@@ -270,6 +273,10 @@ export const useRunStore = create<RunState>()((set, get) => ({
   },
   stopListening() {
     set({ status: 'idle', testWebhook: null, pending: {}, ignored: [] });
+  },
+  setListenExpiry(expiresAt) {
+    const { testWebhook } = get();
+    if (testWebhook) set({ testWebhook: { ...testWebhook, expiresAt } });
   },
   loadExecution(detail) {
     set({

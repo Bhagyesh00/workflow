@@ -15,12 +15,13 @@ export function ExecuteBar({
   onExecute: () => void;
   onStop: () => void;
   readOnly: boolean;
-  /** set when "Execute workflow" means listening on this webhook trigger */
+  /** set when "Execute workflow" means listening on this webhook or event trigger */
   listenNode: string | null;
 }) {
   const status = useRunStore((s) => s.status);
   const runData = useRunStore((s) => s.runData);
   const testWebhook = useRunStore((s) => s.testWebhook);
+  const testUrl = testWebhook?.testUrl;
   const startedAt = useRunStore((s) => s.startedAt);
   const finishedAt = useRunStore((s) => s.finishedAt);
   const logs = useRunStore((s) => s.logs.length);
@@ -37,28 +38,37 @@ export function ExecuteBar({
       <div className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-line bg-surface/95 p-1.5 shadow-lift backdrop-blur">
         {status === 'listening' && testWebhook ? (
           <>
-            <span className="flex items-center gap-2 pl-2 text-sm">
-              <Radio size={15} className="text-brand" />
-              <span className="font-semibold">Waiting for a call to</span>
-              <code
-                className="max-w-72 truncate rounded bg-surface-3 px-1.5 py-0.5 text-xs"
-                title={testWebhook.testUrl}
-              >
-                {testWebhook.testUrl}
-              </code>
-            </span>
-            <IconButton
-              label="Copy test URL"
-              size="sm"
-              onClick={() =>
-                void navigator.clipboard?.writeText(testWebhook.testUrl).then(
-                  () => toast.success('Test URL copied'),
-                  () => undefined,
-                )
-              }
-            >
-              <Copy size={13} />
-            </IconButton>
+            {testUrl ? (
+              <>
+                <span className="flex items-center gap-2 pl-2 text-sm">
+                  <Radio size={15} className="text-brand" />
+                  <span className="font-semibold">Waiting for a call to</span>
+                  <code
+                    className="max-w-72 truncate rounded bg-surface-3 px-1.5 py-0.5 text-xs"
+                    title={testUrl}
+                  >
+                    {testUrl}
+                  </code>
+                </span>
+                <IconButton
+                  label="Copy test URL"
+                  size="sm"
+                  onClick={() =>
+                    void navigator.clipboard?.writeText(testUrl).then(
+                      () => toast.success('Test URL copied'),
+                      () => undefined,
+                    )
+                  }
+                >
+                  <Copy size={13} />
+                </IconButton>
+              </>
+            ) : (
+              <span className="flex items-center gap-2 pl-2 text-sm">
+                <Radio size={15} className="text-brand" />
+                <span className="font-semibold">Waiting for a trigger event</span>
+              </span>
+            )}
             <Button size="md" onClick={onStop} icon={<Square size={13} />}>
               Stop listening
             </Button>

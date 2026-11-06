@@ -3,12 +3,19 @@
  * listeners and version diffs.
  */
 import { randomUUID } from 'node:crypto';
-import { type ContextDeps, createPollContext, createTriggerContext, type NodeTypes } from '@workflow/core';
+import {
+  type ContextDeps,
+  createInitialState,
+  createPollContext,
+  createTriggerContext,
+  type NodeTypes,
+} from '@workflow/core';
 import {
   ExpressionEvaluator,
   type Item,
   planPartialRun,
   type RunData,
+  serializeError,
   sortByPosition,
   validateWorkflowNodeGroups,
   Workflow,
@@ -37,6 +44,7 @@ import type { ExecutionService } from './executions';
 import type { FavoriteService } from './favorites';
 import type { PublishHistoryService } from './publish-history';
 import { TEST_WEBHOOK_TTL_MS, type TestWebhookStore } from './test-webhooks';
+import { closeBounded } from './trigger-retry';
 import { nodeWebhooks, webhookUrlBase } from './webhook-paths';
 import { cloneDefinition, toDefinition, toDTO, type WorkflowDTO } from './workflow-model';
 import type { WorkflowReviewService } from './workflow-reviews';
@@ -369,6 +377,7 @@ export class WorkflowService {
     const row = await this.get(tenantId, id);
     assertDeletable(row, { force: options.force });
     if (row.active) await this.deps.activeWorkflows.deactivate(tenantId, id);
+    await this.deps.activeWorkflows.stopTestTrigger(tenantId, id);
     const executionIds = await this.repos.executions.idsForWorkflow(tenantId, id);
     // before the row goes: the FK set-null would hide the open review request
     await this.deps.reviews.afterWorkflowDeleted(tenantId, id);
@@ -717,7 +726,8 @@ export class WorkflowService {
           await Promise.race([wait, new Promise((r) => setTimeout(r, MANUAL_TRIGGER_WAIT_MS))]);
         }
       } finally {
-        await response?.closeFunction?.().catch(() => {});
+        const close = response?.closeFunction;
+        if (close) await closeBounded(close).catch(() => {});
       }
       if (failed) throw failed;
       return emitted?.length ? (JSON.parse(JSON.stringify(emitted)) as Item[]) : undefined;
@@ -781,18 +791,91 @@ export class WorkflowService {
     };
   }
 
-  /** "Listen for test event" on a trigger node without a webhook (L12) */
+  /**
+   * "Listen for test event" on a trigger node without a webhook (P4-21): the saved draft's node runs in
+   * manual mode for up to 120 s, and its first event starts a test run the editor adopts.
+   */
   async listenTestTrigger(
-    _tenant: TenantRow,
-    _id: string,
-    _nodeName: string,
+    tenant: TenantRow,
+    id: string,
+    nodeName: string,
+    actor: Actor = {},
   ): Promise<{ expiresAt: string }> {
-    throw new ApiError(501, 'not_built', 'not built');
+    const row = await this.get(tenant.id, id);
+    const definition = toDefinition(row);
+    const workflow = assertGraph(definition, this.deps.nodeTypes);
+    const node = workflow.nodes[nodeName];
+    if (!node) throw ApiError.badRequest(`Node "${nodeName}" does not exist`);
+    const type = this.deps.nodeTypes.get(node.type);
+    if (!type?.trigger || type.execute || type.description.webhooks?.length || node.disabled) {
+      throw ApiError.badRequest(`Node "${node.name}" does not listen for events`);
+    }
+    return this.deps.activeWorkflows.listenTestTrigger(tenant, workflow, node, type, {
+      userId: actor.userId,
+      onStarted: (executionId) =>
+        this.deps.context().push.send(tenant.id, 'testWebhookReceived', { workflowId: id, executionId }),
+      onFailed: (executionId, error) => this.failTestListen(tenant, definition, node, executionId, error),
+    });
   }
 
-  /** stops what listenTestTrigger started (L12) */
-  async stopTestTrigger(_tenant: TenantRow, _id: string): Promise<void> {
-    throw new ApiError(501, 'not_built', 'not built');
+  /**
+   * The listen call has answered, so the failure can only reach the editor as a run: a failed manual
+   * execution, as n8n shows it, which the editor adopts like the one of a first event.
+   */
+  private async failTestListen(
+    tenant: TenantRow,
+    definition: WorkflowDefinition,
+    node: WorkflowNode,
+    executionId: string,
+    error: Error,
+  ): Promise<void> {
+    const message = `${node.name}: ${error.message}`;
+    const workflowId = definition.id ?? null;
+    const now = new Date();
+    try {
+      await this.repos.executions.create(
+        tenant.id,
+        {
+          id: executionId,
+          workflowId,
+          workflowName: definition.name ?? '',
+          mode: 'manual',
+          status: 'error',
+          startedAt: now,
+          stoppedAt: now,
+          errorMessage: message,
+          workflowVersionId: definition.versionId ?? null,
+        },
+        {
+          workflowData: cloneDefinition(definition) as unknown as Record<string, unknown>,
+          runOptions: { startNode: node.name },
+        },
+      );
+      const state = createInitialState();
+      state.resultData.error = serializeError(new Error(message));
+      state.resultData.lastNodeExecuted = node.name;
+      await this.repos.executions.saveState(tenant.id, executionId, state);
+    } catch (failure) {
+      // the editor still hears why it stopped listening
+      this.deps.context().logger.warn(
+        { err: failure, tenantId: tenant.id, workflowId },
+        'Could not store a failed test listen',
+      );
+    }
+    const { push } = this.deps.context();
+    push.send(tenant.id, 'testWebhookReceived', { workflowId, executionId });
+    push.send(tenant.id, 'executionFinished', {
+      executionId,
+      workflowId,
+      status: 'error',
+      error: { message },
+    });
+  }
+
+  /** stops what listenTestTrigger started, on whichever main holds it */
+  async stopTestTrigger(tenant: TenantRow, id: string): Promise<void> {
+    await this.get(tenant.id, id);
+    await this.deps.activeWorkflows.stopTestTrigger(tenant.id, id);
   }
 
   /** "Stop listening": drop the test registrations of one node and the provider hook they set up */

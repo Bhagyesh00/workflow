@@ -8,6 +8,8 @@ import { Redis } from 'ioredis';
 import { matchDynamic, sortDynamic } from './webhook-paths';
 
 export const TEST_WEBHOOK_TTL_MS = 120_000;
+/** how long a trigger without a URL listens for a test event (P4-21); as long as a test webhook */
+export const TEST_TRIGGER_TTL_MS = TEST_WEBHOOK_TTL_MS;
 
 export interface TestWebhookRegistration {
   tenantId: string;

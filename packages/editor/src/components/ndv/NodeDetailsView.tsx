@@ -7,6 +7,7 @@ import { BookOpen, Copy, ExternalLink, Play, Radio, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNodeTypes, useSettings, useVariables, useWebhookUrls } from '../../api/queries';
+import { isEventTrigger } from '../../features/editor/editor-actions';
 import { openTestForm } from '../../features/editor/form-popup';
 import { flattenSchema, inferSchema } from '../../lib/data';
 import {
@@ -48,6 +49,7 @@ function TriggerPanel({
   nodeName,
   isFormTrigger,
   hasWebhooks,
+  isEventNode,
   eventDescription,
   onListen,
   onExecute,
@@ -56,6 +58,8 @@ function TriggerPanel({
   nodeName: string;
   isFormTrigger: boolean;
   hasWebhooks: boolean;
+  /** waits for an outside event and has no URL to call */
+  isEventNode: boolean;
   eventDescription?: string;
   onListen?: () => void;
   onExecute?: () => void;
@@ -73,7 +77,9 @@ function TriggerPanel({
         <p className="mt-1 text-sm text-ink-2">
           {hasWebhooks
             ? 'Call the test URL to send it an event. The data appears on the right.'
-            : 'Execute it to see the data it produces.'}
+            : isEventNode
+              ? 'Listen, then send it an event. The data appears on the right.'
+              : 'Execute it to see the data it produces.'}
         </p>
       </div>
       {hasWebhooks && !workflowId && (
@@ -82,7 +88,7 @@ function TriggerPanel({
       {mine.map((u, index) => (
         <div key={`${u.method}-${u.testUrl}`} className="flex flex-col gap-2">
           {[
-            { label: 'Test URL', url: listening ? testWebhook.testUrl : u.testUrl },
+            { label: 'Test URL', url: (listening && testWebhook.testUrl) || u.testUrl },
             { label: 'Production URL', url: u.productionUrl },
           ].map((entry) => (
             <div key={entry.label}>
@@ -114,7 +120,7 @@ function TriggerPanel({
             <Button
               className="self-start"
               icon={<ExternalLink size={14} />}
-              onClick={() => openTestForm(testWebhook.testUrl)}
+              onClick={() => openTestForm(testWebhook.testUrl ?? u.testUrl)}
             >
               Open test form
             </Button>
@@ -123,10 +129,11 @@ function TriggerPanel({
       ))}
       {!readOnly && (
         <div className="flex flex-col items-start gap-2">
-          {hasWebhooks && onListen ? (
+          {(hasWebhooks || isEventNode) && onListen ? (
             listening ? (
               <Callout tone="info" title="Listening for a test event">
-                {eventDescription ?? 'Waiting for you to call the test URL.'}
+                {eventDescription ??
+                  (hasWebhooks ? 'Waiting for you to call the test URL.' : 'Waiting for a trigger event.')}
               </Callout>
             ) : (
               <Button variant="primary" icon={<Radio size={14} />} onClick={onListen}>
@@ -380,6 +387,7 @@ export function NodeDetailsView({
                     nodeName={node.name}
                     isFormTrigger={node.type === 'core.formTrigger'}
                     hasWebhooks={Boolean(description?.webhooks?.length)}
+                    isEventNode={isEventTrigger(description)}
                     eventDescription={description?.eventTriggerDescription}
                     onListen={onListen ? () => onListen(node.name) : undefined}
                     onExecute={onExecuteNode ? () => onExecuteNode(node.name) : undefined}

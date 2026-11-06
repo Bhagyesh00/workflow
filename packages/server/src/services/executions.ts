@@ -977,11 +977,45 @@ export class ExecutionService {
 
   /** an activation failure has no execution row, so it cannot go through startErrorWorkflow (L12) */
   async runActivationErrorWorkflow(
-    _tenantId: string,
-    _workflowId: string,
-    _error: { message: string; node?: string },
+    tenantId: string,
+    workflowId: string,
+    error: { message: string; node?: string },
   ): Promise<void> {
-    throw new ApiError(501, 'not_built', 'not built');
+    const { repos, nodeTypes, logger } = this.deps;
+    const row = await repos.workflows.get(tenantId, workflowId);
+    const errorWorkflowId = (row?.settings as { errorWorkflow?: string } | null | undefined)?.errorWorkflow;
+    if (!row || !errorWorkflowId) return;
+    const target = await repos.workflows.get(tenantId, errorWorkflowId);
+    if (!target) {
+      logger.warn({ tenantId, errorWorkflowId }, 'Error workflow not found');
+      return;
+    }
+    // the error workflow runs its published version, or its draft when it was never published (P3-10)
+    const targetDefinition = await runtimeDefinition(repos, tenantId, target, 'error');
+    const start = findStartNode(new Workflow(targetDefinition, nodeTypes), ERROR_TRIGGER);
+    if (!start) return;
+    await this.start({
+      tenantId,
+      workflow: targetDefinition,
+      workflowId: target.id,
+      mode: 'error',
+      startNode: start.name,
+      triggerItems: [
+        {
+          json: {
+            trigger: {
+              error: {
+                name: 'WorkflowActivationError',
+                message: error.message,
+                ...(error.node ? { node: { name: error.node } } : {}),
+              },
+              mode: 'trigger',
+            },
+            workflow: { id: row.id, name: row.name },
+          },
+        },
+      ],
+    });
   }
 
   private async startErrorWorkflow(

@@ -145,12 +145,36 @@ async function ensureSaved(deps: EditorDeps, requireClean: boolean): Promise<str
   return dto?.id ?? null;
 }
 
-/** Trigger nodes that only start on an HTTP call (Webhook-style) need "Listen for test event". */
+/** triggers that make their data when asked, though nothing in their description says they do not listen */
+const TRIGGERS_THAT_RUN_AT_ONCE = new Set([
+  'core.manualTrigger',
+  'core.errorTrigger',
+  'core.executeWorkflowTrigger',
+]);
+
+/**
+ * A trigger that waits for an event from outside and has no URL to call (Kafka, MQTT, IMAP, ...): it needs a
+ * test listener. Pollers and schedules produce a sample at once, so they run as usual.
+ */
+export function isEventTrigger(description: NodeTypeDescription | undefined): boolean {
+  if (!description || !isTriggerDescription(description)) return false;
+  return (
+    !description.webhooks?.length &&
+    !description.polling &&
+    !description.group.includes('schedule') &&
+    !TRIGGERS_THAT_RUN_AT_ONCE.has(description.name)
+  );
+}
+
+/** Trigger nodes that only start on an HTTP call or an outside event need "Listen for test event". */
 export function webhookTriggerToListen(deps: EditorDeps): string | null {
   const s = useWorkflowStore.getState();
   const triggers = s.nodes.filter((n) => !n.disabled && isTriggerDescription(deps.descriptions.get(n.type)));
   if (!triggers.length) return null;
-  const manual = triggers.find((n) => !deps.descriptions.get(n.type)?.webhooks?.length);
+  const manual = triggers.find((n) => {
+    const description = deps.descriptions.get(n.type);
+    return !description?.webhooks?.length && !isEventTrigger(description);
+  });
   if (manual) return null;
   const pinnedWebhook = triggers.find((n) => s.pinData[n.name]);
   if (pinnedWebhook) return null;
@@ -187,10 +211,9 @@ export async function runWorkflow(
         useWorkflowStore.getState().nodes.find((n) => n.name === options.destinationNode)?.type ?? '',
       )
     : undefined;
-  // a webhook trigger cannot "run": it waits for a call
+  // a webhook or event trigger cannot "run": it waits for a call or an event
   if (
-    destination?.webhooks?.length &&
-    isTriggerDescription(destination) &&
+    (isEventTrigger(destination) || (destination?.webhooks?.length && isTriggerDescription(destination))) &&
     !useWorkflowStore.getState().pinData[options.destinationNode!]
   ) {
     await listenForTestEvent(deps, options.destinationNode!);
@@ -255,7 +278,23 @@ export async function runWorkflow(
 
 let listenTimer: ReturnType<typeof setTimeout> | null = null;
 
+function stopListeningAt(expiresAt: string): void {
+  if (listenTimer) clearTimeout(listenTimer);
+  const ms = Math.max(5_000, new Date(expiresAt).getTime() - Date.now());
+  listenTimer = setTimeout(
+    () => {
+      if (useRunStore.getState().status === 'listening') {
+        void stopListening();
+        toast.info('Stopped listening', 'No test event arrived in time.');
+      }
+    },
+    Number.isFinite(ms) ? ms : 120_000,
+  );
+}
+
 export async function listenForTestEvent(deps: EditorDeps, nodeName: string): Promise<void> {
+  const type = useWorkflowStore.getState().nodes.find((n) => n.name === nodeName)?.type;
+  if (isEventTrigger(deps.descriptions.get(type ?? ''))) return listenForTriggerEvent(deps, nodeName);
   const id = await ensureSaved(deps, true);
   if (!id) return;
   try {
@@ -265,18 +304,36 @@ export async function listenForTestEvent(deps: EditorDeps, nodeName: string): Pr
       .beginListening(id, { nodeName, testUrl, expiresAt }, ranDefinitionOf(useWorkflowStore.getState()));
     const listened = useWorkflowStore.getState().nodes.find((n) => n.name === nodeName);
     if (listened?.type === 'core.formTrigger' && formTestUrls[0]) openTestForm(formTestUrls[0]);
-    if (listenTimer) clearTimeout(listenTimer);
-    const ms = Math.max(5_000, new Date(expiresAt).getTime() - Date.now());
-    listenTimer = setTimeout(
-      () => {
-        if (useRunStore.getState().status === 'listening') {
-          void stopListening();
-          toast.info('Stopped listening', 'No test event arrived in time.');
-        }
-      },
-      Number.isFinite(ms) ? ms : 120_000,
-    );
+    stopListeningAt(expiresAt);
   } catch (error) {
+    toast.error('Could not listen for a test event', errorMessage(error));
+  }
+}
+
+/**
+ * A trigger without a URL: the server starts the node, and its first event starts the test run. That event
+ * can arrive before the call answers (a retained message), so the editor is listening before it asks.
+ */
+async function listenForTriggerEvent(deps: EditorDeps, nodeName: string): Promise<void> {
+  const id = await ensureSaved(deps, true);
+  if (!id) return;
+  if (listenTimer) clearTimeout(listenTimer);
+  const run = useRunStore.getState();
+  run.beginListening(id, { nodeName, expiresAt: '' }, ranDefinitionOf(useWorkflowStore.getState()));
+  try {
+    const { expiresAt } = await workflowsApi.listenTestTrigger(id, nodeName);
+    const { status } = useRunStore.getState();
+    if (status === 'listening') {
+      run.setListenExpiry(expiresAt);
+      stopListeningAt(expiresAt);
+    } else if (status === 'idle') {
+      // stopped while the call ran, which may have overtaken the stop on the server
+      await workflowsApi.stopTestTrigger(id).catch(() => undefined);
+    }
+  } catch (error) {
+    // stopped while the call ran: the failure is the stop itself
+    if (useRunStore.getState().status !== 'listening') return;
+    run.stopListening();
     toast.error('Could not listen for a test event', errorMessage(error));
   }
 }
@@ -288,7 +345,8 @@ export async function stopListening(): Promise<void> {
   useRunStore.getState().stopListening();
   if (!workflowId || !testWebhook) return;
   try {
-    await workflowsApi.stopListeningTestWebhook(workflowId, testWebhook.nodeName);
+    if (testWebhook.testUrl) await workflowsApi.stopListeningTestWebhook(workflowId, testWebhook.nodeName);
+    else await workflowsApi.stopTestTrigger(workflowId);
   } catch (error) {
     toast.error('Could not stop the test listener on the server', errorMessage(error));
   }
