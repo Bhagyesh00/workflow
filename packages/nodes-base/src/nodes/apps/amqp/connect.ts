@@ -184,16 +184,26 @@ export async function openAmqp(
   return connection;
 }
 
+/** what closing needs from a rhea connection, which its typings leave out */
+interface RheaConnectionInternals {
+  socket?: net.Socket;
+  scheduled_reconnect?: NodeJS.Timeout;
+}
+
 /** close the connection and wait for the broker's answer for a short while, then drop the socket */
 export async function closeAmqp(connection: Connection): Promise<void> {
+  const internals = connection as Connection & RheaConnectionInternals;
   connection.set_reconnect(false);
+  // set_reconnect leaves a scheduled attempt in place: it would open a new connection after this close
+  clearTimeout(internals.scheduled_reconnect);
+  internals.scheduled_reconnect = undefined;
   await new Promise<void>((resolve) => {
     const timer = setTimeout(done, CLOSE_TIMEOUT_MS);
     function done() {
       clearTimeout(timer);
       connection.removeListener('connection_close', done);
       connection.removeListener('disconnected', done);
-      (connection as unknown as { socket?: net.Socket }).socket?.destroy();
+      internals.socket?.destroy();
       resolve();
     }
     connection.on('connection_close', done);

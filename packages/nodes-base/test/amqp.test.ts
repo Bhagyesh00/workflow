@@ -553,6 +553,34 @@ describe('AMQP Trigger', () => {
     expect(errors[0]!.message).not.toContain(PASSWORD);
   });
 
+  it('a close while a reconnect is scheduled cancels the reconnect', async () => {
+    const broker = await newBroker();
+    const queue = unique('zombie');
+    const { runs, response } = await start(broker, { sink: queue, options: { sleepTime: 300 } });
+    await until(() => broker.links.length === 1);
+    broker.dropClients();
+    await sleep(100);
+    await response.closeFunction!();
+    broker.put(queue, 'after the close');
+    await sleep(1000);
+    expect(broker.connections).toBe(1);
+    expect(broker.links).toHaveLength(1);
+    expect(runs).toHaveLength(0);
+    expect(broker.accepted).toEqual([]);
+  });
+
+  it('a message that arrives during the close starts no run and is not accepted', async () => {
+    const broker = await newBroker();
+    const queue = unique('closing');
+    const { runs, response } = await start(broker, { sink: queue, options: {} });
+    await until(() => broker.credits.length > 0);
+    broker.put(queue, 'in flight');
+    await response.closeFunction!();
+    await sleep(100);
+    expect(runs).toHaveLength(0);
+    expect(broker.accepted).toEqual([]);
+  });
+
   it('closing the trigger closes the connection and stops the runs', async () => {
     const broker = await newBroker();
     const queue = unique('close');

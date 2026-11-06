@@ -148,6 +148,18 @@ export const AmqpTriggerNode: NodeType = {
     const onMessage = async (context: EventContext) => {
       const message = context.message as unknown as Record<string, unknown>;
       const delivery = context.delivery!;
+      const release = () => {
+        try {
+          delivery.release();
+        } catch {
+          // the link is gone
+        }
+      };
+      // a run cannot start any more: an accept would settle a message nobody got
+      if (closing) {
+        release();
+        return;
+      }
       let ended: Promise<void> = Promise.resolve();
       try {
         const json = messageToJson(message, body);
@@ -163,11 +175,7 @@ export const AmqpTriggerNode: NodeType = {
       } catch (error) {
         // the message could not be turned into an item: the broker keeps it for another consumer
         ctx.logger.debug(`AMQP message not delivered: ${(error as Error).message}`);
-        try {
-          delivery.release();
-        } catch {
-          // the link is gone
-        }
+        release();
         return;
       }
       if (manual) {
