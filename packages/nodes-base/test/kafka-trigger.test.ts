@@ -35,6 +35,7 @@ import {
   readTriggerSettings,
   testGroupId,
 } from '../src/nodes/apps/kafka/consume';
+import { createMessageParser } from '../src/nodes/apps/kafka/message';
 import { scrubRegistryError } from '../src/nodes/apps/kafka/schema-registry';
 import { node, nodeTypes, testServices } from './harness';
 import { localHttp } from './servers';
@@ -659,6 +660,18 @@ describe('closing', () => {
     const second = await start({ topic, groupId });
     await until(() => second.runs.length === 1);
     expect(second.runs[0]!.items[0]!.json.message).toBe('m');
+  });
+});
+
+describe('message parser', () => {
+  it('a header with a null value becomes empty text, alone and among repeated names', async () => {
+    const parse = createMessageParser(
+      { logger: { warn: () => undefined }, helpers: {} as never },
+      { jsonParseMessage: false, keepBinaryData: false, onlyMessage: false, returnHeaders: true },
+    );
+    const headers = { alone: null, many: [Buffer.from('x'), null, 'y'] } as never;
+    const item = await parse({ value: Buffer.from('v'), headers } as never, 't');
+    expect(item.json.headers).toEqual({ alone: '', many: 'x,,y' });
   });
 });
 

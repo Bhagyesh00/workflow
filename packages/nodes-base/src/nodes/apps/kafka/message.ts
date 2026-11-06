@@ -15,9 +15,10 @@ interface MessageContext {
   helpers: Pick<NodeHelpers, 'prepareBinaryData'>;
 }
 
-function headerText(value: IHeaders[string]): string {
-  if (value === undefined) return '';
-  if (Array.isArray(value)) return value.map((entry) => entry.toString()).join(',');
+/** a record header may have a null value, whatever kafkajs's types say */
+function headerText(value: IHeaders[string] | null): string {
+  if (value === undefined || value === null) return '';
+  if (Array.isArray(value)) return value.map((entry) => headerText(entry)).join(',');
   return value.toString();
 }
 
