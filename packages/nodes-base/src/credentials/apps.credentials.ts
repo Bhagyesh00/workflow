@@ -1,5 +1,5 @@
 /** Credentials for app integrations: Slack, Notion, Airtable, Telegram, Postgres, Redis, MySQL, SMTP. */
-import type { CredentialType } from '@workflow/workflow';
+import type { CredentialType, NodeProperty } from '@workflow/workflow';
 
 export const slackApi: CredentialType = {
   name: 'slackApi',
@@ -106,6 +106,88 @@ export const telegramApi: CredentialType = {
   },
 };
 
+/** PEM fields for the client side of TLS (n8n's names), shown with either encrypting SSL mode */
+const SSL_CLIENT_CERT_PROPERTIES: NodeProperty[] = [
+  {
+    displayName: 'Client Private Key',
+    name: 'clientPrivateKey',
+    type: 'string',
+    default: '',
+    typeOptions: { rows: 4, password: true },
+    displayOptions: { show: { ssl: ['allow', 'require'] } },
+  },
+  {
+    displayName: 'Client Certificate',
+    name: 'clientCertificate',
+    type: 'string',
+    default: '',
+    typeOptions: { rows: 4, password: true },
+    displayOptions: { show: { ssl: ['allow', 'require'] } },
+  },
+];
+
+/** the SSH tunnel block of the SQL credentials (n8n's names, including `privateKey` and `passphrase`) */
+export const SSH_TUNNEL_PROPERTIES: NodeProperty[] = [
+  { displayName: 'SSH Tunnel', name: 'sshTunnel', type: 'boolean', default: false },
+  {
+    displayName: 'SSH Authenticate with',
+    name: 'sshAuthenticateWith',
+    type: 'options',
+    default: 'password',
+    options: [
+      { name: 'Password', value: 'password' },
+      { name: 'Private Key', value: 'privateKey' },
+    ],
+    displayOptions: { show: { sshTunnel: [true] } },
+  },
+  {
+    displayName: 'SSH Host',
+    name: 'sshHost',
+    type: 'string',
+    default: 'localhost',
+    displayOptions: { show: { sshTunnel: [true] } },
+  },
+  {
+    displayName: 'SSH Port',
+    name: 'sshPort',
+    type: 'number',
+    default: 22,
+    displayOptions: { show: { sshTunnel: [true] } },
+  },
+  {
+    displayName: 'SSH User',
+    name: 'sshUser',
+    type: 'string',
+    default: 'root',
+    displayOptions: { show: { sshTunnel: [true] } },
+  },
+  {
+    displayName: 'SSH Password',
+    name: 'sshPassword',
+    type: 'string',
+    default: '',
+    typeOptions: { password: true },
+    displayOptions: { show: { sshTunnel: [true], sshAuthenticateWith: ['password'] } },
+  },
+  {
+    displayName: 'Private Key',
+    name: 'privateKey',
+    type: 'string',
+    default: '',
+    typeOptions: { rows: 4, password: true },
+    displayOptions: { show: { sshTunnel: [true], sshAuthenticateWith: ['privateKey'] } },
+  },
+  {
+    displayName: 'Passphrase',
+    name: 'passphrase',
+    type: 'string',
+    default: '',
+    typeOptions: { password: true },
+    description: 'Passphrase of the private key. Leave empty if the key has none.',
+    displayOptions: { show: { sshTunnel: [true], sshAuthenticateWith: ['privateKey'] } },
+  },
+];
+
 export const postgres: CredentialType = {
   name: 'postgres',
   displayName: 'Postgres',
@@ -142,6 +224,7 @@ export const postgres: CredentialType = {
       description: 'PEM certificate of the CA that signed the server certificate (for private CAs)',
       displayOptions: { show: { ssl: ['require'] } },
     },
+    ...SSL_CLIENT_CERT_PROPERTIES,
     {
       displayName: 'Max Connections',
       name: 'maxConnections',
@@ -149,6 +232,7 @@ export const postgres: CredentialType = {
       default: 5,
       typeOptions: { minValue: 1, maxValue: 50 },
     },
+    ...SSH_TUNNEL_PROPERTIES,
   ],
 };
 
@@ -175,6 +259,14 @@ export const redis: CredentialType = {
     },
     { displayName: 'Database', name: 'database', type: 'number', default: 0 },
     { displayName: 'SSL', name: 'ssl', type: 'boolean', default: false },
+    {
+      displayName: 'Disable TLS Verification (Insecure)',
+      name: 'disableTlsVerification',
+      type: 'boolean',
+      default: false,
+      description: 'Whether to accept a certificate that cannot be verified, such as a self-signed one',
+      displayOptions: { show: { ssl: [true] } },
+    },
   ],
 };
 
@@ -213,6 +305,7 @@ export const mySql: CredentialType = {
       typeOptions: { rows: 4 },
       displayOptions: { show: { ssl: ['require'] } },
     },
+    ...SSL_CLIENT_CERT_PROPERTIES,
     {
       displayName: 'Connect Timeout',
       name: 'connectTimeout',
@@ -220,6 +313,7 @@ export const mySql: CredentialType = {
       default: 10000,
       description: 'Milliseconds',
     },
+    ...SSH_TUNNEL_PROPERTIES,
   ],
 };
 

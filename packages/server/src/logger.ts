@@ -11,6 +11,7 @@ const REDACT = [
   'req.headers.authorization',
   'req.headers.cookie',
   'req.headers["x-api-key"]',
+  'req.headers["x-auth-token"]',
   'res.headers["set-cookie"]',
   '*.password',
   '*.passwordHash',
@@ -21,6 +22,13 @@ const REDACT = [
   '*.apiKey',
   '*.data_enc',
   '*.dataEnc',
+  '*.secretAccessKey',
+  '*.serviceAccountKey',
+  '*.secretId',
+  '*.privateKey',
+  '*.passphrase',
+  '*.settingsEnc',
+  '*.settings_enc',
   // database errors carry the query parameters (hashes, ciphertexts, run data)
   'err.params',
   'err.cause.params',
@@ -28,9 +36,14 @@ const REDACT = [
 
 /**
  * Paths whose segments are bearer secrets: the invitation token (`/invitation/<token>`, the editor
- * page, and `/rest/invitations/<token>/accept`) and the resume URL (`/webhook-waiting/<executionId>/<signature>`).
+ * page, and `/rest/invitations/<token>/accept`) and the resume URLs (`/webhook-waiting/<executionId>/<signature>`,
+ * `/form-waiting/<executionId>/<signature>`).
  */
-const SECRET_PATHS: RegExp[] = [/^(\/+(?:rest\/+)?invitations?\/+)[^/]+/, /^(\/+webhook-waiting\/+).+/];
+const SECRET_PATHS: RegExp[] = [
+  /^(\/+(?:rest\/+)?invitations?\/+)[^/]+/,
+  /^(\/+webhook-waiting\/+).+/,
+  /^(\/+form-waiting\/+).+/,
+];
 
 /** the request URL with every token-bearing path segment replaced; the query string is kept */
 export function redactUrl(url: string): string {

@@ -8,7 +8,18 @@ import type { ServerContext } from '../context';
 import { errorBody } from '../http/errors';
 
 /** paths the SPA fallback must never answer */
-const RESERVED = ['/rest', '/api', '/webhook', '/webhook-test', '/webhook-waiting', '/healthz', '/metrics'];
+const RESERVED = [
+  '/rest',
+  '/api',
+  '/webhook',
+  '/webhook-test',
+  '/webhook-waiting',
+  '/form',
+  '/form-test',
+  '/form-waiting',
+  '/healthz',
+  '/metrics',
+];
 
 function isReserved(url: string): boolean {
   const pathname = url.split('?')[0];

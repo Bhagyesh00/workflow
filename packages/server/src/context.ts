@@ -2,7 +2,7 @@
  * Wires configuration, database, Redis, registries and services for one process
  * (a main serving HTTP, or a queue worker).
  */
-import { CredentialCipher, HttpClient, IsolatedVmCodeRunner } from '@workflow/core';
+import { CredentialCipher, HttpClient, IsolatedVmCodeRunner, PyodideCodeRunner } from '@workflow/core';
 import type { NodePackage } from '@workflow/workflow';
 import { Redis } from 'ioredis';
 import type { Config } from './config';
@@ -15,9 +15,12 @@ import { AnnotationService } from './services/annotations';
 import { AuthService } from './services/auth';
 import { MemoryBus, type MessageBus, PushService, RedisBus } from './services/bus';
 import { CredentialService } from './services/credentials';
+import { DataTableService } from './services/data-tables';
 import { ExecutionService } from './services/executions';
 import { FavoriteService } from './services/favorites';
 import { FolderService } from './services/folders';
+import { FormAuthService } from './services/form-auth';
+import { FormTokenService } from './services/form-tokens';
 import { HistoryCompactionService } from './services/history-compaction';
 import { Pruner, WaitTracker } from './services/maintenance';
 import { Metrics } from './services/metrics';
@@ -25,6 +28,8 @@ import { OAuth1Service } from './services/oauth1';
 import { OAuth2Service } from './services/oauth2';
 import { PublishHistoryService } from './services/publish-history';
 import { ExecutionQueue, type Leadership, RedisLeader, SingleLeader } from './services/queue';
+import { SecretsManager } from './services/secrets/manager';
+import type { SecretProviderType } from './services/secrets/types';
 import {
   MemoryTestWebhookStore,
   RedisTestWebhookStore,
@@ -75,6 +80,14 @@ export interface ServerContext {
   historyCompaction: HistoryCompactionService;
   /** P3-19 (L14) */
   reviews: WorkflowReviewService;
+  /** P4-03 (L4) */
+  dataTables: DataTableService;
+  /** P4-07 (L9): started before any job in startMain and startWorker, stopped in close */
+  secrets: SecretsManager;
+  /** P4-16 (L2) */
+  formAuth: FormAuthService;
+  /** P4-01 (L1) */
+  formTokens: FormTokenService;
   /** start leader duties (triggers, wait tracker, pruning) on mains */
   startMain(): Promise<void>;
   /** consume the execution queue (queue mode workers) */
@@ -103,6 +116,8 @@ export interface ContextOptions {
   http?: HttpClient;
   /** apply migrations before returning (default true) */
   migrate?: boolean;
+  /** added to the six built-in secret providers (tests add a fake vault) */
+  secretProviderTypes?: SecretProviderType[];
 }
 
 export async function createContext(options: ContextOptions): Promise<ServerContext> {
@@ -123,6 +138,18 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     memoryLimitMb: config.code.memoryMb,
     timeoutMs: config.code.timeoutMs,
   });
+  const pythonRunner = config.python.enabled
+    ? new PyodideCodeRunner({
+        memoryLimitMb: config.code.memoryMb,
+        timeoutMs: config.code.timeoutMs,
+        maxConcurrency: config.python.maxConcurrency,
+        stdlibAllow: config.python.stdlibAllow,
+        externalAllow: config.python.externalAllow,
+        builtinsDeny: config.python.builtinsDeny,
+        allowTransitiveImports: config.python.allowTransitiveImports,
+        wheelsDir: config.python.wheelsDir || undefined,
+      })
+    : undefined;
 
   const queueMode = config.executionsMode === 'queue';
   const redisUrl = config.redisUrl;
@@ -157,6 +184,10 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const publishHistory = new PublishHistoryService(serviceDeps);
   const historyCompaction = new HistoryCompactionService(serviceDeps);
   const reviews = new WorkflowReviewService(serviceDeps);
+  const dataTables = new DataTableService(serviceDeps);
+  const secrets = new SecretsManager(serviceDeps, { secretProviderTypes: options.secretProviderTypes });
+  const formAuth = new FormAuthService(serviceDeps);
+  const formTokens = new FormTokenService(serviceDeps);
 
   const metrics = new Metrics({
     queueDepth: queue ? () => queue.depth() : undefined,
@@ -173,6 +204,10 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     credentials,
     http,
     codeRunner,
+    pythonRunner,
+    dataTables,
+    formTokens,
+    formAuth,
     logger,
     push,
     bus,
@@ -198,6 +233,8 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     push,
     metrics,
     logger,
+    formTokens,
+    formAuth,
   });
   const workflows = new WorkflowService({
     config,
@@ -251,10 +288,16 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     publishHistory,
     historyCompaction,
     reviews,
+    dataTables,
+    secrets,
+    formAuth,
+    formTokens,
 
     async startMain() {
       if (started) return;
       started = true;
+      // triggers and resumed runs resolve credentials: the secrets must be loaded first
+      await secrets.start();
       await executions.init();
       await activeWorkflows.init();
       if (!queueMode) {
@@ -284,6 +327,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       if (!queue) throw new Error('Workers need EXECUTIONS_MODE=queue and REDIS_URL');
       if (!started) {
         started = true;
+        await secrets.start();
         await executions.init();
       }
       queue.startWorker((job, meta) => executions.runQueued(job, meta), config.queue.concurrency);
@@ -301,6 +345,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       await queue?.close().catch(() => {});
       await executions.close().catch(() => {});
       await testWebhooks.close().catch(() => {});
+      await secrets.stop().catch(() => {});
       await bus.close().catch(() => {});
       await redis?.quit().catch(() => {});
       if (!options.http) await http.close().catch(() => {});

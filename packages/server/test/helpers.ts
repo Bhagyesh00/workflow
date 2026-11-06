@@ -23,6 +23,7 @@ import { Redis } from 'ioredis';
 import { buildApp } from '../src/app';
 import { type Config, loadConfig } from '../src/config';
 import { createContext, type ServerContext } from '../src/context';
+import type { SecretProviderType } from '../src/services/secrets/types';
 
 export const BASE_URL = 'http://localhost:5678';
 export const ORIGIN = 'http://localhost:5678';
@@ -344,6 +345,10 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'data_table_rows',
+  'data_table_columns',
+  'data_tables',
+  'secret_connections',
   'workflow_review_comments',
   'workflow_review_activity',
   'workflow_review_authors',
@@ -394,12 +399,20 @@ export interface TestServer {
 
 export async function createTestServer(
   overrides: Record<string, string> = {},
-  options: { startMain?: boolean; reset?: boolean; http?: HttpClient } = {},
+  options: {
+    startMain?: boolean;
+    reset?: boolean;
+    http?: HttpClient;
+    /** appended after the built-in and test packages */
+    nodePackages?: NodePackage[];
+    secretProviderTypes?: SecretProviderType[];
+  } = {},
 ): Promise<TestServer> {
   const config = testConfig(overrides);
   const ctx = await createContext({
     config,
-    nodePackages: [nodesBasePackage, testPackage],
+    nodePackages: [nodesBasePackage, testPackage, ...(options.nodePackages ?? [])],
+    secretProviderTypes: options.secretProviderTypes,
     // local test servers (credential test, OAuth2 token endpoint) live on 127.0.0.1
     http:
       options.http ??
@@ -429,6 +442,8 @@ export class TestClient {
   constructor(
     readonly app: FastifyInstance,
     readonly origin = ORIGIN,
+    /** the caller's IP; signup allows 20 calls an hour per IP */
+    readonly remoteAddress?: string,
   ) {}
 
   async request(
@@ -440,6 +455,7 @@ export class TestClient {
     const res = await this.app.inject({
       method,
       url,
+      ...(this.remoteAddress ? { remoteAddress: this.remoteAddress } : {}),
       headers: {
         ...(this.cookie ? { cookie: this.cookie } : {}),
         ...(method !== 'GET' ? { origin: this.origin, 'content-type': 'application/json' } : {}),
@@ -471,10 +487,16 @@ let counter = 0;
 
 export async function signup(
   app: FastifyInstance,
-  input: Partial<{ email: string; password: string; name: string; workspaceName: string }> = {},
+  input: Partial<{
+    email: string;
+    password: string;
+    name: string;
+    workspaceName: string;
+    remoteAddress: string;
+  }> = {},
 ) {
   counter++;
-  const client = new TestClient(app);
+  const client = new TestClient(app, ORIGIN, input.remoteAddress);
   const res = await client.post('/rest/auth/signup', {
     email: input.email ?? `user${counter}-${randomUUID().slice(0, 8)}@example.com`,
     password: input.password ?? 'Passw0rd!',

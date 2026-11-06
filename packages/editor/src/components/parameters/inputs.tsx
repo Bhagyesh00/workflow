@@ -424,7 +424,8 @@ export function JsonInput({ prop, value, onChange }: InputProps) {
 
 export function CodeInput({ prop, value, onChange }: InputProps) {
   const ctx = useParameterContext();
-  const language = prop.typeOptions?.editorLanguage === 'json' ? 'json' : 'javascript';
+  const editorLanguage = prop.typeOptions?.editorLanguage;
+  const language = editorLanguage === 'json' ? 'json' : editorLanguage === 'python' ? 'python' : 'javascript';
   return (
     <div className="wf-field !p-0">
       <CodeEditor

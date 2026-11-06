@@ -9,6 +9,7 @@ import type {
   NodeType,
 } from '@workflow/workflow';
 import mysql from 'mysql2/promise';
+import { mysqlCredentialTest } from '../../../credential-tests/mysql';
 import { runSql, type SqlPool } from './runner';
 import { mysqlDialect, sqlProperties } from './sql';
 
@@ -117,7 +118,7 @@ export const MySqlNode: NodeType = {
     alias: ['sql', 'database', 'mariadb', 'query'],
     subtitle: '={{ $parameter.operation }}',
     usableAsTool: true,
-    credentials: [{ name: 'mySql', required: true }],
+    credentials: [{ name: 'mySql', required: true, testedBy: 'mysqlCredentialTest' }],
     properties: sqlProperties({ schema: false }),
   },
 
@@ -132,6 +133,7 @@ export const MySqlNode: NodeType = {
   },
 
   methods: {
+    credentialTest: { mysqlCredentialTest },
     listSearch: {
       async searchTables(ctx, filter): Promise<ListSearchResult> {
         return withPool(ctx, async (pool) => {

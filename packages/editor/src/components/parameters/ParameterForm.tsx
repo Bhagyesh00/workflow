@@ -11,7 +11,8 @@ import {
 } from '@workflow/workflow';
 import { ArrowDown, ArrowUp, Info, Plus, Trash2 } from 'lucide-react';
 import { type ReactNode, useId, useState } from 'react';
-import type { ParameterPath } from '../../lib/workflow-ops';
+import { applyCodeDefaults } from '../../lib/code-defaults';
+import { type ParameterPath, setIn } from '../../lib/workflow-ops';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { Menu } from '../ui/Menu';
@@ -199,7 +200,14 @@ export function ParameterField({
   const ctx = useParameterContext();
   const id = useId();
   const [dragOver, setDragOver] = useState(false);
-  const onChange = (next: unknown) => ctx.onChange(path, next);
+  const onChange = (next: unknown) => {
+    const after = setIn(ctx.rootValues, path, next) as NodeParameters;
+    const kept = applyCodeDefaults(ctx.node.type, ctx.rootValues, after);
+    ctx.onChange(path, next);
+    // P4-06: a Code node's language or mode change may also swap untouched default code
+    if (kept === after) return;
+    for (const key of Object.keys(kept)) if (kept[key] !== after[key]) ctx.onChange([key], kept[key]);
+  };
 
   if (prop.type === 'hidden') return null;
   if (prop.type === 'notice') return <NoticeInput prop={prop} />;

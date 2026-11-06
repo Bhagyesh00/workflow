@@ -7,6 +7,7 @@ import { errorMessage } from '../api/client';
 import { apiKeysApi, membersApi, variablesApi } from '../api/endpoints';
 import { queryKeys, useMe, useSettings } from '../api/queries';
 import { ROLES, type Role, type Variable } from '../api/types';
+import { ApiKeyScopesField } from '../components/settings/ApiKeyScopesField';
 import { Button, IconButton } from '../components/ui/Button';
 import { cx } from '../components/ui/cx';
 import { confirmDialog, Dialog } from '../components/ui/Dialog';
@@ -28,12 +29,14 @@ function canManage(role: Role | undefined): boolean {
 }
 
 export function SettingsLayout() {
+  const me = useMe();
   const links = [
     { to: '/settings/account', label: 'Your account' },
     { to: '/settings/members', label: 'Members' },
     { to: '/settings/api-keys', label: 'API keys' },
     { to: '/settings/variables', label: 'Variables' },
     { to: '/settings/security', label: 'Security' },
+    ...(canManage(me.data?.role) ? [{ to: '/settings/external-secrets', label: 'External secrets' }] : []),
   ];
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-8 md:flex-row">
@@ -320,14 +323,17 @@ export function ApiKeysSettingsPage() {
   const queryClient = useQueryClient();
   const keys = useQuery({ queryKey: queryKeys.apiKeys, queryFn: apiKeysApi.list });
   const [name, setName] = useState('');
+  // empty means every scope
+  const [scopes, setScopes] = useState<string[]>([]);
   const [created, setCreated] = useState<{ name: string; key: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const create = useMutation({
-    mutationFn: () => apiKeysApi.create(name.trim()),
+    mutationFn: () => apiKeysApi.create(name.trim(), scopes),
     onSuccess: async (result) => {
       setCreated({ name: result.name, key: result.key });
       setCopied(false);
       setName('');
+      setScopes([]);
       await queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys });
     },
     onError: (error) => toast.error('Could not create the key', errorMessage(error)),
@@ -357,26 +363,29 @@ export function ApiKeysSettingsPage() {
       title="API keys"
       description="Use a key in the X-API-KEY header to call the public API at /api/v1."
     >
-      <form onSubmit={submit} className="flex items-end gap-2 border-b border-line px-5 py-4">
-        <FormField label="New key name" className="flex-1">
-          {(id) => (
-            <TextInput
-              id={id}
-              placeholder="Deploy pipeline"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          )}
-        </FormField>
-        <Button
-          type="submit"
-          variant="primary"
-          icon={<Plus size={15} />}
-          loading={create.isPending}
-          disabled={!name.trim()}
-        >
-          Create key
-        </Button>
+      <form onSubmit={submit} className="flex flex-col gap-3 border-b border-line px-5 py-4">
+        <div className="flex items-end gap-2">
+          <FormField label="New key name" className="flex-1">
+            {(id) => (
+              <TextInput
+                id={id}
+                placeholder="Deploy pipeline"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            )}
+          </FormField>
+          <Button
+            type="submit"
+            variant="primary"
+            icon={<Plus size={15} />}
+            loading={create.isPending}
+            disabled={!name.trim()}
+          >
+            Create key
+          </Button>
+        </div>
+        <ApiKeyScopesField value={scopes} onChange={setScopes} disabled={create.isPending} />
       </form>
       {keys.isLoading ? (
         <PageLoader />

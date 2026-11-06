@@ -24,7 +24,9 @@ import {
   type Item,
   isParameterDisplayed,
   type NodeType,
+  type TriggerRunResult,
   type WebhookLifecycleContext,
+  type WebhookResponse,
   Workflow,
   type WorkflowDefinition,
   type WorkflowNode,
@@ -42,7 +44,7 @@ import { binaryDirOf, type ExecutionService } from './executions';
 import { loadPublishedDefinition, publishedDefinition } from './published-workflow';
 import type { Leadership } from './queue';
 import { TEST_WEBHOOK_TTL_MS } from './test-webhooks';
-import { type NodeWebhook, nodeWebhooks, workflowWebhooks } from './webhook-paths';
+import { type NodeWebhook, nodeWebhooks, webhookUrlBase, workflowWebhooks } from './webhook-paths';
 import { assertNotArchived } from './workflow-rules';
 
 export interface ValidationIssue {
@@ -696,7 +698,8 @@ export class ActiveWorkflowManager {
       getNodeWebhookUrl: (name: string) => {
         const type = this.deps.nodeTypes.get(node.type)!;
         const match = nodeWebhooks(workflow, node, type).find((h) => h.webhookName === name) ?? hook;
-        const prefix = testUrls ? 'webhook-test' : 'webhook';
+        const urlBase = webhookUrlBase(match.description);
+        const prefix = testUrls ? `${urlBase}-test` : urlBase;
         return `${this.deps.config.baseUrl}/${prefix}/${tenant.slug}/${match.path}`;
       },
       getWebhookName: () => hook.webhookName,
@@ -850,8 +853,16 @@ export class ActiveWorkflowManager {
             this.deps.config.scheduleMisfireGraceS,
           )
         : undefined,
-      emit: (data, responsePromise) => {
-        void this.startFromTrigger(tenant, entry, node, data?.[0] ?? [], responsePromise);
+      emit: (data, responsePromise, responseHook) => {
+        void this.startFromTrigger(
+          tenant,
+          entry,
+          node,
+          data?.[0] ?? [],
+          responsePromise,
+          undefined,
+          responseHook,
+        );
       },
       emitError: (error) => {
         this.deps.logger.warn(
@@ -934,8 +945,10 @@ export class ActiveWorkflowManager {
     entry: RunningTriggers,
     node: WorkflowNode,
     items: Item[],
-    responsePromise?: { resolve(value: unknown): void; reject(err: Error): void },
+    responsePromise?: { resolve(result: TriggerRunResult): void; reject(err: Error): void },
     pollExecutionId?: string,
+    /** n8n's sendResponse hook: unused until L12 */
+    _responseHook?: (response: WebhookResponse) => void,
   ): Promise<boolean> {
     if (entry.abort.signal.aborted) return false;
     // a poll already stored its binary data under its execution id; trigger() emits move theirs there
@@ -961,7 +974,10 @@ export class ActiveWorkflowManager {
         const outcome = await started.finished;
         if (outcome.status === 'error')
           responsePromise.reject(new Error(outcome.error?.message ?? 'Execution failed'));
-        else responsePromise.resolve(outcome);
+        else {
+          const { executionId: id, status, error } = outcome;
+          responsePromise.resolve({ executionId: id, status, ...(error ? { error: error.message } : {}) });
+        }
       }
       return true;
     } catch (error) {

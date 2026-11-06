@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { DataObject, Item, NodeType, WebhookContext, WebhookResponseData } from '@workflow/workflow';
+import { isBotUserAgent } from '../../utils/bots';
 import { type SignaturePreset, verifyWebhookSignature } from '../../utils/webhook-signature';
 
 function safeEqual(a: string, b: string): boolean {
@@ -248,7 +249,7 @@ export const WebhookNode: NodeType = {
     if (allowList.length && (!req.ip || !allowList.includes(req.ip)))
       return unauthorized('IP is not allowed', 403);
 
-    if (options.ignoreBots && /bot|crawler|spider|preview/i.test(header(ctx, 'user-agent') ?? '')) {
+    if (options.ignoreBots && isBotUserAgent(header(ctx, 'user-agent'))) {
       return unauthorized('Bots are ignored', 403);
     }
 

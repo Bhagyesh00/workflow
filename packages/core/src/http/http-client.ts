@@ -144,9 +144,11 @@ function pinnedLookup(host: string, addresses: ResolvedAddress[]): AllowedHost['
   };
 }
 
-function createGuardedAgent(policy: SsrfPolicy, rejectUnauthorized = true): Agent {
+function createGuardedAgent(policy: SsrfPolicy, rejectUnauthorized = true, bodyTimeout?: number): Agent {
   const connector = buildConnector({ rejectUnauthorized, lookup: guardedLookup(policy) });
   return new Agent({
+    // undici's own limit on a silent body (5 minutes) stays, except where a caller lifts it
+    ...(bodyTimeout === undefined ? {} : { bodyTimeout }),
     // runs for every new connection, redirect hops included; IP literals never reach `lookup`, so check them here
     connect(options, callback) {
       const host = options.hostname.replace(/^\[|\]$/g, '');
@@ -240,6 +242,9 @@ export class HttpClient {
   private readonly policy: SsrfPolicy;
   private readonly agent: Agent;
   private readonly insecureAgent: Agent;
+  /** for `streamNoTotalTimeout`: a stream may stay silent for as long as it likes */
+  private readonly streamAgent: Agent;
+  private readonly insecureStreamAgent: Agent;
   private readonly maxResponseBytes: number;
   private readonly defaultTimeoutMs: number;
   private readonly userAgent: string;
@@ -248,6 +253,8 @@ export class HttpClient {
     this.policy = { enabled: true, allow: [], deny: [], ...options.ssrf };
     this.agent = createGuardedAgent(this.policy);
     this.insecureAgent = createGuardedAgent(this.policy, false);
+    this.streamAgent = createGuardedAgent(this.policy, true, 0);
+    this.insecureStreamAgent = createGuardedAgent(this.policy, false, 0);
     this.maxResponseBytes = options.maxResponseBytes ?? 100 * 1024 * 1024;
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 300_000;
     this.userAgent = options.userAgent ?? 'workflow-platform/0.1';
@@ -347,9 +354,26 @@ export class HttpClient {
       }
     }
 
-    const timeout = AbortSignal.timeout(options.timeout ?? this.defaultTimeoutMs);
+    const timeoutMs = options.timeout ?? this.defaultTimeoutMs;
+    const openStream = options.responseType === 'stream' && options.streamNoTotalTimeout === true;
+    // an open-ended stream: the timer below stops once the headers are in; `signal` still ends the stream
+    const headerDeadline = openStream ? new AbortController() : undefined;
+    const headerTimer = headerDeadline
+      ? setTimeout(
+          () => headerDeadline.abort(new DOMException('The operation timed out', 'TimeoutError')),
+          timeoutMs,
+        )
+      : undefined;
+    headerTimer?.unref();
+    const timeout = headerDeadline?.signal ?? AbortSignal.timeout(timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    const dispatcher: Dispatcher = options.skipSslCertificateValidation ? this.insecureAgent : this.agent;
+    const dispatcher: Dispatcher = options.skipSslCertificateValidation
+      ? openStream
+        ? this.insecureStreamAgent
+        : this.insecureAgent
+      : openStream
+        ? this.streamAgent
+        : this.agent;
 
     const init: RequestInit = {
       method,
@@ -367,48 +391,55 @@ export class HttpClient {
         ? fetchWithCredentialDomains(target, requestInit, allowedDomains, (u, i) => this.send(u, i))
         : this.send(target, requestInit);
 
-    let response = await fetchOnce(url, init);
-    if (digest && options.auth && response.status === 401) {
-      response = await this.answerDigest(response, url, init, options.auth, fetchOnce);
-    }
+    try {
+      let response = await fetchOnce(url, init);
+      if (digest && options.auth && response.status === 401) {
+        response = await this.answerDigest(response, url, init, options.auth, fetchOnce);
+      }
 
-    const responseHeaders: Record<string, string> = {};
-    response.headers.forEach((v, k) => {
-      responseHeaders[k] = v;
-    });
-    const isRedirect = response.status >= 300 && response.status < 400 && options.followRedirects === false;
-    const failed =
-      !options.ignoreHttpStatusErrors && (response.status < 200 || response.status >= 300) && !isRedirect;
-    // a failed streamed request is read whole like any other, so the HttpError carries the parsed body
-    const parsed: unknown =
-      options.responseType === 'stream' && !failed
-        ? streamLimited(response as unknown as Response, this.maxResponseBytes)
-        : parseBody(
-            await readLimited(response as unknown as Response, this.maxResponseBytes),
-            responseHeaders['content-type'] ?? '',
-            options.responseType === 'stream' ? 'auto' : (options.responseType ?? 'auto'),
-          );
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((v, k) => {
+        responseHeaders[k] = v;
+      });
+      const isRedirect = response.status >= 300 && response.status < 400 && options.followRedirects === false;
+      const failed =
+        !options.ignoreHttpStatusErrors && (response.status < 200 || response.status >= 300) && !isRedirect;
+      // a failed streamed request is read whole like any other, so the HttpError carries the parsed body
+      const parsed: unknown =
+        options.responseType === 'stream' && !failed
+          ? streamLimited(
+              response as unknown as Response,
+              openStream ? Number.POSITIVE_INFINITY : this.maxResponseBytes,
+            )
+          : parseBody(
+              await readLimited(response as unknown as Response, this.maxResponseBytes),
+              responseHeaders['content-type'] ?? '',
+              options.responseType === 'stream' ? 'auto' : (options.responseType ?? 'auto'),
+            );
 
-    if (failed) {
-      throw new HttpError(
-        `Request failed with status code ${response.status}`,
-        response.status,
-        response.statusText,
-        parsed,
-        responseHeaders,
-        { method, url: `${url.origin}${url.pathname}` },
-      );
-    }
+      if (failed) {
+        throw new HttpError(
+          `Request failed with status code ${response.status}`,
+          response.status,
+          response.statusText,
+          parsed,
+          responseHeaders,
+          { method, url: `${url.origin}${url.pathname}` },
+        );
+      }
 
-    if (options.returnFullResponse) {
-      return {
-        body: parsed as T,
-        headers: responseHeaders,
-        statusCode: response.status,
-        statusMessage: response.statusText,
-      };
+      if (options.returnFullResponse) {
+        return {
+          body: parsed as T,
+          headers: responseHeaders,
+          statusCode: response.status,
+          statusMessage: response.statusText,
+        };
+      }
+      return parsed as T;
+    } finally {
+      clearTimeout(headerTimer);
     }
-    return parsed as T;
   }
 
   /** one fetch on the guarded dispatcher; a connect-time block surfaces as the SsrfBlockedError */
@@ -449,7 +480,12 @@ export class HttpClient {
   }
 
   async close(): Promise<void> {
-    await Promise.all([this.agent.close(), this.insecureAgent.close()]);
+    await Promise.all([
+      this.agent.close(),
+      this.insecureAgent.close(),
+      this.streamAgent.close(),
+      this.insecureStreamAgent.close(),
+    ]);
   }
 }
 

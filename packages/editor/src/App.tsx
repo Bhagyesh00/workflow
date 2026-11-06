@@ -16,10 +16,12 @@ import { PageLoader } from './components/ui/misc';
 import { Toaster } from './components/ui/Toaster';
 import { applyTheme } from './lib/brand';
 import { AcceptInvitationPage, LoginPage, SignupPage } from './pages/auth/AuthPages';
+import { FormSignInPage } from './pages/auth/FormSignInPage';
 import { NotFoundPage, RouteErrorPage } from './pages/ErrorPages';
 import { ExecutionsPage } from './pages/ExecutionsPage';
 import { InboxPage } from './pages/InboxPage';
 import { ReviewDetailPage } from './pages/ReviewDetailPage';
+import { SecretsSettingsPage } from './pages/SecretsSettingsPage';
 import { SecuritySettingsPage } from './pages/SecuritySettingsPage';
 import {
   AccountSettingsPage,
@@ -41,6 +43,12 @@ const ExecutionDetailPage = lazy(() =>
 const CredentialsPage = lazy(() =>
   import('./pages/CredentialsPage').then((m) => ({ default: m.CredentialsPage })),
 );
+const DataTablesPage = lazy(() =>
+  import('./pages/DataTablesPage').then((m) => ({ default: m.DataTablesPage })),
+);
+const DataTableDetailPage = lazy(() =>
+  import('./pages/DataTableDetailPage').then((m) => ({ default: m.DataTableDetailPage })),
+);
 
 function Lazy({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<PageLoader />}>{children}</Suspense>;
@@ -52,6 +60,8 @@ export const routes: RouteObject[] = [
   { path: '/invitation/:token', element: <AcceptInvitationPage />, errorElement: <RouteErrorPage /> },
   // links sent before the server emitted /invitation/:token
   { path: '/invitations/:token', element: <AcceptInvitationPage />, errorElement: <RouteErrorPage /> },
+  // P4-16: signed-out visitors of a protected form land here; outside the server's /form/ prefix
+  { path: '/form-auth', element: <FormSignInPage />, errorElement: <RouteErrorPage /> },
   {
     path: '/',
     element: <AppShell />,
@@ -87,6 +97,22 @@ export const routes: RouteObject[] = [
         ),
       },
       {
+        path: 'data-tables',
+        element: (
+          <Lazy>
+            <DataTablesPage />
+          </Lazy>
+        ),
+      },
+      {
+        path: 'data-tables/:id',
+        element: (
+          <Lazy>
+            <DataTableDetailPage />
+          </Lazy>
+        ),
+      },
+      {
         path: 'settings',
         element: <SettingsLayout />,
         children: [
@@ -96,6 +122,7 @@ export const routes: RouteObject[] = [
           { path: 'api-keys', element: <ApiKeysSettingsPage /> },
           { path: 'variables', element: <VariablesSettingsPage /> },
           { path: 'security', element: <SecuritySettingsPage /> },
+          { path: 'external-secrets', element: <SecretsSettingsPage /> },
         ],
       },
       { path: '*', element: <NotFoundPage /> },

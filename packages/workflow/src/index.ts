@@ -1,5 +1,6 @@
 export * from './ai-types';
 export * from './credential-domain-restrictions';
+export * from './data-tables';
 export * from './diff';
 export * from './dirty-nodes';
 export * from './errors';

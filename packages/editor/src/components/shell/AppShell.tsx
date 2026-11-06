@@ -13,6 +13,7 @@ import {
   PanelLeftOpen,
   Settings,
   Sun,
+  Table2,
   Workflow,
 } from 'lucide-react';
 import { useEffect, useSyncExternalStore } from 'react';
@@ -30,6 +31,7 @@ import type { Me } from '../../api/types';
 import { CommandBar } from '../../features/command-bar/CommandBar';
 import { InboxNavBadge } from '../../features/reviews/InboxNavBadge';
 import { toast, useUiStore } from '../../stores/ui-store';
+import { DataTableStorageBanner } from '../data-tables/StorageBanner';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { Menu } from '../ui/Menu';
@@ -59,6 +61,7 @@ const NAV = [
   // P3-19: shown while workflow reviews are on for the workspace
   { to: '/inbox', label: 'Inbox', icon: Inbox },
   { to: '/credentials', label: 'Credentials', icon: KeyRound },
+  { to: '/data-tables', label: 'Data tables', icon: Table2 },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -337,6 +340,7 @@ export function AppShell() {
         </div>
       </nav>
       <main className="min-w-0 flex-1 overflow-auto">
+        <DataTableStorageBanner />
         <Outlet />
       </main>
     </div>

@@ -9,6 +9,7 @@ import type {
   NodeType,
 } from '@workflow/workflow';
 import pg from 'pg';
+import { postgresCredentialTest } from '../../../credential-tests/postgres';
 import { runSql, type SqlPool } from './runner';
 import { postgresDialect, sqlProperties } from './sql';
 
@@ -26,7 +27,7 @@ interface PostgresCredentials extends DataObject {
 /** Build a pool whose connections go only to addresses that passed the SSRF policy. */
 export async function postgresPool(
   ctx: Pick<BaseContext, 'getCredentials' | 'helpers'>,
-  options: { connectionTimeoutSeconds?: number } = {},
+  options: { connectionTimeoutSeconds?: number; keepAliveDelayMs?: number } = {},
 ): Promise<pg.Pool> {
   const creds = await ctx.getCredentials<PostgresCredentials>('postgres');
   const host = String(creds.host ?? '').trim();
@@ -60,6 +61,9 @@ export async function postgresPool(
     ssl,
     max: Math.min(50, Math.max(1, Number(creds.maxConnections ?? 5))),
     connectionTimeoutMillis: Math.max(1, Number(options.connectionTimeoutSeconds ?? 30)) * 1000,
+    ...(options.keepAliveDelayMs === undefined
+      ? {}
+      : { keepAlive: true, keepAliveInitialDelayMillis: options.keepAliveDelayMs }),
     idleTimeoutMillis: 10_000,
     application_name: 'workflow-platform',
   });
@@ -121,7 +125,7 @@ export const PostgresNode: NodeType = {
     alias: ['sql', 'database', 'postgresql', 'pg', 'query', 'supabase'],
     subtitle: '={{ $parameter.operation }}',
     usableAsTool: true,
-    credentials: [{ name: 'postgres', required: true }],
+    credentials: [{ name: 'postgres', required: true, testedBy: 'postgresCredentialTest' }],
     properties: sqlProperties({ schema: true }),
   },
 
@@ -137,6 +141,7 @@ export const PostgresNode: NodeType = {
   },
 
   methods: {
+    credentialTest: { postgresCredentialTest },
     listSearch: {
       async searchSchemas(ctx, filter): Promise<ListSearchResult> {
         return withPool(ctx, async (pool) => {

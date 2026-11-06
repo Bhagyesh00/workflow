@@ -1,5 +1,5 @@
 /**
- * Per-user favorites (P3-07): workflows and folders. Every query filters tenant_id, and the
+ * Per-user favorites (P3-07, P4-03): workflows, folders and data tables. Every query filters tenant_id, and the
  * per-user methods filter user_id as well.
  */
 import { and, eq, sql } from 'drizzle-orm';
@@ -7,7 +7,7 @@ import type { DbOrTx } from '../db/client';
 import { userFavorites } from '../db/schema';
 import { isUuid } from './util';
 
-export type FavoriteResourceType = 'workflow' | 'folder';
+export type FavoriteResourceType = 'workflow' | 'folder' | 'dataTable';
 
 export interface FavoriteRow {
   resourceType: FavoriteResourceType;
@@ -30,12 +30,13 @@ export class FavoriteRepository {
       name: string;
       created_at: Date;
     }>(sql`
-      select f.resource_type, f.resource_id, coalesce(w.name, fo.name) as name, f.created_at
+      select f.resource_type, f.resource_id, coalesce(w.name, fo.name, dt.name) as name, f.created_at
       from user_favorites f
       left join workflows w on f.resource_type = 'workflow' and w.id = f.resource_id and w.tenant_id = f.tenant_id
       left join folders fo on f.resource_type = 'folder' and fo.id = f.resource_id and fo.tenant_id = f.tenant_id
+      left join data_tables dt on f.resource_type = 'dataTable' and dt.id = f.resource_id and dt.tenant_id = f.tenant_id
       where f.tenant_id = ${tenantId} and f.user_id = ${userId}::uuid
-        and ((w.id is not null and not w.is_archived) or fo.id is not null)
+        and ((w.id is not null and not w.is_archived) or fo.id is not null or dt.id is not null)
       order by f.created_at asc, f.resource_id asc`);
     return result.rows.map((r) => ({
       resourceType: r.resource_type,

@@ -5,11 +5,14 @@
 import type {
   Connections,
   CredentialTypeDescription,
+  DataTableColumnInput,
+  DataTableDryRunOption,
   ExecutionErrorShape,
   ExecutionMode,
   ExecutionState,
   ExecutionStatus,
   Item,
+  NodeProperty,
   NodeTypeDescription,
   RunData,
   StickyNote,
@@ -291,12 +294,12 @@ export interface FolderUpdateBody {
   tagIds?: string[];
 }
 
-export type FavoriteResourceType = 'workflow' | 'folder';
+export type FavoriteResourceType = 'workflow' | 'folder' | 'dataTable';
 
 export interface Favorite {
   resourceType: FavoriteResourceType;
   resourceId: string;
-  /** workflow or folder name */
+  /** workflow, folder or data table name */
   name: string;
   createdAt: string;
 }
@@ -400,6 +403,8 @@ export interface ApiKey {
   prefix?: string;
   createdAt?: string;
   lastUsedAt?: string | null;
+  /** P4-18: empty means every scope */
+  scopes?: string[];
   [key: string]: unknown;
 }
 
@@ -407,6 +412,7 @@ export interface CreatedApiKey {
   id: string;
   name: string;
   key: string;
+  scopes?: string[];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -558,3 +564,172 @@ export const PUSH_EVENT_TYPES: PushEventType[] = [
 ];
 
 export type { CredentialTypeDescription, NodeTypeDescription };
+
+// ---------------------------------------------------------------------------------------------
+// Test listening (P4-01, P4-21)
+// ---------------------------------------------------------------------------------------------
+
+/** POST /workflows/:id/listen-test-webhook */
+export interface ListenTestWebhookResult {
+  testUrl: string;
+  expiresAt: string;
+  /** the `/form-test/...` URL of each form-trigger hook of the node; empty for other nodes */
+  formTestUrls: string[];
+}
+
+/** POST /workflows/:id/listen-test-trigger */
+export interface ListenTestTriggerResult {
+  expiresAt: string;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Data tables (P4-03, P4-05): the table, column, row and filter shapes are the engine's
+// ---------------------------------------------------------------------------------------------
+
+export type {
+  DataTableCellValue,
+  DataTableChange,
+  DataTableColumn,
+  DataTableColumnInput,
+  DataTableColumnType,
+  DataTableDryRunOption,
+  DataTableDryRunRow,
+  DataTableFilter,
+  DataTableFilterClause,
+  DataTableFilterCondition,
+  DataTableInfo,
+  DataTableInsertResult,
+  DataTableInsertReturnType,
+  DataTableListQuery,
+  DataTablePage,
+  DataTableRow,
+  DataTableRowInput,
+  DataTableRowResult,
+  DataTableRowsQuery,
+  DataTableSortDirection,
+} from '@workflow/workflow';
+
+/** POST /data-tables; with `csv` the rows of the CSV text become the first rows */
+export interface DataTableCreateBody {
+  name: string;
+  columns: DataTableColumnInput[];
+  csv?: string;
+  hasHeaders?: boolean;
+}
+
+/** POST /data-tables/:id/columns; `index` is the 0-based position (absent = last) */
+export interface DataTableColumnCreateBody extends DataTableColumnInput {
+  index?: number;
+}
+
+export type DataTableQuotaStatus = 'ok' | 'warn' | 'error';
+
+/** GET /data-tables/limits: the workspace's storage */
+export interface DataTableLimits {
+  totalBytes: number;
+  maxBytes: number;
+  warningBytes: number;
+  quotaStatus: DataTableQuotaStatus;
+  /** the largest CSV an upload may have right now, in bytes */
+  uploadMaxFileSize: number;
+  /** size per table, by table id */
+  dataTables: Record<string, { id: string; name: string; sizeBytes: number }>;
+}
+
+/** GET /data-tables/:id/dependencies: the workflows that use a table */
+export interface DataTableDependency {
+  type: 'workflow';
+  id: string;
+  name: string;
+}
+
+/** POST /data-tables/csv/preview */
+export interface DataTableCsvPreview {
+  rowCount: number;
+  columnCount: number;
+  columns: DataTableColumnInput[];
+}
+
+/** POST /data-tables/:id/import-csv */
+export interface DataTableCsvImportResult {
+  importedRows: number;
+  systemColumnsIgnored: string[];
+}
+
+/** what a row write may ask for; without `returnData` the server answers `true` */
+export interface DataTableWriteOptions extends DataTableDryRunOption {
+  returnData?: boolean;
+}
+
+/** GET /data-tables/:id/download-csv: the page turns it into a file */
+export interface DataTableCsvDownload {
+  csvContent: string;
+  dataTableName: string;
+}
+
+// ---------------------------------------------------------------------------------------------
+// External secrets (P4-07)
+// ---------------------------------------------------------------------------------------------
+
+export type SecretConnectionState =
+  | 'initializing'
+  | 'initialized'
+  | 'connecting'
+  | 'connected'
+  | 'error'
+  | 'retrying';
+
+/** GET /secret-providers/types: `properties` is the form of a connection's settings */
+export interface SecretProviderTypeInfo {
+  name: string;
+  displayName: string;
+  properties: NodeProperty[];
+}
+
+/** GET /secret-providers/connections: secret settings arrive blanked */
+export interface SecretConnection {
+  id: string;
+  providerKey: string;
+  type: string;
+  settings: Record<string, unknown>;
+  isEnabled: boolean;
+  state: SecretConnectionState;
+  /** fixed text, never a provider's response */
+  lastError: string | null;
+  secretsCount: number;
+  /** how many credentials use this connection */
+  credentialsCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SecretConnectionCreateBody {
+  providerKey: string;
+  type: string;
+  settings: Record<string, unknown>;
+}
+
+/** a blanked secret sent back keeps its stored value */
+export interface SecretConnectionPatchBody {
+  type?: string;
+  settings?: Record<string, unknown>;
+  isEnabled?: boolean;
+}
+
+export interface SecretConnectionTestResult {
+  success: boolean;
+  testState: 'connected' | 'tested' | 'error';
+  error?: string;
+}
+
+/** GET /secret-providers/completions/secrets: secret names by connection key, for `$secrets` autocomplete */
+export type SecretCompletions = Record<string, string[]>;
+
+// ---------------------------------------------------------------------------------------------
+// Form sign-in (P4-16)
+// ---------------------------------------------------------------------------------------------
+
+/** POST /form-auth/code: one-time code the form swaps for its token */
+export interface FormAuthCode {
+  code: string;
+}

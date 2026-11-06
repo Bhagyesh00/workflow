@@ -1,5 +1,5 @@
 /**
- * Per-user favorites (P3-07): workflows and folders. A user only ever sees and changes their own.
+ * Per-user favorites (P3-07, P4-03): workflows, folders and data tables. A user only ever sees and changes their own.
  */
 import type { ServiceDeps } from '../context';
 import { ApiError } from '../http/errors';
@@ -8,7 +8,7 @@ import type { FavoriteResourceType } from '../repositories';
 export interface FavoriteDTO {
   resourceType: FavoriteResourceType;
   resourceId: string;
-  /** workflow or folder name */
+  /** workflow, folder or data table name */
   name: string;
   createdAt: string;
 }
@@ -39,9 +39,13 @@ export class FavoriteService {
       const row = await repos.workflows.get(tenantId, resourceId);
       if (!row) throw ApiError.notFound('Workflow');
       name = row.name;
-    } else {
+    } else if (type === 'folder') {
       const row = await repos.folders.get(tenantId, resourceId);
       if (!row) throw ApiError.notFound('Folder');
+      name = row.name;
+    } else {
+      const row = await repos.dataTables.get(tenantId, resourceId);
+      if (!row) throw ApiError.notFound('Data table');
       name = row.name;
     }
     const createdAt = await repos.favorites.add(tenantId, userId, type, resourceId);
@@ -58,7 +62,7 @@ export class FavoriteService {
     await this.deps.repos.favorites.remove(tenantId, userId, type, resourceId);
   }
 
-  /** called when a workflow or folder is deleted, BEFORE its row goes */
+  /** called when a workflow, folder or data table is deleted, BEFORE its row goes */
   async removeForResource(tenantId: string, type: FavoriteResourceType, resourceId: string): Promise<void> {
     await this.deps.repos.favorites.removeForResource(tenantId, type, resourceId);
   }

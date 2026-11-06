@@ -2,12 +2,14 @@
  * Contracts between the execution engine and node implementations.
  * Implementations of these contexts live in `@workflow/core`.
  */
+import type { DataTableAccess } from './data-tables';
 import type {
   BinaryData,
   ConnectionType,
   CredentialType,
   DataObject,
   ExecutionMode,
+  ExecutionStatus,
   HttpFullResponse,
   HttpRequestOptions,
   Item,
@@ -65,6 +67,8 @@ export interface NodeHelpers {
   resolveAllowedHost(host: string): Promise<AllowedHost>;
   /** the instance's size caps for file, archive, image and spreadsheet nodes (defaults overlaid by config) */
   getInstanceLimits(): InstanceLimits;
+  /** the tenant's data tables; undefined where the host stores none */
+  dataTables?: DataTableAccess;
 }
 
 /**
@@ -194,19 +198,52 @@ export interface ExecuteContext extends BaseContext {
   /** per-node scratch state that survives across runs of the same execution (loops) */
   getContext(scope: 'node' | 'flow'): DataObject;
   setCustomData(key: string, value: string): void;
-  /** run user JS in the isolated sandbox */
+  /** run user code in the isolated sandbox */
   runCode(options: RunCodeOptions): Promise<unknown>;
+  /** merged into the metadata of this node's task (TaskData.metadata) */
+  setMetadata(data: DataObject): void;
+  /** every node upstream of this one over main connections, nearest first */
+  getParentNodes(): ConnectedNode[];
+  /** every node downstream of this one over main connections, nearest first */
+  getChildNodes(): ConnectedNode[];
+}
+
+/** a node reached through the workflow graph */
+export interface ConnectedNode {
+  name: string;
+  type: string;
 }
 
 export interface RunCodeOptions {
   code: string;
   mode: 'runOnceForAllItems' | 'runOnceForEachItem';
   itemIndex?: number;
-  language?: 'javaScript';
+  /**
+   * The Code node maps its alias `python` to `pythonNative`. ai.toolCode stores n8n's value `python`
+   * and maps it to `pythonNative` in this call; the engine also accepts a stored `python` at run time.
+   */
+  language?: 'javaScript' | 'pythonNative';
+  /** the Code tool's input, `_query` in Python */
+  query?: unknown;
+}
+
+/** how the run a trigger started ended */
+export interface TriggerRunResult {
+  executionId: string;
+  status: ExecutionStatus;
+  error?: string;
 }
 
 export interface TriggerContext extends BaseContext {
-  emit(data: Item[][], responsePromise?: { resolve(value: unknown): void; reject(err: Error): void }): void;
+  /**
+   * Start a run with `data`. Our 2nd = n8n's donePromise (run result, as today), our 3rd = n8n's
+   * responsePromise / sendResponse hook.
+   */
+  emit(
+    data: Item[][],
+    responsePromise?: { resolve(r: TriggerRunResult): void; reject(e: Error): void },
+    responseHook?: (r: WebhookResponse) => void,
+  ): void;
   emitError(error: Error): void;
   /** register a cron job; `slot` is the scheduled time of the tick; returned function unregisters it */
   registerCron(expression: string, onTick: (slot: Date) => void): () => void;
@@ -249,6 +286,38 @@ export interface WebhookContext extends BaseContext {
   getQueryData(): DataObject;
   getParamsData(): Record<string, string>;
   getWebhookName(): string;
+  /** every node upstream of this one over main connections, nearest first */
+  getParentNodes(): ConnectedNode[];
+  /** every node downstream of this one over main connections, nearest first */
+  getChildNodes(): ConnectedNode[];
+  /** `$execution.resumeFormUrl` of the execution this webhook belongs to; undefined when none */
+  getResumeFormUrl(): string | undefined;
+  /** the bytes of stored binary data; webhook requests have no input items to read them from */
+  getBinaryBuffer(binary: BinaryData): Promise<Uint8Array>;
+  /** a signed token that holds `payload` for `ttlSeconds`; throws where the host has no signer */
+  signFormToken(payload: DataObject, ttlSeconds: number): string;
+  /** the payload of a valid token; null when it is forged, expired, or the host has no signer */
+  verifyFormToken(token: string): DataObject | null;
+  /** n8n user auth for forms; undefined where the host has none */
+  getFormAuth(): FormAuthHelper | undefined;
+}
+
+/** the signed-in user a form hands to the workflow (n8n's four output fields) */
+export interface FormUser {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+}
+
+export interface FormAuthHelper {
+  /** where to send a visitor with no session; `returnTo` comes back after sign-in */
+  signInUrl(returnTo: string): string;
+  /** trade a one-time code for a form-auth token; null when the code is not valid */
+  exchangeCode(code: string): Promise<string | null>;
+  verifyToken(token: string): Promise<FormUser | null>;
+  /** whether the user may run this workflow */
+  canExecute(userId: string, workflowId: string): Promise<boolean>;
 }
 
 export interface WebhookResponseData {
@@ -319,6 +388,19 @@ export interface ListSearchResult {
   paginationToken?: string;
 }
 
+/** what a credential test may do: check hosts and connect through them, nothing that needs an execution */
+export interface CredentialTestContext {
+  helpers: Pick<NodeHelpers, 'resolveAllowedHost' | 'assertHostAllowed'>;
+  logger: Logger;
+  signal: AbortSignal;
+  getTenantId(): string;
+}
+
+export interface NodeCredentialTestResult {
+  status: 'OK' | 'Error';
+  message: string;
+}
+
 export interface NodeType {
   description: NodeTypeDescription;
   execute?(ctx: ExecuteContext): Promise<NodeOutput>;
@@ -332,6 +414,14 @@ export interface NodeType {
     listSearch?: Record<
       string,
       (ctx: LoadOptionsContext, filter?: string, paginationToken?: string) => Promise<ListSearchResult>
+    >;
+    /** named by `testedBy` on the node's credential description; `credential.data` is decrypted */
+    credentialTest?: Record<
+      string,
+      (
+        ctx: CredentialTestContext,
+        credential: { type: string; data: DataObject },
+      ) => Promise<NodeCredentialTestResult>
     >;
   };
 }

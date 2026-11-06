@@ -125,6 +125,8 @@ export class WorkflowExecute {
   private waitTill?: Date;
   /** hints the running node added with addExecutionHints */
   private nodeHints: NodeExecutionHint[] = [];
+  /** what the running node passed to setMetadata */
+  private nodeMetadata: DataObject = {};
   /** hooks of logged sub-node runs, chained so they land in order and finish before the parent node does */
   private subNodeHooks: Promise<void> = Promise.resolve();
   private startedAt = Date.now();
@@ -486,6 +488,7 @@ export class WorkflowExecute {
     const startTime = Date.now();
     this.waitTill = undefined;
     this.nodeHints = [];
+    this.nodeMetadata = {};
 
     let output: NodeOutput = null;
     let error: unknown;
@@ -548,7 +551,7 @@ export class WorkflowExecute {
           executionStatus: 'error',
           error: serialized,
           source,
-          metadata: attempts > 1 ? { attempt: attempts } : undefined,
+          metadata: this.taskMetadata(attempts),
         };
         runs.push(task);
         this.state.resultData.lastNodeExecuted = node.name;
@@ -595,7 +598,7 @@ export class WorkflowExecute {
       executionStatus: this.waitTill ? 'waiting' : 'success',
       data: finalOutput ? { main: finalOutput } : undefined,
       source,
-      metadata: attempts > 1 ? { attempt: attempts } : undefined,
+      metadata: this.taskMetadata(attempts),
     };
     const hints = [...this.nodeHints];
     if (errorOutputUsed) {
@@ -685,8 +688,9 @@ export class WorkflowExecute {
 
     const deps = this.contextDeps(node, effectiveExec, runIndex, signal);
     const closeFunctions: Array<() => Promise<void>> = [];
-    // a retried attempt starts without the hints of the attempt that failed
+    // a retried attempt starts without the hints and metadata of the attempt that failed
     this.nodeHints = [];
+    this.nodeMetadata = {};
     const ctx = createExecuteContext(deps, {
       getInputConnectionData: (type, itemIndex) =>
         this.supplySubNodes(node, nodeType, type, itemIndex, effectiveExec, signal, closeFunctions),
@@ -698,6 +702,9 @@ export class WorkflowExecute {
       addExecutionHints: (hints) => {
         this.nodeHints.push(...hints);
       },
+      setMetadata: (data) => {
+        Object.assign(this.nodeMetadata, data);
+      },
     });
     try {
       return await nodeType.execute(ctx);
@@ -707,6 +714,13 @@ export class WorkflowExecute {
         await close().catch((e) => this.services.logger.warn('Sub-node close failed', { error: String(e) }));
       }
     }
+  }
+
+  /** the metadata of a finished task: what the node set, plus the retry attempt that produced it */
+  private taskMetadata(attempts: number): TaskData['metadata'] {
+    const metadata: NonNullable<TaskData['metadata']> = { ...this.nodeMetadata };
+    if (attempts > 1) metadata.attempt = attempts;
+    return Object.keys(metadata).length ? metadata : undefined;
   }
 
   /** resolve AI sub-nodes attached to `parent` via `type` */

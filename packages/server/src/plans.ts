@@ -12,6 +12,8 @@ export interface PlanLimits {
   maxExecutionTimeout: number | null;
   /** executions older than this are pruned */
   pruneDays: number | null;
+  /** data table storage per workspace; unlike the others, null = DATA_TABLES_MAX_SIZE_BYTES applies */
+  dataTableBytes: number | null;
 }
 
 export const PLANS: Record<string, PlanLimits> = {
@@ -21,6 +23,7 @@ export const PLANS: Record<string, PlanLimits> = {
     concurrentExecutions: 5,
     maxExecutionTimeout: 300,
     pruneDays: 7,
+    dataTableBytes: null,
   },
   pro: {
     executionsPerMonth: 50_000,
@@ -28,6 +31,7 @@ export const PLANS: Record<string, PlanLimits> = {
     concurrentExecutions: 20,
     maxExecutionTimeout: 1_800,
     pruneDays: 30,
+    dataTableBytes: null,
   },
   unlimited: {
     executionsPerMonth: null,
@@ -35,6 +39,7 @@ export const PLANS: Record<string, PlanLimits> = {
     concurrentExecutions: null,
     maxExecutionTimeout: null,
     pruneDays: null,
+    dataTableBytes: null,
   },
 };
 
@@ -62,6 +67,11 @@ export function executionTimeoutMs(
   const caps = [config.executionTimeout.maxS];
   if (limits.maxExecutionTimeout) caps.push(limits.maxExecutionTimeout);
   return Math.min(requested, ...caps) * 1000;
+}
+
+/** the workspace's data table quota: the plan's override, else the instance setting */
+export function dataTableQuotaBytes(config: Config, limits: PlanLimits): number {
+  return limits.dataTableBytes ?? config.dataTables.maxSizeBytes;
 }
 
 export function currentPeriod(date = new Date()): string {

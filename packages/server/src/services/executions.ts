@@ -30,6 +30,7 @@ import {
   type ExecutionState,
   type ExecutionStatus,
   ExecutionTimeoutError,
+  type FormAuthHelper,
   type Item,
   type RunData,
   serializeError,
@@ -48,6 +49,7 @@ import { currentPeriod, effectiveLimits, executionTimeoutMs, type TenantSettings
 import type { Repositories } from '../repositories';
 import type { MessageBus, PushService } from './bus';
 import type { CredentialService } from './credentials';
+import type { DataTableService } from './data-tables';
 import type { Metrics } from './metrics';
 import { runtimeDefinition } from './published-workflow';
 import type { ExecutionJob, ExecutionQueue } from './queue';
@@ -149,6 +151,11 @@ export interface ExecutionServiceDeps {
   credentials: CredentialService;
   http: HttpClient;
   codeRunner: CodeRunner;
+  /** absent when PYTHON_ENABLED is off: the engine answers with the disabled text */
+  pythonRunner?: CodeRunner;
+  dataTables: DataTableService;
+  formTokens: NonNullable<ExecutionServices['formTokens']>;
+  formAuth: FormAuthHelper;
   logger: PinoLogger;
   push: PushService;
   bus: MessageBus;
@@ -183,8 +190,16 @@ export class ExecutionService {
    * execution, so knowing its id (webhook replies, logs, the editor) is not enough.
    */
   resumeUrl(executionId: string): string {
-    const signature = createHmac('sha256', this.resumeKeys[0]).update(executionId).digest('base64url');
-    return `${this.deps.config.baseUrl}/webhook-waiting/${executionId}/${signature}`;
+    return `${this.deps.config.baseUrl}/webhook-waiting/${executionId}/${this.resumeSignature(executionId)}`;
+  }
+
+  /** `/form-waiting/<executionId>/<signature>`: the form page of a waiting execution, signed as resumeUrl */
+  resumeFormUrl(executionId: string): string {
+    return `${this.deps.config.baseUrl}/form-waiting/${executionId}/${this.resumeSignature(executionId)}`;
+  }
+
+  private resumeSignature(executionId: string): string {
+    return createHmac('sha256', this.resumeKeys[0]).update(executionId).digest('base64url');
   }
 
   verifyResumeSignature(executionId: string, signature: string): boolean {
@@ -827,7 +842,8 @@ export class ExecutionService {
     /** aborts when the execution is stopped or times out; sub-workflows it waits for are canceled then */
     signal?: AbortSignal;
   }): Promise<ExecutionServices> {
-    const { config, repos, nodeTypes, credentials, http, codeRunner, logger } = this.deps;
+    const { config, repos, nodeTypes, credentials, http, codeRunner, pythonRunner, logger } = this.deps;
+    const { dataTables, formTokens, formAuth } = this.deps;
     const { tenant, executionId } = input;
     const settings = tenant.settings as TenantSettings;
     const depth = input.depth ?? 0;
@@ -839,11 +855,16 @@ export class ExecutionService {
       variables: await repos.variables.map(tenant.id),
       instanceBaseUrl: config.baseUrl,
       resumeUrl: executionId ? this.resumeUrl(executionId) : undefined,
+      resumeFormUrl: executionId ? this.resumeFormUrl(executionId) : undefined,
       nodeTypes,
       credentialTypes: credentials.types,
       credentials: credentials.provider(tenant.id),
       binaryData: this.binaryStore(tenant.id),
       codeRunner,
+      pythonRunner,
+      dataTables: dataTables.forTenant(tenant.id, { workflowId: input.workflowId }),
+      formTokens,
+      formAuth,
       http,
       logger: toWorkflowLogger(
         logger.child({
@@ -952,6 +973,15 @@ export class ExecutionService {
     } finally {
       signal.removeEventListener('abort', onAbort);
     }
+  }
+
+  /** an activation failure has no execution row, so it cannot go through startErrorWorkflow (L12) */
+  async runActivationErrorWorkflow(
+    _tenantId: string,
+    _workflowId: string,
+    _error: { message: string; node?: string },
+  ): Promise<void> {
+    throw new ApiError(501, 'not_built', 'not built');
   }
 
   private async startErrorWorkflow(

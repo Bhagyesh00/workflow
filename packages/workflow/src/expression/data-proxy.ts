@@ -34,6 +34,8 @@ export interface ExpressionDataContext {
   /** source info for the active node's inputs (paired item resolution) */
   executeData?: ExecuteData;
   resumeUrl?: string;
+  /** `$execution.resumeFormUrl`: where a Wait or Form node's page is served */
+  resumeFormUrl?: string;
   customData?: {
     get(key: string): string | undefined;
     set(key: string, value: string): void;
@@ -215,6 +217,7 @@ export function createDataProxy(ctx: ExpressionDataContext): Record<string, unkn
     id: ctx.executionId,
     mode: ctx.mode === 'manual' ? 'test' : 'production',
     resumeUrl: ctx.resumeUrl,
+    resumeFormUrl: ctx.resumeFormUrl,
     customData: Object.freeze({
       set: (key: string, value: unknown) => ctx.customData?.set(String(key), String(value)),
       get: (key: string) => ctx.customData?.get(String(key)),

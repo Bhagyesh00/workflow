@@ -15,7 +15,12 @@ import type { ServerContext } from '../context';
 import { errorBody } from '../http/errors';
 import { SESSION_COOKIE } from '../services/auth';
 import { normalizePath } from '../services/webhook-paths';
-import { type IncomingWebhook, WebhookBodyError, type WebhookReply } from '../services/webhooks';
+import {
+  type IncomingWebhook,
+  WebhookBodyError,
+  type WebhookKind,
+  type WebhookReply,
+} from '../services/webhooks';
 
 const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const SANDBOX_CSP =
@@ -183,7 +188,7 @@ function send(reply: FastifyReply, result: WebhookReply) {
   return reply.send(JSON.stringify(result.body));
 }
 
-type Kind = 'production' | 'test';
+type Mode = 'production' | 'test';
 
 export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerContext }): Promise<void> {
   const { ctx } = opts;
@@ -226,31 +231,35 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
     }
   };
 
-  const handle = (kind: Kind) => async (request: FastifyRequest, reply: FastifyReply) => {
+  const handle = (mode: Mode, kind: WebhookKind) => async (request: FastifyRequest, reply: FastifyReply) => {
     const params = request.params as { tenantSlug: string; '*'?: string };
     const path = normalizePath(params['*'] ?? '');
     if (request.method === 'OPTIONS') {
       return send(
         reply,
-        await ctx.webhooks.handlePreflight(params.tenantSlug, path, request.headers, kind === 'test'),
+        await ctx.webhooks.handlePreflight(params.tenantSlug, path, request.headers, mode === 'test'),
       );
     }
     const incoming = incomingOf(request, path);
     return respond(reply, () =>
-      kind === 'production'
-        ? ctx.webhooks.handleProduction(params.tenantSlug, incoming)
-        : ctx.webhooks.handleTest(params.tenantSlug, incoming),
+      mode === 'production'
+        ? ctx.webhooks.handleProduction(params.tenantSlug, incoming, kind)
+        : ctx.webhooks.handleTest(params.tenantSlug, incoming, kind),
     );
   };
 
-  const waiting = async (request: FastifyRequest, reply: FastifyReply) => {
+  const waiting = (kind: WebhookKind) => async (request: FastifyRequest, reply: FastifyReply) => {
     const { executionId } = request.params as { executionId: string };
     const path = normalizePath((request.params as { '*'?: string })['*'] ?? '');
-    return respond(reply, () => ctx.webhooks.handleWaiting(executionId, incomingOf(request, path)));
+    return respond(reply, () => ctx.webhooks.handleWaiting(executionId, incomingOf(request, path), kind));
   };
 
-  app.all('/webhook/:tenantSlug/*', handle('production'));
-  app.all('/webhook-test/:tenantSlug/*', handle('test'));
-  app.all('/webhook-waiting/:executionId', waiting);
-  app.all('/webhook-waiting/:executionId/*', waiting);
+  app.all('/webhook/:tenantSlug/*', handle('production', 'webhook'));
+  app.all('/webhook-test/:tenantSlug/*', handle('test', 'webhook'));
+  app.all('/webhook-waiting/:executionId', waiting('webhook'));
+  app.all('/webhook-waiting/:executionId/*', waiting('webhook'));
+  app.all('/form/:tenantSlug/*', handle('production', 'form'));
+  app.all('/form-test/:tenantSlug/*', handle('test', 'form'));
+  app.all('/form-waiting/:executionId', waiting('form'));
+  app.all('/form-waiting/:executionId/*', waiting('form'));
 }

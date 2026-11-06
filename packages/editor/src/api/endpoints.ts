@@ -1,5 +1,23 @@
 /** One typed function per REST endpoint of the contract. */
-import type { BinaryData, ListSearchResult, NodePropertyOption, WorkflowNode } from '@workflow/workflow';
+import type {
+  BinaryData,
+  DataTableChange,
+  DataTableColumn,
+  DataTableFilter,
+  DataTableInfo,
+  DataTableInsertResult,
+  DataTableInsertReturnType,
+  DataTableListQuery,
+  DataTablePage,
+  DataTableRow,
+  DataTableRowInput,
+  DataTableRowResult,
+  DataTableRowsQuery,
+  DataTableSortDirection,
+  ListSearchResult,
+  NodePropertyOption,
+  WorkflowNode,
+} from '@workflow/workflow';
 import { ApiError, api, buildUrl, getCurrentTenant, request } from './client';
 import type {
   AnnotationPatchBody,
@@ -12,6 +30,14 @@ import type {
   CredentialSummary,
   CredentialTestResult,
   CredentialTypeDescription,
+  DataTableColumnCreateBody,
+  DataTableCreateBody,
+  DataTableCsvDownload,
+  DataTableCsvImportResult,
+  DataTableCsvPreview,
+  DataTableDependency,
+  DataTableLimits,
+  DataTableWriteOptions,
   ExecutionAnnotation,
   ExecutionDetail,
   ExecutionSummary,
@@ -22,8 +48,11 @@ import type {
   FolderDetail,
   FolderListQuery,
   FolderUpdateBody,
+  FormAuthCode,
   InboxQuery,
   InboxSummary,
+  ListenTestTriggerResult,
+  ListenTestWebhookResult,
   Me,
   Member,
   MoveWorkflowsBody,
@@ -39,6 +68,12 @@ import type {
   ReviewUser,
   Role,
   RunWorkflowBody,
+  SecretCompletions,
+  SecretConnection,
+  SecretConnectionCreateBody,
+  SecretConnectionPatchBody,
+  SecretConnectionTestResult,
+  SecretProviderTypeInfo,
   Settings,
   SettingsPatchBody,
   Tag,
@@ -140,7 +175,7 @@ export const workflowsApi = {
   run: (id: string, body: RunWorkflowBody) =>
     api.post<{ executionId: string }>(`/workflows/${enc(id)}/run`, body),
   listenTestWebhook: (id: string, nodeName: string) =>
-    api.post<{ testUrl: string; expiresAt: string }>(`/workflows/${enc(id)}/listen-test-webhook`, {
+    api.post<ListenTestWebhookResult>(`/workflows/${enc(id)}/listen-test-webhook`, {
       nodeName,
     }),
   stopListeningTestWebhook: (id: string, nodeName: string) =>
@@ -149,6 +184,10 @@ export const workflowsApi = {
       path: `/workflows/${enc(id)}/listen-test-webhook`,
       body: { nodeName },
     }),
+  /** P4-21: test-listen on a trigger without a URL */
+  listenTestTrigger: (id: string, nodeName: string) =>
+    api.post<ListenTestTriggerResult>(`/workflows/${enc(id)}/listen-test-trigger`, { nodeName }),
+  stopTestTrigger: (id: string) => api.delete<{ ok: true }>(`/workflows/${enc(id)}/listen-test-trigger`),
   webhookUrls: (id: string) => api.get<WebhookUrlInfo[]>(`/workflows/${enc(id)}/webhook-urls`),
   versions: (id: string, query: { limit?: number; cursor?: string } = {}) =>
     api.list<VersionSummary>(`/workflows/${enc(id)}/versions`, { ...query }),
@@ -329,6 +368,90 @@ export const membersApi = {
 
 export const apiKeysApi = {
   list: () => api.get<ApiKey[]>('/api-keys'),
-  create: (name: string) => api.post<CreatedApiKey>('/api-keys', { name }),
+  /** P4-18: empty `scopes` means every scope */
+  create: (name: string, scopes: string[] = []) => api.post<CreatedApiKey>('/api-keys', { name, scopes }),
   remove: (id: string) => api.delete<{ ok: true }>(`/api-keys/${enc(id)}`),
+};
+
+/** `?sortBy=` of the data table routes */
+const sortParam = (sort?: { column: string; direction: DataTableSortDirection }) =>
+  sort ? `${sort.column}:${sort.direction}` : undefined;
+
+/** P4-03: offset paging, because the grid shows page numbers */
+export const dataTablesApi = {
+  list: (query: DataTableListQuery = {}) =>
+    api.get<DataTablePage<DataTableInfo>>('/data-tables', {
+      skip: query.skip,
+      take: query.take,
+      filter: query.name ? JSON.stringify({ name: query.name }) : undefined,
+      sortBy: sortParam(query.sortBy),
+    }),
+  limits: () => api.get<DataTableLimits>('/data-tables/limits'),
+  get: (id: string) => api.get<DataTableInfo>(`/data-tables/${enc(id)}`),
+  create: (body: DataTableCreateBody) => api.post<DataTableInfo>('/data-tables', body),
+  rename: (id: string, name: string) => api.patch<DataTableInfo>(`/data-tables/${enc(id)}`, { name }),
+  remove: (id: string) => api.delete<{ ok: true }>(`/data-tables/${enc(id)}`),
+  dependencies: (id: string) => api.get<DataTableDependency[]>(`/data-tables/${enc(id)}/dependencies`),
+  columns: (id: string) => api.get<DataTableColumn[]>(`/data-tables/${enc(id)}/columns`),
+  addColumn: (id: string, body: DataTableColumnCreateBody) =>
+    api.post<DataTableColumn>(`/data-tables/${enc(id)}/columns`, body),
+  removeColumn: (id: string, columnId: string) =>
+    api.delete<{ ok: true }>(`/data-tables/${enc(id)}/columns/${enc(columnId)}`),
+  moveColumn: (id: string, columnId: string, targetIndex: number) =>
+    api.patch<DataTableColumn>(`/data-tables/${enc(id)}/columns/${enc(columnId)}/move`, { targetIndex }),
+  renameColumn: (id: string, columnId: string, name: string) =>
+    api.patch<DataTableColumn>(`/data-tables/${enc(id)}/columns/${enc(columnId)}/rename`, { name }),
+  rows: (id: string, query: DataTableRowsQuery = {}) =>
+    api.get<DataTablePage<DataTableRow>>(`/data-tables/${enc(id)}/rows`, {
+      skip: query.skip,
+      take: query.take,
+      filter: query.filter ? JSON.stringify(query.filter) : undefined,
+      sortBy: sortParam(query.sortBy),
+      search: query.search,
+    }),
+  insertRows: <T extends DataTableInsertReturnType>(id: string, rows: DataTableRowInput[], returnType: T) =>
+    api.post<DataTableInsertResult<T>>(`/data-tables/${enc(id)}/insert`, { data: rows, returnType }),
+  upsertRow: (id: string, change: DataTableChange, options: DataTableWriteOptions = {}) =>
+    api.post<DataTableRowResult[] | true>(`/data-tables/${enc(id)}/upsert`, { ...change, ...options }),
+  updateRows: (id: string, change: DataTableChange, options: DataTableWriteOptions = {}) =>
+    api.patch<DataTableRowResult[] | true>(`/data-tables/${enc(id)}/rows`, { ...change, ...options }),
+  deleteRows: (id: string, filter: DataTableFilter, options: DataTableWriteOptions = {}) =>
+    request<DataTableRowResult[] | true>({
+      method: 'DELETE',
+      path: `/data-tables/${enc(id)}/rows`,
+      query: { filter: JSON.stringify(filter), dryRun: options.dryRun, returnData: options.returnData },
+    }),
+  clearRows: (id: string) => api.delete<{ deletedCount: number }>(`/data-tables/${enc(id)}/rows/clear`),
+  downloadCsv: (id: string, includeSystemColumns = true) =>
+    api.get<DataTableCsvDownload>(`/data-tables/${enc(id)}/download-csv`, { includeSystemColumns }),
+  /** the CSV travels as text in the body; the server keeps no temp file */
+  csvPreview: (csv: string, hasHeaders: boolean) =>
+    api.post<DataTableCsvPreview>('/data-tables/csv/preview', { csv, hasHeaders }),
+  importCsv: (id: string, csv: string) =>
+    api.post<DataTableCsvImportResult>(`/data-tables/${enc(id)}/import-csv`, { csv }),
+};
+
+/** P4-07: admin and owner manage connections; an editor reads secret names through `completions` */
+export const secretsApi = {
+  types: () => api.get<SecretProviderTypeInfo[]>('/secret-providers/types'),
+  type: (type: string) => api.get<SecretProviderTypeInfo>(`/secret-providers/types/${enc(type)}`),
+  completions: () => api.get<SecretCompletions>('/secret-providers/completions/secrets'),
+  connections: () => api.get<SecretConnection[]>('/secret-providers/connections'),
+  connection: (providerKey: string) =>
+    api.get<SecretConnection>(`/secret-providers/connections/${enc(providerKey)}`),
+  createConnection: (body: SecretConnectionCreateBody) =>
+    api.post<SecretConnection>('/secret-providers/connections', body),
+  updateConnection: (providerKey: string, body: SecretConnectionPatchBody) =>
+    api.patch<SecretConnection>(`/secret-providers/connections/${enc(providerKey)}`, body),
+  removeConnection: (providerKey: string) =>
+    api.delete<{ ok: true }>(`/secret-providers/connections/${enc(providerKey)}`),
+  testConnection: (providerKey: string) =>
+    api.post<SecretConnectionTestResult>(`/secret-providers/connections/${enc(providerKey)}/test`),
+  reloadConnection: (providerKey: string) =>
+    api.post<{ success: boolean }>(`/secret-providers/connections/${enc(providerKey)}/reload`),
+};
+
+export const formAuthApi = {
+  /** P4-16: `returnTo` is the form to go back to; the session cookie names the user */
+  issueCode: (returnTo: string) => api.post<FormAuthCode>('/form-auth/code', { returnTo }),
 };

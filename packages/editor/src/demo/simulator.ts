@@ -23,6 +23,7 @@ import type { PushEvent } from '../api/types';
 import { buildExpressionContext, type PreviewWorkflow } from '../lib/expression-context';
 import { getAncestors, getMainParents, listConnections } from '../lib/workflow-ops';
 import { demoContacts } from './fixtures';
+import { simulateDataTableNode } from './mock-data-tables';
 
 export interface SimulationInput {
   executionId: string;
@@ -258,6 +259,8 @@ export async function simulateExecution(input: SimulationInput): Promise<Simulat
       }
       case 'core.merge':
         return [inputs.flat().map((item, i) => ({ json: item.json, pairedItem: { item: i } }))];
+      case 'core.dataTable':
+        return simulateDataTableNode(node, items);
       case 'core.code':
         emit({
           type: 'consoleMessage',

@@ -27,7 +27,47 @@ const list = z
       .filter(Boolean),
   );
 
+/** a comma list with a default; an empty value means an empty list, not the default */
+const listOr = (fallback: string[]) =>
+  z
+    .string()
+    .optional()
+    .transform((v) =>
+      v === undefined
+        ? fallback
+        : v
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+    );
+
 const MB = 1024 * 1024;
+
+/** n8n's N8N_RUNNERS_BUILTINS_DENY default */
+const PYTHON_BUILTINS_DENY = [
+  'eval',
+  'exec',
+  'compile',
+  'open',
+  'input',
+  'breakpoint',
+  'getattr',
+  'object',
+  'type',
+  'vars',
+  'setattr',
+  'delattr',
+  'hasattr',
+  'dir',
+  'memoryview',
+  '__build_class__',
+  'globals',
+  'locals',
+  'license',
+  'help',
+  'credits',
+  'copyright',
+];
 
 const int = (fallback: number, min = 0) => z.coerce.number().int().min(min).default(fallback);
 /** a non-negative number that may have a fraction (e.g. 0.25 hours) */
@@ -90,6 +130,27 @@ const envSchema = z.object({
   WORKFLOW_HISTORY_TRIMMING_TIME_WINDOW_DAYS: num(2),
   WORKFLOW_HISTORY_COMPACTION_BATCH_SIZE: num(100),
   WORKFLOW_HISTORY_COMPACTION_BATCH_DELAY_MS: num(1000),
+  /** P4-03 data tables, per workspace (n8n: per instance); a plan may override the size (dataTableBytes) */
+  DATA_TABLES_MAX_SIZE_BYTES: int(200 * MB, 1),
+  /** default: 80% of the max */
+  DATA_TABLES_WARNING_THRESHOLD_BYTES: z.coerce.number().int().min(0).optional(),
+  DATA_TABLES_SIZE_CHECK_CACHE_DURATION_MS: int(5000, 0),
+  /** default: remaining space (see dataTableUploadLimitBytes) */
+  DATA_TABLES_UPLOAD_MAX_FILE_SIZE_BYTES: z.coerce.number().int().min(1).optional(),
+  /** P4-06 native Python, n8n's N8N_RUNNERS_* settings without the prefix */
+  PYTHON_ENABLED: bool(true),
+  RUNNERS_STDLIB_ALLOW: list,
+  RUNNERS_EXTERNAL_ALLOW: list,
+  RUNNERS_BUILTINS_DENY: listOr(PYTHON_BUILTINS_DENY),
+  RUNNERS_ALLOW_TRANSITIVE_IMPORTS: bool(false),
+  RUNNERS_MAX_CONCURRENCY: int(5, 1),
+  /** ours, forced by Pyodide: a folder of pure-Python wheels */
+  RUNNERS_PYTHON_WHEELS_DIR: z.string().default(''),
+  /** P4-07 external secrets, seconds */
+  EXTERNAL_SECRETS_UPDATE_INTERVAL: int(300, 1),
+  EXTERNAL_SECRETS_CONNECT_TIMEOUT: int(20, 1),
+  EXTERNAL_SECRETS_REFRESH_TIMEOUT: int(20, 1),
+  EXTERNAL_SECRETS_PREFER_GET: bool(false),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -138,6 +199,32 @@ export interface Config {
     trimmingTimeWindowDays: number;
     batchSize: number;
     batchDelayMs: number;
+  };
+  /** P4-03: DATA_TABLES_* */
+  dataTables: {
+    maxSizeBytes: number;
+    warningThresholdBytes: number;
+    sizeCheckCacheDurationMs: number;
+    /** undefined = remaining space; read it through dataTableUploadLimitBytes */
+    uploadMaxFileSizeBytes: number | undefined;
+  };
+  /** P4-06: PYTHON_ENABLED and RUNNERS_* */
+  python: {
+    enabled: boolean;
+    stdlibAllow: string[];
+    externalAllow: string[];
+    builtinsDeny: string[];
+    allowTransitiveImports: boolean;
+    maxConcurrency: number;
+    /** '' = no wheels folder */
+    wheelsDir: string;
+  };
+  /** P4-07: EXTERNAL_SECRETS_* */
+  externalSecrets: {
+    updateIntervalS: number;
+    connectTimeoutS: number;
+    refreshTimeoutS: number;
+    preferGet: boolean;
   };
 }
 
@@ -253,7 +340,44 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       batchSize: e.WORKFLOW_HISTORY_COMPACTION_BATCH_SIZE,
       batchDelayMs: e.WORKFLOW_HISTORY_COMPACTION_BATCH_DELAY_MS,
     },
+    dataTables: {
+      maxSizeBytes: e.DATA_TABLES_MAX_SIZE_BYTES,
+      warningThresholdBytes:
+        e.DATA_TABLES_WARNING_THRESHOLD_BYTES ?? Math.floor(e.DATA_TABLES_MAX_SIZE_BYTES * 0.8),
+      sizeCheckCacheDurationMs: e.DATA_TABLES_SIZE_CHECK_CACHE_DURATION_MS,
+      uploadMaxFileSizeBytes: e.DATA_TABLES_UPLOAD_MAX_FILE_SIZE_BYTES,
+    },
+    python: {
+      enabled: e.PYTHON_ENABLED,
+      stdlibAllow: e.RUNNERS_STDLIB_ALLOW,
+      externalAllow: e.RUNNERS_EXTERNAL_ALLOW,
+      builtinsDeny: e.RUNNERS_BUILTINS_DENY,
+      allowTransitiveImports: e.RUNNERS_ALLOW_TRANSITIVE_IMPORTS,
+      maxConcurrency: e.RUNNERS_MAX_CONCURRENCY,
+      wheelsDir: e.RUNNERS_PYTHON_WHEELS_DIR && path.resolve(e.RUNNERS_PYTHON_WHEELS_DIR),
+    },
+    externalSecrets: {
+      updateIntervalS: e.EXTERNAL_SECRETS_UPDATE_INTERVAL,
+      connectTimeoutS: e.EXTERNAL_SECRETS_CONNECT_TIMEOUT,
+      refreshTimeoutS: e.EXTERNAL_SECRETS_REFRESH_TIMEOUT,
+      preferGet: e.EXTERNAL_SECRETS_PREFER_GET,
+    },
   };
+}
+
+/**
+ * The biggest CSV a workspace may upload now: the setting, the space it has left and the body limit,
+ * whichever is smallest (CSV comes as JSON text, so a bigger body would get Fastify's 413).
+ */
+export function dataTableUploadLimitBytes(config: Config, remainingBytes: number): number {
+  return Math.max(
+    0,
+    Math.min(
+      config.dataTables.uploadMaxFileSizeBytes ?? Number.POSITIVE_INFINITY,
+      remainingBytes,
+      config.bodyLimitBytes,
+    ),
+  );
 }
 
 export const packageDir = PACKAGE_DIR;

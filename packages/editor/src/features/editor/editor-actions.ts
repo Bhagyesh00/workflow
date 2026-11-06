@@ -18,6 +18,7 @@ import { getAncestors } from '../../lib/workflow-ops';
 import { type RanDefinition, useRunStore } from '../../stores/run-store';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { toWorkflowBody, useWorkflowStore, type WorkflowState } from '../../stores/workflow-store';
+import { openTestForm } from './form-popup';
 
 export interface EditorDeps {
   navigate: (to: string, options?: { replace?: boolean }) => void;
@@ -258,10 +259,12 @@ export async function listenForTestEvent(deps: EditorDeps, nodeName: string): Pr
   const id = await ensureSaved(deps, true);
   if (!id) return;
   try {
-    const { testUrl, expiresAt } = await workflowsApi.listenTestWebhook(id, nodeName);
+    const { testUrl, expiresAt, formTestUrls } = await workflowsApi.listenTestWebhook(id, nodeName);
     useRunStore
       .getState()
       .beginListening(id, { nodeName, testUrl, expiresAt }, ranDefinitionOf(useWorkflowStore.getState()));
+    const listened = useWorkflowStore.getState().nodes.find((n) => n.name === nodeName);
+    if (listened?.type === 'core.formTrigger' && formTestUrls[0]) openTestForm(formTestUrls[0]);
     if (listenTimer) clearTimeout(listenTimer);
     const ms = Math.max(5_000, new Date(expiresAt).getTime() - Date.now());
     listenTimer = setTimeout(

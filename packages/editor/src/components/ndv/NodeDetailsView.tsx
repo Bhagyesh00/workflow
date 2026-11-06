@@ -3,10 +3,11 @@
  * a node. Parameters edit the workflow store; previews use the run store's latest data.
  */
 import type { DirtyReason, NodeProperty } from '@workflow/workflow';
-import { BookOpen, Copy, Play, Radio, X } from 'lucide-react';
+import { BookOpen, Copy, ExternalLink, Play, Radio, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNodeTypes, useSettings, useVariables, useWebhookUrls } from '../../api/queries';
+import { openTestForm } from '../../features/editor/form-popup';
 import { flattenSchema, inferSchema } from '../../lib/data';
 import {
   buildExpressionContext,
@@ -22,6 +23,7 @@ import { toast, useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import type { CompletionData } from '../code/completions';
 import { NodeCredentials } from '../credentials/NodeCredentials';
+import { NodeStorageCallout } from '../data-tables/NodeStorageCallout';
 import { NodeIcon } from '../NodeIcon';
 import { ParameterContext, type ParameterContextValue } from '../parameters/context';
 import { ParameterList } from '../parameters/ParameterForm';
@@ -44,6 +46,7 @@ export interface NodeDetailsViewProps {
 
 function TriggerPanel({
   nodeName,
+  isFormTrigger,
   hasWebhooks,
   eventDescription,
   onListen,
@@ -51,6 +54,7 @@ function TriggerPanel({
   readOnly,
 }: {
   nodeName: string;
+  isFormTrigger: boolean;
   hasWebhooks: boolean;
   eventDescription?: string;
   onListen?: () => void;
@@ -75,7 +79,7 @@ function TriggerPanel({
       {hasWebhooks && !workflowId && (
         <Callout tone="info">Save the workflow to get its webhook URLs.</Callout>
       )}
-      {mine.map((u) => (
+      {mine.map((u, index) => (
         <div key={`${u.method}-${u.testUrl}`} className="flex flex-col gap-2">
           {[
             { label: 'Test URL', url: listening ? testWebhook.testUrl : u.testUrl },
@@ -105,6 +109,16 @@ function TriggerPanel({
               </div>
             </div>
           ))}
+          {/* a form trigger has two hooks on one URL; one button is enough */}
+          {isFormTrigger && listening && index === 0 && !readOnly && (
+            <Button
+              className="self-start"
+              icon={<ExternalLink size={14} />}
+              onClick={() => openTestForm(testWebhook.testUrl)}
+            >
+              Open test form
+            </Button>
+          )}
         </div>
       ))}
       {!readOnly && (
@@ -364,6 +378,7 @@ export function NodeDetailsView({
                 ) : (
                   <TriggerPanel
                     nodeName={node.name}
+                    isFormTrigger={node.type === 'core.formTrigger'}
                     hasWebhooks={Boolean(description?.webhooks?.length)}
                     eventDescription={description?.eventTriggerDescription}
                     onListen={onListen ? () => onListen(node.name) : undefined}
@@ -397,6 +412,7 @@ export function NodeDetailsView({
                 )}
                 {tab === 'parameters' ? (
                   <div className="flex flex-col gap-4">
+                    {node.type === 'core.dataTable' && <NodeStorageCallout />}
                     {description && (
                       <NodeCredentials
                         node={node}

@@ -238,7 +238,12 @@ export interface ResourceLocatorMode {
   name: 'list' | 'id' | 'url' | string;
   type: 'list' | 'string';
   placeholder?: string;
-  typeOptions?: { searchListMethod?: string; searchable?: boolean };
+  typeOptions?: {
+    searchListMethod?: string;
+    searchable?: boolean;
+    /** a "create new" link at the end of the list; `url` is an editor route */
+    allowNewResource?: { label: string; url: string };
+  };
   /** regex used to extract the id from a URL in `url` mode */
   extractValue?: { type: 'regex'; regex: string };
 }
@@ -307,6 +312,8 @@ export interface NodeCredentialDescription {
   name: string;
   required?: boolean;
   displayOptions?: DisplayOptions;
+  /** name of the node's `methods.credentialTest` entry that tests this credential */
+  testedBy?: string;
 }
 
 export interface WebhookDescription {
@@ -325,6 +332,8 @@ export interface WebhookDescription {
   isFullPath?: boolean;
   /** hide URL panel in the editor */
   ndvHideUrl?: boolean;
+  /** `form`: the hook is served under `/form`, `/form-test` and `/form-waiting` instead of `/webhook` */
+  nodeType?: 'form';
 }
 
 /** value of a `filter` parameter (IF / Filter / Switch conditions) */
@@ -504,6 +513,12 @@ export interface HttpRequestOptions {
   timeout?: number;
   /** do not throw on non-2xx */
   ignoreHttpStatusErrors?: boolean;
+  /**
+   * With `responseType: 'stream'`, for a stream with no planned end (Server-Sent Events): `timeout`
+   * runs only until the response headers, the connection may stay idle, and the byte cap does not
+   * apply, so the consumer must cap one message. The abort signal still ends the stream.
+   */
+  streamNoTotalTimeout?: boolean;
   /** `scheme` defaults to `basic`; `digest` answers a 401 Digest challenge with one retry */
   auth?: { username: string; password: string; scheme?: 'basic' | 'digest' };
   /**
@@ -523,7 +538,8 @@ export interface HttpRequestOptions {
 
 /**
  * The body of a `responseType: 'stream'` response, chunk by chunk as it arrives. The size limit,
- * timeout and abort signal of the request apply while it is read; stopping early closes the connection.
+ * timeout and abort signal of the request apply while it is read (`streamNoTotalTimeout` lifts the size
+ * limit and the timeout); stopping early closes the connection.
  */
 export type HttpResponseStream = AsyncIterable<Uint8Array>;
 

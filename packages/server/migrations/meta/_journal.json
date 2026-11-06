@@ -85,6 +85,20 @@
       "when": 1793719966034,
       "tag": "0011_review_version_ids",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1793943395587,
+      "tag": "0012_data_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793943422282,
+      "tag": "0013_secret_connections",
+      "breakpoints": true
     }
   ]
 }

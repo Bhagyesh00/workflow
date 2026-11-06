@@ -36,10 +36,14 @@ import { REDACTED } from '../api/types';
 import { newId } from '../lib/ids';
 import { demoContacts, demoCredentialTypes, demoLoadOptions, demoNodeTypes } from './fixtures';
 import { filterExecutionList, registerAnnotationRoutes } from './mock-annotations';
+import { registerDataTableRoutes, searchDataTables } from './mock-data-tables';
 import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
+import { registerFormAuthRoutes } from './mock-form-auth';
 import { copy, HttpError, now, page } from './mock-http';
 import { registerPublishRoutes } from './mock-publish';
 import { registerReviewRoutes } from './mock-reviews';
+import { registerSecretRoutes } from './mock-secrets';
+import { registerTriggerListenRoutes } from './mock-triggers';
 import { type SimulationResult, simulateExecution } from './simulator';
 
 interface StoredUser {
@@ -148,6 +152,10 @@ export class MockBackend {
     registerAnnotationRoutes(this);
     registerPublishRoutes(this);
     registerReviewRoutes(this);
+    registerDataTableRoutes(this);
+    registerSecretRoutes(this);
+    registerTriggerListenRoutes(this);
+    registerFormAuthRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -668,6 +676,8 @@ export class MockBackend {
         if (!fn) throw new HttpError(400, 'unknown_method', `Unknown method ${String(body.method)}`);
         return fn(node?.parameters ?? {});
       }
+      // P4-05: the Data Table node's locator lists the demo's tables
+      if (body.method === 'tableSearch') return searchDataTables(String(body.filter ?? ''));
       const filter = String(body.filter ?? '').toLowerCase();
       const matches = demoContacts.filter((c) => !filter || c.name.toLowerCase().includes(filter));
       const offset = Number(body.paginationToken ?? 0) || 0;
@@ -815,9 +825,13 @@ export class MockBackend {
         setTimeout(() => this.receiveTestWebhook(wf.id), this.options.autoWebhookMs);
       const { tenant } = this.auth();
       const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
+      const path = String(node.parameters.path || node.webhookId || node.id);
+      const isForm = node.type === 'core.formTrigger';
+      const testUrl = `${origin}/${isForm ? 'form-test' : 'webhook-test'}/${tenant.slug}/${path}`;
       return {
-        testUrl: `${origin}/webhook-test/${tenant.slug}/${String(node.parameters.path || node.webhookId || node.id)}`,
+        testUrl,
         expiresAt: new Date(expiresAt).toISOString(),
+        formTestUrls: isForm ? [testUrl] : [],
       };
     });
     this.on('GET', '/workflows/:id/webhook-urls', ({ params }) => {
@@ -825,14 +839,15 @@ export class MockBackend {
       const { tenant } = this.auth();
       const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
       return wf.nodes
-        .filter((n) => n.type === 'core.webhook')
+        .filter((n) => n.type === 'core.webhook' || n.type === 'core.formTrigger')
         .map((n) => {
           const path = String(n.parameters.path || n.webhookId || n.id);
+          const isForm = n.type === 'core.formTrigger';
           return {
             nodeName: n.name,
-            method: String(n.parameters.httpMethod ?? 'POST'),
-            testUrl: `${origin}/webhook-test/${tenant.slug}/${path}`,
-            productionUrl: `${origin}/webhook/${tenant.slug}/${path}`,
+            method: isForm ? 'GET' : String(n.parameters.httpMethod ?? 'POST'),
+            testUrl: `${origin}/${isForm ? 'form-test' : 'webhook-test'}/${tenant.slug}/${path}`,
+            productionUrl: `${origin}/${isForm ? 'form' : 'webhook'}/${tenant.slug}/${path}`,
           };
         });
     });
@@ -1113,7 +1128,14 @@ export class MockBackend {
       const { tenant } = this.auth();
       return this.apiKeys
         .filter((k) => k.tenantId === tenant.id)
-        .map(({ id, name, prefix, createdAt, lastUsedAt }) => ({ id, name, prefix, createdAt, lastUsedAt }));
+        .map(({ id, name, prefix, createdAt, lastUsedAt, scopes }) => ({
+          id,
+          name,
+          prefix,
+          createdAt,
+          lastUsedAt,
+          scopes,
+        }));
     });
     this.on('POST', '/api-keys', ({ body }) => {
       const { tenant } = this.auth();
@@ -1124,10 +1146,17 @@ export class MockBackend {
         prefix,
         createdAt: now(),
         lastUsedAt: null,
+        // empty means every scope
+        scopes: Array.isArray(body.scopes) ? body.scopes.map(String) : [],
         tenantId: tenant.id,
       };
       this.apiKeys.push(key);
-      return { id: key.id, name: key.name, key: `wfk_${prefix}_${newId().replace(/-/g, '')}` };
+      return {
+        id: key.id,
+        name: key.name,
+        key: `wfk_${prefix}_${newId().replace(/-/g, '')}`,
+        scopes: key.scopes,
+      };
     });
     this.on('DELETE', '/api-keys/:id', ({ params }) => {
       this.apiKeys = this.apiKeys.filter((k) => k.id !== params[0]);

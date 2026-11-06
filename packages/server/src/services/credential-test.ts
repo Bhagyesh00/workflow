@@ -6,6 +6,7 @@ import {
   applyAuthentication,
   type HttpClient,
   HttpError,
+  type NodeTypes,
   type OAuth2Data,
   oauth2Request,
 } from '@workflow/core';
@@ -17,12 +18,20 @@ import {
   type HttpFullResponse,
   type HttpRequestOptions,
   isExpression,
+  type Logger,
 } from '@workflow/workflow';
 import type { CredentialService } from './credentials';
 
 export interface CredentialTestResult {
   status: 'OK' | 'Error';
   message: string;
+}
+
+/** what a node's `methods.credentialTest` hook needs (unused until L22) */
+export interface CredentialTestOptions {
+  nodeTypes: NodeTypes;
+  tenantId: string;
+  logger: Logger;
 }
 
 function resolveTemplates<T>(value: T, credentials: DataObject): T {
@@ -45,6 +54,7 @@ export async function testCredential(
   http: HttpClient,
   type: string,
   data: DataObject,
+  _opts?: CredentialTestOptions,
 ): Promise<CredentialTestResult> {
   const resolvedType = credentials.resolvedType(type);
   const full = credentials.withDefaults(type, data);

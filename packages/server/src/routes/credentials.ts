@@ -13,6 +13,7 @@ import {
   credentialUpdateSchema,
   idParams,
 } from '../http/schemas';
+import { toWorkflowLogger } from '../logger';
 import { testCredential } from '../services/credential-test';
 import { oauthCallbackPage } from '../services/oauth2';
 
@@ -132,7 +133,13 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
       data = credentials.merge(credentials.decrypt(row), data);
     }
     credentials.resolvedType(body.type);
-    return { data: await testCredential(credentials, ctx.http, body.type, data) };
+    return {
+      data: await testCredential(credentials, ctx.http, body.type, data, {
+        nodeTypes: ctx.registries.nodeTypes,
+        tenantId: auth.tenant.id,
+        logger: toWorkflowLogger(ctx.logger),
+      }),
+    };
   });
 
   app.get('/oauth1/authorize', async (request) => {

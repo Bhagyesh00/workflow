@@ -9,12 +9,15 @@ import { handleError } from './http/errors';
 import { registerAnnotationTagRoutes } from './routes/annotation-tags';
 import { registerAuthRoutes } from './routes/auth';
 import { registerCredentialRoutes } from './routes/credentials';
+import { registerDataTableRoutes } from './routes/data-tables';
 import { registerExecutionRoutes } from './routes/executions';
 import { registerFavoriteRoutes } from './routes/favorites';
 import { registerFolderRoutes } from './routes/folders';
+import { registerFormAuthRoutes } from './routes/form-auth';
 import { publicApiPlugin } from './routes/public-api';
 import { registerPushRoutes } from './routes/push';
 import { registerResourceRoutes } from './routes/resources';
+import { registerSecretConnectionRoutes } from './routes/secret-connections';
 import { registerSettingsRoutes } from './routes/settings';
 import { registerEditor, registerHealthRoutes } from './routes/system';
 import { webhookPlugin } from './routes/webhooks';
@@ -131,6 +134,10 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerFavoriteRoutes(rest, ctx);
       registerAnnotationTagRoutes(rest, ctx);
       registerWorkflowReviewRoutes(rest, ctx);
+      // Phase 4 (filled by L4, L9, L2)
+      registerDataTableRoutes(rest, ctx);
+      registerSecretConnectionRoutes(rest, ctx);
+      registerFormAuthRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );

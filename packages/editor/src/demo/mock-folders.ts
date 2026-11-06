@@ -10,6 +10,7 @@ import type { Favorite, FavoriteResourceType, Folder, FolderDetail } from '../ap
 import { folderNameError } from '../components/workflow/FolderDialog';
 import { newId } from '../lib/ids';
 import type { MockBackend, StoredWorkflow } from './mock-backend';
+import { dataTableName } from './mock-data-tables';
 import { copy, HttpError, listResult, now, page } from './mock-http';
 
 interface StoredFolder {
@@ -220,7 +221,9 @@ export function registerFolderRoutes(backend: MockBackend): void {
           ? backend.workflows.find(
               (w) => w.id === fav.resourceId && w.tenantId === tenant.id && !w.isArchived,
             )?.name
-          : state.folders.find((f) => f.id === fav.resourceId && f.tenantId === tenant.id)?.name;
+          : fav.resourceType === 'dataTable'
+            ? dataTableName(fav.resourceId)
+            : state.folders.find((f) => f.id === fav.resourceId && f.tenantId === tenant.id)?.name;
       if (name !== undefined)
         list.push({
           resourceType: fav.resourceType,
@@ -234,9 +237,12 @@ export function registerFolderRoutes(backend: MockBackend): void {
   backend.on('POST', '/favorites', ({ body }) => {
     const { tenant, user } = backend.auth();
     const type = body.resourceType;
-    if (type !== 'workflow' && type !== 'folder') throw new HttpError(400, 'validation_error', 'Bad type');
+    if (type !== 'workflow' && type !== 'folder' && type !== 'dataTable')
+      throw new HttpError(400, 'validation_error', 'Bad type');
     const id = String(body.resourceId ?? '');
-    const name = type === 'workflow' ? backend.workflow(id).name : folderOf(id).name;
+    const tableName = type === 'dataTable' ? dataTableName(id) : undefined;
+    if (type === 'dataTable' && tableName === undefined) throw notFound('Data table');
+    const name = tableName ?? (type === 'workflow' ? backend.workflow(id).name : folderOf(id).name);
     const state = folderState(backend);
     let existing = state.favorites.find(
       (f) => f.userId === user.id && f.resourceType === type && f.resourceId === id,

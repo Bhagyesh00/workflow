@@ -38,5 +38,67 @@ services:
       timeout: 5s
       retries: 20
 
+  # Test brokers for the Kafka and RabbitMQ nodes, off by default (--profile brokers).
+  # Kafka: PLAINTEXT 127.0.0.1:9092, SASL_PLAINTEXT 127.0.0.1:9093 (PLAIN, workflow/workflow).
+  kafka:
+    image: apache/kafka:4.4.0
+    profiles: [brokers]
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9094
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,SASL_PLAINTEXT://:9093,CONTROLLER://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092,SASL_PLAINTEXT://127.0.0.1:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      # the image refuses to start a SASL listener unless KAFKA_OPTS names a JAAS file
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    configs:
+      - source: kafka-jaas
+        target: /etc/kafka/kafka_server_jaas.conf
+    ports:
+      - "127.0.0.1:9092:9092"
+      - "127.0.0.1:9093:9093"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:9092 > /dev/null"]
+      interval: 10s
+      timeout: 15s
+      retries: 20
+      start_period: 15s
+
+  # guest only signs in over loopback and a Docker port mapping is not loopback, so a real user
+  rabbitmq:
+    image: rabbitmq:4.4.0-alpine
+    profiles: [brokers]
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: workflow
+      RABBITMQ_DEFAULT_PASS: workflow
+    ports:
+      - "127.0.0.1:5672:5672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 15s
+      retries: 20
+      start_period: 15s
+
+configs:
+  kafka-jaas:
+    content: |
+      KafkaServer {
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="workflow"
+        password="workflow"
+        user_workflow="workflow";
+      };
+
 volumes:
   pgdata:

@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import type { TagRow, VariableRow } from '../db/schema';
+import { API_KEY_SCOPES } from '../http/api-key-scopes';
 import { requireRole } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { page, paginationQuery } from '../http/pagination';
@@ -266,6 +267,7 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
         id: r.id,
         name: r.name,
         prefix: r.prefix,
+        scopes: r.scopes,
         lastUsedAt: r.lastUsedAt?.toISOString() ?? null,
         createdAt: r.createdAt.toISOString(),
       })),
@@ -275,8 +277,16 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
 
   app.post('/api-keys', async (request) => {
     const auth = requireRole(request, 'viewer');
-    const { name } = parse(z.object({ name: z.string().trim().min(1).max(64) }), request.body);
-    const key = await authService.createApiKey(auth.tenant.id, auth.user.id, name);
+    const { name, scopes } = parse(
+      z.object({
+        name: z.string().trim().min(1).max(64),
+        scopes: z.array(z.enum(API_KEY_SCOPES)).max(API_KEY_SCOPES.length).optional(),
+      }),
+      request.body,
+    );
+    const key = await authService.createApiKey(auth.tenant.id, auth.user.id, name, [
+      ...new Set(scopes ?? []),
+    ]);
     await repos.audit.add(auth.tenant.id, {
       userId: auth.user.id,
       action: 'apikey.created',
@@ -285,7 +295,14 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
       ip: request.ip,
     });
     return {
-      data: { id: key.id, name: key.name, key: key.key, prefix: key.prefix, createdAt: key.createdAt },
+      data: {
+        id: key.id,
+        name: key.name,
+        key: key.key,
+        prefix: key.prefix,
+        scopes: key.scopes,
+        createdAt: key.createdAt,
+      },
     };
   });
 

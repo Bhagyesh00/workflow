@@ -7,16 +7,19 @@ import type {
   BinaryData,
   CredentialType,
   DataObject,
+  DataTableAccess,
   ExecuteWorkflowOptions,
   ExecuteWorkflowSource,
   ExecutionMode,
   ExecutionResult,
   ExecutionState,
+  FormAuthHelper,
   InstanceLimits,
   Item,
   Logger,
   NodeCredentialRef,
   NodeType,
+  RunCodeOptions,
   TaskData,
   WebhookResponse,
 } from '@workflow/workflow';
@@ -70,6 +73,10 @@ export interface CodeRunnerInput {
   staticData?: { global: DataObject; node: DataObject };
   /** called once after a finished run when the code changed the static data, with the new contents */
   onStaticData?(data: { global: DataObject; node: DataObject }): void;
+  /** the alias `python` arrives here as `pythonNative` */
+  language?: RunCodeOptions['language'];
+  /** the Code tool's input (`_query`) */
+  query?: unknown;
 }
 
 export interface CodeRunner {
@@ -119,11 +126,15 @@ export interface ExecutionServices {
   instanceBaseUrl: string;
   /** used for the Wait node "on webhook call" resume */
   resumeUrl?: string;
+  /** used for the Wait node "on form submitted" resume and the Form node */
+  resumeFormUrl?: string;
   nodeTypes: NodeTypeRegistry;
   credentialTypes: CredentialTypeRegistry;
   credentials: CredentialsProvider;
   binaryData: BinaryDataStore;
   codeRunner: CodeRunner;
+  /** runs Python code; unset means Python is disabled on this instance */
+  pythonRunner?: CodeRunner;
   http: import('../http/http-client').HttpClient;
   logger: Logger;
   hooks?: ExecutionHooks;
@@ -131,4 +142,13 @@ export interface ExecutionServices {
   /** instance size caps for nodes (`helpers.getInstanceLimits()`); unset fields use the defaults */
   nodeLimits?: Partial<InstanceLimits>;
   executeSubWorkflow?(request: SubWorkflowRequest): Promise<{ executionId: string; data: Item[][] | null }>;
+  /** the data tables of `tenantId` (`helpers.dataTables`) */
+  dataTables?: DataTableAccess;
+  /** user auth for forms (`getFormAuth()` on the webhook context) */
+  formAuth?: FormAuthHelper;
+  /** signs and checks the tokens forms hand out (`signFormToken`, `verifyFormToken`) */
+  formTokens?: {
+    sign(payload: DataObject, ttlSeconds: number): string;
+    verify(token: string): DataObject | null;
+  };
 }

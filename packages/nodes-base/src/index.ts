@@ -1,4 +1,5 @@
 import type { CredentialType, NodePackage, NodeType } from '@workflow/workflow';
+import { amqp } from './credentials/amqp.credentials';
 import {
   airtableTokenApi,
   mySql,
@@ -19,7 +20,10 @@ import {
   httpQueryAuth,
   webhookSigningSecret,
 } from './credentials/http.credentials';
+import { imap } from './credentials/imap.credentials';
 import { jwtAuth } from './credentials/jwt.credentials';
+import { kafka, schemaRegistryApi } from './credentials/kafka.credentials';
+import { mqtt } from './credentials/mqtt.credentials';
 import { oAuth1Api } from './credentials/oauth1.credentials';
 import {
   gmailOAuth2,
@@ -28,19 +32,32 @@ import {
   oAuth2Api,
   slackOAuth2Api,
 } from './credentials/oauth2.credentials';
+import { rabbitmq } from './credentials/rabbitmq.credentials';
 import { sshPassword, sshPrivateKey } from './credentials/ssh.credentials';
 import { totpApi } from './credentials/totp.credentials';
 import { AirtableNode } from './nodes/apps/Airtable.node';
+import { AmqpNode } from './nodes/apps/amqp/Amqp.node';
+import { AmqpTriggerNode } from './nodes/apps/amqp/AmqpTrigger.node';
 import { GmailNode, GmailTriggerNode } from './nodes/apps/google/Gmail.node';
 import { GoogleSheetsNode } from './nodes/apps/google/GoogleSheets.node';
+import { KafkaNode } from './nodes/apps/kafka/Kafka.node';
+import { KafkaTriggerNode } from './nodes/apps/kafka/KafkaTrigger.node';
+import { MqttNode } from './nodes/apps/mqtt/Mqtt.node';
+import { MqttTriggerNode } from './nodes/apps/mqtt/MqttTrigger.node';
 import { NotionNode } from './nodes/apps/Notion.node';
+import { RabbitMqNode } from './nodes/apps/rabbitmq/RabbitMq.node';
+import { RabbitMqTriggerNode } from './nodes/apps/rabbitmq/RabbitMqTrigger.node';
+import { RedisNode } from './nodes/apps/redis/Redis.node';
+import { RedisTriggerNode } from './nodes/apps/redis/RedisTrigger.node';
 import { SlackNode } from './nodes/apps/Slack.node';
 import { MySqlNode } from './nodes/apps/sql/MySql.node';
 import { PostgresNode } from './nodes/apps/sql/Postgres.node';
+import { PostgresTriggerNode } from './nodes/apps/sql/PostgresTrigger.node';
 import { TelegramNode, TelegramTriggerNode } from './nodes/apps/Telegram.node';
 import { CompressionNode } from './nodes/core/Compression.node';
 import { CryptoNode } from './nodes/core/Crypto.node';
 import { FilterNode, IfNode, SwitchNode } from './nodes/core/conditions.nodes';
+import { DataTableNode } from './nodes/core/DataTable.node';
 import { DateTimeNode } from './nodes/core/DateTime.node';
 import {
   AggregateNode,
@@ -53,6 +70,9 @@ import {
   SummarizeNode,
 } from './nodes/core/data.nodes';
 import { EditImageNode } from './nodes/core/EditImage.node';
+import { EmailReadImapNode } from './nodes/core/EmailReadImap.node';
+import { FormNode } from './nodes/core/Form.node';
+import { FormTriggerNode } from './nodes/core/FormTrigger.node';
 import { FtpNode } from './nodes/core/Ftp.node';
 import { ConvertToFileNode, ExtractFromFileNode } from './nodes/core/files.nodes';
 import {
@@ -67,8 +87,10 @@ import { HttpRequestNode } from './nodes/core/HttpRequest.node';
 import { JwtNode } from './nodes/core/Jwt.node';
 import { MergeNode } from './nodes/core/Merge.node';
 import { HtmlNode, MarkdownNode, XmlNode } from './nodes/core/markup.nodes';
+import { RssFeedReadTriggerNode } from './nodes/core/RssFeedReadTrigger.node';
 import { ScheduleTriggerNode } from './nodes/core/ScheduleTrigger.node';
 import { SendEmailNode } from './nodes/core/SendEmail.node';
+import { SseTriggerNode } from './nodes/core/SseTrigger.node';
 import { SshNode } from './nodes/core/Ssh.node';
 import {
   CodeNode,
@@ -124,6 +146,12 @@ export const coreNodes: NodeType[] = [
   EditImageNode,
   FtpNode,
   SshNode,
+  FormTriggerNode,
+  FormNode,
+  DataTableNode,
+  SseTriggerNode,
+  RssFeedReadTriggerNode,
+  EmailReadImapNode,
 ];
 
 export const appNodes: NodeType[] = [
@@ -137,6 +165,17 @@ export const appNodes: NodeType[] = [
   AirtableNode,
   TelegramNode,
   TelegramTriggerNode,
+  PostgresTriggerNode,
+  RedisTriggerNode,
+  RedisNode,
+  KafkaTriggerNode,
+  KafkaNode,
+  RabbitMqTriggerNode,
+  RabbitMqNode,
+  MqttTriggerNode,
+  MqttNode,
+  AmqpTriggerNode,
+  AmqpNode,
 ];
 
 export const nodes: NodeType[] = [...coreNodes, ...appNodes];
@@ -169,6 +208,12 @@ export const credentials: CredentialType[] = [
   sshPrivateKey,
   oAuth1Api,
   httpDigestAuth,
+  imap,
+  kafka,
+  schemaRegistryApi,
+  rabbitmq,
+  mqtt,
+  amqp,
 ];
 
 export const nodesBasePackage: NodePackage = { name: '@workflow/nodes-base', nodes, credentials };

@@ -13,6 +13,7 @@ import {
   UserRepository,
 } from './accounts';
 import { AnnotationRepository } from './annotations';
+import { DataTableRepository } from './data-tables';
 import { ExecutionRepository } from './executions';
 import { FavoriteRepository } from './favorites';
 import { FolderRepository } from './folders';
@@ -27,6 +28,7 @@ import {
 } from './resources';
 import { ReviewRepository } from './reviews';
 import { ScheduleSlotRepository } from './schedule-slots';
+import { SecretConnectionRepository } from './secrets';
 import { StaticDataRepository } from './static-data';
 import { TagRepository, WorkflowRepository, WorkflowVersionRepository } from './workflows';
 
@@ -58,6 +60,10 @@ export interface Repositories {
   publishHistory: PublishHistoryRepository;
   /** P3-19 (L14) */
   reviews: ReviewRepository;
+  /** P4-03 (L4) */
+  dataTables: DataTableRepository;
+  /** P4-07 (L9) */
+  secrets: SecretConnectionRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -85,6 +91,8 @@ export function createRepositories(db: DbOrTx): Repositories {
     annotations: new AnnotationRepository(db),
     publishHistory: new PublishHistoryRepository(db),
     reviews: new ReviewRepository(db),
+    dataTables: new DataTableRepository(db),
+    secrets: new SecretConnectionRepository(db),
   };
 }
 

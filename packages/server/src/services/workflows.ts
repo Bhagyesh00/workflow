@@ -37,7 +37,7 @@ import type { ExecutionService } from './executions';
 import type { FavoriteService } from './favorites';
 import type { PublishHistoryService } from './publish-history';
 import { TEST_WEBHOOK_TTL_MS, type TestWebhookStore } from './test-webhooks';
-import { nodeWebhooks } from './webhook-paths';
+import { nodeWebhooks, webhookUrlBase } from './webhook-paths';
 import { cloneDefinition, toDefinition, toDTO, type WorkflowDTO } from './workflow-model';
 import type { WorkflowReviewService } from './workflow-reviews';
 import { assertDeletable, assertFolderInTenant, assertNotArchived } from './workflow-rules';
@@ -765,10 +765,34 @@ export class WorkflowService {
         expiresAt,
       });
     }
+    const base = this.deps.config.baseUrl;
+    // a form's GET and POST hooks share one path, so one URL
+    const formTestUrls = [
+      ...new Set(
+        hooks
+          .filter((hook) => webhookUrlBase(hook.description) === 'form')
+          .map((hook) => `${base}/form-test/${tenant.slug}/${hook.path}`),
+      ),
+    ];
     return {
-      testUrl: `${this.deps.config.baseUrl}/webhook-test/${tenant.slug}/${hooks[0].path}`,
+      testUrl: `${base}/${webhookUrlBase(hooks[0].description)}-test/${tenant.slug}/${hooks[0].path}`,
       expiresAt: new Date(expiresAt).toISOString(),
+      formTestUrls,
     };
+  }
+
+  /** "Listen for test event" on a trigger node without a webhook (L12) */
+  async listenTestTrigger(
+    _tenant: TenantRow,
+    _id: string,
+    _nodeName: string,
+  ): Promise<{ expiresAt: string }> {
+    throw new ApiError(501, 'not_built', 'not built');
+  }
+
+  /** stops what listenTestTrigger started (L12) */
+  async stopTestTrigger(_tenant: TenantRow, _id: string): Promise<void> {
+    throw new ApiError(501, 'not_built', 'not built');
   }
 
   /** "Stop listening": drop the test registrations of one node and the provider hook they set up */
@@ -791,8 +815,8 @@ export class WorkflowService {
           urls.push({
             nodeName: node.name,
             method: hook.method,
-            testUrl: `${base}/webhook-test/${tenant.slug}/${hook.path}`,
-            productionUrl: `${base}/webhook/${tenant.slug}/${hook.path}`,
+            testUrl: `${base}/${webhookUrlBase(hook.description)}-test/${tenant.slug}/${hook.path}`,
+            productionUrl: `${base}/${webhookUrlBase(hook.description)}/${tenant.slug}/${hook.path}`,
           });
         }
       } catch {

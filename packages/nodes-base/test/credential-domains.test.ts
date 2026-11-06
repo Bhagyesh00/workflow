@@ -165,6 +165,12 @@ describe('credential fields', () => {
     'sftp',
     'sshPassword',
     'sshPrivateKey',
+    'imap',
+    'kafka',
+    'schemaRegistryApi',
+    'rabbitmq',
+    'mqtt',
+    'amqp',
   ])('%s has no domain fields (it sends no HTTP requests with a credential)', (type) => {
     expect(fieldNames(type)).toEqual([]);
   });

@@ -10,6 +10,7 @@ import {
   type NodeProperty,
   type NodeType,
 } from '@workflow/workflow';
+import { ftpCredentialTest } from '../../credential-tests/ftp';
 import { assertSafePath, type FileTransfer, openFtp, openSftp } from '../../utils/file-transfer';
 import { remoteBaseName } from '../../utils/remote-connect';
 import { errorItem, ItemList, mapItems } from '../../utils/utilities';
@@ -43,8 +44,18 @@ export const FtpNode: NodeType = {
     categories: ['Core', 'Files'],
     alias: ['ftp', 'sftp', 'upload', 'download', 'file transfer'],
     credentials: [
-      { name: 'ftp', required: true, displayOptions: { show: { protocol: ['ftp'] } } },
-      { name: 'sftp', required: true, displayOptions: { show: { protocol: ['sftp'] } } },
+      {
+        name: 'ftp',
+        required: true,
+        testedBy: 'ftpCredentialTest',
+        displayOptions: { show: { protocol: ['ftp'] } },
+      },
+      {
+        name: 'sftp',
+        required: true,
+        testedBy: 'ftpCredentialTest',
+        displayOptions: { show: { protocol: ['sftp'] } },
+      },
     ],
     properties: [
       {
@@ -300,5 +311,9 @@ export const FtpNode: NodeType = {
     } finally {
       await transfer.close();
     }
+  },
+
+  methods: {
+    credentialTest: { ftpCredentialTest },
   },
 };

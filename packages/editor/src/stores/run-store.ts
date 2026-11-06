@@ -11,6 +11,7 @@ import type {
 } from '@workflow/workflow';
 import { create } from 'zustand';
 import type { ExecutionDetail, PushEvent } from '../api/types';
+import { maybeOpenFormPopup } from '../features/editor/form-popup';
 
 export type RunStatus = 'idle' | 'starting' | 'listening' | ExecutionStatus;
 
@@ -186,6 +187,11 @@ function bufferEvent(state: RunSnapshot, event: PushEvent): RunSnapshot {
   return { ...state, pending: { ...state.pending, [id]: [...(state.pending[id] ?? []), event] } };
 }
 
+/** P4-02: a finished node may send the tester to the next form page. Outside the pure reducer. */
+function openFormPopups(events: PushEvent[]): void {
+  for (const event of events) if (event.type === 'nodeExecuteAfter') maybeOpenFormPopup(event.data.taskData);
+}
+
 export type NodeRunStatus = 'running' | 'success' | 'error' | 'waiting' | undefined;
 
 export function nodeRunStatus(
@@ -246,12 +252,18 @@ export const useRunStore = create<RunState>()((set, get) => ({
     });
   },
   adopt(executionId) {
-    set(adoptExecution(get(), executionId));
+    const s = get();
+    set(adoptExecution(s, executionId));
+    openFormPopups(s.pending[executionId] ?? []);
   },
   receive(event, openWorkflowId) {
     const s = get();
     const next = reduceRunEvent(s, event, openWorkflowId);
     if (next !== s) set(next);
+    // the events this run took in: those buffered until it was adopted, then this one
+    if (next.executionId && next.executionId !== s.executionId)
+      openFormPopups(s.pending[next.executionId] ?? []);
+    if (next.executionId && eventExecutionId(event) === next.executionId) openFormPopups([event]);
   },
   fail(error) {
     set({ status: 'error', error, runningNodes: [], finishedAt: Date.now(), testWebhook: null });

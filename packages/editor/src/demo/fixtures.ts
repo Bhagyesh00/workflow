@@ -3,7 +3,12 @@
  * suite's mock server. They mirror the shape the real server sends (GET /rest/node-types) and
  * between them use every parameter type the editor supports.
  */
-import type { CredentialTypeDescription, NodeTypeDescription, WorkflowDefinition } from '@workflow/workflow';
+import type {
+  CredentialTypeDescription,
+  NodeProperty,
+  NodeTypeDescription,
+  WorkflowDefinition,
+} from '@workflow/workflow';
 
 const manualTrigger: NodeTypeDescription = {
   name: 'core.manualTrigger',
@@ -180,7 +185,7 @@ const set: NodeTypeDescription = {
 const code: NodeTypeDescription = {
   name: 'core.code',
   displayName: 'Code',
-  description: 'Run custom JavaScript in a secure sandbox',
+  description: 'Run custom JavaScript or Python in a secure sandbox',
   icon: 'lucide:code',
   group: ['transform'],
   version: 1,
@@ -188,7 +193,7 @@ const code: NodeTypeDescription = {
   inputs: ['main'],
   outputs: ['main'],
   categories: ['Core', 'Data transformation'],
-  alias: ['javascript', 'script', 'function'],
+  alias: ['javascript', 'python', 'script', 'function'],
   properties: [
     {
       displayName: 'Mode',
@@ -202,10 +207,33 @@ const code: NodeTypeDescription = {
       ],
     },
     {
+      displayName: 'Language',
+      name: 'language',
+      type: 'options',
+      default: 'javaScript',
+      noDataExpression: true,
+      options: [
+        { name: 'JavaScript', value: 'javaScript' },
+        { name: 'Python', value: 'pythonNative' },
+      ],
+    },
+    {
+      displayName: 'Python',
+      name: 'pythonCode',
+      type: 'code',
+      noDataExpression: true,
+      // `python` is the older stored value of the same language
+      displayOptions: { show: { language: ['pythonNative', 'python'] } },
+      typeOptions: { editor: 'codeNodeEditor', editorLanguage: 'python', rows: 10 },
+      default:
+        "# Add a field to every item\nfor item in _items:\n    item['json']['checked'] = True\nreturn _items\n",
+    },
+    {
       displayName: 'JavaScript',
       name: 'jsCode',
       type: 'code',
       noDataExpression: true,
+      displayOptions: { show: { language: ['javaScript'] } },
       typeOptions: { editor: 'codeNodeEditor', editorLanguage: 'javaScript', rows: 10 },
       default:
         "// Add a field to every item\nconsole.log('items in:', $input.all().length);\nreturn $input.all().map((item) => ({ json: { ...item.json, checked: true } }));\n",
@@ -406,6 +434,236 @@ const httpRequest: NodeTypeDescription = {
           displayOptions: { show: { '@version': [2] } },
         },
       ],
+    },
+  ],
+};
+
+const formFields: NodeProperty = {
+  displayName: 'Form Fields',
+  name: 'formFields',
+  type: 'fixedCollection',
+  default: {},
+  typeOptions: { multipleValues: true, sortable: true },
+  options: [
+    {
+      displayName: 'Values',
+      name: 'values',
+      values: [
+        { displayName: 'Field Label', name: 'fieldLabel', type: 'string', default: '', required: true },
+        {
+          displayName: 'Field Type',
+          name: 'fieldType',
+          type: 'options',
+          default: 'text',
+          options: ['text', 'email', 'number', 'textarea', 'date', 'dropdown'].map((value) => ({
+            name: value[0].toUpperCase() + value.slice(1),
+            value,
+          })),
+        },
+        { displayName: 'Required Field', name: 'requiredField', type: 'boolean', default: false },
+      ],
+    },
+  ],
+};
+
+const formTrigger: NodeTypeDescription = {
+  name: 'core.formTrigger',
+  displayName: 'Form Trigger',
+  description: 'Starts the workflow when someone submits a form',
+  icon: 'lucide:file-input',
+  group: ['trigger'],
+  version: 1,
+  defaults: { name: 'On form submission' },
+  inputs: [],
+  outputs: ['main'],
+  categories: ['Core', 'Triggers'],
+  alias: ['form', 'survey', 'questionnaire'],
+  webhooks: [
+    {
+      name: 'setup',
+      httpMethod: 'GET',
+      path: '={{$parameter["path"] || $parameter["options"]?.path || ""}}',
+      isFullPath: true,
+      ndvHideUrl: true,
+      nodeType: 'form',
+    },
+    {
+      name: 'default',
+      httpMethod: 'POST',
+      path: '={{$parameter["path"] || $parameter["options"]?.path || ""}}',
+      isFullPath: true,
+      nodeType: 'form',
+    },
+  ],
+  eventTriggerDescription: 'Waiting for you to submit the test form',
+  properties: [
+    { displayName: 'Form Title', name: 'formTitle', type: 'string', default: '', required: true },
+    { displayName: 'Form Description', name: 'formDescription', type: 'string', default: '' },
+    formFields,
+    {
+      displayName: 'Respond When',
+      name: 'responseMode',
+      type: 'options',
+      default: 'onReceived',
+      options: [
+        { name: 'Form Is Submitted', value: 'onReceived' },
+        { name: 'Workflow Finishes', value: 'lastNode' },
+      ],
+    },
+  ],
+};
+
+const form: NodeTypeDescription = {
+  name: 'core.form',
+  displayName: 'Form',
+  description: 'Shows the next page of a form, or how the form ends',
+  icon: 'lucide:file-text',
+  group: ['transform'],
+  version: 1,
+  defaults: { name: 'Form' },
+  inputs: ['main'],
+  outputs: ['main'],
+  categories: ['Core', 'Flow'],
+  alias: ['page', 'survey'],
+  properties: [
+    {
+      displayName: 'Page Type',
+      name: 'operation',
+      type: 'options',
+      default: 'page',
+      noDataExpression: true,
+      options: [
+        { name: 'Next Form Page', value: 'page' },
+        { name: 'Form Ending', value: 'completion' },
+      ],
+    },
+    { ...formFields, displayOptions: { show: { operation: ['page'] } } },
+    {
+      displayName: 'Completion Title',
+      name: 'completionTitle',
+      type: 'string',
+      default: '',
+      displayOptions: { show: { operation: ['completion'] } },
+    },
+    {
+      displayName: 'Completion Message',
+      name: 'completionMessage',
+      type: 'string',
+      default: '',
+      displayOptions: { show: { operation: ['completion'] } },
+    },
+  ],
+};
+
+const dataTable: NodeTypeDescription = {
+  name: 'core.dataTable',
+  displayName: 'Data Table',
+  description: 'Reads and writes the tables of this workspace',
+  icon: 'lucide:table-2',
+  group: ['transform'],
+  version: 1,
+  defaults: { name: 'Data Table' },
+  inputs: ['main'],
+  outputs: ['main'],
+  categories: ['Core', 'Data transformation'],
+  alias: ['table', 'database', 'store', 'rows'],
+  properties: [
+    {
+      displayName: 'Operation',
+      name: 'operation',
+      type: 'options',
+      default: 'insert',
+      noDataExpression: true,
+      options: [
+        { name: 'Insert', value: 'insert', action: 'Insert row' },
+        { name: 'Get', value: 'get', action: 'Get rows' },
+        { name: 'Update', value: 'update', action: 'Update rows' },
+        { name: 'Upsert', value: 'upsert', action: 'Upsert row' },
+        { name: 'Delete', value: 'deleteRows', action: 'Delete rows' },
+      ],
+    },
+    {
+      displayName: 'Data Table',
+      name: 'dataTableId',
+      type: 'resourceLocator',
+      default: { __rl: true, mode: 'list', value: '' },
+      required: true,
+      modes: [
+        {
+          displayName: 'From list',
+          name: 'list',
+          type: 'list',
+          typeOptions: {
+            searchListMethod: 'tableSearch',
+            searchable: true,
+            allowNewResource: { label: 'Create a new data table', url: '/data-tables' },
+          },
+        },
+        { displayName: 'By name', name: 'name', type: 'string' },
+        { displayName: 'By ID', name: 'id', type: 'string' },
+      ],
+    },
+    {
+      displayName: 'Mapping Mode',
+      name: 'dataMode',
+      type: 'options',
+      default: 'defineBelow',
+      displayOptions: { show: { operation: ['insert', 'update', 'upsert'] } },
+      options: [
+        { name: 'Map Each Column Manually', value: 'defineBelow' },
+        { name: 'Map Automatically', value: 'autoMapInputData' },
+      ],
+    },
+    {
+      displayName: 'Fields',
+      name: 'fieldsUi',
+      type: 'fixedCollection',
+      default: {},
+      typeOptions: { multipleValues: true },
+      displayOptions: { show: { operation: ['insert', 'update', 'upsert'], dataMode: ['defineBelow'] } },
+      options: [
+        {
+          displayName: 'Field',
+          name: 'fieldValues',
+          values: [
+            { displayName: 'Column', name: 'columnName', type: 'string', default: '' },
+            { displayName: 'Value', name: 'value', type: 'string', default: '' },
+          ],
+        },
+      ],
+    },
+    {
+      displayName: 'Limit',
+      name: 'limit',
+      type: 'number',
+      default: 50,
+      displayOptions: { show: { operation: ['get'] } },
+    },
+  ],
+};
+
+const redisTrigger: NodeTypeDescription = {
+  name: 'app.redisTrigger',
+  displayName: 'Redis Trigger',
+  description: 'Starts the workflow when a message arrives on a Redis channel',
+  icon: 'simple:redis',
+  iconColor: '#d82c20',
+  group: ['trigger'],
+  version: 1,
+  defaults: { name: 'Redis Trigger' },
+  inputs: [],
+  outputs: ['main'],
+  categories: ['Data & Storage', 'Triggers'],
+  eventTriggerDescription: 'Waiting for a message on the channels',
+  credentials: [{ name: 'redis', required: true }],
+  properties: [
+    {
+      displayName: 'Channels',
+      name: 'channels',
+      type: 'string',
+      default: '',
+      required: true,
+      placeholder: 'orders, invoices',
     },
   ],
 };
@@ -783,6 +1041,10 @@ export const demoNodeTypes: NodeTypeDescription[] = [
   merge,
   noOp,
   httpRequest,
+  formTrigger,
+  form,
+  dataTable,
+  redisTrigger,
   crm,
   agent,
   chatModel,
@@ -792,6 +1054,25 @@ export const demoNodeTypes: NodeTypeDescription[] = [
 ];
 
 export const demoCredentialTypes: CredentialTypeDescription[] = [
+  {
+    name: 'redis',
+    displayName: 'Redis',
+    icon: 'simple:redis',
+    properties: [
+      { displayName: 'Host', name: 'host', type: 'string', default: 'localhost' },
+      { displayName: 'Port', name: 'port', type: 'number', default: 6379 },
+      {
+        displayName: 'Password',
+        name: 'password',
+        type: 'string',
+        default: '',
+        typeOptions: { password: true },
+      },
+    ],
+    hasAuthenticate: false,
+    isOAuth2: false,
+    isOAuth1: false,
+  },
   {
     name: 'httpBasicAuth',
     displayName: 'Basic Auth',

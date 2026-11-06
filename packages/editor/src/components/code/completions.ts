@@ -89,6 +89,7 @@ const EXECUTION_MEMBERS: Suggestion[] = [
   { label: 'id', type: 'property' },
   { label: 'mode', type: 'property' },
   { label: 'resumeUrl', type: 'property' },
+  { label: 'resumeFormUrl', type: 'property' },
   { label: 'customData', type: 'property' },
 ];
 

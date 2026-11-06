@@ -7,6 +7,7 @@ import {
   assertCredentialUrlAllowed,
   type BaseContext,
   type BinaryData,
+  type ConnectedNode,
   type ConnectionType,
   CredentialDomainError,
   type DataObject,
@@ -215,6 +216,7 @@ export function buildExpressionContext(deps: ContextDeps, itemIndex: number): Ex
     variables: deps.services.variables,
     executeData: deps.executeData,
     resumeUrl: deps.services.resumeUrl,
+    resumeFormUrl: deps.services.resumeFormUrl,
     nodeParameters: getResolvedParameters(deps.workflow, deps.node),
     customData: state
       ? {
@@ -372,6 +374,7 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
       }
     },
     getInstanceLimits: () => getInstanceLimits(services.nodeLimits),
+    dataTables: services.dataTables,
   } as NodeHelpers;
 }
 
@@ -453,6 +456,8 @@ export interface ExecuteContextCallbacks {
   continueOnFail(): boolean;
   /** receives the hints the node adds during this run */
   addExecutionHints(hints: NodeExecutionHint[]): void;
+  /** receives what the node passes to setMetadata during this run */
+  setMetadata?(data: DataObject): void;
 }
 
 /** `executeWorkflow` shared by execute and supply-data contexts */
@@ -476,21 +481,31 @@ export function createSubWorkflowCaller(deps: ContextDeps): ExecuteContext['exec
   };
 }
 
+/** what a Python run says when the instance has no Python runner */
+export const PYTHON_DISABLED_MESSAGE =
+  'This instance disallows Python execution because it has the environment variable `PYTHON_ENABLED` set to `false`. To restore this functionality, remove this environment variable or set it to `true`.';
+
 /** `runCode` shared by execute and supply-data contexts */
 export function createCodeRunnerCall(deps: ContextDeps, base: BaseContext): ExecuteContext['runCode'] {
   const { services, node, state } = deps;
   const staticData = deps.workflow.staticData;
   const nodeKey = `node:${node.name}`;
   return async (options) => {
+    // a workflow stores n8n's `python` on ai.toolCode, whatever the option's type says
+    const python = options.language === 'pythonNative' || (options.language as string) === 'python';
+    const runner = python ? services.pythonRunner : services.codeRunner;
+    if (!runner) throw new NodeOperationError(node, PYTHON_DISABLED_MESSAGE);
     const nodeOutputs: Record<string, Item[]> = {};
     for (const [name, runs] of Object.entries(state?.resultData.runData ?? {})) {
       const last = runs[runs.length - 1];
       const main = last?.data?.main?.[0];
       if (main) nodeOutputs[name] = main;
     }
-    return services.codeRunner.run({
+    return runner.run({
       code: options.code,
       mode: options.mode,
+      language: python ? 'pythonNative' : options.language,
+      query: options.query,
       items: inputItems(deps).map((item, index) => ({ ...item, pairedItem: { item: index } })),
       nodeOutputs,
       variables: services.variables,
@@ -532,6 +547,14 @@ function replaceScope(staticData: DataObject, key: string, contents: DataObject)
   }
 }
 
+/** the nodes `names` lists, with their types */
+function connectedNodes(workflow: Workflow, names: string[]): ConnectedNode[] {
+  return names.flatMap((name) => {
+    const found = workflow.getNode(name);
+    return found ? [{ name: found.name, type: found.type }] : [];
+  });
+}
+
 export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContextCallbacks): ExecuteContext {
   const base = createBaseContext(deps);
   const { services, node, state } = deps;
@@ -561,11 +584,15 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
       if (state) setCustomData(state, key, value);
     },
     runCode: createCodeRunnerCall(deps, base),
+    setMetadata: (data) => callbacks.setMetadata?.(data),
+    getParentNodes: () => connectedNodes(deps.workflow, deps.workflow.getParentNodes(node.name)),
+    getChildNodes: () => connectedNodes(deps.workflow, deps.workflow.getChildNodes(node.name)),
   };
 }
 
 export interface TriggerCallbacks {
-  emit(data: Item[][], responsePromise?: { resolve(value: unknown): void; reject(err: Error): void }): void;
+  /** our 2nd = n8n's donePromise (run result, as today), our 3rd = n8n's responsePromise / sendResponse hook */
+  emit: TriggerContext['emit'];
   emitError(error: Error): void;
   activationMode: 'init' | 'create' | 'update' | 'activate' | 'manual';
   /** the slot store for missed schedules; the host gives one only for a saved workflow */
@@ -627,6 +654,7 @@ export function createWebhookContext(
   webhookName: string,
 ): WebhookContext {
   const base = createBaseContext(deps);
+  const { services, workflow, node } = deps;
   return {
     ...base,
     getRequestObject: () => request,
@@ -635,6 +663,18 @@ export function createWebhookContext(
     getQueryData: () => request.query,
     getParamsData: () => request.params,
     getWebhookName: () => webhookName,
+    getParentNodes: () => connectedNodes(workflow, workflow.getParentNodes(node.name)),
+    getChildNodes: () => connectedNodes(workflow, workflow.getChildNodes(node.name)),
+    getResumeFormUrl: () => services.resumeFormUrl,
+    getBinaryBuffer: (binary) => services.binaryData.getBuffer(binary),
+    signFormToken(payload, ttlSeconds) {
+      if (!services.formTokens) {
+        throw new NodeOperationError(node, 'Form tokens are not available in this environment');
+      }
+      return services.formTokens.sign(payload, ttlSeconds);
+    },
+    verifyFormToken: (token) => services.formTokens?.verify(token) ?? null,
+    getFormAuth: () => services.formAuth,
   };
 }
 

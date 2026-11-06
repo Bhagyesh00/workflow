@@ -175,6 +175,21 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
     return { data: { ok: true } };
   });
 
+  // a trigger node without a webhook (L12)
+  app.post('/workflows/:id/listen-test-trigger', async (request) => {
+    const auth = requireRole(request, 'editor');
+    const { id } = parse(idParams, request.params);
+    const { nodeName } = parse(z.object({ nodeName: z.string().min(1).max(256) }), request.body);
+    return { data: await workflows.listenTestTrigger(auth.tenant, id, nodeName) };
+  });
+
+  app.delete('/workflows/:id/listen-test-trigger', async (request) => {
+    const auth = requireRole(request, 'editor');
+    const { id } = parse(idParams, request.params);
+    await workflows.stopTestTrigger(auth.tenant, id);
+    return { data: { ok: true } };
+  });
+
   app.get('/workflows/:id/webhook-urls', async (request) => {
     const auth = requireRole(request, 'viewer');
     const { id } = parse(idParams, request.params);

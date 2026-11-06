@@ -269,11 +269,26 @@ export class AuthService {
   // -------------------------------------------------------------------------------------------
   // API keys: `wfk_<prefix>_<secret>`
 
-  async createApiKey(tenantId: string, userId: string, name: string) {
+  /** empty scopes = every route the user's role allows */
+  async createApiKey(tenantId: string, userId: string, name: string, scopes: string[] = []) {
     const prefix = randomBytes(4).toString('hex');
     const key = `wfk_${prefix}_${randomToken(32)}`;
-    const row = await this.repos.apiKeys.create({ tenantId, userId, name, prefix, keyHash: sha256(key) });
-    return { id: row.id, name: row.name, prefix, key, createdAt: row.createdAt.toISOString() };
+    const row = await this.repos.apiKeys.create({
+      tenantId,
+      userId,
+      name,
+      prefix,
+      keyHash: sha256(key),
+      scopes,
+    });
+    return {
+      id: row.id,
+      name: row.name,
+      prefix,
+      key,
+      scopes: row.scopes,
+      createdAt: row.createdAt.toISOString(),
+    };
   }
 
   /** resolve an API key to its tenant, user and the user's current role */
@@ -291,6 +306,6 @@ export class AuthService {
     if (!row.lastUsedAt || Date.now() - row.lastUsedAt.getTime() > 60_000) {
       await this.repos.apiKeys.touch(row.tenantId, row.id);
     }
-    return { user, tenant, role: membership.role, apiKeyId: row.id };
+    return { user, tenant, role: membership.role, apiKeyId: row.id, apiKeyScopes: row.scopes };
   }
 }

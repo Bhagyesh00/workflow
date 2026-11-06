@@ -44,6 +44,11 @@ export function evaluateDescriptionValue(value: string | undefined, parameters: 
   return current;
 }
 
+/** the URL family of a hook: `/form`, `/form-test` for a form hook, else `/webhook`, `/webhook-test` */
+export function webhookUrlBase(description: Pick<WebhookDescription, 'nodeType'>): 'webhook' | 'form' {
+  return description.nodeType === 'form' ? 'form' : 'webhook';
+}
+
 export function normalizePath(path: string): string {
   return path
     .split('/')

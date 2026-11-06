@@ -42,6 +42,16 @@ export const queryKeys = {
   reviews: (query: object = {}) => ['workflow-reviews', query] as const,
   inbox: (query: object = {}) => ['inbox', query] as const,
   inboxSummary: ['inbox', 'summary'] as const,
+  dataTables: (query: object = {}) => ['data-tables', query] as const,
+  dataTable: (id: string) => ['data-table', id] as const,
+  dataTableColumns: (id: string) => ['data-table', id, 'columns'] as const,
+  dataTableRows: (id: string, query: object = {}) => ['data-table', id, 'rows', query] as const,
+  dataTableDependencies: (id: string) => ['data-table', id, 'dependencies'] as const,
+  dataTableLimits: ['data-tables-limits'] as const,
+  secretProviderTypes: ['secret-providers', 'types'] as const,
+  secretConnections: ['secret-providers', 'connections'] as const,
+  secretConnection: (providerKey: string) => ['secret-providers', 'connections', providerKey] as const,
+  secretCompletions: ['secret-providers', 'completions'] as const,
 };
 
 export function createQueryClient(): QueryClient {

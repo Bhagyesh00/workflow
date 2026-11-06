@@ -13,6 +13,7 @@ import {
   type NodeType,
 } from '@workflow/workflow';
 import ssh2, { type ClientChannel, type SFTPWrapper } from 'ssh2';
+import { sshCredentialTest } from '../../credential-tests/ssh';
 import {
   CappedBuffer,
   connectSocket,
@@ -183,8 +184,18 @@ export const SshNode: NodeType = {
     categories: ['Core', 'Developer tools'],
     alias: ['ssh', 'remote command', 'shell', 'sftp'],
     credentials: [
-      { name: 'sshPassword', required: true, displayOptions: { show: { authentication: ['password'] } } },
-      { name: 'sshPrivateKey', required: true, displayOptions: { show: { authentication: ['privateKey'] } } },
+      {
+        name: 'sshPassword',
+        required: true,
+        testedBy: 'sshCredentialTest',
+        displayOptions: { show: { authentication: ['password'] } },
+      },
+      {
+        name: 'sshPrivateKey',
+        required: true,
+        testedBy: 'sshCredentialTest',
+        displayOptions: { show: { authentication: ['privateKey'] } },
+      },
     ],
     properties: [
       {
@@ -370,5 +381,9 @@ export const SshNode: NodeType = {
     } finally {
       session.close();
     }
+  },
+
+  methods: {
+    credentialTest: { sshCredentialTest },
   },
 };

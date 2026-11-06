@@ -7,6 +7,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import type { Role } from '../db/schema';
+import { type ApiKeyScope, assertApiKeyScope } from '../http/api-key-scopes';
 import { type AuthContext, loadApiKey } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import {
@@ -21,6 +22,7 @@ import {
 import { hasRole } from '../services/auth';
 import { createCredential, deleteCredential } from './credentials';
 import { deleteExecution, executionListQuery, getExecution, listExecutions } from './executions';
+import { PUBLIC_DATA_TABLE_ROUTES } from './public-data-tables';
 import { publicFolderHandlers } from './public-folders';
 import { createTag, createVariable, renameTag, tagDTO, updateVariable, variableDTO } from './resources';
 
@@ -38,6 +40,8 @@ interface ApiRoute {
   summary: string;
   tag: string;
   role: Role;
+  /** the API key scope of this route (n8n's); checked by assertApiKeyScope after the role */
+  scope?: ApiKeyScope;
   params?: z.ZodObject;
   query?: z.ZodObject;
   body?: z.ZodType;
@@ -98,6 +102,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'List workflows',
     tag: 'Workflows',
     role: 'viewer',
+    scope: 'workflow:list',
     query: publicWorkflowListQuery,
     response: 'WorkflowSummary',
     list: true,
@@ -116,6 +121,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Create a workflow',
     tag: 'Workflows',
     role: 'editor',
+    scope: 'workflow:create',
     body: workflowCreateSchema,
     response: 'Workflow',
     handler: async (ctx, input) => ({
@@ -128,6 +134,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Get a workflow',
     tag: 'Workflows',
     role: 'viewer',
+    scope: 'workflow:read',
     params: idParams,
     response: 'Workflow',
     handler: async (ctx, { auth, params }) => ({
@@ -140,6 +147,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Update a workflow (versionId enables optimistic concurrency)',
     tag: 'Workflows',
     role: 'editor',
+    scope: 'workflow:update',
     params: idParams,
     query: publicWorkflowUpdateQuery,
     body: publicWorkflowUpdate,
@@ -163,6 +171,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Delete a workflow',
     tag: 'Workflows',
     role: 'editor',
+    scope: 'workflow:delete',
     params: idParams,
     response: 'Ok',
     handler: async (ctx, input) => {
@@ -177,6 +186,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Publish a workflow (a version, optionally named; default the current one)',
     tag: 'Workflows',
     role: 'editor',
+    scope: 'workflow:activate',
     params: idParams,
     body: publicPublishBody,
     response: 'Workflow',
@@ -194,6 +204,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Archive a workflow (unpublishes it; archiving an archived workflow is a no-op)',
     tag: 'Workflows',
     role: 'editor',
+    scope: 'workflow:delete',
     params: idParams,
     response: 'Workflow',
     handler: async (ctx, input) => ({
@@ -208,6 +219,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Unarchive a workflow (stays unpublished)',
     tag: 'Workflows',
     role: 'editor',
+    scope: 'workflow:delete',
     params: idParams,
     response: 'Workflow',
     handler: async (ctx, input) => ({
@@ -220,6 +232,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Deactivate a workflow',
     tag: 'Workflows',
     role: 'editor',
+    scope: 'workflow:deactivate',
     params: idParams,
     response: 'Workflow',
     handler: async (ctx, input) => ({
@@ -232,6 +245,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'List executions',
     tag: 'Executions',
     role: 'viewer',
+    scope: 'execution:list',
     query: executionListQuery,
     response: 'Execution',
     list: true,
@@ -243,6 +257,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Get an execution (includeData=true adds the workflow snapshot and run data)',
     tag: 'Executions',
     role: 'viewer',
+    scope: 'execution:read',
     params: idParams,
     query: executionGetQuery,
     response: 'Execution',
@@ -256,6 +271,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Delete an execution',
     tag: 'Executions',
     role: 'editor',
+    scope: 'execution:delete',
     params: idParams,
     response: 'Ok',
     handler: async (ctx, { auth, params }) => {
@@ -269,6 +285,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Retry a failed execution',
     tag: 'Executions',
     role: 'editor',
+    scope: 'execution:retry',
     params: idParams,
     body: z.object({ useCurrentWorkflow: z.boolean().optional() }),
     response: 'ExecutionRef',
@@ -286,6 +303,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Create a credential',
     tag: 'Credentials',
     role: 'editor',
+    scope: 'credential:create',
     body: credentialCreateSchema,
     response: 'CredentialRef',
     handler: async (ctx, input) => ({
@@ -304,6 +322,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Delete a credential',
     tag: 'Credentials',
     role: 'editor',
+    scope: 'credential:delete',
     params: idParams,
     response: 'Ok',
     handler: async (ctx, input) => {
@@ -323,6 +342,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'JSON schema of the data of a credential type',
     tag: 'Credentials',
     role: 'viewer',
+    scope: 'credential:read',
     params: credentialTypeParams,
     response: 'JsonSchema',
     handler: async (ctx, { params }) => {
@@ -337,6 +357,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'List tags',
     tag: 'Tags',
     role: 'viewer',
+    scope: 'tag:list',
     response: 'Tag',
     list: true,
     handler: async (ctx, { auth }) => ({
@@ -350,6 +371,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Create a tag',
     tag: 'Tags',
     role: 'editor',
+    scope: 'tag:create',
     body: tagSchema,
     response: 'Tag',
     handler: async (ctx, { auth, body }) => ({ data: await createTag(ctx, auth.tenant.id, body.name) }),
@@ -360,6 +382,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Get a tag',
     tag: 'Tags',
     role: 'viewer',
+    scope: 'tag:read',
     params: idParams,
     response: 'Tag',
     handler: async (ctx, { auth, params }) => {
@@ -374,6 +397,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Rename a tag',
     tag: 'Tags',
     role: 'editor',
+    scope: 'tag:update',
     params: idParams,
     body: tagSchema,
     response: 'Tag',
@@ -387,6 +411,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Delete a tag',
     tag: 'Tags',
     role: 'editor',
+    scope: 'tag:delete',
     params: idParams,
     response: 'Ok',
     handler: async (ctx, { auth, params }) => {
@@ -400,6 +425,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'List variables',
     tag: 'Variables',
     role: 'viewer',
+    scope: 'variable:list',
     response: 'Variable',
     list: true,
     handler: async (ctx, { auth }) => ({
@@ -413,6 +439,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Create a variable',
     tag: 'Variables',
     role: 'admin',
+    scope: 'variable:create',
     body: variableCreateSchema,
     response: 'Variable',
     handler: async (ctx, { auth, body }) => ({
@@ -425,6 +452,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Update a variable',
     tag: 'Variables',
     role: 'admin',
+    scope: 'variable:update',
     params: idParams,
     body: variableUpdateSchema,
     response: 'Variable',
@@ -438,6 +466,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Delete a variable',
     tag: 'Variables',
     role: 'admin',
+    scope: 'variable:delete',
     params: idParams,
     response: 'Ok',
     handler: async (ctx, { auth, params }) => {
@@ -451,6 +480,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'List folders',
     tag: 'Folders',
     role: 'viewer',
+    scope: 'folder:list',
     query: publicFolderListQuery,
     response: 'Folder',
     list: true,
@@ -462,6 +492,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Create a folder',
     tag: 'Folders',
     role: 'editor',
+    scope: 'folder:create',
     body: publicFolderCreate,
     response: 'Folder',
     handler: (ctx, input) => publicFolderHandlers.create(ctx, input),
@@ -472,6 +503,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Get a folder',
     tag: 'Folders',
     role: 'viewer',
+    scope: 'folder:read',
     params: folderParams,
     response: 'Folder',
     handler: (ctx, input) => publicFolderHandlers.get(ctx, input),
@@ -482,6 +514,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Rename, move or tag a folder',
     tag: 'Folders',
     role: 'editor',
+    scope: 'folder:update',
     params: folderParams,
     body: publicFolderUpdate,
     response: 'Folder',
@@ -493,11 +526,13 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     summary: 'Delete a folder (transferToFolderId moves its content; omitted archives its workflows to root)',
     tag: 'Folders',
     role: 'editor',
+    scope: 'folder:delete',
     params: folderParams,
     query: publicFolderDeleteQuery,
     response: 'Ok',
     handler: (ctx, input) => publicFolderHandlers.remove(ctx, input),
   },
+  ...PUBLIC_DATA_TABLE_ROUTES,
 ];
 
 /** JSON schema of credential data from the type's properties */
@@ -670,6 +705,46 @@ const COMPONENTS: Record<string, unknown> = {
     },
   },
   JsonSchema: { type: 'object' },
+  DataTableColumn: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      name: { type: 'string' },
+      type: { enum: ['string', 'number', 'boolean', 'date'] },
+      index: { type: 'integer' },
+    },
+  },
+  DataTable: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      name: { type: 'string' },
+      columns: { type: 'array', items: ref('DataTableColumn') },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+  DataTableRow: {
+    type: 'object',
+    description: 'The system columns, and one property per column of the table',
+    properties: {
+      id: { type: 'integer' },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+    additionalProperties: true,
+  },
+  DataTableDependency: {
+    type: 'object',
+    properties: {
+      type: { const: 'workflow' },
+      id: { type: 'string', format: 'uuid' },
+      name: { type: 'string' },
+    },
+  },
+  DataTableResult: {
+    description: 'What a write answers: true, a count, ids or rows, as the request asked',
+  },
 };
 
 export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown> {
@@ -831,6 +906,7 @@ export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerC
         await loadApiKey(request, ctx.auth);
         const auth = request.auth!;
         if (!hasRole(auth.role, route.role)) throw ApiError.forbidden();
+        assertApiKeyScope(auth, route.scope);
         const input: PublicApiInput = {
           auth,
           request,

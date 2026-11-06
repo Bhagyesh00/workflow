@@ -24,6 +24,8 @@ export interface AuthContext {
   role: Role;
   sessionId?: string;
   apiKeyId?: string;
+  /** the key's scopes; empty = every route the role allows (checked by assertApiKeyScope) */
+  apiKeyScopes?: string[];
 }
 
 declare module 'fastify' {

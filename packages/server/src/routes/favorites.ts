@@ -8,7 +8,7 @@ import type { ServerContext } from '../context';
 import { requireRole } from '../http/auth';
 import { parse } from '../http/errors';
 
-const resourceType = z.enum(['workflow', 'folder']);
+const resourceType = z.enum(['workflow', 'folder', 'dataTable']);
 const addBody = z.object({ resourceType, resourceId: z.uuid() });
 const removeParams = z.object({ resourceType, resourceId: z.uuid() });
 

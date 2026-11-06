@@ -33,7 +33,8 @@ import { useEffect, useRef } from 'react';
 import { cx } from '../ui/cx';
 import { type CompletionData, completeExpression, enclosingExpressionStart } from './completions';
 
-export type CodeLanguage = 'javascript' | 'json' | 'expression' | 'text';
+/** `python` is plain text until L8 adds its highlighting */
+export type CodeLanguage = 'javascript' | 'python' | 'json' | 'expression' | 'text';
 
 const highlight = HighlightStyle.define([
   { tag: tags.keyword, color: 'var(--wf-cm-keyword)' },

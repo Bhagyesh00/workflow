@@ -44,6 +44,10 @@ export default defineConfig(({ mode }) => ({
       '/webhook': proxyTarget,
       '/webhook-test': proxyTarget,
       '/webhook-waiting': proxyTarget,
+      // regex keys: a plain '/form' prefix would also send the SPA route /form-auth to the server
+      '^/form/': proxyTarget,
+      '^/form-test/': proxyTarget,
+      '^/form-waiting/': proxyTarget,
     },
   },
   build: {

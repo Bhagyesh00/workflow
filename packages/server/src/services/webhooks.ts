@@ -1,6 +1,7 @@
 /**
  * Incoming webhook calls (ARCHITECTURE.md §11): production `/webhook/<tenantSlug>/<path>`,
  * test `/webhook-test/<tenantSlug>/<path>` and resume `/webhook-waiting/<executionId>/<signature>`.
+ * Forms use the same handlers at `/form/...`, `/form-test/...` and `/form-waiting/...` (`kind: 'form'`).
  *
  * Response modes: `onReceived` (answer at once), `lastNode` (answer with the last node's data),
  * `responseNode` (hold the request until a Respond to Webhook node answers or the run ends).
@@ -15,12 +16,18 @@
  */
 import { randomUUID } from 'node:crypto';
 import { PassThrough, type Readable } from 'node:stream';
-import { createWebhookContext, getResolvedParameters, type NodeTypes } from '@workflow/core';
+import {
+  createWebhookContext,
+  type ExecutionServices,
+  getResolvedParameters,
+  type NodeTypes,
+} from '@workflow/core';
 import {
   type DataObject,
   type ExecutionMode,
   type ExecutionState,
   ExpressionEvaluator,
+  type FormAuthHelper,
   type Item,
   isExpression,
   isPlainObject,
@@ -104,6 +111,9 @@ const json = (statusCode: number, body: unknown, headers: Record<string, string>
 const notRegistered = (method: string, path: string) =>
   json(404, errorBody('not_found', `The webhook "${method} ${path}" is not registered`));
 
+/** which URL family a request came in on: `/webhook*` or `/form*` (ignored until L1) */
+export type WebhookKind = 'webhook' | 'form';
+
 export interface WebhookServiceDeps {
   config: Config;
   repos: Repositories;
@@ -113,6 +123,8 @@ export interface WebhookServiceDeps {
   push: PushService;
   metrics: Metrics;
   logger: PinoLogger;
+  formTokens: NonNullable<ExecutionServices['formTokens']>;
+  formAuth: FormAuthHelper;
 }
 
 interface RunInput {
@@ -145,7 +157,11 @@ export class WebhookService {
   // -------------------------------------------------------------------------------------------
   // production
 
-  async handleProduction(tenantSlug: string, incoming: IncomingWebhook): Promise<WebhookReply> {
+  async handleProduction(
+    tenantSlug: string,
+    incoming: IncomingWebhook,
+    _kind: WebhookKind = 'webhook',
+  ): Promise<WebhookReply> {
     const { repos } = this.deps;
     const tenant = await repos.tenants.getBySlug(tenantSlug);
     if (!tenant) return notRegistered(incoming.method, incoming.path);
@@ -306,7 +322,11 @@ export class WebhookService {
   // -------------------------------------------------------------------------------------------
   // test webhooks
 
-  async handleTest(tenantSlug: string, incoming: IncomingWebhook): Promise<WebhookReply> {
+  async handleTest(
+    tenantSlug: string,
+    incoming: IncomingWebhook,
+    _kind: WebhookKind = 'webhook',
+  ): Promise<WebhookReply> {
     const { repos, testWebhooks, push } = this.deps;
     const tenant = await repos.tenants.getBySlug(tenantSlug);
     if (!tenant) return notRegistered(incoming.method, incoming.path);
@@ -367,7 +387,11 @@ export class WebhookService {
   // -------------------------------------------------------------------------------------------
   // resume webhooks
 
-  async handleWaiting(executionId: string, incoming: IncomingWebhook): Promise<WebhookReply> {
+  async handleWaiting(
+    executionId: string,
+    incoming: IncomingWebhook,
+    _kind: WebhookKind = 'webhook',
+  ): Promise<WebhookReply> {
     const { repos, nodeTypes, executions } = this.deps;
     // `<signature>[/<suffix>]`: an unsigned or forged URL is answered like an unknown execution
     const [signature = '', ...rest] = incoming.path.split('/');
@@ -402,7 +426,7 @@ export class WebhookService {
 
     let output: Item[][];
     if (node && type?.webhook && hook) {
-      const services = await executions.buildServices({
+      const services = await this.contextServices({
         tenant,
         executionId,
         mode: row.mode as never,
@@ -436,6 +460,14 @@ export class WebhookService {
   // -------------------------------------------------------------------------------------------
   // shared run logic
 
+  /** what a webhook context runs on: the execution's services with this service's form helpers */
+  private async contextServices(
+    input: Parameters<ExecutionService['buildServices']>[0],
+  ): Promise<ExecutionServices> {
+    const services = await this.deps.executions.buildServices(input);
+    return { ...services, formTokens: this.deps.formTokens, formAuth: this.deps.formAuth };
+  }
+
   private async run(input: RunInput): Promise<WebhookReply> {
     const { executions, metrics, logger } = this.deps;
     const started = Date.now();
@@ -449,7 +481,7 @@ export class WebhookService {
     let reply: WebhookReply;
     let executionStarted = false;
     try {
-      const services = await executions.buildServices({
+      const services = await this.contextServices({
         tenant,
         executionId,
         mode: input.mode,

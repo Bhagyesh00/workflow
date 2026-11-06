@@ -10,6 +10,7 @@ import {
   bigserial,
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -17,6 +18,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
   varchar,
@@ -200,7 +202,7 @@ export const workflowVersions = pgTable(
   (t) => [index('workflow_versions_workflow_idx').on(t.tenantId, t.workflowId, t.createdAt)],
 );
 
-/** per-user favorites (P3-07): workflows and folders */
+/** per-user favorites (P3-07, P4-03): workflows, folders and data tables */
 export const userFavorites = pgTable(
   'user_favorites',
   {
@@ -210,14 +212,17 @@ export const userFavorites = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    resourceType: text('resource_type').$type<'workflow' | 'folder'>().notNull(),
+    resourceType: text('resource_type').$type<'workflow' | 'folder' | 'dataTable'>().notNull(),
     resourceId: uuid('resource_id').notNull(),
     createdAt: createdAt(),
   },
   (t) => [
     primaryKey({ columns: [t.userId, t.resourceType, t.resourceId] }),
     index('user_favorites_tenant_user_idx').on(t.tenantId, t.userId),
-    check('user_favorites_resource_type_check', sql`${t.resourceType} in ('workflow', 'folder')`),
+    check(
+      'user_favorites_resource_type_check',
+      sql`${t.resourceType} in ('workflow', 'folder', 'dataTable')`,
+    ),
   ],
 );
 
@@ -279,6 +284,8 @@ export const credentials = pgTable(
     type: text('type').notNull(),
     /** CredentialCipher payload, AAD = tenantId:credentialId */
     dataEnc: text('data_enc').notNull(),
+    /** external secret names the credential reads (P4-07), never their values */
+    secretKeys: text('secret_keys').array().notNull().default(sql`'{}'`),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -631,6 +638,100 @@ export const workflowReviewComments = pgTable(
   (t) => [index('workflow_review_comments_activity_idx').on(t.activityId)],
 );
 
+/**
+ * Data tables (P4-03): user tables kept per workspace. Cell values live in `data_table_rows.data`, keyed by column name;
+ * `next_row_id` hands out the per-table row ids. Unique constraints, not indexes: the composite foreign keys need
+ * (tenant_id, id) to exist before they are added.
+ */
+export const dataTables = pgTable(
+  'data_tables',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 128 }).notNull(),
+    nextRowId: bigint('next_row_id', { mode: 'number' }).notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique('data_tables_tenant_name_unique').on(t.tenantId, t.name),
+    unique('data_tables_tenant_id_unique').on(t.tenantId, t.id),
+  ],
+);
+
+export const dataTableColumns = pgTable(
+  'data_table_columns',
+  {
+    id: uuid('id').primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    tableId: uuid('table_id').notNull(),
+    name: varchar('name', { length: 63 }).notNull(),
+    type: text('type').$type<'string' | 'number' | 'boolean' | 'date'>().notNull(),
+    position: integer('position').notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique('data_table_columns_table_name_unique').on(t.tableId, t.name),
+    foreignKey({
+      name: 'data_table_columns_table_fk',
+      columns: [t.tenantId, t.tableId],
+      foreignColumns: [dataTables.tenantId, dataTables.id],
+    }).onDelete('cascade'),
+    index('data_table_columns_table_position_idx').on(t.tableId, t.position),
+    check('data_table_columns_type_check', sql`${t.type} in ('string', 'number', 'boolean', 'date')`),
+  ],
+);
+
+export const dataTableRows = pgTable(
+  'data_table_rows',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    tableId: uuid('table_id').notNull(),
+    rowId: bigint('row_id', { mode: 'number' }).notNull(),
+    data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
+    /** size of `data` in bytes, summed for the workspace storage limit */
+    sizeBytes: integer('size_bytes').notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tableId, t.rowId] }),
+    foreignKey({
+      name: 'data_table_rows_table_fk',
+      columns: [t.tenantId, t.tableId],
+      foreignColumns: [dataTables.tenantId, dataTables.id],
+    }).onDelete('cascade'),
+    index('data_table_rows_tenant_table_idx').on(t.tenantId, t.tableId),
+  ],
+);
+
+/** External secrets vault connections (P4-07). `settings_enc` is a CredentialCipher payload. */
+export const secretConnections = pgTable(
+  'secret_connections',
+  {
+    id: uuid('id').primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    providerKey: text('provider_key').notNull(),
+    type: text('type').notNull(),
+    settingsEnc: text('settings_enc').notNull(),
+    isEnabled: boolean('is_enabled').notNull().default(false),
+    state: text('state')
+      .$type<'initializing' | 'initialized' | 'connecting' | 'connected' | 'error' | 'retrying'>()
+      .notNull()
+      .default('initializing'),
+    lastError: text('last_error'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [unique('secret_connections_tenant_provider_key_unique').on(t.tenantId, t.providerKey)],
+);
+
 export type Role = 'owner' | 'admin' | 'editor' | 'viewer';
 
 export type TenantRow = typeof tenants.$inferSelect;
@@ -647,6 +748,10 @@ export type ApiKeyRow = typeof apiKeys.$inferSelect;
 export type InvitationRow = typeof invitations.$inferSelect;
 export type FolderRow = typeof folders.$inferSelect;
 export type UserFavoriteRow = typeof userFavorites.$inferSelect;
+export type DataTableRow = typeof dataTables.$inferSelect;
+export type DataTableColumnRow = typeof dataTableColumns.$inferSelect;
+export type DataTableRowRow = typeof dataTableRows.$inferSelect;
+export type SecretConnectionRow = typeof secretConnections.$inferSelect;
 export type AnnotationTagRow = typeof annotationTags.$inferSelect;
 export type ExecutionAnnotationRow = typeof executionAnnotations.$inferSelect;
 export type PublishHistoryRow = typeof workflowPublishHistory.$inferSelect;
