@@ -12,10 +12,10 @@ import {
 } from '@workflow/core';
 import {
   assertCredentialUrlAllowed,
+  type CredentialTestContext,
   type DataObject,
   evaluateSimple,
   getCredentialAllowedDomains,
-  type CredentialTestContext,
   type HttpFullResponse,
   type HttpRequestOptions,
   isExpression,
@@ -54,6 +54,11 @@ function resolveTemplates<T>(value: T, credentials: DataObject): T {
 /** a node's own test runs for at most this long, then its signal aborts */
 const NODE_TEST_TIMEOUT_MS = 30_000;
 
+type NodeCredentialTest = (
+  ctx: CredentialTestContext,
+  credential: { type: string; data: DataObject },
+) => Promise<NodeCredentialTestResult>;
+
 /**
  * The `methods.credentialTest` function of the node type whose credential entry names `type` (or a
  * type it extends) with `testedBy`, with the credential entry that matched.
@@ -62,13 +67,8 @@ function findNodeTest(
   credentials: CredentialService,
   type: string,
   nodeTypes: NodeTypes,
-):
-  | ((
-      ctx: CredentialTestContext,
-      credential: { type: string; data: DataObject },
-    ) => Promise<NodeCredentialTestResult>)
-  | undefined {
-  let inherited;
+): NodeCredentialTest | undefined {
+  let inherited: NodeCredentialTest | undefined;
   for (const node of nodeTypes.list()) {
     for (const entry of node.description.credentials ?? []) {
       if (!entry.testedBy) continue;
@@ -114,9 +114,7 @@ async function runNodeTest(
     // the node's own functions answer with their own texts; anything thrown is not shown
     return {
       status: 'Error',
-      message: controller.signal.aborted
-        ? 'The connection test timed out'
-        : "Couldn't test the credential",
+      message: controller.signal.aborted ? 'The connection test timed out' : "Couldn't test the credential",
     };
   } finally {
     clearTimeout(timer);
