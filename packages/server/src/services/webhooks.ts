@@ -53,6 +53,7 @@ import {
   type NodeWebhook,
   nodeWebhooks,
   sortDynamic,
+  webhookUrlBase,
 } from './webhook-paths';
 
 export interface WebhookReply {
@@ -111,8 +112,39 @@ const json = (statusCode: number, body: unknown, headers: Record<string, string>
 const notRegistered = (method: string, path: string) =>
   json(404, errorBody('not_found', `The webhook "${method} ${path}" is not registered`));
 
-/** which URL family a request came in on: `/webhook*` or `/form*` (ignored until L1) */
+/** which URL family a request came in on: `/webhook*` or `/form*` */
 export type WebhookKind = 'webhook' | 'form';
+
+const FORM_TOO_LARGE =
+  'The files you are trying to upload are too large. Please reduce the total size and try again.';
+const FORM_NOT_LISTENING = {
+  title: "Form Trigger isn't listening yet",
+  message: 'Click the "Listen for test event" button in your Form Trigger',
+};
+const FORM_NOT_FOUND = {
+  title: 'Problem loading form',
+  message: 'This usually occurs if the workflow serving this form is deactivated or no longer exists',
+};
+
+/** fixed texts only: nothing of the request or a workflow goes in this page */
+const formErrorPage = (statusCode: number, page: { title: string; message: string }): WebhookReply => ({
+  statusCode,
+  headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+  body: `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Form</title><style>body{margin:0;padding:32px 16px;background:#f5f5f7;color:#1f1f24;font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}main{max-width:520px;margin:0 auto;padding:24px;background:#fff;border:1px solid #e3e3e8;border-radius:10px}h1{margin:0 0 8px;font-size:22px}p{margin:0;color:#55555f}</style></head><body><main><h1>${escapeFixedText(page.title)}</h1><p>${escapeFixedText(page.message)}</p></main></body></html>`,
+});
+
+const escapeFixedText = (text: string) => text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** a browser opening a form URL gets a page; any other caller keeps the JSON */
+function formErrorFor(
+  kind: WebhookKind,
+  headers: WebhookRequest['headers'],
+  reply: WebhookReply,
+  page: { title: string; message: string },
+): WebhookReply {
+  if (kind !== 'form' || !header(headers, 'accept')?.includes('text/html')) return reply;
+  return formErrorPage(reply.statusCode, page);
+}
 
 export interface WebhookServiceDeps {
   config: Config;
@@ -160,22 +192,25 @@ export class WebhookService {
   async handleProduction(
     tenantSlug: string,
     incoming: IncomingWebhook,
-    _kind: WebhookKind = 'webhook',
+    kind: WebhookKind = 'webhook',
   ): Promise<WebhookReply> {
     const { repos } = this.deps;
+    const missing = () =>
+      formErrorFor(kind, incoming.headers, notRegistered(incoming.method, incoming.path), FORM_NOT_FOUND);
     const tenant = await repos.tenants.getBySlug(tenantSlug);
-    if (!tenant) return notRegistered(incoming.method, incoming.path);
+    if (!tenant) return missing();
     const found = await this.findWebhook(tenant.id, incoming.method, incoming.path);
-    if (!found) return notRegistered(incoming.method, incoming.path);
+    if (!found) return missing();
     const row = await repos.workflows.get(tenant.id, found.workflowId);
-    if (!row?.active) return notRegistered(incoming.method, incoming.path);
+    if (!row?.active) return missing();
     // production serves the published version (P3-10), never the saved draft
     const definition = await loadPublishedDefinition(repos, tenant.id, row);
-    if (!definition) return notRegistered(incoming.method, incoming.path);
+    if (!definition) return missing();
     const node = definition.nodes.find((n) => n.name === found.nodeName);
-    if (!node) return notRegistered(incoming.method, incoming.path);
+    if (!node) return missing();
     const hook = this.hookOf(definition, node, found.webhookName);
-    if (!hook) return notRegistered(incoming.method, incoming.path);
+    // /form serves only form hooks, /webhook none
+    if (!hook || webhookUrlBase(hook.description) !== kind) return missing();
     const workflow = new Workflow(definition, this.deps.nodeTypes);
     const source: CorsSource = { tenant, mode: 'webhook', workflowId: row.id, workflow, node };
     const cors = (reply: WebhookReply) => this.decorate(reply, source, incoming.headers);
@@ -183,7 +218,7 @@ export class WebhookService {
     try {
       received = await receive(incoming);
     } catch (error) {
-      return cors(bodyErrorReply(error));
+      return cors(bodyErrorReply(error, kind));
     }
 
     const key = header(received.request.headers, 'idempotency-key');
@@ -325,25 +360,40 @@ export class WebhookService {
   async handleTest(
     tenantSlug: string,
     incoming: IncomingWebhook,
-    _kind: WebhookKind = 'webhook',
+    kind: WebhookKind = 'webhook',
   ): Promise<WebhookReply> {
     const { repos, testWebhooks, push } = this.deps;
-    const tenant = await repos.tenants.getBySlug(tenantSlug);
-    if (!tenant) return notRegistered(incoming.method, incoming.path);
-    const found = await findTestWebhook(testWebhooks, tenant.id, incoming.method, incoming.path);
-    if (!found) {
-      return json(
-        404,
-        errorBody(
-          'not_found',
-          `The test webhook "${incoming.method} ${incoming.path}" is not registered. Click "Listen for test event" in the editor first.`,
+    const notListening = () =>
+      formErrorFor(
+        kind,
+        incoming.headers,
+        json(
+          404,
+          errorBody(
+            'not_found',
+            `The test webhook "${incoming.method} ${incoming.path}" is not registered. Click "Listen for test event" in the editor first.`,
+          ),
         ),
+        FORM_NOT_LISTENING,
       );
-    }
+    const missing = () =>
+      formErrorFor(kind, incoming.headers, notRegistered(incoming.method, incoming.path), FORM_NOT_LISTENING);
+    const tenant = await repos.tenants.getBySlug(tenantSlug);
+    if (!tenant) return missing();
+    const found = await findTestWebhook(testWebhooks, tenant.id, incoming.method, incoming.path);
+    if (!found) return notListening();
     const { registration } = found;
     const definition = registration.workflow;
     const node = definition.nodes.find((n) => n.name === registration.nodeName);
-    if (!node) return notRegistered(incoming.method, incoming.path);
+    if (!node) return missing();
+    const type = this.deps.nodeTypes.get(node.type);
+    const hook = type
+      ? nodeWebhooks(new Workflow(definition, this.deps.nodeTypes), node, type).find(
+          (h) => h.method === registration.method && h.path === registration.path,
+        )
+      : undefined;
+    // /form-test serves only form hooks, /webhook-test none
+    if (!hook || webhookUrlBase(hook.description) !== kind) return missing();
     // a body that cannot be read (too large, malformed) leaves the registration in place
     let received: ReceivedWebhook;
     try {
@@ -357,18 +407,17 @@ export class WebhookService {
         workflow,
         node,
       };
-      return this.decorate(bodyErrorReply(error), source, incoming.headers);
+      return this.decorate(bodyErrorReply(error, kind), source, incoming.headers);
     }
-    // one-shot: the first call consumes the registration
-    if (!(await testWebhooks.remove(found.registration)))
-      return notRegistered(incoming.method, incoming.path);
-    const type = this.deps.nodeTypes.get(node.type);
-    const hook = type
-      ? nodeWebhooks(new Workflow(definition, this.deps.nodeTypes), node, type).find(
-          (h) => h.method === registration.method && h.path === registration.path,
-        )
-      : undefined;
-    if (!hook) return notRegistered(incoming.method, incoming.path);
+    // showing a test form uses nothing up: only its submission does, and then for both of its hooks
+    const showsForm = kind === 'form' && hook.method === 'GET';
+    if (!showsForm) {
+      // one-shot: the first call consumes the registration
+      if (!(await testWebhooks.remove(found.registration))) return missing();
+      if (kind === 'form') {
+        await testWebhooks.removeForNode(tenant.id, registration.workflowId, registration.nodeName);
+      }
+    }
     return this.run({
       tenant,
       definition,
@@ -560,7 +609,12 @@ export class WebhookService {
         input.mode === 'manual'
           ? (error as Error).message || 'The webhook failed'
           : 'The webhook could not be processed';
-      reply = json(500, errorBody('webhook_error', message));
+      reply = formErrorFor(
+        webhookUrlBase(hook.description),
+        incoming.request.headers,
+        json(500, errorBody('webhook_error', message)),
+        { title: 'Problem loading form', message },
+      );
     } finally {
       // uploads the node stored for an execution that never started belong to no row and would never be pruned
       if (!executionStarted) await executions.removeBinaryData(tenant.id, executionId);
@@ -857,9 +911,10 @@ function headerNames(value: string | undefined): string[] {
   return [...new Set(names)];
 }
 
-function bodyErrorReply(error: unknown): WebhookReply {
-  if (error instanceof WebhookBodyError) return json(error.statusCode, errorBody(error.code, error.message));
-  throw error;
+function bodyErrorReply(error: unknown, kind: WebhookKind): WebhookReply {
+  if (!(error instanceof WebhookBodyError)) throw error;
+  const message = kind === 'form' && error.statusCode === 413 ? FORM_TOO_LARGE : error.message;
+  return json(error.statusCode, errorBody(error.code, message));
 }
 
 /**

@@ -1,5 +1,15 @@
-/** Stub of Form Trigger: final name, description and hooks; L1 (P4-01) builds it. */
+/** Form Trigger: a hosted form at test and production URLs; a submission starts a run with the answers. */
 import type { NodeType } from '@workflow/workflow';
+import {
+  formAuthenticationProperty,
+  formDescriptionProperty,
+  formFieldsProperty,
+  formResponseModeProperty,
+  formTitleProperty,
+  formTriggerOptionsProperty,
+} from './form/fields';
+import { userAuthProperties } from './form/user-auth';
+import { formTriggerWebhook } from './form/webhook';
 
 // the `path` parameter, then the Form Path option; empty becomes the node's webhookId (webhook-paths.ts)
 const FORM_PATH = '={{$parameter["path"] || $parameter["options"]?.path || ""}}';
@@ -17,6 +27,15 @@ export const FormTriggerNode: NodeType = {
     inputs: [],
     outputs: ['main'],
     categories: ['Core', 'Triggers'],
+    credentials: [
+      {
+        name: 'httpBasicAuth',
+        required: true,
+        displayOptions: { show: { authentication: ['basicAuth'] } },
+      },
+    ],
+    eventTriggerDescription: 'Waiting for you to submit the test form',
+    activationMessage: 'You can now make calls to your production Form URL.',
     webhooks: [
       {
         name: 'setup',
@@ -37,10 +56,17 @@ export const FormTriggerNode: NodeType = {
         nodeType: 'form',
       },
     ],
-    properties: [],
+    properties: [
+      { displayName: 'Path', name: 'path', type: 'hidden', default: '' },
+      formAuthenticationProperty,
+      ...userAuthProperties,
+      formTitleProperty,
+      formDescriptionProperty,
+      formFieldsProperty,
+      formResponseModeProperty,
+      formTriggerOptionsProperty,
+    ],
   },
 
-  async webhook() {
-    throw new Error('Not built yet');
-  },
+  webhook: formTriggerWebhook,
 };
