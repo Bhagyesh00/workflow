@@ -177,6 +177,7 @@ export const ToolCalculatorNode: NodeType = {
 
 const DEFAULT_TOOL_CODE =
   "// The model's input is available as `query` (a string, or an object when an input schema is set).\n// Return a string or any JSON value.\nreturn query.toUpperCase();\n";
+const DEFAULT_TOOL_PYTHON = 'return _query.upper()';
 
 /** Wrap tool code so the model's input is data (a parsed JSON string), never source code. */
 export function wrapToolCode(code: string, input: unknown): string {
@@ -188,11 +189,22 @@ export const ToolCodeNode: NodeType = {
   description: toolDescriptionOf({
     name: 'ai.toolCode',
     displayName: 'Code Tool',
-    description: 'Lets the agent run JavaScript you write, in the secure sandbox',
+    description: 'Lets the agent run JavaScript or Python you write, in the secure sandbox',
     icon: 'lucide:square-terminal',
-    alias: ['javascript', 'function', 'custom tool'],
+    alias: ['javascript', 'python', 'function', 'custom tool'],
     properties: [
       toolDescriptionProperty('Call this tool to ...'),
+      {
+        displayName: 'Language',
+        name: 'language',
+        type: 'options',
+        default: 'javaScript',
+        noDataExpression: true,
+        options: [
+          { name: 'JavaScript', value: 'javaScript' },
+          { name: 'Python', value: 'python' },
+        ],
+      },
       {
         displayName: 'JavaScript',
         name: 'jsCode',
@@ -200,13 +212,27 @@ export const ToolCodeNode: NodeType = {
         default: DEFAULT_TOOL_CODE,
         noDataExpression: true,
         typeOptions: { editor: 'codeNodeEditor', editorLanguage: 'javaScript', rows: 10 },
+        displayOptions: { show: { language: ['javaScript'] } },
+      },
+      {
+        displayName: 'Python',
+        name: 'pythonCode',
+        type: 'code',
+        default: DEFAULT_TOOL_PYTHON,
+        noDataExpression: true,
+        hint: 'You can read what the tool receives through the input property "_query". The returned value should be a single string.',
+        typeOptions: { editor: 'codeNodeEditor', editorLanguage: 'python', rows: 10 },
+        displayOptions: { show: { language: ['python'] } },
       },
       ...inputSchemaProperties,
     ],
   }),
   async supplyData(ctx, itemIndex) {
+    const python = ctx.getNodeParameter('language', itemIndex, 'javaScript') === 'python';
     const code = String(
-      ctx.getNodeParameter('jsCode', itemIndex, DEFAULT_TOOL_CODE, { rawExpressions: true }),
+      python
+        ? ctx.getNodeParameter('pythonCode', itemIndex, DEFAULT_TOOL_PYTHON, { rawExpressions: true })
+        : ctx.getNodeParameter('jsCode', itemIndex, DEFAULT_TOOL_CODE, { rawExpressions: true }),
     );
     const structured = Boolean(ctx.getNodeParameter('specifyInputSchema', itemIndex, false));
     let parameters: JsonSchema;
@@ -221,10 +247,11 @@ export const ToolCodeNode: NodeType = {
         { name: toolNameOf(ctx), description: describe(ctx, itemIndex, 'Runs custom code'), parameters },
         async (args) => {
           const input = structured ? args : args.query;
-          const items = (await ctx.runCode({
-            code: wrapToolCode(code, input),
-            mode: 'runOnceForAllItems',
-          })) as Item[];
+          const items = (await ctx.runCode(
+            python
+              ? { code, mode: 'runOnceForAllItems', language: 'pythonNative', query: input ?? null }
+              : { code: wrapToolCode(code, input), mode: 'runOnceForAllItems' },
+          )) as Item[];
           return items[0]?.json.result ?? null;
         },
       ),

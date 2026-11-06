@@ -549,7 +549,9 @@ def __make_sandbox():
             lock_down()
             safe = make_builtins(payload, prints, state)
             compiled = compile_code(payload["code"], payload)
-            if payload["mode"] == ITEM_MODE:
+            if "query" in payload:
+                result = call_user_code(compiled, safe, {"_items": payload["items"], "_query": payload["query"]})
+            elif payload["mode"] == ITEM_MODE:
                 result = [call_user_code(compiled, safe, {"_item": item}) for item in payload["items"]]
             else:
                 result = call_user_code(compiled, safe, {"_items": payload["items"]})

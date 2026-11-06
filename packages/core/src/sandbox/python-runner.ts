@@ -188,6 +188,7 @@ export class PyodideCodeRunner implements CodeRunner {
       code: input.code,
       mode: input.mode,
       items: input.items,
+      query: input.query,
       stdlibAllow,
       externalAllow,
       builtinsDeny,
@@ -251,6 +252,8 @@ export class PyodideCodeRunner implements CodeRunner {
       throw new CodeExecutionError(answer.error.message, answer.error.line ?? undefined);
     }
     const { result } = answer;
+    // the Code tool: any return value is the answer, with none of the Code node's return rules
+    if (input.query !== undefined) return [{ json: { result } }];
     return input.mode === 'runOnceForEachItem'
       ? (result as DataObject[]).flatMap((value, index) =>
           value === null ? [] : normalizeResult(value, input.mode, index, PYTHON_RESULT_WORDING),
