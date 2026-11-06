@@ -6,23 +6,41 @@ export interface ApiKeyScopesFieldProps {
   /** the picked scopes; empty means every scope */
   value: string[];
   onChange(next: string[]): void;
+  /** the mode changed: true is "only the scopes I pick", so the form can refuse that with nothing picked */
+  onModeChange?(only: boolean): void;
   disabled?: boolean;
 }
 
 /** n8n's public API scopes, by resource (the server's API_KEY_SCOPES, same order) */
 const GROUPS: Array<{ resource: string; label: string; scopes: string[] }> = [
-  { resource: 'workflow', label: 'Workflows', scopes: ['list', 'read', 'create', 'update', 'delete', 'move', 'activate', 'deactivate'] },
+  {
+    resource: 'workflow',
+    label: 'Workflows',
+    scopes: ['list', 'read', 'create', 'update', 'delete', 'move', 'activate', 'deactivate'],
+  },
   { resource: 'workflowTags', label: 'Workflow tags', scopes: ['list', 'update'] },
   { resource: 'execution', label: 'Executions', scopes: ['list', 'read', 'retry', 'stop', 'delete'] },
-  { resource: 'credential', label: 'Credentials', scopes: ['list', 'read', 'create', 'update', 'move', 'delete'] },
+  {
+    resource: 'credential',
+    label: 'Credentials',
+    scopes: ['list', 'read', 'create', 'update', 'move', 'delete'],
+  },
   { resource: 'tag', label: 'Tags', scopes: ['list', 'read', 'create', 'update', 'delete'] },
   { resource: 'variable', label: 'Variables', scopes: ['list', 'create', 'update', 'delete'] },
   { resource: 'folder', label: 'Folders', scopes: ['list', 'read', 'create', 'update', 'delete'] },
   { resource: 'project', label: 'Projects', scopes: ['list', 'create', 'update', 'delete'] },
   { resource: 'user', label: 'Users', scopes: ['list', 'read', 'create', 'changeRole', 'delete'] },
   { resource: 'dataTable', label: 'Data tables', scopes: ['list', 'read', 'create', 'update', 'delete'] },
-  { resource: 'dataTableColumn', label: 'Data table columns', scopes: ['read', 'create', 'update', 'delete'] },
-  { resource: 'dataTableRow', label: 'Data table rows', scopes: ['read', 'create', 'update', 'upsert', 'delete'] },
+  {
+    resource: 'dataTableColumn',
+    label: 'Data table columns',
+    scopes: ['read', 'create', 'update', 'delete'],
+  },
+  {
+    resource: 'dataTableRow',
+    label: 'Data table rows',
+    scopes: ['read', 'create', 'update', 'upsert', 'delete'],
+  },
   { resource: 'sourceControl', label: 'Source control', scopes: ['pull'] },
   { resource: 'securityAudit', label: 'Security audit', scopes: ['generate'] },
 ];
@@ -32,7 +50,7 @@ const withScopes = GROUPS.map((group) => ({
   all: group.scopes.map((action) => `${group.resource}:${action}`),
 }));
 
-export function ApiKeyScopesField({ value, onChange, disabled }: ApiKeyScopesFieldProps) {
+export function ApiKeyScopesField({ value, onChange, onModeChange, disabled }: ApiKeyScopesFieldProps) {
   const name = useId();
   // a key with nothing ticked has every scope, so "only these" is tracked apart from the value
   const [only, setOnly] = useState(value.length > 0);
@@ -65,6 +83,7 @@ export function ApiKeyScopesField({ value, onChange, disabled }: ApiKeyScopesFie
             checked={!only}
             onChange={() => {
               setOnly(false);
+              onModeChange?.(false);
               onChange([]);
             }}
           />
@@ -76,7 +95,10 @@ export function ApiKeyScopesField({ value, onChange, disabled }: ApiKeyScopesFie
             name={name}
             className="size-4 accent-[var(--wf-brand)]"
             checked={only}
-            onChange={() => setOnly(true)}
+            onChange={() => {
+              setOnly(true);
+              onModeChange?.(true);
+            }}
           />
           <span>Only the scopes I pick</span>
         </label>
@@ -85,7 +107,7 @@ export function ApiKeyScopesField({ value, onChange, disabled }: ApiKeyScopesFie
         <>
           {value.length === 0 ? (
             <p className="text-xs text-ink-3" data-testid="scope-summary">
-              Nothing picked yet: a key with no scopes can use every route.
+              Nothing picked yet: pick at least one scope, or choose All scopes.
             </p>
           ) : (
             <p className="text-xs text-ink-3" data-testid="scope-summary">
@@ -96,7 +118,12 @@ export function ApiKeyScopesField({ value, onChange, disabled }: ApiKeyScopesFie
             {withScopes.map((group) => {
               const count = group.all.filter((scope) => picked.has(scope)).length;
               return (
-                <div key={group.resource} className="flex flex-col gap-1" role="group" aria-label={group.label}>
+                <div
+                  key={group.resource}
+                  className="flex flex-col gap-1"
+                  role="group"
+                  aria-label={group.label}
+                >
                   <Checkbox
                     label={<span className="font-medium">{group.label}</span>}
                     checked={count === group.all.length}

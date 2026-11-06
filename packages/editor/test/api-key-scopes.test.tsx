@@ -51,9 +51,10 @@ describe('ApiKeyScopesField', () => {
     expect(screen.getByTestId('scope-summary').textContent).toMatch(/6 scopes picked/);
     const group = screen.getByRole('group', { name: 'Data table rows' });
     await user.click(within(group).getByRole('checkbox', { name: 'dataTableRow:upsert' }));
-    expect((screen.getByRole('checkbox', { name: 'All data table rows scopes' }) as HTMLInputElement).indeterminate).toBe(
-      true,
-    );
+    expect(
+      (screen.getByRole('checkbox', { name: 'All data table rows scopes' }) as HTMLInputElement)
+        .indeterminate,
+    ).toBe(true);
     await user.click(screen.getByRole('checkbox', { name: 'All data table rows scopes' }));
     await user.click(screen.getByRole('checkbox', { name: 'All data table rows scopes' }));
     expect(JSON.parse(screen.getByTestId('value').textContent ?? '')).toEqual(['workflow:read']);
@@ -69,7 +70,9 @@ describe('ApiKeyScopesField', () => {
 
   it('is locked while disabled', () => {
     render(<ApiKeyScopesField value={['tag:list']} onChange={vi.fn()} disabled />);
-    expect((screen.getByRole('radio', { name: 'All scopes' }) as HTMLInputElement).matches(':disabled')).toBe(true);
+    expect((screen.getByRole('radio', { name: 'All scopes' }) as HTMLInputElement).matches(':disabled')).toBe(
+      true,
+    );
   });
 });
 
@@ -85,5 +88,26 @@ describe('API key form', () => {
     await screen.findByTestId('new-api-key');
     const post = backend().requests.find((r) => r.method === 'POST' && r.path === '/api-keys');
     expect(post?.body).toEqual({ name: 'CI', scopes: ['dataTable:list'] });
+  });
+
+  it('refuses a key on "only the scopes I pick" with nothing picked, and starts on all scopes after saving', async () => {
+    const user = userEvent.setup();
+    signedIn();
+    renderApp('/settings/api-keys');
+    await user.type(await screen.findByLabelText('New key name', {}, { timeout: 5000 }), 'CI');
+    const create = screen.getByRole('button', { name: 'Create key' }) as HTMLButtonElement;
+    expect(create.disabled).toBe(false);
+    await user.click(screen.getByRole('radio', { name: 'Only the scopes I pick' }));
+    expect(create.disabled).toBe(true);
+    await user.click(screen.getByRole('checkbox', { name: 'tag:list' }));
+    expect(create.disabled).toBe(false);
+    await user.click(screen.getByRole('checkbox', { name: 'tag:list' }));
+    expect(create.disabled).toBe(true);
+    await user.click(screen.getByRole('checkbox', { name: 'tag:list' }));
+    await user.click(create);
+    await screen.findByTestId('new-api-key');
+    expect((screen.getByRole('radio', { name: 'All scopes' }) as HTMLInputElement).checked).toBe(true);
+    await user.type(screen.getByLabelText('New key name'), 'Next');
+    expect((screen.getByRole('button', { name: 'Create key' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

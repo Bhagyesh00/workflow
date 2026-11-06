@@ -325,6 +325,10 @@ export function ApiKeysSettingsPage() {
   const [name, setName] = useState('');
   // empty means every scope
   const [scopes, setScopes] = useState<string[]>([]);
+  // "only the scopes I pick" with none picked would make a key that can use every route
+  const [onlyPicked, setOnlyPicked] = useState(false);
+  // a new key starts on All scopes: the field is made again
+  const [scopeFormKey, setScopeFormKey] = useState(0);
   const [created, setCreated] = useState<{ name: string; key: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const create = useMutation({
@@ -334,6 +338,8 @@ export function ApiKeysSettingsPage() {
       setCopied(false);
       setName('');
       setScopes([]);
+      setOnlyPicked(false);
+      setScopeFormKey((n) => n + 1);
       await queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys });
     },
     onError: (error) => toast.error('Could not create the key', errorMessage(error)),
@@ -356,7 +362,7 @@ export function ApiKeysSettingsPage() {
   };
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (name.trim()) create.mutate();
+    if (name.trim() && !(onlyPicked && !scopes.length)) create.mutate();
   };
   return (
     <Panel
@@ -380,12 +386,18 @@ export function ApiKeysSettingsPage() {
             variant="primary"
             icon={<Plus size={15} />}
             loading={create.isPending}
-            disabled={!name.trim()}
+            disabled={!name.trim() || (onlyPicked && scopes.length === 0)}
           >
             Create key
           </Button>
         </div>
-        <ApiKeyScopesField value={scopes} onChange={setScopes} disabled={create.isPending} />
+        <ApiKeyScopesField
+          key={scopeFormKey}
+          value={scopes}
+          onChange={setScopes}
+          onModeChange={setOnlyPicked}
+          disabled={create.isPending}
+        />
       </form>
       {keys.isLoading ? (
         <PageLoader />
