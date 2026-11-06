@@ -71,8 +71,10 @@ export const RedisTriggerNode: NodeType = {
     const manual = ctx.getActivationMode() === 'manual';
     const patterns = String(ctx.getNodeParameter('channels', 0, ''))
       .split(',')
+      // 'orders, events.*' (the placeholder) must not subscribe to ' events.*'
+      .map((p) => p.trim())
       .filter((p) => p.length > 0);
-    if (patterns.every((p) => !p.trim())) throw new Error('Channels is required');
+    if (patterns.length === 0) throw new Error('Channels is required');
     const jsonParseBody = ctx.getNodeParameter('options.jsonParseBody', 0, false) === true;
     const onlyMessage = ctx.getNodeParameter('options.onlyMessage', 0, false) === true;
     const creds = (await ctx.getCredentials('redis')) as RedisCredentials;

@@ -15,7 +15,11 @@ import { localHttp } from './servers';
 
 const REDIS_URL = process.env.TEST_REDIS_URL ?? 'redis://127.0.0.1:6379/11';
 const url = new URL(REDIS_URL);
-const baseCreds = { host: url.hostname, port: Number(url.port || 6379), database: Number(url.pathname.slice(1) || 0) };
+const baseCreds = {
+  host: url.hostname,
+  port: Number(url.port || 6379),
+  database: Number(url.pathname.slice(1) || 0),
+};
 const rand = () => randomBytes(4).toString('hex');
 
 const closers: Array<() => Promise<void> | void> = [];
@@ -99,6 +103,15 @@ describe('Redis Trigger', () => {
     await publisher.publish(`plain${p}`, '2');
     await waitFor(() => t.emitted.length === 2);
     expect(t.emitted.map((e) => e.channel).sort()).toEqual([`plain${p}`, `w${p}.a`]);
+  });
+
+  it('trims spaces around the entries, so the placeholder list works', async () => {
+    const p = rand();
+    const t = await start({ channels: `orders${p}, events${p}.*` });
+    await publisher.publish(`events${p}.created`, 'x');
+    await publisher.publish(`orders${p}`, 'y');
+    await waitFor(() => t.emitted.length === 2);
+    expect(t.emitted.map((e) => e.channel).sort()).toEqual([`events${p}.created`, `orders${p}`]);
   });
 
   it('JSON Parse Body parses JSON and leaves other text alone', async () => {
