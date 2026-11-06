@@ -73,7 +73,7 @@ const properties: NodeProperty[] = [
     type: 'string',
     default: 'propertyName',
     required: true,
-    displayOptions: op('get', 'incr', 'pop'),
+    displayOptions: op('get', 'pop'),
     description: 'Name of the property that gets the value in the output item. Dots make a nested path',
   },
   {
@@ -166,7 +166,11 @@ const properties: NodeProperty[] = [
     type: 'options',
     default: 'automatic',
     options: [
-      { name: 'Automatic', value: 'automatic', description: 'Find the type from the value' },
+      {
+        name: 'Automatic',
+        value: 'automatic',
+        description: 'Text is stored as a string, an array as a list and an object as a hash',
+      },
       { name: 'Hash', value: 'hash', description: 'Value is a JSON object whose fields become hash fields' },
       { name: 'List', value: 'list', description: 'Value is a JSON array pushed to a list' },
       { name: 'Sets', value: 'sets', description: 'Value is a JSON array added to a set' },
@@ -174,6 +178,15 @@ const properties: NodeProperty[] = [
     ],
     displayOptions: op('set'),
     description: 'The type to store the value as',
+  },
+  {
+    displayName: 'Value Is JSON',
+    name: 'valueIsJSON',
+    type: 'boolean',
+    default: true,
+    displayOptions: { show: { operation: ['set'], valueType: ['hash'] } },
+    description:
+      'Whether the value is a JSON object whose fields become hash fields. Off: the value is field and value pairs separated by spaces',
   },
   {
     displayName: 'Expire',
@@ -198,7 +211,7 @@ const properties: NodeProperty[] = [
     type: 'collection',
     placeholder: 'Add option',
     default: {},
-    displayOptions: op('get', 'incr', 'pop'),
+    displayOptions: op('get', 'pop'),
     options: [
       {
         displayName: 'Dot Notation',
@@ -280,6 +293,12 @@ async function runOperation(
   const param = (name: string, fallback: unknown = '') => ctx.getNodeParameter(name, index, fallback);
   const keepInput = (): Item[] => [{ json: { ...item.json }, pairedItem: { item: index } }];
   const paired = (json: DataObject): Item[] => [{ json, pairedItem: { item: index } }];
+  /** one property named after a key or list, as n8n answers Increment and List Length */
+  const named = (name: string, value: unknown): Item[] => {
+    const json: DataObject = {};
+    if (!UNSAFE.has(name)) json[name] = asJson(value);
+    return paired(json);
+  };
   const dotNotation = param('options.dotNotation', true) !== false;
   const propertyName = () => String(param('propertyName', 'propertyName'));
 
@@ -290,20 +309,19 @@ async function runOperation(
     }
     case 'get': {
       const value = await readKey(client, String(param('key')), String(param('keyType', 'automatic')));
-      const json: DataObject = { ...item.json };
+      // like n8n, the output item holds only the value
+      const json: DataObject = {};
       setPath(json, propertyName(), asJson(value), dotNotation);
       return paired(json);
     }
     case 'incr': {
       const key = String(param('key'));
       const value = await client.incr(key);
-      if (param('expire', false) === true) await client.expire(key, Number(param('ttl', 60)));
-      const json: DataObject = { ...item.json };
-      setPath(json, propertyName(), value, dotNotation);
-      return paired(json);
+      // a TTL of 0 or less would delete the key, so only a positive one is applied
+      const ttl = Number(param('ttl', 60));
+      if (param('expire', false) === true && ttl > 0) await client.expire(key, ttl);
+      return named(key, value);
     }
-    case 'info':
-      return paired(parseInfo(await client.info()));
     case 'keys': {
       const keys = await client.keys(String(param('keyPattern')));
       if (param('getValues', true) !== true) return paired({ keys });
@@ -315,11 +333,11 @@ async function runOperation(
       return paired(json);
     }
     case 'llen':
-      return paired({ length: await client.llen(String(param('list'))) });
+      return named(String(param('list')), await client.llen(String(param('list'))));
     case 'pop': {
       const list = String(param('list'));
       const text = param('tail', false) === true ? await client.rpop(list) : await client.lpop(list);
-      const json: DataObject = { ...item.json };
+      const json: DataObject = {};
       setPath(json, propertyName(), asJson(parseMaybeJson(text)), dotNotation);
       return paired(json);
     }
@@ -337,14 +355,34 @@ async function runOperation(
     case 'set': {
       const key = String(param('key'));
       const value = param('value');
-      const parsed = typeof value === 'string' ? parseMaybeJson(value) : value;
       let type = String(param('valueType', 'automatic'));
       if (type === 'automatic') {
-        type = Array.isArray(parsed) ? 'list' : parsed !== null && typeof parsed === 'object' ? 'hash' : 'string';
+        // like n8n: text is a string key, an array a list and an object a hash
+        type = Array.isArray(value)
+          ? 'list'
+          : value !== null && typeof value === 'object'
+            ? 'hash'
+            : 'string';
       }
+      const valueIsJson = type !== 'hash' || param('valueIsJSON', true) !== false;
+      const parsed = typeof value === 'string' && valueIsJson ? parseMaybeJson(value) : value;
       const text = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v));
       if (type === 'string') {
         await client.set(key, text(value));
+      } else if (type === 'hash' && !valueIsJson) {
+        // field and value pairs separated by spaces
+        const words = String(value ?? '')
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean);
+        if (words.length === 0 || words.length % 2 !== 0) {
+          throw new NodeOperationError(
+            ctx.getNode(),
+            'Value must be field and value pairs separated by spaces to store as a hash',
+            { itemIndex: index },
+          );
+        }
+        await client.hset(key, ...words);
       } else if (type === 'hash') {
         if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
           throw new NodeOperationError(ctx.getNode(), 'Value must be a JSON object to store as a hash', {
@@ -367,7 +405,8 @@ async function runOperation(
           else await client.sadd(key, ...members);
         }
       }
-      if (param('expire', false) === true) await client.expire(key, Number(param('ttl', 60)));
+      const ttl = Number(param('ttl', 60));
+      if (param('expire', false) === true && ttl > 0) await client.expire(key, ttl);
       return keepInput();
     }
     default:
@@ -406,6 +445,18 @@ export const RedisNode: NodeType = {
     const client = await openRedis(ctx, creds);
     const results: Item[] = [];
     try {
+      // Info describes the instance, so like n8n it runs once however many items come in
+      if (String(ctx.getNodeParameter('operation', 0, 'get')) === 'info') {
+        try {
+          return [[{ json: parseInfo(await client.info()) }]];
+        } catch (error) {
+          if (ctx.continueOnFail()) return [[{ json: { error: (error as Error).message } }]];
+          throw new NodeOperationError(
+            ctx.getNode(),
+            `Couldn't run the Redis command: ${(error as Error).message}`,
+          );
+        }
+      }
       for (let index = 0; index < items.length; index++) {
         try {
           const operation = String(ctx.getNodeParameter('operation', index, 'get'));
