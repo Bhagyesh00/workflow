@@ -72,8 +72,50 @@ const $getWorkflowStaticData = (type) => {
 const $env = new Proxy({}, { get() { throw new Error('Access to environment variables is disabled. Use $vars instead.'); } });
 `;
 
-function normalizeResult(result: unknown, mode: CodeRunnerInput['mode'], itemIndex?: number): Item[] {
-  const toItem = (value: unknown, index: number): Item => {
+/** a language's own texts and n8n's stricter item checks; without it the JavaScript behaviour applies */
+export interface ResultWording {
+  /** an all-items result, or an entry of one, that is not an item */
+  notItems: string;
+  /** a per-item result that is not an item */
+  notItem: string;
+  /** a per-item result that is a list */
+  notSingle: string;
+  /** an item whose `json` is not an object */
+  jsonNotObject: string;
+  unknownKey(key: string): string;
+}
+
+/** n8n's result checks for Python */
+export const PYTHON_RESULT_WORDING: ResultWording = {
+  notItems: "Code doesn't return items properly",
+  notItem: "Code doesn't return a dictionary",
+  notSingle: "Code doesn't return a single dictionary",
+  jsonNotObject: "A 'json' property isn't a dictionary",
+  unknownKey: (key) => `Unknown top-level item key: ${key}`,
+};
+
+const ITEM_KEYS = new Set(['json', 'binary', 'error', 'pairedItem', 'index']);
+
+/** with a wording, a value with `json` or `binary` is an item: its keys are checked and `json` is required to be one */
+function checkedItem(value: DataObject, wording: ResultWording): DataObject {
+  if ('json' in value && !isPlainObject(value.json)) throw new CodeExecutionError(wording.jsonNotObject);
+  for (const key of Object.keys(value)) {
+    if (!ITEM_KEYS.has(key)) throw new CodeExecutionError(wording.unknownKey(key));
+  }
+  return { json: {}, ...value };
+}
+
+export function normalizeResult(
+  result: unknown,
+  mode: CodeRunnerInput['mode'],
+  itemIndex?: number,
+  wording?: ResultWording,
+): Item[] {
+  const toItem = (original: unknown, index: number): Item => {
+    const value =
+      wording && isPlainObject(original) && ('json' in original || 'binary' in original)
+        ? checkedItem(original as DataObject, wording)
+        : original;
     if (isPlainObject(value) && 'json' in value && isPlainObject((value as DataObject).json)) {
       const v = value as unknown as Item;
       return {
@@ -89,6 +131,9 @@ function normalizeResult(result: unknown, mode: CodeRunnerInput['mode'], itemInd
         pairedItem: mode === 'runOnceForEachItem' ? { item: itemIndex ?? index } : undefined,
       };
     }
+    if (wording) {
+      throw new CodeExecutionError(mode === 'runOnceForEachItem' ? wording.notItem : wording.notItems);
+    }
     throw new CodeExecutionError(
       `Code must return ${mode === 'runOnceForEachItem' ? 'an object' : 'an array of objects'}, got ${
         value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
@@ -97,8 +142,11 @@ function normalizeResult(result: unknown, mode: CodeRunnerInput['mode'], itemInd
   };
   if (result === undefined || result === null) return [];
   if (mode === 'runOnceForEachItem') {
-    if (Array.isArray(result))
-      throw new CodeExecutionError('In "Run once for each item" mode, return a single object');
+    if (Array.isArray(result)) {
+      throw new CodeExecutionError(
+        wording?.notSingle ?? 'In "Run once for each item" mode, return a single object',
+      );
+    }
     return [toItem(result, itemIndex ?? 0)];
   }
   if (!Array.isArray(result)) return [toItem(result, 0)];

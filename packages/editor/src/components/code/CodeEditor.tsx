@@ -1,5 +1,5 @@
 /**
- * CodeMirror 6 wrapper used for JSON, JavaScript (Code node) and `{{ }}` expressions.
+ * CodeMirror 6 wrapper used for JSON, JavaScript and Python (Code node) and `{{ }}` expressions.
  * The view is created once per language; external value changes are patched into the document.
  */
 import {
@@ -14,6 +14,7 @@ import {
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { javascript, javascriptLanguage } from '@codemirror/lang-javascript';
 import { json } from '@codemirror/lang-json';
+import { python } from '@codemirror/lang-python';
 import { bracketMatching, HighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language';
 import { EditorState, type Extension } from '@codemirror/state';
 import {
@@ -30,10 +31,10 @@ import {
 } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 import { useEffect, useRef } from 'react';
+import { FIELD_DRAG_TYPE } from '../parameters/context';
 import { cx } from '../ui/cx';
 import { type CompletionData, completeExpression, enclosingExpressionStart } from './completions';
 
-/** `python` is plain text until L8 adds its highlighting */
 export type CodeLanguage = 'javascript' | 'python' | 'json' | 'expression' | 'text';
 
 const highlight = HighlightStyle.define([
@@ -154,6 +155,46 @@ function toCompletionSource(
   };
 }
 
+/** `$json` access in a dropped field, or another node's; Python only has the item, so both read from it */
+const JSON_ACCESS =
+  /^(?:\$json|\$\('(?:[^'\\]|\\.)*'\)\.item\.json)((?:\.[A-Za-z_$][\w$]*|\[\d+\]|\["(?:[^"\\]|\\.)*"\])*)$/;
+
+/** What a field dragged from the input pane (`{{ $json.x }}`) inserts in code of this language. */
+export function fieldDropText(dropped: string, language: CodeLanguage): string {
+  const expression = dropped.replace(/^\{\{\s*/, '').replace(/\s*\}\}$/, '');
+  if (language !== 'python') return expression;
+  const path = JSON_ACCESS.exec(expression)?.[1];
+  if (path === undefined) return expression;
+  // a bracketed name stays as it is: a dot inside it is part of the name
+  const brackets = path.replace(/\.([A-Za-z_$][\w$]*)(?=\.|\[|$)|(\["(?:[^"\\]|\\.)*"\])/g, (_all, name, kept) =>
+    kept ? kept : `["${name}"]`,
+  );
+  return `_item["json"]${brackets}`;
+}
+
+/** Drops a field at the drop point; the form around the editor must not take the drop as its own. */
+function fieldDropHandlers(language: CodeLanguage): Extension {
+  return EditorView.domEventHandlers({
+    dragover(event) {
+      if (!event.dataTransfer?.types.includes(FIELD_DRAG_TYPE)) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    },
+    drop(event, view) {
+      const dropped = event.dataTransfer?.getData(FIELD_DRAG_TYPE);
+      if (!dropped) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      const at = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
+      const insert = fieldDropText(dropped, language);
+      view.dispatch({ changes: { from: at, insert }, selection: { anchor: at + insert.length } });
+      view.focus();
+      return true;
+    },
+  });
+}
+
 export interface CodeEditorProps {
   value: string;
   onChange?: (value: string) => void;
@@ -235,6 +276,9 @@ export function CodeEditor({
         }),
         autocompletion({ activateOnTyping: true }),
       );
+    } else if (language === 'python') {
+      // no completions, as n8n
+      extensions.push(python());
     } else if (language === 'expression') {
       extensions.push(
         resolvableHighlighter,
@@ -243,6 +287,9 @@ export function CodeEditor({
           activateOnTyping: true,
         }),
       );
+    }
+    if (!readOnly && (language === 'javascript' || language === 'python')) {
+      extensions.push(fieldDropHandlers(language));
     }
     const view = new EditorView({
       parent: host,

@@ -63,11 +63,14 @@ export const NoOpNode: NodeType = {
   },
 };
 
+/** `python` is the older stored value of the same language */
+const PYTHON_LANGUAGES = ['pythonNative', 'python'];
+
 export const CodeNode: NodeType = {
   description: {
     name: 'core.code',
     displayName: 'Code',
-    description: 'Run custom JavaScript in a secure sandbox',
+    description: 'Run custom JavaScript or Python in a secure sandbox',
     icon: 'lucide:code',
     group: ['transform'],
     version: 1,
@@ -75,7 +78,7 @@ export const CodeNode: NodeType = {
     inputs: ['main'],
     outputs: ['main'],
     categories: ['Core', 'Data transformation'],
-    alias: ['javascript', 'js', 'script', 'function', 'custom'],
+    alias: ['javascript', 'js', 'python', 'py', 'script', 'function', 'custom'],
     properties: [
       {
         displayName: 'Mode',
@@ -97,6 +100,17 @@ export const CodeNode: NodeType = {
         ],
       },
       {
+        displayName: 'Language',
+        name: 'language',
+        type: 'options',
+        default: 'javaScript',
+        noDataExpression: true,
+        options: [
+          { name: 'JavaScript', value: 'javaScript' },
+          { name: 'Python', value: 'pythonNative' },
+        ],
+      },
+      {
         displayName: 'JavaScript',
         name: 'jsCode',
         type: 'code',
@@ -104,7 +118,7 @@ export const CodeNode: NodeType = {
         typeOptions: { editor: 'codeNodeEditor', editorLanguage: 'javaScript', rows: 12 },
         default:
           '// Loop over input items and add a new field called "myNewField" to the JSON of each one\nreturn $input.all().map((item) => ({\n  json: { ...item.json, myNewField: 1 },\n}));\n',
-        displayOptions: { show: { mode: ['runOnceForAllItems'] } },
+        displayOptions: { show: { mode: ['runOnceForAllItems'], language: ['javaScript'] } },
       },
       {
         displayName: 'JavaScript',
@@ -114,15 +128,49 @@ export const CodeNode: NodeType = {
         typeOptions: { editor: 'codeNodeEditor', editorLanguage: 'javaScript', rows: 12 },
         default:
           '// Add a new field called "myNewField" to the JSON of the item\nreturn { ...$json, myNewField: 1 };\n',
-        displayOptions: { show: { mode: ['runOnceForEachItem'] } },
+        displayOptions: { show: { mode: ['runOnceForEachItem'], language: ['javaScript'] } },
+      },
+      {
+        displayName: 'Python',
+        name: 'pythonCode',
+        type: 'code',
+        noDataExpression: true,
+        typeOptions: { editor: 'codeNodeEditor', editorLanguage: 'python', rows: 12 },
+        default:
+          '# Loop over input items and add a new field called "my_new_field" to the JSON of each one\nfor item in _items:\n    item["json"]["my_new_field"] = 1\nreturn _items\n',
+        displayOptions: { show: { mode: ['runOnceForAllItems'], language: PYTHON_LANGUAGES } },
+      },
+      {
+        displayName: 'Python',
+        name: 'pythonCode',
+        type: 'code',
+        noDataExpression: true,
+        typeOptions: { editor: 'codeNodeEditor', editorLanguage: 'python', rows: 12 },
+        default:
+          '# Add a new field called "my_new_field" to the JSON of the item\n_item["json"]["my_new_field"] = 1\nreturn _item\n',
+        displayOptions: { show: { mode: ['runOnceForEachItem'], language: PYTHON_LANGUAGES } },
+      },
+      {
+        displayName:
+          'Debug with print(): its output goes to the browser console. Use _items, or _item when running once for each item; there are no other helpers. Imports are off unless this instance allows them.',
+        name: 'pythonNotice',
+        type: 'notice',
+        default: '',
+        displayOptions: { show: { language: PYTHON_LANGUAGES } },
       },
     ],
   },
   async execute(ctx) {
     const mode = ctx.getNodeParameter('mode', 0) as 'runOnceForAllItems' | 'runOnceForEachItem';
-    const code = ctx.getNodeParameter('jsCode', 0, '', { rawExpressions: true }) as string;
+    const language = ctx.getNodeParameter('language', 0, 'javaScript') as string;
+    const python = PYTHON_LANGUAGES.includes(language);
+    const code = ctx.getNodeParameter(python ? 'pythonCode' : 'jsCode', 0, '', {
+      rawExpressions: true,
+    }) as string;
     try {
-      return [(await ctx.runCode({ code, mode })) as Item[]];
+      return [
+        (await ctx.runCode({ code, mode, language: python ? 'pythonNative' : 'javaScript' })) as Item[],
+      ];
     } catch (error) {
       if (ctx.continueOnFail()) {
         return [
