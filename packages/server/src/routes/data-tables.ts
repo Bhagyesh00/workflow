@@ -1,7 +1,6 @@
 /**
  * /rest/data-tables (P4-03), n8n's REST list without the project segment, with offset paging. Viewer
- * reads, editor and above write. The schemas here are real and the public routes reuse them; the
- * service behind them is a stub until L4.
+ * reads, editor and above write. The public routes reuse the schemas here.
  */
 import {
   DATA_TABLE_COLUMN_NAME_MAX,
@@ -12,11 +11,12 @@ import {
   DATA_TABLE_NAME_MAX,
   DATA_TABLE_ROWS_TAKE_MAX,
 } from '@workflow/workflow';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireRole } from '../http/auth';
-import { parse } from '../http/errors';
+import { errorBody, handleError, parse } from '../http/errors';
 import { idParams } from '../http/schemas';
+import { CSV_TOO_LARGE_MESSAGE } from '../services/data-table-csv';
 import type { DataTableActor, DataTableService } from '../services/data-tables';
 
 /** a query parameter that holds JSON (n8n's `filter`) */
@@ -140,6 +140,19 @@ const downloadQuery = z.object({ includeSystemColumns: z.stringbool().default(tr
 const csvPreviewBody = z.object({ csv: z.string(), hasHeaders: z.boolean().optional() });
 const csvImportBody = z.object({ csv: z.string() });
 
+/**
+ * For the routes that take CSV text: a body over BODY_LIMIT_MB stops in the JSON parser, before the
+ * handler, and gets the same answer as a file over the upload limit instead of Fastify's 413.
+ */
+const csvRoute = {
+  errorHandler(error: FastifyError, request: FastifyRequest, reply: FastifyReply) {
+    if (error.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+      return reply.status(400).send(errorBody('bad_request', CSV_TOO_LARGE_MESSAGE));
+    }
+    return handleError(error, request, reply);
+  },
+};
+
 export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables: DataTableService }): void {
   const { dataTables } = deps;
   const actor = (request: FastifyRequest): DataTableActor => ({
@@ -157,12 +170,12 @@ export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables
     return { data: await dataTables.limits(auth.tenant.id) };
   });
 
-  app.post('/data-tables', async (request) => {
+  app.post('/data-tables', csvRoute, async (request) => {
     const auth = requireRole(request, 'editor');
     return { data: await dataTables.create(auth.tenant.id, parse(createBody, request.body), actor(request)) };
   });
 
-  app.post('/data-tables/csv/preview', async (request) => {
+  app.post('/data-tables/csv/preview', csvRoute, async (request) => {
     const auth = requireRole(request, 'editor');
     return { data: await dataTables.csvPreview(auth.tenant.id, parse(csvPreviewBody, request.body)) };
   });
@@ -282,7 +295,7 @@ export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables
     return { data: await dataTables.downloadCsv(auth.tenant.id, id, parse(downloadQuery, request.query)) };
   });
 
-  app.post('/data-tables/:id/import-csv', async (request) => {
+  app.post('/data-tables/:id/import-csv', csvRoute, async (request) => {
     const auth = requireRole(request, 'editor');
     const { id } = parse(idParams, request.params);
     const body = parse(csvImportBody, request.body);
