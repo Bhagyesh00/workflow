@@ -9,7 +9,7 @@ import {
   type ResourceLocatorValue,
   resolveNodeParameters,
 } from '@workflow/workflow';
-import { ChevronDown, ExternalLink, Search } from 'lucide-react';
+import { ChevronDown, ExternalLink, Plus, Search } from 'lucide-react';
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { nodeTypesApi } from '../../api/endpoints';
@@ -36,6 +36,15 @@ export function extractFromUrl(mode: ResourceLocatorMode | undefined, url: strin
   }
 }
 
+/** a page of this app; a link from a node's description never leaves it */
+const isLocalPath = (url: string) => /^\/(?![/\\])/.test(url);
+
+/** the page opens its create dialog from `new`, with what was typed as the name */
+function newResourceHref(url: string, typed: string): string {
+  const name = typed.trim();
+  return `${url}?new=1${name ? `&name=${encodeURIComponent(name)}` : ''}`;
+}
+
 function ListMode({
   name,
   mode,
@@ -56,6 +65,7 @@ function ListMode({
   const deferredFilter = useDeferredValue(filter);
   const rootRef = useRef<HTMLDivElement>(null);
   const method = mode.typeOptions?.searchListMethod;
+  const newResource = mode.typeOptions?.allowNewResource;
 
   const workflowId = useWorkflowStore((s) => s.meta.id);
   // the list can depend on any other parameter (spreadsheet of a sheet list, schema of a table list)
@@ -199,6 +209,17 @@ function ListMode({
               </button>
             )}
           </div>
+          {newResource && isLocalPath(newResource.url) && (
+            <a
+              href={newResourceHref(newResource.url, filter)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1 flex items-center gap-1.5 rounded-lg border-t border-line px-2 py-1.5 text-sm font-semibold text-brand hover:bg-surface-3"
+            >
+              <Plus size={13} aria-hidden="true" />
+              {newResource.label}
+            </a>
+          )}
         </div>
       )}
     </div>

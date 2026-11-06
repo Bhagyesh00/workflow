@@ -103,6 +103,7 @@ function useShellCommands(): void {
       ['go-workflows', 'Go to Workflows', '/workflows'],
       ['go-executions', 'Go to Executions', '/executions'],
       ['go-credentials', 'Go to Credentials', '/credentials'],
+      ['go-data-tables', 'Go to Data tables', '/data-tables'],
       ['go-settings', 'Go to Settings', '/settings'],
     ] as const) {
       list.push({ id, title, description: 'Navigate', path, run: () => navigate(path) });

@@ -1,8 +1,8 @@
 /**
- * The signed-in user's favorite workflows and folders in the left nav (P3-07, as n8n).
+ * The signed-in user's favorite workflows, folders and data tables in the left nav (P3-07, as n8n).
  * Hidden when the sidebar is collapsed or nothing is starred.
  */
-import { Folder, Star, Workflow } from 'lucide-react';
+import { Folder, Star, Table2, Workflow } from 'lucide-react';
 import { NavLink } from 'react-router';
 import { useFavorites } from '../../api/queries';
 import { cx } from '../ui/cx';
@@ -17,11 +17,15 @@ export function FavoritesNav({ collapsed }: { collapsed: boolean }) {
       </h2>
       <ul className="flex flex-col gap-0.5">
         {data.map((fav) => {
+          const id = encodeURIComponent(fav.resourceId);
           const to =
             fav.resourceType === 'workflow'
-              ? `/workflow/${encodeURIComponent(fav.resourceId)}`
-              : `/workflows?folder=${encodeURIComponent(fav.resourceId)}`;
-          const Icon = fav.resourceType === 'workflow' ? Workflow : Folder;
+              ? `/workflow/${id}`
+              : fav.resourceType === 'dataTable'
+                ? `/data-tables/${id}`
+                : `/workflows?folder=${id}`;
+          const Icon =
+            fav.resourceType === 'workflow' ? Workflow : fav.resourceType === 'dataTable' ? Table2 : Folder;
           return (
             <li key={`${fav.resourceType}:${fav.resourceId}`}>
               <NavLink
@@ -30,7 +34,7 @@ export function FavoritesNav({ collapsed }: { collapsed: boolean }) {
                 className={({ isActive }) =>
                   cx(
                     'flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors',
-                    isActive && fav.resourceType === 'workflow'
+                    isActive && fav.resourceType !== 'folder'
                       ? 'bg-brand-soft text-brand'
                       : 'text-ink-2 hover:bg-surface-3 hover:text-ink',
                   )
