@@ -219,8 +219,10 @@ export const RabbitMqTriggerNode: NodeType = {
 
     let closing = false;
     let failed = false;
+    // a refused setup is reported once, by the rejected call: its text says why, the channel event does not
+    let ready = false;
     const fail = (error: Error) => {
-      if (closing || failed) return;
+      if (closing || failed || !ready) return;
       failed = true;
       ctx.emitError(error);
     };
@@ -238,6 +240,7 @@ export const RabbitMqTriggerNode: NodeType = {
       channel.on('close', () => fail(new Error('The RabbitMQ channel closed unexpectedly')));
       await prepareQueue(connection, channel, settings);
       if (settings.prefetch > 0) await channel.prefetch(settings.prefetch);
+      ready = true;
     } catch (error) {
       closing = true;
       // a refusal that closes the connection reports its reason there, one turn later than the reply

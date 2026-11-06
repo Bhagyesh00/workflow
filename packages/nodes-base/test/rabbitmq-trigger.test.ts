@@ -427,6 +427,8 @@ describe('items from the real broker', () => {
 
     const missing = harness({ queue: unique('missing'), options: { assertQueue: false } });
     await expect(nodeType().trigger!(missing.ctx)).rejects.toThrow(/NOT_FOUND/);
+    // the thrown reason is the only report: an emitError would replace it in a test listen
+    expect(missing.errors).toEqual([]);
     await first.response.closeFunction!();
     const existing = await start({ queue, options: { assertQueue: false } });
     publish(queue, 'second');
@@ -717,6 +719,16 @@ describe('credential test', () => {
       message: 'Enter the RabbitMQ hostname',
     });
   });
+
+  it('a broker that closes after the sign-in never gets its words into the answer', async () => {
+    const words = 'Connection closed: 320 (CONNECTION-FORCED) with message "CONNECTION_FORCED - broker words"';
+    const refused = vi.spyOn(Object.getPrototypeOf(side), 'createChannel').mockRejectedValueOnce(new Error(words));
+    try {
+      expect(await run(brokerCredentials())).toEqual({ status: 'Error', message: "Couldn't connect to RabbitMQ" });
+    } finally {
+      refused.mockRestore();
+    }
+  });
 });
 
 describe('tracker on a fake channel', () => {
@@ -727,7 +739,7 @@ describe('tracker on a fake channel', () => {
       properties: {},
     }) as unknown as ConsumeMessage;
 
-  function fake(mode: Parameters<typeof createTracker>[0]['mode'], closeWaitMs?: number) {
+  function fake(mode: Parameters<typeof createTracker>[0]['mode'], closeWaitMs?: number, retryDelayMs?: number) {
     const calls: string[] = [];
     const runs: EmittedRun[] = [];
     const warnings: string[] = [];
@@ -741,6 +753,7 @@ describe('tracker on a fake channel', () => {
       emit: (data, done, hook) => void runs.push({ items: data[0] ?? [], done, hook }),
       logger: { debug: () => undefined, warn: (m: string) => void warnings.push(m) },
       closeWaitMs,
+      retryDelayMs,
     });
     return { tracker, calls, runs, warnings };
   }
@@ -763,30 +776,74 @@ describe('tracker on a fake channel', () => {
     expect(calls).toEqual(['ack 1']);
   });
 
-  it('only the status success acknowledges in "Execution Finishes Successfully"', async () => {
+  it('only a failed run goes back in "Execution Finishes Successfully"; a run at a Wait node is done', async () => {
     const { tracker, calls, runs } = fake('executionFinishesSuccessfully');
-    const jobs = [1, 2, 3].map((tag) => tracker.handle(message(tag)));
+    const jobs = [1, 2, 3, 4, 5].map((tag) => tracker.handle(message(tag)));
     await tick();
     runs[0]!.done!.resolve({ executionId: 'a', status: 'success' });
     runs[1]!.done!.resolve({ executionId: 'b', status: 'crashed' });
     runs[2]!.done!.resolve({ executionId: 'c', status: 'waiting' });
+    runs[3]!.done!.resolve({ executionId: 'd', status: 'error' });
+    runs[4]!.done!.resolve({ executionId: 'e', status: 'canceled' });
     await Promise.all(jobs);
-    expect(calls).toEqual(['ack 1', 'requeue 2', 'requeue 3']);
+    expect(calls).toEqual(['ack 1', 'requeue 2', 'ack 3', 'requeue 4', 'requeue 5']);
   });
 
-  it('a message that cannot be read is rejected, not looped', async () => {
+  it('Specified Later: a run at a Wait node is done, as is a run that ends without the node', async () => {
+    const { tracker, calls, runs } = fake('laterMessageNode');
+    const jobs = [1, 2, 3].map((tag) => tracker.handle(message(tag)));
+    await tick();
+    runs[0]!.done!.resolve({ executionId: 'a', status: 'waiting' });
+    runs[1]!.done!.resolve({ executionId: 'b', status: 'success' });
+    runs[2]!.done!.resolve({ executionId: 'c', status: 'error' });
+    await Promise.all(jobs);
+    expect(calls).toEqual(['ack 1', 'ack 2', 'requeue 3']);
+  });
+
+  it('a run that cannot start waits before its message goes back', async () => {
+    const { tracker, calls, runs } = fake('executionFinishes', undefined, 150);
+    const job = tracker.handle(message(1));
+    await tick();
+    runs[0]!.done!.reject(new Error('limit reached'));
+    await sleep(50);
+    expect(calls).toEqual([]);
+    expect(tracker.inFlight()).toBe(1);
+    await job;
+    expect(calls).toEqual(['requeue 1']);
+  });
+
+  it('a stop ends the wait of a run that could not start', async () => {
+    const { tracker, calls, runs } = fake('executionFinishes', undefined, 60_000);
+    const job = tracker.handle(message(1));
+    await tick();
+    runs[0]!.done!.reject(new Error('limit reached'));
+    await tick();
+    expect(calls).toEqual([]);
+    tracker.stop();
+    await tracker.drain();
+    await job;
+    expect(calls).toEqual(['requeue 1']);
+  });
+
+  it('a message that cannot be read gets no answer: it is neither lost nor looped', async () => {
     const calls: string[] = [];
+    const warnings: string[] = [];
     const tracker = createTracker({
-      channel: { ack: () => undefined, nack: (m, _a, requeue) => void calls.push(`${requeue ? 'requeue' : 'reject'} ${m.fields.deliveryTag}`) },
-      mode: 'immediately',
+      channel: {
+        ack: (m) => void calls.push(`ack ${m.fields.deliveryTag}`),
+        nack: (m, _a, requeue) => void calls.push(`${requeue ? 'requeue' : 'reject'} ${m.fields.deliveryTag}`),
+      },
+      mode: 'executionFinishesSuccessfully',
       parse: async () => {
         throw new Error('too large');
       },
       emit: () => undefined,
-      logger: { debug: () => undefined, warn: () => undefined },
+      logger: { debug: () => undefined, warn: (m: string) => void warnings.push(m) },
     });
     await tracker.handle(message(7));
-    expect(calls).toEqual(['reject 7']);
+    expect(calls).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(tracker.inFlight()).toBe(0);
   });
 
   it('an answer on a closed channel is dropped without a throw', async () => {

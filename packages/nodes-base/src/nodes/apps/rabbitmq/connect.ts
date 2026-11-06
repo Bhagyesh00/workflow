@@ -196,14 +196,19 @@ export async function rabbitmqCredentialTest(
   const abort = () => void connection?.close().catch(() => undefined);
   ctx.signal.addEventListener('abort', abort, { once: true });
   try {
-    connection = await openRabbit(ctx, credential.data as RabbitMqCredentials);
+    try {
+      connection = await openRabbit(ctx, credential.data as RabbitMqCredentials);
+    } catch (error) {
+      // openRabbit's errors are already ours
+      return { status: 'Error', message: (error as Error).message };
+    }
     connection.on('error', () => undefined);
     const channel = await connection.createChannel();
     channel.on('error', () => undefined);
     await channel.close();
     return { status: 'OK', message: 'Connection successful' };
   } catch (error) {
-    return { status: 'Error', message: (error as Error).message };
+    return { status: 'Error', message: describeConnectError(error) };
   } finally {
     ctx.signal.removeEventListener('abort', abort);
     await connection?.close().catch(() => undefined);

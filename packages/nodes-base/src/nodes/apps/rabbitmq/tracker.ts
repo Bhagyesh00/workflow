@@ -192,9 +192,14 @@ export interface TrackerDeps {
   logger: Pick<Logger, 'debug' | 'warn'>;
   /** how long a close waits for runs that are still going (default 10 seconds) */
   closeWaitMs?: number;
+  /** how long a message of a run that could not start stays out of the queue (default 5 seconds) */
+  retryDelayMs?: number;
 }
 
 export const CLOSE_WAIT_MS = 10_000;
+export const RETRY_DELAY_MS = 5000;
+
+const FAILED_STATUSES: ReadonlySet<TriggerRunResult['status']> = new Set(['error', 'crashed', 'canceled']);
 
 /**
  * Starts a run per message and answers the broker once. A message the broker is never told about comes
@@ -203,7 +208,22 @@ export const CLOSE_WAIT_MS = 10_000;
 export function createTracker(deps: TrackerDeps) {
   const { channel, mode, logger } = deps;
   const pending = new Set<Promise<void>>();
+  const retryWaits = new Set<() => void>();
   let stopped = false;
+
+  /** without this a limit that stops every run would send the message round at the speed of the broker */
+  function waitBeforeRetry(): Promise<void> {
+    if (stopped) return Promise.resolve();
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        retryWaits.delete(finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, deps.retryDelayMs ?? RETRY_DELAY_MS);
+      retryWaits.add(finish);
+    });
+  }
 
   function answer(message: ConsumeMessage | GetMessage, how: 'ack' | 'requeue' | 'reject') {
     try {
@@ -219,8 +239,8 @@ export function createTracker(deps: TrackerDeps) {
     try {
       item = await deps.parse(message);
     } catch {
-      logger.warn('A RabbitMQ message could not be read and was rejected');
-      answer(message, 'reject');
+      // no answer, as in n8n: the broker keeps the message and hands it out again when the channel closes
+      logger.warn('A RabbitMQ message could not be read, it stays with the broker until the channel closes');
       return;
     }
 
@@ -248,13 +268,15 @@ export function createTracker(deps: TrackerDeps) {
     if (outcome instanceof Error) {
       // no run took place: the message stays in the queue
       logger.warn('The run could not start, the message goes back to the queue');
+      await waitBeforeRetry();
       once('requeue');
     } else if (mode === 'executionFinishes') {
       once('ack');
-    } else if (outcome.status === 'success') {
-      once('ack');
-    } else {
+    } else if (outcome.error !== undefined || FAILED_STATUSES.has(outcome.status)) {
       once('requeue');
+    } else {
+      // also a run that waits at a Wait node: it has not failed, and a requeue would start it over and over
+      once('ack');
     }
   }
 
@@ -276,6 +298,7 @@ export function createTracker(deps: TrackerDeps) {
     /** no new message is taken from now on; one that arrives is returned to the queue */
     stop() {
       stopped = true;
+      for (const finish of [...retryWaits]) finish();
     },
     inFlight: () => pending.size,
     /** wait for runs that are going, at most `closeWaitMs`; the broker redelivers what stays open */
