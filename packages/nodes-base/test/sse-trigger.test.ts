@@ -18,7 +18,11 @@ const original = { ...sseRetry };
 
 const typeOf = () => nodes.find((n) => n.description.name === 'core.sseTrigger')!;
 
-function build(parameters: DataObject, mode: 'activate' | 'manual' = 'activate', http: HttpClient = localHttp()) {
+function build(
+  parameters: DataObject,
+  mode: 'activate' | 'manual' = 'activate',
+  http: HttpClient = localHttp(),
+) {
   const wfNode = node('SSE Trigger', 'core.sseTrigger', parameters, [0, 0], { id: `n${rand()}` });
   const workflow = new Workflow(
     { id: 'wf1', name: 'test', nodes: [wfNode], connections: {}, staticData: {} },
@@ -114,6 +118,28 @@ describe('SseParser', () => {
     expect(run(['retry: soon\n']).p.retryMs).toBeUndefined();
   });
 
+  it('reads a long line that arrives in many small chunks, in time that grows with the size', () => {
+    const p = new SseParser();
+    const piece = enc('x'.repeat(1024));
+    const started = Date.now();
+    for (let i = 0; i < 4096; i++) expect(p.feed(piece)).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(2000);
+    const q = new SseParser();
+    q.feed(enc('data: '));
+    for (let i = 0; i < 100; i++) q.feed(enc('é€'));
+    const events = q.feed(enc('\n\n'));
+    expect(events).toHaveLength(1);
+    expect(events[0]!.data).toBe('é€'.repeat(100));
+  });
+
+  it('counts the bytes of a split multi-byte line against the cap', () => {
+    const p = new SseParser({ maxEventBytes: 64 });
+    p.feed(enc('data: '));
+    expect(() => {
+      for (let i = 0; i < 40; i++) p.feed(enc('€'));
+    }).toThrow(SseEventTooLargeError);
+  });
+
   it('refuses one event past the cap, also a line that never ends', () => {
     const p = new SseParser({ maxEventBytes: 64 });
     expect(() => p.feed(enc(`data: ${'x'.repeat(100)}`))).toThrow(SseEventTooLargeError);
@@ -142,18 +168,35 @@ describe('core.sseTrigger', () => {
 
   it('reconnects when the stream ends, with Last-Event-ID and the server retry delay', async () => {
     let n = 0;
+    const at: number[] = [];
     const s = await server((_req, res) => {
       stream(res);
       n++;
-      if (n === 1) res.end('retry: 30\nid: 41\ndata: {"a":1}\n\n');
+      at.push(Date.now());
+      if (n === 1) res.end('retry: 200\nid: 41\ndata: {"a":1}\n\n');
       else res.write('id: 42\ndata: {"a":2}\n\n');
     });
-    sseRetry.baseMs = 5000;
+    sseRetry.baseMs = 20;
     const { emitted } = await start({ url: s.url });
     await waitFor(() => emitted.length === 2);
     expect(emitted).toEqual([{ a: 1 }, { a: 2 }]);
     expect(s.requests[0]!.headers['last-event-id']).toBeUndefined();
     expect(s.requests[1]!.headers['last-event-id']).toBe('41');
+    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(180);
+  });
+
+  it('a server retry of 0 does not make the reconnect loop spin: the base delay is the floor', async () => {
+    const at: number[] = [];
+    const s = await server((_req, res) => {
+      stream(res);
+      at.push(Date.now());
+      res.end('retry: 0\ndata: {"a":1}\n\n');
+    });
+    sseRetry.baseMs = 200;
+    await start({ url: s.url });
+    await waitFor(() => at.length >= 3, 8000);
+    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(180);
+    expect(at[2]! - at[1]!).toBeGreaterThanOrEqual(180);
   });
 
   it('retries on a 5xx answer and on a refused connection', async () => {

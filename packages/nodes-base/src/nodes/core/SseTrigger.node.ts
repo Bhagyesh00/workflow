@@ -133,7 +133,10 @@ export const SseTriggerNode: NodeType = {
       while (!ended.aborted) {
         const parser = new SseParser({ lastEventId });
         try {
-          const headers: Record<string, string> = { accept: 'text/event-stream', 'cache-control': 'no-cache' };
+          const headers: Record<string, string> = {
+            accept: 'text/event-stream',
+            'cache-control': 'no-cache',
+          };
           if (lastEventId) headers['last-event-id'] = lastEventId;
           const full = (await ctx.helpers.httpRequest({
             url: target.url,
@@ -170,7 +173,11 @@ export const SseTriggerNode: NodeType = {
         }
         lastEventId = parser.lastEventId || lastEventId;
         if (ended.aborted) return;
-        const wait = parser.retryMs !== undefined ? Math.min(parser.retryMs, MAX_SERVER_RETRY_MS) : delay;
+        // the server's retry sets the wait, but never below the base delay: `retry: 0` must not spin
+        const wait =
+          parser.retryMs !== undefined
+            ? Math.max(sseRetry.baseMs, Math.min(parser.retryMs, MAX_SERVER_RETRY_MS))
+            : delay;
         await sleep(wait, ended);
         delay = Math.min(sseRetry.maxMs, delay * 2);
       }

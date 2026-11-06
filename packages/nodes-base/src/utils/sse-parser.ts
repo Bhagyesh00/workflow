@@ -31,7 +31,9 @@ export interface SseParserOptions {
 export class SseParser {
   private readonly decoder = new TextDecoder('utf-8');
   private readonly maxEventBytes: number;
-  private buffer = '';
+  /** the start of the line being read, in pieces: joined once when the line ends */
+  private pending: string[] = [];
+  private pendingBytes = 0;
   private skipLf = false;
   private started = false;
   private dataLines: string[] = [];
@@ -65,16 +67,22 @@ export class SseParser {
       if (text.charCodeAt(0) === 0x0a) text = text.slice(1);
       this.skipLf = false;
     }
-    this.buffer += text;
+    // only the new text is scanned, so a line that never ends costs time in step with what arrives
     const events: SseEvent[] = [];
     let start = 0;
-    for (let i = 0; i < this.buffer.length; i++) {
-      const c = this.buffer.charCodeAt(i);
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
       if (c !== 0x0a && c !== 0x0d) continue;
-      const line = this.buffer.slice(start, i);
+      let line = text.slice(start, i);
+      if (this.pending.length > 0) {
+        this.pending.push(line);
+        line = this.pending.join('');
+        this.pending = [];
+        this.pendingBytes = 0;
+      }
       if (c === 0x0d) {
-        if (i + 1 < this.buffer.length) {
-          if (this.buffer.charCodeAt(i + 1) === 0x0a) i++;
+        if (i + 1 < text.length) {
+          if (text.charCodeAt(i + 1) === 0x0a) i++;
         } else {
           this.skipLf = true;
         }
@@ -83,9 +91,13 @@ export class SseParser {
       const event = this.line(line);
       if (event) events.push(event);
     }
-    this.buffer = this.buffer.slice(start);
+    if (start < text.length) {
+      const tail = start === 0 ? text : text.slice(start);
+      this.pending.push(tail);
+      this.pendingBytes += Buffer.byteLength(tail);
+    }
     // a line that never ends counts toward the same cap
-    if (this.eventBytes + Buffer.byteLength(this.buffer) > this.maxEventBytes) {
+    if (this.eventBytes + this.pendingBytes > this.maxEventBytes) {
       throw new SseEventTooLargeError(this.maxEventBytes);
     }
     return events;
