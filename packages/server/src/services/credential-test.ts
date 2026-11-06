@@ -15,10 +15,12 @@ import {
   type DataObject,
   evaluateSimple,
   getCredentialAllowedDomains,
+  type CredentialTestContext,
   type HttpFullResponse,
   type HttpRequestOptions,
   isExpression,
   type Logger,
+  type NodeCredentialTestResult,
 } from '@workflow/workflow';
 import type { CredentialService } from './credentials';
 
@@ -27,7 +29,7 @@ export interface CredentialTestResult {
   message: string;
 }
 
-/** what a node's `methods.credentialTest` hook needs (unused until L22) */
+/** what a node's `methods.credentialTest` hook needs */
 export interface CredentialTestOptions {
   nodeTypes: NodeTypes;
   tenantId: string;
@@ -49,17 +51,93 @@ function resolveTemplates<T>(value: T, credentials: DataObject): T {
   return value;
 }
 
+/** a node's own test runs for at most this long, then its signal aborts */
+const NODE_TEST_TIMEOUT_MS = 30_000;
+
+/**
+ * The `methods.credentialTest` function of the node type whose credential entry names `type` (or a
+ * type it extends) with `testedBy`, with the credential entry that matched.
+ */
+function findNodeTest(
+  credentials: CredentialService,
+  type: string,
+  nodeTypes: NodeTypes,
+):
+  | ((
+      ctx: CredentialTestContext,
+      credential: { type: string; data: DataObject },
+    ) => Promise<NodeCredentialTestResult>)
+  | undefined {
+  let inherited;
+  for (const node of nodeTypes.list()) {
+    for (const entry of node.description.credentials ?? []) {
+      if (!entry.testedBy) continue;
+      const fn = node.methods?.credentialTest?.[entry.testedBy];
+      if (!fn) continue;
+      if (entry.name === type) return fn;
+      if (!inherited && credentials.types.isA(type, entry.name)) inherited = fn;
+    }
+  }
+  return inherited;
+}
+
+async function runNodeTest(
+  test: NonNullable<ReturnType<typeof findNodeTest>>,
+  http: HttpClient,
+  type: string,
+  data: DataObject,
+  opts: CredentialTestOptions,
+): Promise<CredentialTestResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), NODE_TEST_TIMEOUT_MS);
+  const ctx: CredentialTestContext = {
+    helpers: {
+      resolveAllowedHost: (host) => http.resolveAllowedHost(host),
+      assertHostAllowed: (host) => http.assertHostAllowed(host),
+    },
+    logger: opts.logger,
+    signal: controller.signal,
+    getTenantId: () => opts.tenantId,
+  };
+  try {
+    const result = await Promise.race([
+      test(ctx, { type, data }),
+      new Promise<never>((_, reject) =>
+        controller.signal.addEventListener('abort', () => reject(new Error('timed out')), { once: true }),
+      ),
+    ]);
+    const message = typeof result?.message === 'string' ? result.message : '';
+    return result?.status === 'OK'
+      ? { status: 'OK', message: message || 'Connection tested successfully' }
+      : { status: 'Error', message: message || "Couldn't test the credential" };
+  } catch {
+    // the node's own functions answer with their own texts; anything thrown is not shown
+    return {
+      status: 'Error',
+      message: controller.signal.aborted
+        ? 'The connection test timed out'
+        : "Couldn't test the credential",
+    };
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
+}
+
 export async function testCredential(
   credentials: CredentialService,
   http: HttpClient,
   type: string,
   data: DataObject,
-  _opts?: CredentialTestOptions,
+  opts?: CredentialTestOptions,
 ): Promise<CredentialTestResult> {
   const resolvedType = credentials.resolvedType(type);
   const full = credentials.withDefaults(type, data);
   const isOAuth2 = credentials.types.isA(type, 'oAuth2Api');
   const isOAuth1 = credentials.types.isA(type, 'oAuth1Api');
+  // a node that names a test function for this credential type runs it instead of a request
+  const nodeTest = opts ? findNodeTest(credentials, type, opts.nodeTypes) : undefined;
+  if (nodeTest && opts) return runNodeTest(nodeTest, http, type, full, opts);
   if (!resolvedType.test) {
     if (isOAuth1) {
       const connected = Boolean((full.oauthTokenData as DataObject | undefined)?.oauth_token);
