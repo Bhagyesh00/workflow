@@ -6,7 +6,7 @@ import { HttpClient } from '@workflow/core';
 import type { DataObject } from '@workflow/workflow';
 import mysql from 'mysql2';
 import ssh2 from 'ssh2';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mysqlPool } from '../src/nodes/apps/sql/MySql.node';
 import { postgresPool } from '../src/nodes/apps/sql/Postgres.node';
 import { contextFor } from './contexts';
@@ -633,5 +633,165 @@ describe('TLS through the SSH tunnel', () => {
     await waitFor(() => seen.secure > 0);
     expect(seen.secure).toBeGreaterThan(0);
     expect(seen.clientCerts[0]).toBe('db-client');
+  });
+});
+
+/** maps made-up host names to 127.0.0.1, so a name that is not in the test certificate can be reached */
+class NamedHttp extends HttpClient {
+  constructor(private readonly names: Record<string, string>) {
+    super({ ssrf: { allow: ['127.0.0.1'] } });
+  }
+  override resolveAllowedHost(host: string) {
+    return super.resolveAllowedHost(this.names[host] ?? host);
+  }
+}
+const named = new NamedHttp({ localhost: '127.0.0.1', 'db.wrong.test': '127.0.0.1' });
+const IDENTITY = /altnames|does not match|Hostname\/IP|identity/i;
+
+describe('MySQL checks the host name in the server certificate under require', () => {
+  const connectTo = async (host: string, extra: DataObject = {}) => {
+    const { port, seen } = await mysqlTlsEndpoint();
+    const ctx = contextFor(
+      'app.mySql',
+      {},
+      {
+        creds: { mySql: { host, port, user: 'u', password: 'p', ...tlsCreds(extra) } },
+        services: { http: named },
+      },
+    ).loadOptions();
+    const pool = await mysqlPool(ctx, { connectionTimeoutSeconds: 3 });
+    let error: Error | undefined;
+    try {
+      (await pool.getConnection()).release();
+    } catch (e) {
+      error = e as Error;
+    } finally {
+      await pool.end().catch(() => undefined);
+    }
+    return { error, seen };
+  };
+
+  it('accepts a certificate that is valid for the name the user entered', async () => {
+    const { error, seen } = await connectTo('localhost');
+    await waitFor(() => seen.secure > 0);
+    expect(seen.secure).toBeGreaterThan(0);
+    expect(String(error?.message ?? '')).not.toMatch(IDENTITY);
+  });
+
+  it('refuses a certificate from the trusted CA that is for another name', async () => {
+    const { error, seen } = await connectTo('db.wrong.test');
+    expect(error).toBeInstanceOf(Error);
+    expect(error!.message).toMatch(IDENTITY);
+    expect(seen.secure).toBe(0);
+  });
+
+  it('does not check the name under allow, which does not verify the server', async () => {
+    const { error, seen } = await connectTo('db.wrong.test', { ssl: 'allow' });
+    await waitFor(() => seen.secure > 0);
+    expect(seen.secure).toBeGreaterThan(0);
+    expect(String(error?.message ?? '')).not.toMatch(IDENTITY);
+  });
+
+  it('keeps the host the user entered in the pool and sends the TLS options mysql2 reads', async () => {
+    const ctx = contextFor(
+      'app.mySql',
+      {},
+      {
+        creds: { mySql: { host: 'db.wrong.test', port: 3306, user: 'u', password: 'p', ...tlsCreds() } },
+        services: { http: named },
+      },
+    ).loadOptions();
+    const pool = await mysqlPool(ctx, { connectionTimeoutSeconds: 3 });
+    const config = (
+      pool as unknown as { pool: { config: { connectionConfig: { host: string; ssl: DataObject } } } }
+    ).pool.config.connectionConfig;
+    await pool.end();
+    expect(config.host).toBe('db.wrong.test');
+    expect(config.ssl.verifyIdentity).toBe(true);
+    expect(config.ssl.rejectUnauthorized).toBe(true);
+  });
+
+  it('an IP address as the host leaves the name check off (only the chain is verified)', async () => {
+    const ctx = contextFor(
+      'app.mySql',
+      {},
+      {
+        creds: { mySql: { host: '127.0.0.1', port: 3306, user: 'u', password: 'p', ...tlsCreds() } },
+        services: { http },
+      },
+    ).loadOptions();
+    const pool = await mysqlPool(ctx, { connectionTimeoutSeconds: 3 });
+    const config = (pool as unknown as { pool: { config: { connectionConfig: { ssl: DataObject } } } }).pool
+      .config.connectionConfig;
+    await pool.end();
+    expect(config.ssl.verifyIdentity).toBeUndefined();
+  });
+});
+
+describe('MySQL TLS through the SSH tunnel', () => {
+  it('verifies the server certificate and presents the client certificate through the tunnel', async () => {
+    const { port, seen } = await mysqlTlsEndpoint();
+    const creds = {
+      mySql: {
+        host: '127.0.0.1',
+        port,
+        user: 'u',
+        password: 'p',
+        ...tlsCreds(),
+        ...tunnelFields(passwordServer),
+      },
+    };
+    const pool = await mysqlPool(loadContext('app.mySql', creds), { connectionTimeoutSeconds: 3 });
+    await pool.getConnection().then(
+      (c) => c.release(),
+      () => undefined,
+    );
+    await pool.end();
+    await waitFor(() => seen.secure > 0);
+    expect(seen.secure).toBeGreaterThan(0);
+    expect(seen.clientCerts[0]).toBe('db-client');
+  });
+});
+
+describe('SSH tunnel failures', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('a failure text from the SSH server is not passed on', async () => {
+    const serverText = 'Go away, this is the server text with details 10.9.8.7';
+    vi.spyOn(ssh2.Client.prototype, 'connect').mockImplementation(function (this: ssh2.Client) {
+      queueMicrotask(() => this.emit('error', new Error(serverText)));
+      return this;
+    });
+    const r = await runPg(pgCreds(tunnelFields(passwordServer)));
+    expect(r.status).toBe('error');
+    expect(r.error?.message).toMatch(/Couldn't open the SSH tunnel to 127\.0\.0\.1:\d+/);
+    expect(r.error?.message).toContain("Couldn't complete the SSH handshake");
+    expect(JSON.stringify(r.error)).not.toContain('server text');
+    expect(JSON.stringify(r.error)).not.toContain('10.9.8.7');
+  });
+
+  it('a wrong password and a timeout each give a fixed text', async () => {
+    const wrong = await runPg(pgCreds(tunnelFields(passwordServer, { sshPassword: 'nope-nope' })));
+    expect(wrong.error?.message).toContain('SSH refused the user name, password or key');
+  });
+
+  it('a forward on an SSH connection that is gone closes the local socket and does not throw', async () => {
+    vi.spyOn(ssh2.Client.prototype, 'forwardOut').mockImplementation(() => {
+      throw new Error('Not connected');
+    });
+    const pool = await postgresPool(loadContext('app.postgres', pgCreds(tunnelFields(passwordServer))), {
+      connectionTimeoutSeconds: 3,
+    });
+    const uncaught: Error[] = [];
+    const onUncaught = (e: Error) => void uncaught.push(e);
+    process.on('uncaughtException', onUncaught);
+    try {
+      await expect(pool.connect()).rejects.toThrow();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      await pool.end();
+    }
+    expect(uncaught).toEqual([]);
   });
 });

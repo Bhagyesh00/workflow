@@ -5,22 +5,11 @@
  */
 import type { CredentialTestContext, DataObject, NodeCredentialTestResult } from '@workflow/workflow';
 import ssh2 from 'ssh2';
-import { connectSocket, remoteHost, remotePort, sshAuthConfig } from '../utils/remote-connect';
+import { connectSocket, remoteHost, remotePort, sshAuthConfig, sshFailure } from '../utils/remote-connect';
+
+export { sshFailure };
 
 const READY_TIMEOUT_MS = 15_000;
-
-export function sshFailure(error: unknown): string {
-  const text = (error as Error)?.message ?? '';
-  const level = (error as { level?: string })?.level;
-  if (level === 'client-authentication' || /authentication methods failed/i.test(text))
-    return 'SSH refused the user name, password or key';
-  if (/privatekey|private key|passphrase|parse|decrypt/i.test(text))
-    return 'The private key is not valid or its passphrase is wrong';
-  if (/timed out|timeout/i.test(text)) return "Couldn't connect over SSH: the connection timed out";
-  if (level === 'client-socket' || /connection closed/i.test(text))
-    return "Couldn't connect over SSH: the connection was closed";
-  return "Couldn't complete the SSH handshake";
-}
 
 export async function sshCredentialTest(
   ctx: CredentialTestContext,

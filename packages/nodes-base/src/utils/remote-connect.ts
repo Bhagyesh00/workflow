@@ -10,6 +10,23 @@ import type { BaseContext, DataObject, ExecuteContext, ResolvedAddress } from '@
 import type { AuthenticationType } from 'ssh2';
 import { formatPemBlock } from './pem';
 
+/**
+ * A fixed text for an ssh2 failure. The error's own message can be the server's text (a DISCONNECT
+ * description), so it is matched here and never returned.
+ */
+export function sshFailure(error: unknown): string {
+  const text = (error as Error)?.message ?? '';
+  const level = (error as { level?: string })?.level;
+  if (level === 'client-authentication' || /authentication methods failed/i.test(text))
+    return 'SSH refused the user name, password or key';
+  if (/privatekey|private key|passphrase|parse|decrypt/i.test(text))
+    return 'The private key is not valid or its passphrase is wrong';
+  if (/timed out|timeout/i.test(text)) return "Couldn't connect over SSH: the connection timed out";
+  if (level === 'client-socket' || /connection closed/i.test(text))
+    return "Couldn't connect over SSH: the connection was closed";
+  return "Couldn't complete the SSH handshake";
+}
+
 /** the port as a number between 1 and 65535, or the protocol's default when empty */
 export function remotePort(value: unknown, fallback: number): number {
   if (value === undefined || value === null || value === '') return fallback;

@@ -10,7 +10,7 @@ import tls from 'node:tls';
 import type { BaseContext, DataObject } from '@workflow/workflow';
 import ssh2 from 'ssh2';
 import { formatPemBlock } from './pem';
-import { connectSocket, remoteHost, remotePort, sshAuthConfig } from './remote-connect';
+import { connectSocket, remoteHost, remotePort, sshAuthConfig, sshFailure } from './remote-connect';
 
 /** how long the TCP connect and the SSH handshake with sign-in may take */
 const TUNNEL_READY_MS = 20_000;
@@ -72,7 +72,8 @@ export async function openSshTunnel(
   } catch (error) {
     client.end();
     sock.destroy();
-    throw new Error(`Couldn't open the SSH tunnel to ${sshHost}:${sshPort}: ${(error as Error).message}`);
+    // a fixed text: the error's own message can be the SSH server's description text
+    throw new Error(`Couldn't open the SSH tunnel to ${sshHost}:${sshPort}. ${sshFailure(error)}`);
   }
   // errors after sign-in surface through the connection that hit them
   client.on('error', () => undefined);
@@ -83,17 +84,23 @@ export async function openSshTunnel(
     local.once('close', () => open.delete(local));
     local.on('error', () => undefined);
     local.pause();
-    client.forwardOut('127.0.0.1', local.remotePort ?? 0, target.host, target.port, (error, channel) => {
-      if (error) {
-        local.destroy();
-        return;
-      }
-      channel.on('error', () => local.destroy());
-      local.once('close', () => channel.destroy());
-      channel.once('close', () => local.destroy());
-      local.pipe(channel).pipe(local);
-      local.resume();
-    });
+    try {
+      client.forwardOut('127.0.0.1', local.remotePort ?? 0, target.host, target.port, (error, channel) => {
+        if (error) {
+          local.destroy();
+          return;
+        }
+        channel.on('error', () => local.destroy());
+        local.once('close', () => channel.destroy());
+        channel.once('close', () => local.destroy());
+        local.pipe(channel).pipe(local);
+        local.resume();
+      });
+    } catch {
+      // ssh2 throws "Not connected" when the SSH socket is gone but its close event has not come yet;
+      // an uncaught throw here would end the process
+      local.destroy();
+    }
   });
   try {
     await new Promise<void>((resolve, reject) => {
@@ -137,6 +144,8 @@ export interface SqlTlsCredentials extends DataObject {
  * set, else the system roots. The client certificate and key (PEM, re-wrapped so a value pasted on one
  * line works) are sent in both encrypting modes. `serverName` is the host the user entered: through
  * a tunnel the socket goes to 127.0.0.1, so the TLS server name and the name check use it instead.
+ * node-postgres passes all of this to tls.connect. mysql2 reads only the chain settings from it (its
+ * own `verifyIdentity` does the name check), so the MySQL node builds its options from the result.
  */
 export function sqlTlsOptions(
   creds: SqlTlsCredentials,
