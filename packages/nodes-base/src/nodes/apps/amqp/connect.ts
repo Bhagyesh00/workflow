@@ -228,7 +228,9 @@ export async function sendMessage(
     return await new Promise<{ id: number }>((resolve, reject) => {
       const timer = setTimeout(
         () =>
-          finish(new Error(`The AMQP broker did not take the message within ${SEND_TIMEOUT_MS / 1000} seconds`)),
+          finish(
+            new Error(`The AMQP broker did not take the message within ${SEND_TIMEOUT_MS / 1000} seconds`),
+          ),
         SEND_TIMEOUT_MS,
       );
       let sent = false;
@@ -240,7 +242,9 @@ export async function sendMessage(
       }
       const onDisconnect = () => finish(new Error('The AMQP connection closed unexpectedly'));
       connection.on('disconnected', onDisconnect);
-      sender.on('accepted', (context: { delivery: { id: number } }) => finish(undefined, context.delivery.id));
+      sender.on('accepted', (context: { delivery: { id: number } }) =>
+        finish(undefined, context.delivery.id),
+      );
       sender.on('rejected', () => finish(new Error('The AMQP broker rejected the message')));
       sender.on('released', () => finish(new Error('The AMQP broker released the message')));
       sender.on('modified', () => finish(new Error('The AMQP broker did not take the message')));
@@ -311,7 +315,8 @@ export const CONNECTION_FIELDS: NodeProperty[] = [
     name: 'sleepTime',
     type: 'number',
     default: 10,
-    description: 'Milliseconds to wait before the first new attempt. Each next wait is twice as long, up to 60 seconds.',
+    description:
+      'Milliseconds to wait before the first new attempt. Each next wait is twice as long, up to 60 seconds.',
   },
 ];
 

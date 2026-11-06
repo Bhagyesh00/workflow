@@ -144,7 +144,11 @@ describe('Python Code node', () => {
   it('blocks file access and imports, as the node error', async () => {
     const file = await runNode(
       'core.code',
-      { language: 'pythonNative', mode: 'runOnceForAllItems', pythonCode: 'return {"x": open("/etc/passwd").read()}' },
+      {
+        language: 'pythonNative',
+        mode: 'runOnceForAllItems',
+        pythonCode: 'return {"x": open("/etc/passwd").read()}',
+      },
       input,
       { services },
     );

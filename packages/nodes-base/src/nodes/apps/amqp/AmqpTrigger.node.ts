@@ -5,8 +5,8 @@ import {
   type AmqpCredentials,
   amqpCredentialTest,
   type BodyOptions,
-  closeAmqp,
   CONNECTION_FIELDS,
+  closeAmqp,
   messageToJson,
   openAmqp,
   readConnectionOptions,
@@ -75,7 +75,8 @@ export const AmqpTriggerNode: NodeType = {
             name: 'jsonParseBody',
             type: 'boolean',
             default: false,
-            description: 'Whether to parse a text body as JSON. Turn on Convert Body To String for a body sent as bytes.',
+            description:
+              'Whether to parse a text body as JSON. Turn on Convert Body To String for a body sent as bytes.',
           },
           {
             displayName: 'Messages per Cycle',
@@ -96,7 +97,8 @@ export const AmqpTriggerNode: NodeType = {
             name: 'parallelProcessing',
             type: 'boolean',
             default: true,
-            description: 'Whether to start runs for several messages at once. Off: one message at a time, the next after the run finishes.',
+            description:
+              'Whether to start runs for several messages at once. Off: one message at a time, the next after the run finishes.',
           },
           ...CONNECTION_FIELDS.slice(1),
         ],
@@ -193,15 +195,15 @@ export const AmqpTriggerNode: NodeType = {
     const start = (limit?: number) => {
       const sequential = limit !== undefined || !parallel;
       receiver = connection.open_receiver({
-        source: subscription
-          ? { address: sink, durable: 2, expiry_policy: 'never' }
-          : { address: sink },
+        source: subscription ? { address: sink, durable: 2, expiry_policy: 'never' } : { address: sink },
         ...(subscription ? { name: subscription } : {}),
         autoaccept: false,
         credit_window: sequential ? 0 : pull,
       });
       receiver.on('message', (context: EventContext) => void onMessage(context));
-      receiver.on('receiver_error', () => fail(new Error('The AMQP broker refused the link to the queue or topic')));
+      receiver.on('receiver_error', () =>
+        fail(new Error('The AMQP broker refused the link to the queue or topic')),
+      );
       receiver.on('receiver_close', () => {
         if (!manual) fail(new Error('The AMQP broker closed the link to the queue or topic'));
       });

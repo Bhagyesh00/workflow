@@ -71,7 +71,11 @@ class FakeTables implements DataTableAccess {
     if ('id' in ref) return this.tables.get(ref.id)?.info ?? null;
     return [...this.tables.values()].find((t) => t.info.name === ref.name)?.info ?? null;
   }
-  async createTable(input: { name: string; columns: Array<{ name: string; type: DataTableColumn['type'] }>; reuseExisting?: boolean }) {
+  async createTable(input: {
+    name: string;
+    columns: Array<{ name: string; type: DataTableColumn['type'] }>;
+    reuseExisting?: boolean;
+  }) {
     const existing = [...this.tables.values()].find((t) => t.info.name === input.name);
     if (existing) {
       if (input.reuseExisting) return existing.info;
@@ -121,16 +125,25 @@ class FakeTables implements DataTableAccess {
       const v = (row as Record<string, unknown>)[f.columnName] ?? null;
       const want = f.value instanceof Date ? f.value.toISOString() : f.value;
       switch (f.condition) {
-        case 'eq': return v === want;
-        case 'neq': return v !== want;
+        case 'eq':
+          return v === want;
+        case 'neq':
+          return v !== want;
         case 'like':
-        case 'ilike': return String(v).toLowerCase().includes(String(want).replace(/%/g, '').toLowerCase());
-        case 'gt': return (v as number) > (want as number);
-        case 'gte': return (v as number) >= (want as number);
-        case 'lt': return (v as number) < (want as number);
-        case 'lte': return (v as number) <= (want as number);
-        case 'isEmpty': return v === null || v === '';
-        default: return v !== null && v !== '';
+        case 'ilike':
+          return String(v).toLowerCase().includes(String(want).replace(/%/g, '').toLowerCase());
+        case 'gt':
+          return (v as number) > (want as number);
+        case 'gte':
+          return (v as number) >= (want as number);
+        case 'lt':
+          return (v as number) < (want as number);
+        case 'lte':
+          return (v as number) <= (want as number);
+        case 'isEmpty':
+          return v === null || v === '';
+        default:
+          return v !== null && v !== '';
       }
     };
     return filter.type === 'and' ? filter.filters.every(test) : filter.filters.some(test);
@@ -150,7 +163,11 @@ class FakeTables implements DataTableAccess {
     const take = Math.min(query.take ?? 250, 250);
     return { count: rows.length, data: rows.slice(query.skip ?? 0, (query.skip ?? 0) + take) };
   }
-  async updateRows(id: string, change: { filter: DataTableFilter; data: DataTableRowInput }, o: { dryRun?: boolean } = {}) {
+  async updateRows(
+    id: string,
+    change: { filter: DataTableFilter; data: DataTableRowInput },
+    o: { dryRun?: boolean } = {},
+  ) {
     const t = this.need(id);
     const hit = t.rows.filter((r) => this.matches(r, change.filter));
     const patch = this.coerce(t, change.data);
@@ -163,17 +180,27 @@ class FakeTables implements DataTableAccess {
     for (const r of hit) Object.assign(r, patch);
     return hit.map((r) => ({ ...r })) as DataTableRowResult[];
   }
-  async upsertRow(id: string, change: { filter: DataTableFilter; data: DataTableRowInput }, o: { dryRun?: boolean } = {}) {
+  async upsertRow(
+    id: string,
+    change: { filter: DataTableFilter; data: DataTableRowInput },
+    o: { dryRun?: boolean } = {},
+  ) {
     const t = this.need(id);
     if (t.rows.some((r) => this.matches(r, change.filter))) return this.updateRows(id, change, o);
-    if (o.dryRun) return [{ id: 0, createdAt: '', updatedAt: '', ...change.data, dryRunState: 'after' }] as unknown as DataTableRowResult[];
+    if (o.dryRun)
+      return [
+        { id: 0, createdAt: '', updatedAt: '', ...change.data, dryRunState: 'after' },
+      ] as unknown as DataTableRowResult[];
     return (await this.insertRows(id, [change.data], 'all')) as DataTableRowResult[];
   }
   async deleteRows(id: string, filter: DataTableFilter, o: { dryRun?: boolean } = {}) {
     const t = this.need(id);
     const hit = t.rows.filter((r) => this.matches(r, filter));
     if (!o.dryRun) t.rows = t.rows.filter((r) => !hit.includes(r));
-    return hit.map((r) => ({ ...r, ...(o.dryRun ? { dryRunState: 'before' as const } : {}) })) as DataTableRowResult[];
+    return hit.map((r) => ({
+      ...r,
+      ...(o.dryRun ? { dryRunState: 'before' as const } : {}),
+    })) as DataTableRowResult[];
   }
   async rowsExist(id: string, filter: DataTableFilter) {
     return this.need(id).rows.some((r) => this.matches(r, filter));
@@ -191,10 +218,15 @@ function setup() {
   const fake = new FakeTables();
   const table = fake.add('Tasks', COLUMNS);
   const run = (parameters: DataObject, input: DataObject[] = [{}], node: DataObject = {}) =>
-    runNode('core.dataTable', parameters, input.map((json) => ({ json })), {
-      services: { dataTables: fake },
-      node: node as never,
-    });
+    runNode(
+      'core.dataTable',
+      parameters,
+      input.map((json) => ({ json })),
+      {
+        services: { dataTables: fake },
+        node: node as never,
+      },
+    );
   const byId = { __rl: true, mode: 'id', value: table.id };
   const insert = (rows: DataObject[]) =>
     run({ resource: 'row', operation: 'insert', dataTableId: byId, dataMode: 'autoMapInputData' }, rows);
@@ -210,7 +242,10 @@ describe('row insert', () => {
     const { run, byId } = setup();
     const r = await run(
       { resource: 'row', operation: 'insert', dataTableId: byId, dataMode: 'autoMapInputData' },
-      [{ title: 'a', score: 1, id: 99, createdAt: 'x', extra: 'ignored' }, { title: 'b', score: 2 }],
+      [
+        { title: 'a', score: 1, id: 99, createdAt: 'x', extra: 'ignored' },
+        { title: 'b', score: 2 },
+      ],
     );
     expect(r.status).toBe('success');
     expect(r.outputs[0]).toMatchObject([
@@ -222,10 +257,11 @@ describe('row insert', () => {
 
   it('sends all items of one table in one call', async () => {
     const { run, byId, fake } = setup();
-    await run(
-      { resource: 'row', operation: 'insert', dataTableId: byId, dataMode: 'autoMapInputData' },
-      [{ title: 'a' }, { title: 'b' }, { title: 'c' }],
-    );
+    await run({ resource: 'row', operation: 'insert', dataTableId: byId, dataMode: 'autoMapInputData' }, [
+      { title: 'a' },
+      { title: 'b' },
+      { title: 'c' },
+    ]);
     expect(fake.calls.filter((c) => c.startsWith('insertRows'))).toEqual(['insertRows:3']);
   });
 
@@ -263,7 +299,7 @@ describe('row insert', () => {
     expect(r.outputs[0]![0]).toMatchObject({ title: 'x', score: null, due: '2026-03-04T00:00:00.000Z' });
   });
 
-  it('refuses arrays and objects with n8n\'s text, and unknown or system columns', async () => {
+  it("refuses arrays and objects with n8n's text, and unknown or system columns", async () => {
     const { run, byId } = setup();
     const arr = await run(
       { resource: 'row', operation: 'insert', dataTableId: byId, dataMode: 'autoMapInputData' },
@@ -313,7 +349,7 @@ describe('table lookup', () => {
     expect(miss.error?.message).toBe(DATA_TABLE_ERRORS.tableNameNotFound('task'));
   });
 
-  it('answers an unknown id with n8n\'s text and description', async () => {
+  it("answers an unknown id with n8n's text and description", async () => {
     const { run } = setup();
     const r = await run({
       resource: 'row',
@@ -321,7 +357,9 @@ describe('table lookup', () => {
       dataTableId: { __rl: true, mode: 'id', value: 'zzz' },
     });
     expect(r.error?.message).toBe(DATA_TABLE_ERRORS.tableIdNotFound('zzz'));
-    expect((r.error as { description?: string }).description).toBe(DATA_TABLE_ERRORS.tableIdNotFoundDescription);
+    expect((r.error as { description?: string }).description).toBe(
+      DATA_TABLE_ERRORS.tableIdNotFoundDescription,
+    );
   });
 
   it('asks for a table when the locator is empty', async () => {
@@ -338,10 +376,11 @@ describe('table lookup', () => {
     const { run, fake, insert, table } = setup();
     await insert([{ title: 'a' }, { title: 'b' }]);
     fake.calls.length = 0;
-    await run(
-      { resource: 'row', operation: 'get', returnAll: true, dataTableId: '={{ $json.t }}' },
-      [{ t: table.id }, { t: table.id }, { t: table.id }],
-    );
+    await run({ resource: 'row', operation: 'get', returnAll: true, dataTableId: '={{ $json.t }}' }, [
+      { t: table.id },
+      { t: table.id },
+      { t: table.id },
+    ]);
     expect(fake.calls.filter((c) => c === 'getTable')).toHaveLength(1);
   });
 });
@@ -364,7 +403,12 @@ describe('row get', () => {
       [{}, {}],
     );
     expect(limited.outputs[0]).toHaveLength(4);
-    expect(limited.items[0]!.map((i) => i.pairedItem)).toEqual([{ item: 0 }, { item: 0 }, { item: 1 }, { item: 1 }]);
+    expect(limited.items[0]!.map((i) => i.pairedItem)).toEqual([
+      { item: 0 },
+      { item: 0 },
+      { item: 1 },
+      { item: 1 },
+    ]);
     const all = await run({ resource: 'row', operation: 'get', dataTableId: byId, returnAll: true });
     expect(all.outputs[0]).toHaveLength(3);
   });
@@ -386,7 +430,13 @@ describe('row get', () => {
         { keyName: 'done', condition: 'isTrue' },
       ],
     };
-    const any = await run({ resource: 'row', operation: 'get', dataTableId: byId, returnAll: true, filters: two });
+    const any = await run({
+      resource: 'row',
+      operation: 'get',
+      dataTableId: byId,
+      returnAll: true,
+      filters: two,
+    });
     expect(any.outputs[0]!.map((r) => r.title)).toEqual(['a', 'b', 'c']);
     const all = await run({
       resource: 'row',
@@ -425,7 +475,10 @@ describe('row get', () => {
 describe('row update, upsert, delete', () => {
   it('update needs a condition and returns the updated rows', async () => {
     const { run, byId, insert } = setup();
-    await insert([{ title: 'a', score: 1 }, { title: 'b', score: 2 }]);
+    await insert([
+      { title: 'a', score: 1 },
+      { title: 'b', score: 2 },
+    ]);
     const base = {
       resource: 'row',
       operation: 'update',
@@ -451,7 +504,10 @@ describe('row update, upsert, delete', () => {
       filters: cond('title', 'eq', 'a'),
       options: { dryRun: true },
     });
-    expect(r.outputs[0]!.map((x) => [x.dryRunState, x.score])).toEqual([['before', 1], ['after', 5]]);
+    expect(r.outputs[0]!.map((x) => [x.dryRunState, x.score])).toEqual([
+      ['before', 1],
+      ['after', 5],
+    ]);
     const check = await run({ resource: 'row', operation: 'get', dataTableId: byId, returnAll: true });
     expect(check.outputs[0]![0]!.score).toBe(1);
   });
@@ -463,7 +519,12 @@ describe('row update, upsert, delete', () => {
       operation: 'upsert',
       dataTableId: byId,
       dataMode: 'defineBelow',
-      fieldsUi: { fieldValues: [{ columnName: 'title', value: title }, { columnName: 'score', value: score }] },
+      fieldsUi: {
+        fieldValues: [
+          { columnName: 'title', value: title },
+          { columnName: 'score', value: score },
+        ],
+      },
       filters: cond('title', 'eq', title),
     });
     expect((await run(params('a', '1'))).outputs[0]).toMatchObject([{ id: 1, title: 'a', score: 1 }]);
@@ -530,19 +591,24 @@ describe('table operations', () => {
     expect(list.outputs[0]!.map((t) => t.name)).toEqual(['Another', 'Tasks']);
     const limited = await run({ resource: 'table', operation: 'list', returnAll: false, limit: 1 });
     expect(limited.outputs[0]).toHaveLength(1);
-    const named = await run({ resource: 'table', operation: 'list', returnAll: true, options: { filterName: 'tas' } });
+    const named = await run({
+      resource: 'table',
+      operation: 'list',
+      returnAll: true,
+      options: { filterName: 'tas' },
+    });
     expect(named.outputs[0]!.map((t) => t.name)).toEqual(['Tasks']);
 
-    expect((await run({ resource: 'table', operation: 'update', dataTableId: byId, newName: 'Todo' })).outputs[0]).toEqual([
-      { success: true, name: 'Todo' },
-    ]);
+    expect(
+      (await run({ resource: 'table', operation: 'update', dataTableId: byId, newName: 'Todo' })).outputs[0],
+    ).toEqual([{ success: true, name: 'Todo' }]);
     await insert([{ title: 'a' }, { title: 'b' }]);
     expect((await run({ resource: 'table', operation: 'clear', dataTableId: byId })).outputs[0]).toEqual([
       { success: true, deletedCount: 2 },
     ]);
-    expect((await run({ resource: 'table', operation: 'deleteTable', dataTableId: byId })).outputs[0]).toEqual([
-      { success: true, deletedTableId: table.id },
-    ]);
+    expect(
+      (await run({ resource: 'table', operation: 'deleteTable', dataTableId: byId })).outputs[0],
+    ).toEqual([{ success: true, deletedTableId: table.id }]);
     expect(fake.tables.has(table.id)).toBe(false);
   });
 });
@@ -574,7 +640,13 @@ describe('editor lookups', () => {
     const { getColumns, getWritableColumns } = DataTableNode.methods!.loadOptions!;
     const ctx = loadCtx(fake, { dataTableId: { __rl: true, mode: 'id', value: table.id } });
     expect((await getColumns!(ctx)).map((o) => o.value)).toEqual([
-      'title', 'score', 'done', 'due', 'id', 'createdAt', 'updatedAt',
+      'title',
+      'score',
+      'done',
+      'due',
+      'id',
+      'createdAt',
+      'updatedAt',
     ]);
     expect((await getWritableColumns!(ctx)).map((o) => o.value)).toEqual(['title', 'score', 'done', 'due']);
     const byName = loadCtx(fake, { dataTableId: { __rl: true, mode: 'name', value: 'Tasks' } });

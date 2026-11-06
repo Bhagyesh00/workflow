@@ -54,7 +54,11 @@ const SNAPSHOT_MEMORY_MB = 256;
 /** starting is our code, not the user's: it has its own time, far above what it needs */
 const START_TIMEOUT_MS = 120_000;
 
-async function prepareContext(isolate: ivm.Isolate, memoryMb: number, wheels?: PythonWheels): Promise<ivm.Context> {
+async function prepareContext(
+  isolate: ivm.Isolate,
+  memoryMb: number,
+  wheels?: PythonWheels,
+): Promise<ivm.Context> {
   const context = await isolate.createContext();
   const jail = context.global;
   const loadAsset = pythonAssetLoader(memoryMb, wheels);
@@ -89,7 +93,12 @@ async function prepareContext(isolate: ivm.Isolate, memoryMb: number, wheels?: P
 }
 
 /** settles with `work`, or disposes the isolate and rejects with `onLate()` after `ms` */
-async function within<T>(work: Promise<T>, ms: number, isolate: ivm.Isolate, onLate: () => Error): Promise<T> {
+async function within<T>(
+  work: Promise<T>,
+  ms: number,
+  isolate: ivm.Isolate,
+  onLate: () => Error,
+): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const late = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -254,7 +263,8 @@ export class PyodideCodeRunner implements CodeRunner {
       if (input.signal?.aborted) throw new CodeExecutionError('Code execution was cancelled');
       const message = (error as Error)?.message ?? String(error);
       // a file too big for the isolate (an unpacked wheel) ends in a failed ArrayBuffer allocation
-      if (/memory limit|MemoryError|allocation failed/i.test(message) || isolate.isDisposed) throw this.memoryText();
+      if (/memory limit|MemoryError|allocation failed/i.test(message) || isolate.isDisposed)
+        throw this.memoryText();
       throw new CodeExecutionError(message);
     } finally {
       input.signal?.removeEventListener('abort', dispose);

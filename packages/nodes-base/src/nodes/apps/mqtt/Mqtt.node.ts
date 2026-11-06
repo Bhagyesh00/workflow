@@ -4,7 +4,7 @@
  */
 import { type DataObject, type Item, NodeOperationError, type NodeType } from '@workflow/workflow';
 import type { MqttClient } from 'mqtt';
-import { closeMqtt, mqttCredentialTest, type MqttCredentials, openMqtt } from './client';
+import { closeMqtt, type MqttCredentials, mqttCredentialTest, openMqtt } from './client';
 
 export const MqttNode: NodeType = {
   description: {
@@ -124,9 +124,14 @@ export const MqttNode: NodeType = {
               ? String(ctx.getNodeParameter('message', index, '') ?? '')
               : JSON.stringify(item.json);
           try {
-            await Promise.race([client.publishAsync(topic, message, { qos, retain: options.retain === true }), lost]);
+            await Promise.race([
+              client.publishAsync(topic, message, { qos, retain: options.retain === true }),
+              lost,
+            ]);
           } catch {
-            throw new NodeOperationError(ctx.getNode(), "Couldn't publish the MQTT message", { itemIndex: index });
+            throw new NodeOperationError(ctx.getNode(), "Couldn't publish the MQTT message", {
+              itemIndex: index,
+            });
           }
           results.push({ json: { ...item.json }, pairedItem: { item: index } });
         } catch (error) {

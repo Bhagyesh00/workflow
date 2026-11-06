@@ -2,8 +2,8 @@
 import { randomUUID } from 'node:crypto';
 import dns from 'node:dns';
 import http from 'node:http';
-import net, { type AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
+import net, { type AddressInfo } from 'node:net';
 import tls from 'node:tls';
 import { createTriggerContext, HttpClient } from '@workflow/core';
 import {
@@ -53,7 +53,9 @@ interface WsModule {
 }
 
 const listen = (server: net.Server | http.Server) =>
-  new Promise<number>((resolve) => server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port)));
+  new Promise<number>((resolve) =>
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port)),
+  );
 
 beforeAll(async () => {
   broker = await Aedes.createBroker();
@@ -223,7 +225,9 @@ describe('node and credential', () => {
 
 describe('settings and item', () => {
   const settingsFor = (parameters: DataObject) =>
-    readSettings({ getNodeParameter: (name: string, _i: number, fallback?: unknown) => parameters[name] ?? fallback } as never);
+    readSettings({
+      getNodeParameter: (name: string, _i: number, fallback?: unknown) => parameters[name] ?? fallback,
+    } as never);
 
   it('reads topics with their QoS and the defaults of the options', () => {
     expect(settingsFor(topics(['a', 1], ['b', 2]))).toEqual({
@@ -245,24 +249,42 @@ describe('settings and item', () => {
   it('builds the item: text by default, parsed with JSON Parse Body, wrapped when Only Message has a text', () => {
     const warn = vi.fn();
     const opts = { jsonParseBody: false, onlyMessage: false };
-    expect(buildItem('t', Buffer.from('{"a":1}'), opts, warn).json).toEqual({ topic: 't', message: '{"a":1}' });
+    expect(buildItem('t', Buffer.from('{"a":1}'), opts, warn).json).toEqual({
+      topic: 't',
+      message: '{"a":1}',
+    });
     expect(buildItem('t', Buffer.from('{"a":1}'), { ...opts, jsonParseBody: true }, warn).json).toEqual({
       topic: 't',
       message: { a: 1 },
     });
-    expect(buildItem('t', Buffer.from('{"a":1}'), { jsonParseBody: true, onlyMessage: true }, warn).json).toEqual({ a: 1 });
-    expect(buildItem('t', Buffer.from('hi'), { jsonParseBody: false, onlyMessage: true }, warn).json).toEqual({ message: 'hi' });
+    expect(
+      buildItem('t', Buffer.from('{"a":1}'), { jsonParseBody: true, onlyMessage: true }, warn).json,
+    ).toEqual({ a: 1 });
+    expect(buildItem('t', Buffer.from('hi'), { jsonParseBody: false, onlyMessage: true }, warn).json).toEqual(
+      { message: 'hi' },
+    );
     expect(warn).not.toHaveBeenCalled();
-    expect(buildItem('t', Buffer.from('nope'), { ...opts, jsonParseBody: true }, warn).json).toEqual({ topic: 't', message: 'nope' });
+    expect(buildItem('t', Buffer.from('nope'), { ...opts, jsonParseBody: true }, warn).json).toEqual({
+      topic: 't',
+      message: 'nope',
+    });
     expect(warn).toHaveBeenCalledOnce();
   });
 
   it('plans the transport and keeps verification on unless the credential turns it off', () => {
     expect(connectionPlan({ host: 'h' })).toMatchObject({ transport: 'mqtt', port: 1883 });
-    expect(connectionPlan({ host: 'h', protocol: 'mqtts', port: '' })).toMatchObject({ transport: 'mqtts', port: 8883 });
-    expect(connectionPlan({ host: 'h', protocol: 'ws', ssl: true })).toMatchObject({ transport: 'wss', port: 443 });
+    expect(connectionPlan({ host: 'h', protocol: 'mqtts', port: '' })).toMatchObject({
+      transport: 'mqtts',
+      port: 8883,
+    });
+    expect(connectionPlan({ host: 'h', protocol: 'ws', ssl: true })).toMatchObject({
+      transport: 'wss',
+      port: 443,
+    });
     expect(connectionPlan({ host: 'h', ssl: true }).tls.rejectUnauthorized).toBe(true);
-    expect(connectionPlan({ host: 'h', ssl: true, rejectUnauthorized: false }).tls.rejectUnauthorized).toBe(false);
+    expect(connectionPlan({ host: 'h', ssl: true, rejectUnauthorized: false }).tls.rejectUnauthorized).toBe(
+      false,
+    );
     expect(connectionPlan({ host: 'h', username: 'u' }).options.username).toBeUndefined();
     expect(() => connectionPlan({ host: '' })).toThrow('Enter the MQTT host');
     expect(() => connectionPlan({ host: 'h', port: 70000 })).toThrow('port');
@@ -308,7 +330,10 @@ describe('subscribing and messages', () => {
     await pub.publishAsync(`${root}/kitchen/temp`, '21');
     await pub.publishAsync(`${root}/all/deep/er`, 'x');
     await until(() => t.runs.length === 2);
-    expect(t.runs.map((r) => r.items[0].json.topic).sort()).toEqual([`${root}/all/deep/er`, `${root}/kitchen/temp`]);
+    expect(t.runs.map((r) => r.items[0].json.topic).sort()).toEqual([
+      `${root}/all/deep/er`,
+      `${root}/kitchen/temp`,
+    ]);
   });
 
   it('JSON Parse Body and Only Message', async () => {
@@ -414,7 +439,11 @@ describe('subscribing and messages', () => {
     const clientId = `lost-${randomUUID().slice(0, 8)}`;
     const t = await start(topics([topic]), { creds: creds({ clientId }) });
     // the broker drops it when another connection takes the client ID
-    const thief = await mqtt.connectAsync(`mqtt://127.0.0.1:${tcpPort}`, { username: USER, password: PASS, clientId });
+    const thief = await mqtt.connectAsync(`mqtt://127.0.0.1:${tcpPort}`, {
+      username: USER,
+      password: PASS,
+      clientId,
+    });
     closers.push(() => thief.endAsync(true));
     await until(() => t.errors.length > 0);
     await sleep(100);
@@ -431,7 +460,8 @@ describe('subscribing and messages', () => {
 
   it('fails the start when a topic is refused', async () => {
     const old = broker.authorizeSubscribe;
-    broker.authorizeSubscribe = (_client, sub, done) => (sub.topic.startsWith('denied/') ? done(null, null) : done(null, sub));
+    broker.authorizeSubscribe = (_client, sub, done) =>
+      sub.topic.startsWith('denied/') ? done(null, null) : done(null, sub);
     try {
       const h = harness(topics(['denied/x']));
       await expect(nodeType().trigger!(h.ctx)).rejects.toThrow("Couldn't subscribe");
@@ -472,7 +502,10 @@ describe('transports', () => {
     const withoutCa = creds({ protocol: 'mqtts', port: tlsPort });
     const r = await mqttCredentialTest(testCtx(), { type: 'mqtt', data: withoutCa });
     expect(r.message).toMatch(/^Couldn't connect to MQTT/);
-    const off = await mqttCredentialTest(testCtx(), { type: 'mqtt', data: { ...withoutCa, ssl: true, rejectUnauthorized: false } });
+    const off = await mqttCredentialTest(testCtx(), {
+      type: 'mqtt',
+      data: { ...withoutCa, ssl: true, rejectUnauthorized: false },
+    });
     expect(off).toEqual({ status: 'OK', message: 'Connection successful' });
   });
 
@@ -490,7 +523,10 @@ describe('SSRF guard', () => {
   it('refuses loopback and private hosts with the default client', async () => {
     for (const protocol of ['mqtt', 'ws']) {
       for (const host of ['127.0.0.1', '10.0.0.5', '169.254.169.254']) {
-        const h = harness(topics([unique('g')]), { creds: creds({ protocol, host }), http: new HttpClient() });
+        const h = harness(topics([unique('g')]), {
+          creds: creds({ protocol, host }),
+          http: new HttpClient(),
+        });
         await expect(nodeType().trigger!(h.ctx)).rejects.toThrow(/blocked/);
       }
     }
@@ -551,7 +587,10 @@ describe('credential test', () => {
   });
 
   it('fails clearly on a wrong password, without echoing it', async () => {
-    const r = await mqttCredentialTest(testCtx(), { type: 'mqtt', data: creds({ password: 'wrong-secret-xyz' }) });
+    const r = await mqttCredentialTest(testCtx(), {
+      type: 'mqtt',
+      data: creds({ password: 'wrong-secret-xyz' }),
+    });
     expect(r).toEqual({ status: 'Error', message: 'MQTT refused the username or password' });
   });
 

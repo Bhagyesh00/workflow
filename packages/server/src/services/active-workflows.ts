@@ -899,9 +899,11 @@ export class ActiveWorkflowManager {
     if (listener.close) await this.runTestClose(listener, listener.close);
     // an event gave the binary data to its run
     if (!listener.consumed) {
-      await this.deps.executions.removeBinaryData(listener.tenantId, listener.executionId).catch((error) =>
-        this.deps.logger.warn({ err: error, key: listener.key }, 'Removing test trigger data failed'),
-      );
+      await this.deps.executions
+        .removeBinaryData(listener.tenantId, listener.executionId)
+        .catch((error) =>
+          this.deps.logger.warn({ err: error, key: listener.key }, 'Removing test trigger data failed'),
+        );
     }
   }
 

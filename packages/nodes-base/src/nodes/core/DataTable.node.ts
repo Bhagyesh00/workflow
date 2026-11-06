@@ -17,13 +17,7 @@ import {
   type NodeType,
 } from '@workflow/workflow';
 import { runRowOperation } from './data-table/rows';
-import {
-  dataTableAccess,
-  nodeError,
-  rlParts,
-  runTableOperation,
-  type TableCache,
-} from './data-table/tables';
+import { dataTableAccess, nodeError, rlParts, runTableOperation, type TableCache } from './data-table/tables';
 
 const ROW_OPS = ['insert', 'get', 'update', 'upsert', 'deleteRows', 'rowExists', 'rowNotExists'];
 const FILTER_OPS = ['get', 'update', 'upsert', 'deleteRows', 'rowExists', 'rowNotExists'];

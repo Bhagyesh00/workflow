@@ -988,7 +988,11 @@ describe('credentials read secrets', () => {
     );
 
     const braces = await owner.client.data(
-      owner.client.post('/rest/credentials', { name: 'Braces', type: 'testApi', data: { apiKey: '=aB{{9x' } }),
+      owner.client.post('/rest/credentials', {
+        name: 'Braces',
+        type: 'testApi',
+        data: { apiKey: '=aB{{9x' },
+      }),
     );
     expect((await owner.client.data(owner.client.get(`/rest/credentials/${braces.id}`))).data.apiKey).toBe(
       '__REDACTED__',

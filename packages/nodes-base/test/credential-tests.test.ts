@@ -100,17 +100,34 @@ describe('MySQL', () => {
           params: { user: string; database?: string },
           cb: (err: Error | null, mysqlError?: { message: string; code: number }) => void,
         ) => {
-          if (params.user === 'baduser') return cb(null, { message: "Access denied for user 'SERVERTEXT'", code: 1045 });
-          if (params.database === 'nodb') return cb(null, { message: "Unknown database 'SERVERTEXT'", code: 1049 });
+          if (params.user === 'baduser')
+            return cb(null, { message: "Access denied for user 'SERVERTEXT'", code: 1045 });
+          if (params.database === 'nodb')
+            return cb(null, { message: "Unknown database 'SERVERTEXT'", code: 1049 });
           cb(null);
         },
       });
       conn.on('query', (sql: string) => {
         calls++;
         if (/^select 1/i.test(sql)) {
-          return conn.writeTextResult([{ '1': '1' }], [
-            { catalog: 'def', schema: '', table: '', orgTable: '', name: '1', orgName: '', characterSet: 63, columnLength: 1, columnType: 8, flags: 129, decimals: 0 },
-          ]);
+          return conn.writeTextResult(
+            [{ '1': '1' }],
+            [
+              {
+                catalog: 'def',
+                schema: '',
+                table: '',
+                orgTable: '',
+                name: '1',
+                orgName: '',
+                characterSet: 63,
+                columnLength: 1,
+                columnType: 8,
+                flags: 129,
+                decimals: 0,
+              },
+            ],
+          );
         }
         conn.writeOk();
       });

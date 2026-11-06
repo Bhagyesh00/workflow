@@ -1,7 +1,17 @@
 /** The menu of a column header: sort and filter for everyone, rename, move and delete for writers (P4-05). */
 import { useQueryClient } from '@tanstack/react-query';
 import type { DataTableColumn, DataTableSortDirection } from '@workflow/workflow';
-import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Filter, MoreVertical, Pencil, Trash2, X } from 'lucide-react';
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronLeft,
+  ChevronRight,
+  Filter,
+  MoreVertical,
+  Pencil,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { dataTablesApi } from '../../api/endpoints';

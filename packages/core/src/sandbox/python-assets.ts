@@ -151,7 +151,10 @@ function canRunInPyodide(file: string): boolean {
     return abi === 'none' && pythonTags.some((tag) => tag.startsWith('py3') || tag === thisPython);
   }
   const built = [`pyemscripten_${info.abi_version}_${info.arch}`, `pyodide_${info.abi_version}_${info.arch}`];
-  return (abi === 'abi3' || pythonTags.includes(thisPython)) && platform.split('.').some((tag) => built.includes(tag));
+  return (
+    (abi === 'abi3' || pythonTags.includes(thisPython)) &&
+    platform.split('.').some((tag) => built.includes(tag))
+  );
 }
 
 function readEntries(file: string): string[] | undefined {
@@ -227,7 +230,9 @@ export function pythonAssetLoader(memoryMb: number, wheels?: PythonWheels): (nam
       stdlibCopy ??= toCopy(readFileSync(assetPath(STDLIB_NAME)));
       return stdlibCopy.copyInto({ release: false });
     }
-    const wheel = name.startsWith(WHEEL_ASSET_PREFIX) ? wheels?.files.get(name.slice(WHEEL_ASSET_PREFIX.length)) : undefined;
+    const wheel = name.startsWith(WHEEL_ASSET_PREFIX)
+      ? wheels?.files.get(name.slice(WHEEL_ASSET_PREFIX.length))
+      : undefined;
     if (wheel) return toCopy(readFileSync(wheel)).copyInto({ release: true });
     throw new Error('Unknown Python asset');
   };

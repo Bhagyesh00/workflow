@@ -82,12 +82,22 @@ describe('the Code node form', () => {
     await waitFor(() => expect(node.current.parameters.pythonCode).toBe(pythonCode[ALL]));
     expect(node.current.parameters.language).toBe('pythonNative');
     await waitFor(() =>
-      expect(document.querySelector('[data-testid="code-editor-python"]')?.textContent).toContain('my_new_field'),
+      expect(document.querySelector('[data-testid="code-editor-python"]')?.textContent).toContain(
+        'my_new_field',
+      ),
     );
   });
 });
 
-function Editor({ language, initial, onValue }: { language: CodeLanguage; initial: string; onValue(v: string): void }) {
+function Editor({
+  language,
+  initial,
+  onValue,
+}: {
+  language: CodeLanguage;
+  initial: string;
+  onValue(v: string): void;
+}) {
   const [value, setValue] = useState(initial);
   return (
     <CodeEditor

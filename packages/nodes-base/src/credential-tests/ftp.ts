@@ -3,8 +3,9 @@
  * IP literal, so a DNS rebind cannot redirect it). SFTP: sign in over SSH through the checked socket
  * and open the SFTP subsystem. A failure answers with a fixed text, never with the server's own text.
  */
-import { FTPError } from 'basic-ftp';
+
 import type { CredentialTestContext, DataObject, NodeCredentialTestResult } from '@workflow/workflow';
+import { FTPError } from 'basic-ftp';
 import ssh2 from 'ssh2';
 import { createFtpClient } from '../utils/file-transfer';
 import { connectSocket, remoteHost, remotePort, sshAuthConfig } from '../utils/remote-connect';

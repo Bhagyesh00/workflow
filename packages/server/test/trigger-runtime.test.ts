@@ -476,7 +476,9 @@ describe('error workflow on an activation error', () => {
     const wf = await createWorkflow(owner.client, reconnecting());
     const { executions } = server.ctx;
     const error = { message: 'x' };
-    await expect(executions.runActivationErrorWorkflow(owner.tenant.id, wf.id, error)).resolves.toBeUndefined();
+    await expect(
+      executions.runActivationErrorWorkflow(owner.tenant.id, wf.id, error),
+    ).resolves.toBeUndefined();
     await expect(
       executions.runActivationErrorWorkflow(owner.tenant.id, '00000000-0000-4000-8000-000000000000', error),
     ).resolves.toBeUndefined();

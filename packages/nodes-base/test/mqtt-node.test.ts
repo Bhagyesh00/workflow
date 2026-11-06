@@ -26,7 +26,12 @@ beforeAll(async () => {
   };
   broker.on('publish', (packet) => {
     if (packet.topic.startsWith('l20n/'))
-      published.push({ topic: packet.topic, payload: packet.payload.toString(), qos: packet.qos, retain: packet.retain });
+      published.push({
+        topic: packet.topic,
+        payload: packet.payload.toString(),
+        qos: packet.qos,
+        retain: packet.retain,
+      });
   });
   server = net.createServer(broker.handle);
   port = await new Promise<number>((resolve) =>
@@ -72,7 +77,11 @@ describe('publish', () => {
     const topic = unique('text');
     const r = await run({ topic, sendInputData: false, message: 'hello', options: { qos: 1, retain: true } });
     expect(r.status).toBe('success');
-    expect(published.find((p) => p.topic === topic)).toMatchObject({ payload: 'hello', qos: 1, retain: true });
+    expect(published.find((p) => p.topic === topic)).toMatchObject({
+      payload: 'hello',
+      qos: 1,
+      retain: true,
+    });
   });
 
   it('a retained message reaches a later subscriber', async () => {
@@ -107,7 +116,11 @@ describe('publish', () => {
 
 describe('errors', () => {
   it('a wrong password gives a fixed text without the password', async () => {
-    const r = await run({ topic: unique('bad'), sendInputData: true }, [{ json: {} }], creds({ password: 'nope-secret' }));
+    const r = await run(
+      { topic: unique('bad'), sendInputData: true },
+      [{ json: {} }],
+      creds({ password: 'nope-secret' }),
+    );
     expect(r.status).toBe('error');
     const text = String(r.error?.message ?? JSON.stringify(r.error));
     expect(text).toMatch(/username or password/);
@@ -115,13 +128,22 @@ describe('errors', () => {
   });
 
   it('continue on fail keeps the item with an error', async () => {
-    const r = await run({ topic: unique('c'), sendInputData: true }, [{ json: { a: 1 } }], creds({ password: 'nope' }));
+    const r = await run(
+      { topic: unique('c'), sendInputData: true },
+      [{ json: { a: 1 } }],
+      creds({ password: 'nope' }),
+    );
     expect(r.status).toBe('error');
-    const ok = await runNode('app.mqtt', { topic: unique('c'), sendInputData: true } as never, [{ json: { a: 1 } }] as never, {
-      creds: creds({ password: 'nope' }),
-      services: { http: localHttp() },
-      node: { onError: 'continueRegularOutput' } as never,
-    });
+    const ok = await runNode(
+      'app.mqtt',
+      { topic: unique('c'), sendInputData: true } as never,
+      [{ json: { a: 1 } }] as never,
+      {
+        creds: creds({ password: 'nope' }),
+        services: { http: localHttp() },
+        node: { onError: 'continueRegularOutput' } as never,
+      },
+    );
     expect(ok.outputs[0]?.[0]).toHaveProperty('error');
   });
 
@@ -137,7 +159,9 @@ describe('errors', () => {
     };
   }
 
-  it('a connection that drops during a publish fails the node instead of hanging', { timeout: 10_000 }, async () => {
+  it('a connection that drops during a publish fails the node instead of hanging', {
+    timeout: 10_000,
+  }, async () => {
     const topic = unique('drop');
     const restore = dropOnPublish(topic);
     try {
@@ -149,7 +173,9 @@ describe('errors', () => {
     }
   });
 
-  it('continue on fail gets past a lost connection, for the item after it too', { timeout: 10_000 }, async () => {
+  it('continue on fail gets past a lost connection, for the item after it too', {
+    timeout: 10_000,
+  }, async () => {
     const topic = unique('drop-continue');
     const restore = dropOnPublish(topic);
     try {
@@ -157,7 +183,11 @@ describe('errors', () => {
         'app.mqtt',
         { topic, sendInputData: true, options: { qos: 1 } } as never,
         [{ json: { a: 1 } }, { json: { a: 2 } }] as never,
-        { creds: creds(), services: { http: localHttp() }, node: { onError: 'continueRegularOutput' } as never },
+        {
+          creds: creds(),
+          services: { http: localHttp() },
+          node: { onError: 'continueRegularOutput' } as never,
+        },
       );
       expect(r.outputs[0]).toEqual([
         { error: "Couldn't publish the MQTT message" },
@@ -169,9 +199,14 @@ describe('errors', () => {
   });
 
   it('refuses a private host through the guard', async () => {
-    const r = await runNode('app.mqtt', { topic: 't', sendInputData: true } as never, [{ json: {} }] as never, {
-      creds: creds({ host: '10.0.0.5' }),
-    });
+    const r = await runNode(
+      'app.mqtt',
+      { topic: 't', sendInputData: true } as never,
+      [{ json: {} }] as never,
+      {
+        creds: creds({ host: '10.0.0.5' }),
+      },
+    );
     expect(r.status).toBe('error');
   });
 });

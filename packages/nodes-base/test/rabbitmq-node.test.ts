@@ -122,14 +122,25 @@ describe('RabbitMQ node', () => {
     const message = (await take(queue))!;
     expect(message.fields.routingKey).toBe('blue');
     expect(JSON.parse(message.content.toString())).toEqual({ a: 1 });
-    await run({ operation: 'sendMessage', mode: 'exchange', exchange, exchangeType: 'direct', routingKey: 'red' });
+    await run({
+      operation: 'sendMessage',
+      mode: 'exchange',
+      exchange,
+      exchangeType: 'direct',
+      routingKey: 'red',
+    });
     expect(await take(queue)).toBeUndefined();
   });
 
   it('declares a missing fanout exchange', async () => {
     const exchange = unique('xf');
     exchanges.push(exchange);
-    const result = await run({ operation: 'sendMessage', mode: 'exchange', exchange, exchangeType: 'fanout' });
+    const result = await run({
+      operation: 'sendMessage',
+      mode: 'exchange',
+      exchange,
+      exchangeType: 'fanout',
+    });
     expect(result.status).toBe('success');
     const probe = await direct.createChannel();
     await expect(probe.checkExchange(exchange)).resolves.toBeDefined();

@@ -183,9 +183,13 @@ describe('Python Code tool in an agent', () => {
 
   it('sends print() to the browser console of a manual run', async () => {
     const messages: unknown[][] = [];
-    const { observation } = await agentWith(python('print("from python", _query)\nreturn "ok"'), { query: 'q' }, {
-      messages,
-    });
+    const { observation } = await agentWith(
+      python('print("from python", _query)\nreturn "ok"'),
+      { query: 'q' },
+      {
+        messages,
+      },
+    );
     expect(observation).toBe('ok');
     expect(messages).toEqual([['from python', 'q']]);
   });
@@ -254,6 +258,8 @@ return [{"found": found}]
 `;
     const items = await pythonRunner.run(direct(code, {}));
     expect(items.map((item) => item.json)).toEqual([{ found: false }]);
-    await expect(pythonRunner.run(direct('return 42', {}))).rejects.toThrow("Code doesn't return items properly");
+    await expect(pythonRunner.run(direct('return 42', {}))).rejects.toThrow(
+      "Code doesn't return items properly",
+    );
   });
 });

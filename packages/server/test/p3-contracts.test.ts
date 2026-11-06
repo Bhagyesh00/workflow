@@ -66,7 +66,9 @@ const manual = () => ({
 describe('P3 migrations', () => {
   it('applies 0003-0011 in journal order', () => {
     const journal = JSON.parse(readFileSync(path.join(migrationsFolder, 'meta', '_journal.json'), 'utf8'));
-    expect(journal.entries.map((e: { idx: number; tag: string }) => `${e.idx}:${e.tag}`).slice(3, 12)).toEqual([
+    expect(
+      journal.entries.map((e: { idx: number; tag: string }) => `${e.idx}:${e.tag}`).slice(3, 12),
+    ).toEqual([
       '3:0003_node_groups',
       '4:0004_folders_archive_favorites',
       '5:0005_execution_annotations',

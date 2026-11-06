@@ -857,10 +857,12 @@ export class WorkflowService {
       await this.repos.executions.saveState(tenant.id, executionId, state);
     } catch (failure) {
       // the editor still hears why it stopped listening
-      this.deps.context().logger.warn(
-        { err: failure, tenantId: tenant.id, workflowId },
-        'Could not store a failed test listen',
-      );
+      this.deps
+        .context()
+        .logger.warn(
+          { err: failure, tenantId: tenant.id, workflowId },
+          'Could not store a failed test listen',
+        );
     }
     const { push } = this.deps.context();
     push.send(tenant.id, 'testWebhookReceived', { workflowId, executionId });

@@ -257,15 +257,21 @@ describe('Python imports', () => {
     );
   });
 
-  it.each(['js', 'pyodide', 'pyodide.ffi', 'pyodide_js', '_pyodide', '_pyodide_core', 'micropip', 'requests'])(
-    'refuses %s with the external text',
-    async (name) => {
-      const error = await failure(runner.run(all(`import ${name}\nreturn []`)));
-      expect((error as Error).message).toContain(
-        `Import of external package '${name.split('.')[0]}' is disallowed. Allowed external packages: none`,
-      );
-    },
-  );
+  it.each([
+    'js',
+    'pyodide',
+    'pyodide.ffi',
+    'pyodide_js',
+    '_pyodide',
+    '_pyodide_core',
+    'micropip',
+    'requests',
+  ])('refuses %s with the external text', async (name) => {
+    const error = await failure(runner.run(all(`import ${name}\nreturn []`)));
+    expect((error as Error).message).toContain(
+      `Import of external package '${name.split('.')[0]}' is disallowed. Allowed external packages: none`,
+    );
+  });
 
   it('keeps js and pyodide blocked with every list set to all, also by importlib and sys.modules', async () => {
     const open = make({
@@ -348,19 +354,21 @@ return {"found": found, "left": [m for m in sys.modules if m.split(".")[0] in ("
   ])('keeps importlib.machinery out through %s', async (_name, code) => {
     const strict = make({ stdlibAllow: ['importlib'] });
     const error = await failure(strict.run(all(code)));
-    expect((error as Error).message).toContain(
-      "Import of standard library module 'importlib.machinery",
-    );
+    expect((error as Error).message).toContain("Import of standard library module 'importlib.machinery");
   });
 
   it('leaves the parts of importlib that respect the lists', async () => {
     const strict = make({ stdlibAllow: ['importlib', 'json'] });
     const out = await strict.run(
-      all('import importlib\nimportlib.invalidate_caches()\nreturn {"x": importlib.import_module("json").loads("1")}'),
+      all(
+        'import importlib\nimportlib.invalidate_caches()\nreturn {"x": importlib.import_module("json").loads("1")}',
+      ),
     );
     expect(out[0].json).toEqual({ x: 1 });
     const open = make({ stdlibAllow: ['*'] });
-    const wide = await open.run(all('import importlib\nreturn {"x": importlib.util.find_spec("json") is not None}'));
+    const wide = await open.run(
+      all('import importlib\nreturn {"x": importlib.util.find_spec("json") is not None}'),
+    );
     expect(wide[0].json).toEqual({ x: true });
   });
 
@@ -373,9 +381,7 @@ return {"found": found, "left": [m for m in sys.modules if m.split(".")[0] in ("
       "Security violations detected:\nLine 5: Access to attribute 'obj' is disallowed, because it can be used to bypass security restrictions.",
     );
     const open = make({ stdlibAllow: ['json'], builtinsDeny: [] });
-    const out = await open.run(
-      all(code('[str(e), getattr(e, "ob" + "j"), getattr(e, "__con" + "text__")]')),
-    );
+    const out = await open.run(all(code('[str(e), getattr(e, "ob" + "j"), getattr(e, "__con" + "text__")]')));
     expect(out[0].json).toEqual({ x: ["module 'json' has no attribute 'nope'", null, null] });
     const from = await failure(open.run(all('from json import nope\nreturn []')));
     expect((from as Error).message).toContain("ImportError: cannot import name 'nope' from 'json'");
@@ -451,9 +457,7 @@ describe('Python builtins and the AST validator', () => {
   it('blocks name-mangled access, match patterns, string patterns and bare format', async () => {
     const mangled = await failure(runner.run(all('return {"x": (1).__secret}')));
     expect((mangled as Error).message).toContain('name-mangled');
-    const positional = await failure(
-      runner.run(all('match 1:\n    case int(x):\n        pass\nreturn []')),
-    );
+    const positional = await failure(runner.run(all('match 1:\n    case int(x):\n        pass\nreturn []')));
     expect((positional as Error).message).toContain('Line 2');
     expect((positional as Error).message).toContain('match');
     const keyword = await failure(
@@ -475,7 +479,11 @@ describe('Python builtins and the AST validator', () => {
   it('refuses string.Formatter reading a field whose name is built at run time', async () => {
     const open = make({ stdlibAllow: ['string'] });
     const error = await failure(
-      open.run(all('import string\nreturn {"x": str(string.Formatter().get_field("0." + "__cl" + "ass__", (1,), {}))}')),
+      open.run(
+        all(
+          'import string\nreturn {"x": str(string.Formatter().get_field("0." + "__cl" + "ass__", (1,), {}))}',
+        ),
+      ),
     );
     expect((error as Error).message).toContain("Access to attribute 'get_field' is disallowed");
   });
@@ -596,7 +604,14 @@ return {"ran": ran, "env": dict(os.environ)}`),
     ]) {
       expect(names).not.toContain(name);
     }
-    for (const name of ['setTimeout', 'clearTimeout', 'performance', 'TextEncoder', 'TextDecoder', 'crypto']) {
+    for (const name of [
+      'setTimeout',
+      'clearTimeout',
+      'performance',
+      'TextEncoder',
+      'TextDecoder',
+      'crypto',
+    ]) {
       expect(names).toContain(name);
     }
   });
@@ -782,9 +797,7 @@ describe('Python limits', () => {
     const runner = make({ memoryLimitMb: 96 });
     const text = 'Code exceeded the memory limit of 96MB';
     const before = process.memoryUsage().rss;
-    const big = await failure(
-      runner.run(all('x = bytearray(1500 * 1024 * 1024)\nreturn [{"n": len(x)}]')),
-    );
+    const big = await failure(runner.run(all('x = bytearray(1500 * 1024 * 1024)\nreturn [{"n": len(x)}]')));
     expect((big as Error).message).toBe(text);
     const slow = await failure(
       runner.run(all('kept = []\nwhile True:\n    kept.append(bytearray(4 * 1024 * 1024))\nreturn []')),

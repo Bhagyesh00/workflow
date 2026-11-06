@@ -233,7 +233,7 @@ function setPath(target: DataObject, path: string, value: unknown, dotNotation: 
   let cursor = target as Record<string, unknown>;
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i]!;
-    const next = Object.prototype.hasOwnProperty.call(cursor, part) ? cursor[part] : undefined;
+    const next = Object.hasOwn(cursor, part) ? cursor[part] : undefined;
     if (next === null || typeof next !== 'object') cursor[part] = {};
     cursor = cursor[part] as Record<string, unknown>;
   }

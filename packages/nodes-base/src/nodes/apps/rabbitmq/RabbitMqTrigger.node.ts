@@ -151,7 +151,8 @@ export const RabbitMqTriggerNode: NodeType = {
             name: 'durable',
             type: 'boolean',
             default: true,
-            description: 'Whether the queue (and an exchange declared by the trigger) survives a broker restart',
+            description:
+              'Whether the queue (and an exchange declared by the trigger) survives a broker restart',
           },
           {
             displayName: 'Exclusive',

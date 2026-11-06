@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { nodes } from '../src';
 import { allOf, parseCustomRules } from '../src/utils/imap-search';
 import { node, nodeTypes, testServices } from './harness';
-import { ImapTestServer, type ImapServerOptions } from './imap-server';
+import { type ImapServerOptions, ImapTestServer } from './imap-server';
 import { localHttp } from './servers';
 
 const nodeType = (): NodeType => nodes.find((n) => n.description.name === 'core.emailReadImap')!;

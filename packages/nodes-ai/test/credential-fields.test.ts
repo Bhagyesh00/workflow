@@ -14,7 +14,15 @@ describe('credential field names match what nodes-ai reads', () => {
   });
 
   it('redis fields are read by redisCredentials', () => {
-    expect(names(redis)).toEqual(['host', 'port', 'user', 'password', 'database', 'ssl', 'disableTlsVerification']);
+    expect(names(redis)).toEqual([
+      'host',
+      'port',
+      'user',
+      'password',
+      'database',
+      'ssl',
+      'disableTlsVerification',
+    ]);
     const creds = redisCredentials({
       host: 'cache.example.com',
       port: 6380,

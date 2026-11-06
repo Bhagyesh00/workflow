@@ -29,8 +29,8 @@ export function DataTableStorageBanner() {
   if (data.quotaStatus === 'warn') {
     return (
       <Callout tone="warn" className="mx-4 mt-3">
-        {usage} of data tables storage used. Delete rows or tables before it runs out, or workflows that
-        write to them will fail.
+        {usage} of data tables storage used. Delete rows or tables before it runs out, or workflows that write
+        to them will fail.
       </Callout>
     );
   }

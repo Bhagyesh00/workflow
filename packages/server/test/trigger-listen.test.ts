@@ -269,10 +269,7 @@ describe('POST /workflows/:id/listen-test-trigger', () => {
   it('closes only after the run when the node waits for the run result', async () => {
     const { client } = await signup(server.app);
     const wf = await createWorkflow(client, {
-      nodes: [
-        node('Events', 'tl.events'),
-        node('Slow', 'tl.slowStep', {}, [200, 0]),
-      ],
+      nodes: [node('Events', 'tl.events'), node('Slow', 'tl.slowStep', {}, [200, 0])],
       connections: chain('Events', 'Slow'),
     });
     await client.data(listen(client, wf.id, 'Events'));

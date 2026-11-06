@@ -66,7 +66,19 @@ function make(options: Partial<PyodideRunnerOptions> = {}) {
     maxConcurrency: 5,
     stdlibAllow: [],
     externalAllow: [],
-    builtinsDeny: ['eval', 'exec', 'compile', 'open', 'input', 'getattr', 'object', 'type', 'vars', 'dir', 'globals'],
+    builtinsDeny: [
+      'eval',
+      'exec',
+      'compile',
+      'open',
+      'input',
+      'getattr',
+      'object',
+      'type',
+      'vars',
+      'dir',
+      'globals',
+    ],
     allowTransitiveImports: false,
     ...options,
   });
@@ -96,7 +108,10 @@ const value = async (runner: PyodideCodeRunner, code: string) =>
   (await runner.run(input(`${code}\nreturn [{"json": {"v": out}}]`)))[0]?.json.v;
 
 const tiny = {
-  'tiny-1.0-py3-none-any.whl': { 'tiny/__init__.py': 'VALUE = 41\ndef add(n):\n    return VALUE + n\n', ...info('tiny-1.0') },
+  'tiny-1.0-py3-none-any.whl': {
+    'tiny/__init__.py': 'VALUE = 41\ndef add(n):\n    return VALUE + n\n',
+    ...info('tiny-1.0'),
+  },
 };
 
 describe('an allowed package', () => {
@@ -122,23 +137,36 @@ describe('an allowed package', () => {
   });
 
   it('imports a wheel holding one module file', async () => {
-    const dir = folder({ 'solo-2.0-py2.py3-none-any.whl': { 'solo.py': 'WORD = "solo"\n', ...info('solo-2.0') } });
-    expect(await value(make({ externalAllow: ['solo'], wheelsDir: dir }), 'import solo\nout = solo.WORD')).toBe('solo');
+    const dir = folder({
+      'solo-2.0-py2.py3-none-any.whl': { 'solo.py': 'WORD = "solo"\n', ...info('solo-2.0') },
+    });
+    expect(
+      await value(make({ externalAllow: ['solo'], wheelsDir: dir }), 'import solo\nout = solo.WORD'),
+    ).toBe('solo');
   });
 
   it('goes by the import name, not the name of the wheel', async () => {
     const dir = folder({
-      'python_dateish-1.0-py3-none-any.whl': { 'dateish/__init__.py': 'WORD = "d"\n', ...info('python_dateish-1.0') },
+      'python_dateish-1.0-py3-none-any.whl': {
+        'dateish/__init__.py': 'WORD = "d"\n',
+        ...info('python_dateish-1.0'),
+      },
     });
-    expect(await value(make({ externalAllow: ['dateish'], wheelsDir: dir }), 'import dateish\nout = dateish.WORD')).toBe('d');
-    const error = await failure(make({ externalAllow: ['python_dateish'], wheelsDir: dir }).run(input('import dateish')));
+    expect(
+      await value(make({ externalAllow: ['dateish'], wheelsDir: dir }), 'import dateish\nout = dateish.WORD'),
+    ).toBe('d');
+    const error = await failure(
+      make({ externalAllow: ['python_dateish'], wheelsDir: dir }).run(input('import dateish')),
+    );
     expect(error.message).toContain("Import of external package 'dateish' is disallowed");
   });
 
   it('works in each-item mode and in the Code tool', async () => {
     const runner = make({ externalAllow: ['tiny'], wheelsDir: folder(tiny) });
     const items = await runner.run(
-      input('import tiny\nreturn {"json": {"v": tiny.add(_item["json"]["a"])}}', { mode: 'runOnceForEachItem' }),
+      input('import tiny\nreturn {"json": {"v": tiny.add(_item["json"]["a"])}}', {
+        mode: 'runOnceForEachItem',
+      }),
     );
     expect(items.map((i) => i.json.v)).toEqual([42]);
     const tool = await runner.run(input('import tiny\nreturn tiny.add(len(_query))', { query: 'abc' }));
@@ -147,14 +175,21 @@ describe('an allowed package', () => {
 
   it('gets its own imports from the folder, without opening them to user code', async () => {
     const dir = folder({
-      'tiny-1.0-py3-none-any.whl': { 'tiny/__init__.py': 'import helper\nVALUE = helper.WORD\n', ...info('tiny-1.0') },
+      'tiny-1.0-py3-none-any.whl': {
+        'tiny/__init__.py': 'import helper\nVALUE = helper.WORD\n',
+        ...info('tiny-1.0'),
+      },
       'helper-1.0-py3-none-any.whl': { 'helper/__init__.py': 'WORD = "helped"\n', ...info('helper-1.0') },
     });
     const runner = make({ externalAllow: ['tiny'], wheelsDir: dir });
     expect(await value(runner, 'import tiny\nout = tiny.VALUE')).toBe('helped');
     const direct = await failure(runner.run(input('import helper')));
-    expect(direct.message).toContain("Import of external package 'helper' is disallowed. Allowed external packages: tiny");
-    const through = await failure(runner.run(input('import tiny\nreturn [{"json": {"v": tiny.helper.WORD}}]')));
+    expect(direct.message).toContain(
+      "Import of external package 'helper' is disallowed. Allowed external packages: tiny",
+    );
+    const through = await failure(
+      runner.run(input('import tiny\nreturn [{"json": {"v": tiny.helper.WORD}}]')),
+    );
     expect(through.message).toContain("Import of external package 'helper' is disallowed");
   });
 
@@ -172,7 +207,9 @@ describe('an allowed package', () => {
       'tiny-1.2-py3-none-any.whl': { 'tiny/__init__.py': 'VALUE = "1.2"\n', ...info('tiny-1.2') },
       'tiny-1.10-py3-none-any.whl': { 'tiny/__init__.py': 'VALUE = "1.10"\n', ...info('tiny-1.10') },
     });
-    expect(await value(make({ externalAllow: ['tiny'], wheelsDir: dir }), 'import tiny\nout = tiny.VALUE')).toBe('1.10');
+    expect(
+      await value(make({ externalAllow: ['tiny'], wheelsDir: dir }), 'import tiny\nout = tiny.VALUE'),
+    ).toBe('1.10');
   });
 
   it('allows every wheel in the folder with *', async () => {
@@ -221,22 +258,60 @@ describe('a Pyodide wheel', () => {
     const dylinkInfo = [1, ...((b) => [...leb(b.length), ...b])([...leb(128), 4, 0, 0])];
     const body = [
       0, // no locals
-      0x23, 0, 0x23, 0, 0x41, ...sleb(TEXT_AT), 0x6a, 0x36, 2, 20, // def.m_name = base + TEXT_AT
-      0x23, 0, 0x41, 0x7f, 0x36, 2, 28, // def.m_size = -1
-      0x23, 0, 0x41, ...sleb(1013), 0x10, 0, // PyModule_Create2(def, PYTHON_API_VERSION)
+      0x23,
+      0,
+      0x23,
+      0,
+      0x41,
+      ...sleb(TEXT_AT),
+      0x6a,
+      0x36,
+      2,
+      20, // def.m_name = base + TEXT_AT
+      0x23,
+      0,
+      0x41,
+      0x7f,
+      0x36,
+      2,
+      28, // def.m_size = -1
+      0x23,
+      0,
+      0x41,
+      ...sleb(1013),
+      0x10,
+      0, // PyModule_Create2(def, PYTHON_API_VERSION)
       0x0b,
     ];
     const data = [...Array(TEXT_AT).fill(0), ...Buffer.from(name), 0];
     data[0] = 1; // ob_refcnt
     return Buffer.from([
-      0, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
+      0,
+      0x61,
+      0x73,
+      0x6d,
+      1,
+      0,
+      0,
+      0,
       ...section(0, [...text('dylink.0'), ...dylinkInfo]),
       ...section(1, [2, 0x60, 0, 1, 0x7f, 0x60, 2, 0x7f, 0x7f, 1, 0x7f]),
       ...section(2, [
         3,
-        ...text('env'), ...text('memory'), 2, 0, 1,
-        ...text('env'), ...text('__memory_base'), 3, 0x7f, 0,
-        ...text('env'), ...text('PyModule_Create2'), 0, 1,
+        ...text('env'),
+        ...text('memory'),
+        2,
+        0,
+        1,
+        ...text('env'),
+        ...text('__memory_base'),
+        3,
+        0x7f,
+        0,
+        ...text('env'),
+        ...text('PyModule_Create2'),
+        0,
+        1,
       ]),
       ...section(3, [1, 0]),
       ...section(7, [1, ...text(init), 0, 1]),
@@ -275,7 +350,11 @@ describe('a Pyodide wheel', () => {
 
   it('refuses a wheel of another Pyodide version, and one for Linux, with a clear text', async () => {
     const native = { 'nat/__init__.py': 'VALUE = 1\n', ...info('nat-1.0') };
-    for (const tag of ['cp314-cp314-manylinux_2_17_x86_64', 'cp313-cp313-pyemscripten_2025_0_wasm32', 'py2-none-any']) {
+    for (const tag of [
+      'cp314-cp314-manylinux_2_17_x86_64',
+      'cp313-cp313-pyemscripten_2025_0_wasm32',
+      'py2-none-any',
+    ]) {
       const file = `nat-1.0-${tag}.whl`;
       const runner = make({ externalAllow: ['nat'], wheelsDir: folder({ [file]: native }) });
       const error = await failure(runner.run(input('import nat')));
@@ -286,17 +365,25 @@ describe('a Pyodide wheel', () => {
 
   it('prefers a wheel that can run to one that cannot', async () => {
     const dir = folder({
-      'nat-2.0-cp314-cp314-manylinux_2_17_x86_64.whl': { 'nat/__init__.py': 'VALUE = "linux"\n', ...info('nat-2.0') },
+      'nat-2.0-cp314-cp314-manylinux_2_17_x86_64.whl': {
+        'nat/__init__.py': 'VALUE = "linux"\n',
+        ...info('nat-2.0'),
+      },
       'nat-1.0-py3-none-any.whl': { 'nat/__init__.py': 'VALUE = "pure"\n', ...info('nat-1.0') },
     });
-    expect(await value(make({ externalAllow: ['nat'], wheelsDir: dir }), 'import nat\nout = nat.VALUE')).toBe('pure');
+    expect(await value(make({ externalAllow: ['nat'], wheelsDir: dir }), 'import nat\nout = nat.VALUE')).toBe(
+      'pure',
+    );
   });
 
   it('reads the tag of this Pyodide from its lock file', () => {
     const dir = folder({
       [`one-1.0-cp314-cp314-${abiTag}.whl`]: { 'one/__init__.py': '', ...info('one-1.0') },
       [`two-1.0-cp312-abi3-${abiTag}.whl`]: { 'two/__init__.py': '', ...info('two-1.0') },
-      'three-1.0-cp314-cp314-pyemscripten_2025_0_wasm32.whl': { 'three/__init__.py': '', ...info('three-1.0') },
+      'three-1.0-cp314-cp314-pyemscripten_2025_0_wasm32.whl': {
+        'three/__init__.py': '',
+        ...info('three-1.0'),
+      },
     });
     const wheels = readWheelFolder(dir);
     expect([...wheels.roots.keys()].sort()).toEqual(['one', 'two']);
@@ -308,9 +395,15 @@ describe('a package that is not allowed', () => {
   it("is refused with n8n's text, even with its wheel in the folder", async () => {
     const dir = folder(tiny);
     const none = await failure(make({ wheelsDir: dir }).run(input('import tiny')));
-    expect(none.message).toContain("Line 1: Import of external package 'tiny' is disallowed. Allowed external packages: none");
-    const other = await failure(make({ externalAllow: ['other', 'more'], wheelsDir: dir }).run(input('from tiny import VALUE')));
-    expect(other.message).toContain("Import of external package 'tiny' is disallowed. Allowed external packages: more, other");
+    expect(none.message).toContain(
+      "Line 1: Import of external package 'tiny' is disallowed. Allowed external packages: none",
+    );
+    const other = await failure(
+      make({ externalAllow: ['other', 'more'], wheelsDir: dir }).run(input('from tiny import VALUE')),
+    );
+    expect(other.message).toContain(
+      "Import of external package 'tiny' is disallowed. Allowed external packages: more, other",
+    );
   });
 
   it('stays refused with importlib allowed', async () => {
@@ -320,15 +413,23 @@ describe('a package that is not allowed', () => {
   });
 
   it('gives an allowed name with no wheel the plain Python text', async () => {
-    const error = await failure(make({ externalAllow: ['gone'], wheelsDir: folder(tiny) }).run(input('import gone')));
+    const error = await failure(
+      make({ externalAllow: ['gone'], wheelsDir: folder(tiny) }).run(input('import gone')),
+    );
     expect(error.message).toContain("No module named 'gone'");
   });
 
   it('cannot bring back js, pyodide or micropip with a wheel of that name', async () => {
     const dir = folder({
-      'micropip-0.11.1-py3-none-any.whl': { 'micropip/__init__.py': 'VALUE = 1\n', ...info('micropip-0.11.1') },
+      'micropip-0.11.1-py3-none-any.whl': {
+        'micropip/__init__.py': 'VALUE = 1\n',
+        ...info('micropip-0.11.1'),
+      },
       'js-1.0-py3-none-any.whl': { 'js/__init__.py': 'VALUE = 1\n', ...info('js-1.0') },
-      'pyodide_http-1.0-py3-none-any.whl': { 'pyodide_http/__init__.py': 'VALUE = 1\n', ...info('pyodide_http-1.0') },
+      'pyodide_http-1.0-py3-none-any.whl': {
+        'pyodide_http/__init__.py': 'VALUE = 1\n',
+        ...info('pyodide_http-1.0'),
+      },
       'sneaky-1.0-py3-none-any.whl': {
         'sneaky/__init__.py': 'import js\n',
         ...info('sneaky-1.0'),
@@ -365,7 +466,9 @@ describe('the sandbox with wheels', () => {
       '    except OSError as error:',
       '        return type(error).__name__',
     ].join('\n');
-    const dir = folder({ 'probe-1.0-py3-none-any.whl': { 'probe/__init__.py': probe, ...info('probe-1.0') } });
+    const dir = folder({
+      'probe-1.0-py3-none-any.whl': { 'probe/__init__.py': probe, ...info('probe-1.0') },
+    });
     const runner = make({ externalAllow: ['probe'], wheelsDir: dir });
     const out = await value(
       runner,
@@ -405,30 +508,51 @@ describe('the sandbox with wheels', () => {
       '        "other": found("other.whl"),',
       '    }',
     ].join('\n');
-    const dir = folder({ 'probe-1.0-py3-none-any.whl': { 'probe/__init__.py': probe, ...info('probe-1.0') } });
+    const dir = folder({
+      'probe-1.0-py3-none-any.whl': { 'probe/__init__.py': probe, ...info('probe-1.0') },
+    });
     writeFileSync(path.join(dir, 'secret.txt'), 'secret');
-    const out = await value(make({ externalAllow: ['probe'], wheelsDir: dir }), 'import probe\nout = probe.report()');
+    const out = await value(
+      make({ externalAllow: ['probe'], wheelsDir: dir }),
+      'import probe\nout = probe.report()',
+    );
     expect(out).toEqual({ found: true, reach: [], outside: false, other: false });
   });
 
   it('keeps js and pyodide out of sys.modules for wheel code', async () => {
-    const probe = 'import sys\nJS = "js" in sys.modules\nPYO = "pyodide" in sys.modules or "_pyodide" in sys.modules\n';
-    const dir = folder({ 'probe-1.0-py3-none-any.whl': { 'probe/__init__.py': probe, ...info('probe-1.0') } });
-    const out = await value(make({ externalAllow: ['probe'], wheelsDir: dir }), 'import probe\nout = [probe.JS, probe.PYO]');
+    const probe =
+      'import sys\nJS = "js" in sys.modules\nPYO = "pyodide" in sys.modules or "_pyodide" in sys.modules\n';
+    const dir = folder({
+      'probe-1.0-py3-none-any.whl': { 'probe/__init__.py': probe, ...info('probe-1.0') },
+    });
+    const out = await value(
+      make({ externalAllow: ['probe'], wheelsDir: dir }),
+      'import probe\nout = [probe.JS, probe.PYO]',
+    );
     expect(out).toEqual([false, false]);
   });
 
   it('unpacks only inside the wheel folder of the in-memory file system', async () => {
-    const probe = 'import os\nLOOSE = os.path.exists("/evil.py") or os.path.exists("/lib/evil.py")\nFILE = __file__\n';
+    const probe =
+      'import os\nLOOSE = os.path.exists("/evil.py") or os.path.exists("/lib/evil.py")\nFILE = __file__\n';
     const dir = folder({
-      'tiny-1.0-py3-none-any.whl': { 'tiny/__init__.py': probe, '../../evil.py': 'BAD = 1\n', ...info('tiny-1.0') },
+      'tiny-1.0-py3-none-any.whl': {
+        'tiny/__init__.py': probe,
+        '../../evil.py': 'BAD = 1\n',
+        ...info('tiny-1.0'),
+      },
     });
-    const out = await value(make({ externalAllow: ['tiny'], wheelsDir: dir }), 'import tiny\nout = [tiny.LOOSE, tiny.FILE]');
+    const out = await value(
+      make({ externalAllow: ['tiny'], wheelsDir: dir }),
+      'import tiny\nout = [tiny.LOOSE, tiny.FILE]',
+    );
     expect(out).toEqual([false, '/lib/wheels/tiny/__init__.py']);
   });
 
   it('keeps the standard library ahead of a wheel with the same name', async () => {
-    const dir = folder({ 'fake-1.0-py3-none-any.whl': { 'textwrap.py': 'WORD = "fake"\n', ...info('fake-1.0') } });
+    const dir = folder({
+      'fake-1.0-py3-none-any.whl': { 'textwrap.py': 'WORD = "fake"\n', ...info('fake-1.0') },
+    });
     const runner = make({ externalAllow: ['textwrap'], stdlibAllow: ['textwrap'], wheelsDir: dir });
     expect(await value(runner, 'import textwrap\nout = textwrap.fill("a b", 80)')).toBe('a b');
   });
@@ -447,7 +571,11 @@ describe('the sandbox with wheels', () => {
 
   it('stops a wheel too big to unpack at the memory limit, and the next run works', async () => {
     const dir = folder({
-      'huge-1.0-py3-none-any.whl': { 'huge/__init__.py': '', 'huge/blob.bin': Buffer.alloc(400 * 1024 * 1024), ...info('huge-1.0') },
+      'huge-1.0-py3-none-any.whl': {
+        'huge/__init__.py': '',
+        'huge/blob.bin': Buffer.alloc(400 * 1024 * 1024),
+        ...info('huge-1.0'),
+      },
       ...tiny,
     });
     const runner = make({ externalAllow: ['huge', 'tiny'], wheelsDir: dir, memoryLimitMb: 128 });
@@ -487,9 +615,13 @@ describe('the wheel folder', () => {
 
   it('runs code that imports nothing when the folder is missing or unset', async () => {
     const missing = path.join(tmpdir(), `no-wheels-${Date.now()}`);
-    expect((await make({ externalAllow: ['tiny'], wheelsDir: missing }).run(input('return _items'))).length).toBe(1);
+    expect(
+      (await make({ externalAllow: ['tiny'], wheelsDir: missing }).run(input('return _items'))).length,
+    ).toBe(1);
     expect((await make({ externalAllow: ['tiny'] }).run(input('return _items'))).length).toBe(1);
-    const error = await failure(make({ externalAllow: ['tiny'], wheelsDir: missing }).run(input('import tiny')));
+    const error = await failure(
+      make({ externalAllow: ['tiny'], wheelsDir: missing }).run(input('import tiny')),
+    );
     expect(error.message).toContain("No module named 'tiny'");
     expect(error.message).not.toContain(missing);
   });
@@ -526,7 +658,13 @@ describe('the asset loader', () => {
     writeFileSync(path.join(dir, 'secret.txt'), 'secret');
     const load = pythonAssetLoader(128, readWheelFolder(dir));
     expect(load('wheel:tiny-1.0-py3-none-any.whl')).toBeDefined();
-    for (const name of ['wheel:secret.txt', 'wheel:../secret.txt', `wheel:${path.join(dir, 'secret.txt')}`, 'wheel:', 'secret.txt']) {
+    for (const name of [
+      'wheel:secret.txt',
+      'wheel:../secret.txt',
+      `wheel:${path.join(dir, 'secret.txt')}`,
+      'wheel:',
+      'secret.txt',
+    ]) {
       expect(() => load(name)).toThrow('Unknown Python asset');
     }
   });

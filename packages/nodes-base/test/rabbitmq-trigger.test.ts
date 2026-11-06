@@ -14,7 +14,7 @@ import {
   type WebhookResponse,
   Workflow,
 } from '@workflow/workflow';
-import { type Channel, type ChannelModel, connect, type ConsumeMessage } from 'amqplib';
+import { type Channel, type ChannelModel, type ConsumeMessage, connect } from 'amqplib';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { credentials as allCredentials, nodes } from '../src';
 import {
@@ -255,7 +255,9 @@ describe('queue setup errors', () => {
   it('a transient queue is explained, and an unknown refusal is cut to its first line', async () => {
     const h = harness({ queue: unique('transient'), options: { durable: false } });
     await expect(nodeType().trigger!(h.ctx)).rejects.toThrow(/neither durable nor exclusive/);
-    expect(describeSetupError(new Error('PRECONDITION_FAILED - x\nsecond line'))).toBe('PRECONDITION_FAILED - x');
+    expect(describeSetupError(new Error('PRECONDITION_FAILED - x\nsecond line'))).toBe(
+      'PRECONDITION_FAILED - x',
+    );
   });
 });
 
@@ -299,7 +301,11 @@ describe('settings', () => {
   });
 
   it('a test run answers at once and takes one message', () => {
-    const settings = settingsOf({ acknowledge: 'executionFinishesSuccessfully', parallelMessages: 5 }, 'q', 'manual');
+    const settings = settingsOf(
+      { acknowledge: 'executionFinishesSuccessfully', parallelMessages: 5 },
+      'q',
+      'manual',
+    );
     expect(settings).toMatchObject({ acknowledge: 'immediately', prefetch: 1, manual: true });
   });
 
@@ -314,7 +320,12 @@ describe('settings', () => {
         ],
       },
       headers: { header: [{ key: 'format', value: 'pdf' }] },
-      binding: { bindings: [{ exchange: 'ex', routingKey: 'a.#' }, { exchange: '', routingKey: 'x' }] },
+      binding: {
+        bindings: [
+          { exchange: 'ex', routingKey: 'a.#' },
+          { exchange: '', routingKey: 'x' },
+        ],
+      },
     });
     expect(settings.queueArguments).toEqual({
       'x-message-ttl': 60000,
@@ -335,7 +346,11 @@ describe('items from the real broker', () => {
   it('delivers a message as { content, fields, properties } and empties the queue (Immediately)', async () => {
     const queue = await newQueue('basic');
     const { runs } = await start({ queue, options: {} });
-    publish(queue, 'hello', { contentType: 'text/plain', headers: { source: 'test', count: 3 }, messageId: 'm1' });
+    publish(queue, 'hello', {
+      contentType: 'text/plain',
+      headers: { source: 'test', count: 3 },
+      messageId: 'm1',
+    });
     await until(() => runs.length === 1);
     const json = runs[0]!.items[0]!.json as DataObject & { fields: DataObject; properties: DataObject };
     expect(json.content).toBe('hello');
@@ -410,7 +425,10 @@ describe('items from the real broker', () => {
     const exchange = unique('fanex');
     await sideChannel.assertExchange(exchange, 'fanout', { durable: false });
     closers.push(() => sideChannel.deleteExchange(exchange).catch(() => undefined));
-    const { runs } = await start({ queue, options: { binding: { bindings: [{ exchange, routingKey: '' }] } } });
+    const { runs } = await start({
+      queue,
+      options: { binding: { bindings: [{ exchange, routingKey: '' }] } },
+    });
     sideChannel.publish(exchange, '', Buffer.from('fan'));
     await until(() => runs.length === 1);
   });
@@ -614,7 +632,9 @@ describe('close and failures', () => {
     closers.push(() => new Promise((resolve) => proxy.close(resolve)));
     const { errors } = await start(
       { queue, options: {} },
-      { creds: brokerCredentials({ hostname: '127.0.0.1', port: (proxy.address() as net.AddressInfo).port }) },
+      {
+        creds: brokerCredentials({ hostname: '127.0.0.1', port: (proxy.address() as net.AddressInfo).port }),
+      },
     );
     for (const socket of sockets) socket.destroy();
     await until(() => errors.length >= 1);
@@ -635,7 +655,10 @@ describe('close and failures', () => {
 
   it('a wrong virtual host fails the start without the broker text', async () => {
     const queue = await newQueue('badvhost');
-    const h = harness({ queue, options: {} }, { creds: brokerCredentials({ vhost: 'no-such-vhost-secret' }) });
+    const h = harness(
+      { queue, options: {} },
+      { creds: brokerCredentials({ vhost: 'no-such-vhost-secret' }) },
+    );
     const error = await nodeType().trigger!(h.ctx).then(
       () => undefined,
       (e: Error) => e,
@@ -647,7 +670,10 @@ describe('close and failures', () => {
 
 describe('SSRF guard', () => {
   it('a blocked host fails the start at once and opens no socket', async () => {
-    const h = harness({ queue: 'q', options: {} }, { httpClient: new HttpClient(), creds: brokerCredentials() });
+    const h = harness(
+      { queue: 'q', options: {} },
+      { httpClient: new HttpClient(), creds: brokerCredentials() },
+    );
     const before = Date.now();
     await expect(nodeType().trigger!(h.ctx)).rejects.toThrow(/blocked/);
     expect(Date.now() - before).toBeLessThan(1000);
@@ -681,7 +707,12 @@ describe('credential test', () => {
       resolveAllowedHost: (host: string) => httpClient.resolveAllowedHost(host),
       assertHostAllowed: (host: string) => httpClient.assertHostAllowed(host),
     },
-    logger: { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+    logger: {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+    } as never,
     signal: new AbortController().signal,
     getTenantId: () => 't1',
   });
@@ -721,10 +752,16 @@ describe('credential test', () => {
   });
 
   it('a broker that closes after the sign-in never gets its words into the answer', async () => {
-    const words = 'Connection closed: 320 (CONNECTION-FORCED) with message "CONNECTION_FORCED - broker words"';
-    const refused = vi.spyOn(Object.getPrototypeOf(side), 'createChannel').mockRejectedValueOnce(new Error(words));
+    const words =
+      'Connection closed: 320 (CONNECTION-FORCED) with message "CONNECTION_FORCED - broker words"';
+    const refused = vi
+      .spyOn(Object.getPrototypeOf(side), 'createChannel')
+      .mockRejectedValueOnce(new Error(words));
     try {
-      expect(await run(brokerCredentials())).toEqual({ status: 'Error', message: "Couldn't connect to RabbitMQ" });
+      expect(await run(brokerCredentials())).toEqual({
+        status: 'Error',
+        message: "Couldn't connect to RabbitMQ",
+      });
     } finally {
       refused.mockRestore();
     }
@@ -739,14 +776,19 @@ describe('tracker on a fake channel', () => {
       properties: {},
     }) as unknown as ConsumeMessage;
 
-  function fake(mode: Parameters<typeof createTracker>[0]['mode'], closeWaitMs?: number, retryDelayMs?: number) {
+  function fake(
+    mode: Parameters<typeof createTracker>[0]['mode'],
+    closeWaitMs?: number,
+    retryDelayMs?: number,
+  ) {
     const calls: string[] = [];
     const runs: EmittedRun[] = [];
     const warnings: string[] = [];
     const tracker = createTracker({
       channel: {
         ack: (m) => void calls.push(`ack ${m.fields.deliveryTag}`),
-        nack: (m, _all, requeue) => void calls.push(`${requeue ? 'requeue' : 'reject'} ${m.fields.deliveryTag}`),
+        nack: (m, _all, requeue) =>
+          void calls.push(`${requeue ? 'requeue' : 'reject'} ${m.fields.deliveryTag}`),
       },
       mode,
       parse: async (m) => ({ json: { content: m.content.toString() } }),
@@ -831,7 +873,8 @@ describe('tracker on a fake channel', () => {
     const tracker = createTracker({
       channel: {
         ack: (m) => void calls.push(`ack ${m.fields.deliveryTag}`),
-        nack: (m, _a, requeue) => void calls.push(`${requeue ? 'requeue' : 'reject'} ${m.fields.deliveryTag}`),
+        nack: (m, _a, requeue) =>
+          void calls.push(`${requeue ? 'requeue' : 'reject'} ${m.fields.deliveryTag}`),
       },
       mode: 'executionFinishesSuccessfully',
       parse: async () => {

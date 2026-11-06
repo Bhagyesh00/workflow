@@ -149,9 +149,9 @@ describe('connectGuarded', () => {
     // nothing answers the TLS handshake of a server that only accepts the connection
     const server = net.createServer(() => {});
     const port = await listen(server);
-    await expect(
-      connectGuarded(ctx, { host: 'broker.test', port, tls: {}, timeoutMs: 100 }),
-    ).rejects.toThrow('Timed out connecting to broker.test');
+    await expect(connectGuarded(ctx, { host: 'broker.test', port, tls: {}, timeoutMs: 100 })).rejects.toThrow(
+      'Timed out connecting to broker.test',
+    );
   });
 
   it('TLS: sends the host as the server name and verifies against it', async () => {
@@ -170,7 +170,11 @@ describe('connectGuarded', () => {
     const port = await listen(server);
     const { ctx } = pinnedContext();
     const socket = opened(
-      await connectGuarded(ctx, { host: 'broker.test', port, tls: { ca: CERT, servername: 'elsewhere.test' } }),
+      await connectGuarded(ctx, {
+        host: 'broker.test',
+        port,
+        tls: { ca: CERT, servername: 'elsewhere.test' },
+      }),
     );
     expect(await firstData(socket)).toBe('hello');
     expect(seen.servername).toBe('broker.test');

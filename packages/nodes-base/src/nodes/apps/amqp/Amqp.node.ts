@@ -3,8 +3,8 @@ import { type DataObject, type Item, NodeOperationError, type NodeType } from '@
 import {
   type AmqpCredentials,
   amqpCredentialTest,
-  closeAmqp,
   CONNECTION_FIELDS,
+  closeAmqp,
   openAmqp,
   readConnectionOptions,
   sendMessage,
@@ -65,8 +65,7 @@ export const AmqpNode: NodeType = {
             name: 'dataAsObject',
             type: 'boolean',
             default: false,
-            description:
-              'Whether to send an object as an AMQP map. Off: an object is sent as JSON text.',
+            description: 'Whether to send an object as an AMQP map. Off: an object is sent as JSON text.',
           },
           ...CONNECTION_FIELDS.slice(1),
         ],
@@ -105,7 +104,12 @@ export const AmqpNode: NodeType = {
         try {
           const json = items[i]!.json;
           const payload = property ? json[property] : json;
-          const body = asObject && isObject(payload) ? payload : typeof payload === 'string' ? payload : JSON.stringify(payload ?? null);
+          const body =
+            asObject && isObject(payload)
+              ? payload
+              : typeof payload === 'string'
+                ? payload
+                : JSON.stringify(payload ?? null);
           const sent = await sendMessage(connection, sink, {
             body,
             ...(headers ? { application_properties: headers } : {}),

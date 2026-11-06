@@ -427,9 +427,9 @@ describe('columns', () => {
     await open();
     await cell('Ann');
     await userEvent.click(screen.getByRole('button', { name: 'Column menu for name' }));
-    expect(
-      ((await screen.findByRole('menuitem', { name: 'Move left' })) as HTMLButtonElement).disabled,
-    ).toBe(true);
+    expect(((await screen.findByRole('menuitem', { name: 'Move left' })) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     expect((screen.getByRole('menuitem', { name: 'Move right' }) as HTMLButtonElement).disabled).toBe(false);
   });
 

@@ -4,8 +4,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import dns from 'node:dns';
-import type { Server } from 'node:net';
-import type { AddressInfo } from 'node:net';
+import type { AddressInfo, Server } from 'node:net';
 import { createTriggerContext, HttpClient } from '@workflow/core';
 import {
   type AllowedHost,
@@ -27,8 +26,8 @@ import {
   messageToJson,
   readEndpoint,
 } from '../src/nodes/apps/amqp/connect';
-import { TEST_CERT, TEST_KEY } from './imap-server';
 import { node, nodeTypes, runNode, testServices } from './harness';
+import { TEST_CERT, TEST_KEY } from './imap-server';
 import { localHttp } from './servers';
 
 const USER = 'workflow';
@@ -75,7 +74,9 @@ class TestBroker {
 
   constructor(private readonly useTls = false) {
     const c = this.container;
-    c.sasl_server_mechanisms.enable_plain((user: string, password: string) => user === USER && password === PASSWORD);
+    c.sasl_server_mechanisms.enable_plain(
+      (user: string, password: string) => user === USER && password === PASSWORD,
+    );
     c.on('connection_open', () => void 0);
     c.on('message', (context: any) => {
       const address = context.receiver.target.address as string;
@@ -133,7 +134,8 @@ class TestBroker {
   /** deliveries a consumer link was given and has not answered yet */
   unsettled(address: string): number {
     let count = 0;
-    for (const sender of this.queue(address).receivers) count += sender.session?.outgoing?.deliveries?.size?.() ?? 0;
+    for (const sender of this.queue(address).receivers)
+      count += sender.session?.outgoing?.deliveries?.size?.() ?? 0;
     return count;
   }
 
@@ -147,11 +149,14 @@ class TestBroker {
         this.sockets.delete(socket);
         // a client that went away takes its consumer links with it
         for (const state of this.queues.values()) {
-          for (const sender of [...state.receivers]) if (sender.connection?.socket === socket) state.receivers.delete(sender);
+          for (const sender of [...state.receivers])
+            if (sender.connection?.socket === socket) state.receivers.delete(sender);
         }
       });
     });
-    this.server.on('secureConnection', (socket: { servername?: string }) => this.servernames.push(String(socket.servername)));
+    this.server.on('secureConnection', (socket: { servername?: string }) =>
+      this.servernames.push(String(socket.servername)),
+    );
     this.server.on('error', () => void 0);
     await new Promise<void>((resolve) => this.server.once('listening', resolve));
     this.port = (this.server.address() as AddressInfo).port;
@@ -269,7 +274,12 @@ const testContext = (http: HttpClient = localHttp()): CredentialTestContext => (
     resolveAllowedHost: (host: string) => http.resolveAllowedHost(host),
     assertHostAllowed: (host: string) => http.assertHostAllowed(host),
   },
-  logger: { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+  logger: {
+    debug: () => undefined,
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+  } as never,
   signal: new AbortController().signal,
   getTenantId: () => 't1',
 });
@@ -301,7 +311,12 @@ describe('node and credential', () => {
   it('has the names, the fields and the options of n8n and a credential test', () => {
     const trigger = triggerType();
     expect(trigger.description.displayName).toBe('AMQP Trigger');
-    expect(trigger.description.properties.map((p) => p.name)).toEqual(['sink', 'clientname', 'subscription', 'options']);
+    expect(trigger.description.properties.map((p) => p.name)).toEqual([
+      'sink',
+      'clientname',
+      'subscription',
+      'options',
+    ]);
     const options = trigger.description.properties.find((p) => p.name === 'options')!;
     expect((options.options as Array<{ name: string }>).map((o) => o.name)).toEqual(
       expect.arrayContaining([
@@ -318,9 +333,16 @@ describe('node and credential', () => {
     );
     const sender = senderType();
     expect(sender.description.displayName).toBe('AMQP Sender');
-    expect(sender.description.properties.map((p) => p.name)).toEqual(['sink', 'headerParametersJson', 'options']);
+    expect(sender.description.properties.map((p) => p.name)).toEqual([
+      'sink',
+      'headerParametersJson',
+      'options',
+    ]);
     for (const type of [trigger, sender]) {
-      expect(type.description.credentials?.[0]).toMatchObject({ name: 'amqp', testedBy: 'amqpCredentialTest' });
+      expect(type.description.credentials?.[0]).toMatchObject({
+        name: 'amqp',
+        testedBy: 'amqpCredentialTest',
+      });
       expect(type.methods?.credentialTest?.amqpCredentialTest).toBe(amqpCredentialTest);
     }
   });
@@ -356,7 +378,9 @@ describe('message conversion', () => {
 
   it('parses JSON text, converts bytes and keeps bytes JSON-shaped when not converted', () => {
     const section = { typecode: 0x75, content: Buffer.from('{"a":1}'), multiple: false };
-    expect(messageToJson({ body: '{"a":1}' }, { ...off, jsonParseBody: true, onlyBody: true })).toEqual({ a: 1 });
+    expect(messageToJson({ body: '{"a":1}' }, { ...off, jsonParseBody: true, onlyBody: true })).toEqual({
+      a: 1,
+    });
     expect(messageToJson({ body: section }, { ...off, convertBodyToString: true, onlyBody: true })).toEqual({
       message: '{"a":1}',
     });
@@ -402,10 +426,15 @@ describe('AMQP Trigger', () => {
     const broker = await newBroker();
     const queue = unique('roundtrip');
     const { runs } = await start(broker, { sink: queue, options: { jsonParseBody: true, onlyBody: true } });
-    const sent = await runNode('app.amqp', { sink: queue, options: {} }, [{ json: { hello: 'world', n: 3 } }], {
-      creds: { amqp: broker.creds() },
-      services: { http: localHttp() },
-    });
+    const sent = await runNode(
+      'app.amqp',
+      { sink: queue, options: {} },
+      [{ json: { hello: 'world', n: 3 } }],
+      {
+        creds: { amqp: broker.creds() },
+        services: { http: localHttp() },
+      },
+    );
     expect(sent.status).toBe('success');
     expect(sent.outputs[0]).toEqual([expect.objectContaining({ sent: true, sink: queue })]);
     await until(() => runs.length === 1);
@@ -424,7 +453,10 @@ describe('AMQP Trigger', () => {
   it('converts a body sent as bytes to text', async () => {
     const broker = await newBroker();
     const queue = unique('bytes');
-    const { runs } = await start(broker, { sink: queue, options: { onlyBody: true, convertBodyToString: true } });
+    const { runs } = await start(broker, {
+      sink: queue,
+      options: { onlyBody: true, convertBodyToString: true },
+    });
     broker.put(queue, rhea.message.data_section(Buffer.from('from bytes')));
     await until(() => runs.length === 1);
     expect(runs[0]!.items[0]!.json).toEqual({ message: 'from bytes' });
@@ -629,11 +661,9 @@ describe('AMQP Sender', () => {
   it('Send Property sends only that property and Send As Object keeps an object an object', async () => {
     const broker = await newBroker();
     const queue = unique('prop');
-    await send(
-      broker,
-      { sink: queue, options: { sendOnlyProperty: 'payload', dataAsObject: true } },
-      [{ json: { payload: { x: 1 }, other: 'no' } }],
-    );
+    await send(broker, { sink: queue, options: { sendOnlyProperty: 'payload', dataAsObject: true } }, [
+      { json: { payload: { x: 1 }, other: 'no' } },
+    ]);
     expect(broker.received[0]!.message.body).toEqual({ x: 1 });
     await send(broker, { sink: queue, options: { sendOnlyProperty: 'text' } }, [{ json: { text: 'hello' } }]);
     expect(broker.received[1]!.message.body).toBe('hello');
@@ -668,7 +698,9 @@ describe('AMQP Sender', () => {
 
   it('a wrong password fails with the fixed text', async () => {
     const broker = await newBroker();
-    const result = await send(broker, { sink: 'q', options: {} }, [{ json: {} }], { password: 'nope-secret' });
+    const result = await send(broker, { sink: 'q', options: {} }, [{ json: {} }], {
+      password: 'nope-secret',
+    });
     expect(result.status).toBe('error');
     expect(String(result.error?.message)).toBe('The AMQP broker refused the username or password');
     expect(JSON.stringify(result.error)).not.toContain('nope-secret');
@@ -762,14 +794,20 @@ describe('SSRF guard and TLS', () => {
 
   it('tls refuses a CA field that is not a PEM block', async () => {
     const broker = await newBroker(true);
-    const result = await amqpCredentialTest(testContext(), { type: 'amqp', data: broker.creds({ ca: 'junk' }) });
+    const result = await amqpCredentialTest(testContext(), {
+      type: 'amqp',
+      data: broker.creds({ ca: 'junk' }),
+    });
     expect(result).toEqual({ status: 'Error', message: 'The AMQP CA certificate is not a valid PEM block' });
   });
 
   it('a name the guard refuses opens no socket', async () => {
     const broker = await newBroker();
     const http = new ScriptedGuard(() => new Error('Blocked by the guard'));
-    const h = harness({ sink: 'q', options: {} }, { creds: broker.creds({ hostname: 'blocked.test' }), httpClient: http });
+    const h = harness(
+      { sink: 'q', options: {} },
+      { creds: broker.creds({ hostname: 'blocked.test' }), httpClient: http },
+    );
     await expect(triggerType().trigger!(h.ctx)).rejects.toThrow('Blocked by the guard');
     expect(broker.connections).toBe(0);
   });

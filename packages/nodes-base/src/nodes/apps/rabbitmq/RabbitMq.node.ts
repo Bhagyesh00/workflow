@@ -228,7 +228,8 @@ async function sendOne(
     send = (channel, done) => void channel.publish(exchange, routingKey, content, publishOptions, done);
   } else {
     const queue = String(ctx.getNodeParameter('queue', index, '')).trim();
-    if (!queue) throw new NodeOperationError(ctx.getNode(), 'Queue / Topic is required', { itemIndex: index });
+    if (!queue)
+      throw new NodeOperationError(ctx.getNode(), 'Queue / Topic is required', { itemIndex: index });
     setup = async (channel) => {
       await channel.assertQueue(queue, {
         durable,

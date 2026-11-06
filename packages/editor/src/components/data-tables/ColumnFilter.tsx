@@ -23,9 +23,7 @@ interface ConditionOption {
 
 const one =
   (condition: DataTableFilterClause['condition']) =>
-  (columnName: string, value: string | number): DataTableFilterClause[] => [
-    { columnName, condition, value },
-  ];
+  (columnName: string, value: string | number): DataTableFilterClause[] => [{ columnName, condition, value }];
 const between = (columnName: string, from: string | number, to: string | number): DataTableFilterClause[] => [
   { columnName, condition: 'gte', value: from },
   { columnName, condition: 'lte', value: to },

@@ -4,10 +4,10 @@
  */
 import type { CredentialTestContext, DataObject, Logger, NodeCredentialTestResult } from '@workflow/workflow';
 import {
+  credentials as amqpCredentials,
   type Channel,
   type ChannelModel,
   connect,
-  credentials as amqpCredentials,
   type Options,
   type SocketOptions,
 } from 'amqplib';
@@ -101,7 +101,8 @@ export function describeConnectError(error: unknown): string {
   const code = (error as { code?: unknown } | undefined)?.code;
   if (/ACCESS[-_]REFUSED/i.test(message)) return 'RabbitMQ refused the username or password';
   // the broker signed the user in and then closed the connection at the virtual host
-  if (/NOT[-_]ALLOWED|Expected ConnectionOpenOk/i.test(message)) return 'RabbitMQ refused access to the virtual host';
+  if (/NOT[-_]ALLOWED|Expected ConnectionOpenOk/i.test(message))
+    return 'RabbitMQ refused access to the virtual host';
   if (typeof code === 'string' && /^[A-Z0-9_]+$/.test(code)) return `Couldn't connect to RabbitMQ (${code})`;
   if (/ETIMEDOUT/.test(message)) return "Couldn't connect to RabbitMQ (ETIMEDOUT)";
   return "Couldn't connect to RabbitMQ";

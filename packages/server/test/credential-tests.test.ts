@@ -35,7 +35,10 @@ describe('the route dispatches to the node that names the credential', () => {
     );
     expect(ok).toEqual(OK);
     const bad = await client.data(
-      client.post('/rest/credentials/test', { type: 'postgres', data: { ...base, password: 'wrong-pw-secret' } }),
+      client.post('/rest/credentials/test', {
+        type: 'postgres',
+        data: { ...base, password: 'wrong-pw-secret' },
+      }),
     );
     expect(bad).toEqual({ status: 'Error', message: 'Postgres refused the user name or password' });
   });
@@ -115,7 +118,9 @@ describe('testCredential with a node that names a test', () => {
     ({
       resolvedType: () => ({ name: 'x', properties: [] }),
       withDefaults: (_t: string, d: DataObject) => ({ ...d, filled: true }),
-      types: { isA: (name: string, parent: string) => name === parent || (parents[name] ?? []).includes(parent) },
+      types: {
+        isA: (name: string, parent: string) => name === parent || (parents[name] ?? []).includes(parent),
+      },
     }) as never;
 
   const opts = (...nodes: NodeType[]) => ({

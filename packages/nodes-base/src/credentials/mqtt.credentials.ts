@@ -78,7 +78,8 @@ export const mqtt: CredentialType = {
       type: 'boolean',
       default: true,
       displayOptions: { show: { ssl: [true] } },
-      description: 'Whether to refuse a broker whose certificate cannot be verified. Turn off only for tests.',
+      description:
+        'Whether to refuse a broker whose certificate cannot be verified. Turn off only for tests.',
     },
     {
       displayName: 'Client Certificate',

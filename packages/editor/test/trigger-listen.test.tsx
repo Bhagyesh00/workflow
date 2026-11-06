@@ -10,6 +10,7 @@ import { workflowsApi } from '../src/api/endpoints';
 import { NodeDetailsView } from '../src/components/ndv/NodeDetailsView';
 import { demoNodeTypes } from '../src/demo/fixtures';
 import { receiveTestTrigger } from '../src/demo/mock-triggers';
+import { ExecuteBar } from '../src/features/editor/ExecuteBar';
 import {
   isEventTrigger,
   listenForTestEvent,
@@ -18,7 +19,6 @@ import {
   stopExecution,
   webhookTriggerToListen,
 } from '../src/features/editor/editor-actions';
-import { ExecuteBar } from '../src/features/editor/ExecuteBar';
 import { publishWorkflow } from '../src/features/editor/publish-actions';
 import { useRunStore } from '../src/stores/run-store';
 import { useToastStore, useUiStore } from '../src/stores/ui-store';
@@ -345,7 +345,9 @@ describe('stopping', () => {
 
 describe('ExecuteBar', () => {
   const bar = () =>
-    withProviders(<ExecuteBar onExecute={() => undefined} onStop={stopExecution} readOnly={false} listenNode="Redis" />);
+    withProviders(
+      <ExecuteBar onExecute={() => undefined} onStop={stopExecution} readOnly={false} listenNode="Redis" />,
+    );
 
   it('offers to listen, then waits for a trigger event without a URL', async () => {
     await open([nodeOf('Redis', 'app.redisTrigger')]);
@@ -396,7 +398,12 @@ describe('NodeDetailsView', () => {
     await open([nodeOf('Redis', 'app.redisTrigger')]);
     await act(() => runWorkflow(deps, { destinationNode: 'Redis' }));
     withProviders(
-      <NodeDetailsView nodeName="Redis" readOnly={false} onClose={() => undefined} onListen={() => undefined} />,
+      <NodeDetailsView
+        nodeName="Redis"
+        readOnly={false}
+        onClose={() => undefined}
+        onListen={() => undefined}
+      />,
     );
     await screen.findByText('Listening for a test event');
     expect(screen.getByText('Waiting for a message on the channels')).toBeTruthy();

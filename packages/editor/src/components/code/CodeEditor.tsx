@@ -166,8 +166,9 @@ export function fieldDropText(dropped: string, language: CodeLanguage): string {
   const path = JSON_ACCESS.exec(expression)?.[1];
   if (path === undefined) return expression;
   // a bracketed name stays as it is: a dot inside it is part of the name
-  const brackets = path.replace(/\.([A-Za-z_$][\w$]*)(?=\.|\[|$)|(\["(?:[^"\\]|\\.)*"\])/g, (_all, name, kept) =>
-    kept ? kept : `["${name}"]`,
+  const brackets = path.replace(
+    /\.([A-Za-z_$][\w$]*)(?=\.|\[|$)|(\["(?:[^"\\]|\\.)*"\])/g,
+    (_all, name, kept) => (kept ? kept : `["${name}"]`),
   );
   return `_item["json"]${brackets}`;
 }

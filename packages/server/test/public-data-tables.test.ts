@@ -79,7 +79,10 @@ describe('public API data tables', () => {
   it('adds, renames, moves and deletes columns', async () => {
     const { key } = await setup();
     const table = await makeTable(key);
-    const added = await api(key, 'POST', `/data-tables/${table.id}/columns`, { name: 'city', type: 'string' });
+    const added = await api(key, 'POST', `/data-tables/${table.id}/columns`, {
+      name: 'city',
+      type: 'string',
+    });
     expect(added.json().data).toMatchObject({ name: 'city', type: 'string', index: 2 });
     const cols = (await api(key, 'GET', `/data-tables/${table.id}/columns`)).json().data;
     expect(cols.map((c: { name: string }) => c.name)).toEqual(['name', 'age', 'city']);
@@ -109,7 +112,11 @@ describe('public API data tables', () => {
     });
     expect(ins.json().data.map((r: { name: string }) => r.name)).toEqual(['ann', 'bob']);
     const byAnn = { type: 'and', filters: [{ columnName: 'name', condition: 'eq', value: 'ann' }] };
-    const up = await api(key, 'POST', `${base}/upsert`, { filter: byAnn, data: { age: 31 }, returnData: true });
+    const up = await api(key, 'POST', `${base}/upsert`, {
+      filter: byAnn,
+      data: { age: 31 },
+      returnData: true,
+    });
     expect(up.json().data[0]).toMatchObject({ name: 'ann', age: 31 });
     const upNew = await api(key, 'POST', `${base}/upsert`, {
       filter: { type: 'and', filters: [{ columnName: 'name', condition: 'eq', value: 'cy' }] },

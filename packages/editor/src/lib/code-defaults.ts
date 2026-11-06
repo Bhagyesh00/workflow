@@ -31,11 +31,7 @@ function modeOf(parameters: NodeParameters): Mode {
 }
 
 /** @returns the node's parameters to keep, given the parameters before and after the change */
-export function applyCodeDefaults(
-  type: string,
-  prev: NodeParameters,
-  next: NodeParameters,
-): NodeParameters {
+export function applyCodeDefaults(type: string, prev: NodeParameters, next: NodeParameters): NodeParameters {
   if (type !== 'core.code') return next;
   const field = codeField(next);
   const mode = modeOf(next);

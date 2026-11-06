@@ -52,7 +52,11 @@ function decodeCursor(raw: string | undefined): number {
   if (raw === undefined) return 0;
   const text = Buffer.from(raw, 'base64url').toString('utf8');
   const skip = text.startsWith(CURSOR_PREFIX) ? Number(text.slice(CURSOR_PREFIX.length)) : Number.NaN;
-  if (!Number.isSafeInteger(skip) || skip < 0 || Buffer.from(raw, 'base64url').toString('base64url') !== raw) {
+  if (
+    !Number.isSafeInteger(skip) ||
+    skip < 0 ||
+    Buffer.from(raw, 'base64url').toString('base64url') !== raw
+  ) {
     throw ApiError.badRequest('Invalid cursor');
   }
   return skip;
@@ -153,7 +157,13 @@ export const publicDataTableHandlers: Record<PublicDataTableHandler, Handler> = 
       column = await ctx.dataTables.columns.rename(tenantId, dataTableId, columnId, { name }, actor);
     }
     if (index !== undefined) {
-      column = await ctx.dataTables.columns.move(tenantId, dataTableId, columnId, { targetIndex: index }, actor);
+      column = await ctx.dataTables.columns.move(
+        tenantId,
+        dataTableId,
+        columnId,
+        { targetIndex: index },
+        actor,
+      );
     }
     return { data: columnDTO(column as ColumnLike) };
   },
