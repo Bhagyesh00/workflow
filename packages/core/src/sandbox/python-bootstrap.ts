@@ -208,6 +208,7 @@ export const ISOLATE_START = `
   const load = __loadPyodide;
   const lock = JSON.parse(__lockJson);
   const snapshot = globalThis.__snapshot;
+  const readFile = globalThis.readbuffer;
   delete globalThis.__createPyodideModule;
   delete globalThis.__loadPyodide;
   delete globalThis.__lockJson;
@@ -229,6 +230,7 @@ export const ISOLATE_START = `
   delete globalThis.read;
   delete globalThis.load;
   delete globalThis.readbuffer;
+  globalThis.__readWheel = (file) => readFile('wheel:' + file);
   globalThis.__pyodide = pyodide;
 })()
 `;
@@ -241,16 +243,31 @@ export const ISOLATE_MAKE_SNAPSHOT = `
 })()
 `;
 
-/** Takes the guarded entry point out of the restored interpreter and calls it once with `__payload`. */
+/**
+ * Takes the guarded entry point out of the restored interpreter and calls it once with `__payload`.
+ * Python's one way back to JavaScript is fetchWheel: a name in, a fixed in-memory file and a boolean
+ * out. It has no prototype and throws nothing, so no JavaScript object reaches Python through it.
+ */
 export const ISOLATE_RUN = `
 (async () => {
   const payload = __payload;
   delete globalThis.__payload;
+  const readWheel = __readWheel;
+  delete globalThis.__readWheel;
   const pyodide = __pyodide;
   delete globalThis.__pyodide;
   const run = pyodide.globals.get('__sandbox_run');
   pyodide.globals.delete('__sandbox_run');
-  return run(payload);
+  const fetchWheel = (file) => {
+    try {
+      pyodide.FS.writeFile('/tmp/wheel.whl', readWheel(String(file)));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  Object.setPrototypeOf(fetchWheel, null);
+  return run(payload, fetchWheel);
 })()
 `;
 
@@ -279,6 +296,13 @@ def __make_sandbox():
     MATCH_TEXT = "Positional sub-patterns in a match class pattern are disallowed for security reasons."
     STRING_TEXT = "A string containing '{}' is disallowed, because it can be used to bypass security restrictions."
     FORMAT_TEXT = "Access to attribute '{}' is only allowed in a direct call, because it can be used to bypass security restrictions."
+    WHEEL_RUN_TEXT = "Wheel '{}' cannot run in the Python sandbox. Only pure-Python and Pyodide wheels work."
+    WHEEL_READ_TEXT = "Couldn't read wheel '{}'."
+
+    # the same name as in fetchWheel (ISOLATE_RUN)
+    WHEEL_FILE = "/tmp/wheel.whl"
+    # after the standard library on sys.path, so a wheel cannot replace a stdlib module
+    WHEELS_PATH = "/lib/wheels"
 
     BLOCKED_NAMES = {"__builtins__", "__globals__", "__loader__", "__spec__", "__name__"}
     BLOCKED_ATTRIBUTES = {
@@ -448,12 +472,47 @@ def __make_sandbox():
                 raise ModuleNotFoundError("No module named '{}'".format(name))
             return None
 
-    def lock_down():
+    def make_wheel_finder(wheels, fetch_wheel):
+        unpacked = set()
+
+        def unpack(file):
+            import zipfile
+            unpacked.add(file)
+            if not fetch_wheel(file):
+                raise ImportError(WHEEL_READ_TEXT.format(file))
+            with zipfile.ZipFile(WHEEL_FILE) as archive:
+                archive.extractall(WHEELS_PATH)
+            os.remove(WHEEL_FILE)
+            importlib.invalidate_caches()
+
+        class WheelFinder:
+            """Unpacks a wheel when something first imports it, so a run pays only for what it uses."""
+
+            @staticmethod
+            def find_spec(name, path=None, target=None):
+                root = root_of(name)
+                if root in stdlib_names:
+                    return None
+                if root in wheels["unusable"]:
+                    raise ImportError(WHEEL_RUN_TEXT.format(wheels["unusable"][root]))
+                for file in wheels["roots"].get(root, ()):
+                    if file not in unpacked:
+                        unpack(file)
+                return None
+
+        return WheelFinder
+
+    def lock_down(wheels, fetch_wheel):
         for name in list(sys.modules):
             if is_blocked(root_of(name)):
                 del sys.modules[name]
         kept = [f for f in sys.meta_path if not is_blocked(root_of(getattr(type(f), "__module__", "")))]
-        sys.meta_path[:] = [BlockedFinder] + kept
+        finders = [BlockedFinder]
+        if wheels["roots"] or wheels["unusable"]:
+            os.makedirs(WHEELS_PATH)
+            sys.path.append(WHEELS_PATH)
+            finders.append(make_wheel_finder(wheels, fetch_wheel))
+        sys.meta_path[:] = finders + kept
         os.environ.clear()
 
     def make_print(prints, state):
@@ -541,12 +600,12 @@ def __make_sandbox():
         if state["dropped"]:
             prints.append(["[Output truncated - {} more print statements]".format(state["dropped"])])
 
-    def run(payload_json):
+    def run(payload_json, fetch_wheel):
         prints = []
         state = {"dropped": 0}
         try:
             payload = json.loads(payload_json)
-            lock_down()
+            lock_down(payload["wheels"], fetch_wheel)
             safe = make_builtins(payload, prints, state)
             compiled = compile_code(payload["code"], payload)
             if "query" in payload:

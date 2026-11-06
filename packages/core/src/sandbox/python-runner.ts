@@ -3,8 +3,8 @@
  *
  * - A new isolate and interpreter per run, disposed after it; runs share no state.
  * - globalThis holds only our shims. Host callbacks are random bytes and a fixed-name file loader.
- * - Files are Emscripten's in-memory file system with the stdlib zip only. No socket, fetch or child
- *   exists: wasm cannot open one, and the shims offer none.
+ * - Files are Emscripten's in-memory file system with the stdlib zip, plus the wheels a run imports.
+ *   No socket, fetch or child exists: wasm cannot open one, and the shims offer none.
  * - Memory: the isolate's memoryLimit does not count wasm memory, so the wasm's own maximum is
  *   lowered (python-assets.ts). Time: the isolate is disposed at the timeout, which stops any loop.
  * - Starting an interpreter takes seconds, so the first run builds a memory snapshot of a started one
@@ -17,7 +17,7 @@ import type { DataObject, Item } from '@workflow/workflow';
 import ivm from 'isolated-vm';
 import type { CodeRunner, CodeRunnerInput } from '../engine/services';
 import { CodeExecutionError, normalizeResult, PYTHON_RESULT_WORDING } from './code-runner';
-import { pyodideSources, pythonAssetLoader } from './python-assets';
+import { type PythonWheels, pyodideSources, pythonAssetLoader, readWheelFolder } from './python-assets';
 import {
   ISOLATE_MAKE_SNAPSHOT,
   ISOLATE_RUN,
@@ -53,10 +53,10 @@ const SNAPSHOT_MEMORY_MB = 256;
 /** starting is our code, not the user's: it has its own time, far above what it needs */
 const START_TIMEOUT_MS = 120_000;
 
-async function prepareContext(isolate: ivm.Isolate, memoryMb: number): Promise<ivm.Context> {
+async function prepareContext(isolate: ivm.Isolate, memoryMb: number, wheels?: PythonWheels): Promise<ivm.Context> {
   const context = await isolate.createContext();
   const jail = context.global;
-  const loadAsset = pythonAssetLoader(memoryMb);
+  const loadAsset = pythonAssetLoader(memoryMb, wheels);
   await jail.set('globalThis', jail.derefInto());
   await jail.set('__asset', new ivm.Callback((name: string) => loadAsset(String(name))));
   await jail.set(
@@ -146,11 +146,22 @@ interface PythonAnswer {
 export class PyodideCodeRunner implements CodeRunner {
   private running = 0;
   private readonly waiting: Array<() => void> = [];
+  private wheels: PythonWheels | undefined;
 
   constructor(readonly options: PyodideRunnerOptions) {}
 
   private memoryText(): CodeExecutionError {
     return new CodeExecutionError(`Code exceeded the memory limit of ${this.options.memoryLimitMb}MB`);
+  }
+
+  /** read once, like the allow list; with no package allowed no wheel file is ever opened */
+  private wheelIndex(): PythonWheels {
+    const { externalAllow, wheelsDir } = this.options;
+    this.wheels ??=
+      externalAllow.length > 0 && wheelsDir
+        ? readWheelFolder(wheelsDir)
+        : { roots: new Map(), unusable: new Map(), files: new Map() };
+    return this.wheels;
   }
 
   /** resolves with a slot held; a signal that fires while waiting gives the place up */
@@ -184,6 +195,7 @@ export class PyodideCodeRunner implements CodeRunner {
 
   async run(input: CodeRunnerInput): Promise<Item[]> {
     const { stdlibAllow, externalAllow, builtinsDeny, allowTransitiveImports } = this.options;
+    const wheels = this.wheelIndex();
     const payload = JSON.stringify({
       code: input.code,
       mode: input.mode,
@@ -193,19 +205,20 @@ export class PyodideCodeRunner implements CodeRunner {
       externalAllow,
       builtinsDeny,
       allowTransitiveImports,
+      wheels: { roots: Object.fromEntries(wheels.roots), unusable: Object.fromEntries(wheels.unusable) },
     });
     if (payload.length > MAX_PAYLOAD_BYTES) {
       throw new CodeExecutionError('Input data is too large for the Code node sandbox');
     }
     await this.acquire(input.signal);
     try {
-      return await this.runIsolated(input, payload);
+      return await this.runIsolated(input, payload, wheels);
     } finally {
       this.release();
     }
   }
 
-  private async runIsolated(input: CodeRunnerInput, payload: string): Promise<Item[]> {
+  private async runIsolated(input: CodeRunnerInput, payload: string, wheels: PythonWheels): Promise<Item[]> {
     const started = await pythonSnapshot();
     if (input.signal?.aborted) throw new CodeExecutionError('Code execution was cancelled');
 
@@ -217,7 +230,7 @@ export class PyodideCodeRunner implements CodeRunner {
     input.signal?.addEventListener('abort', dispose, { once: true });
 
     try {
-      const context = await prepareContext(isolate, memoryLimitMb);
+      const context = await prepareContext(isolate, memoryLimitMb, wheels);
       await context.global.set('__snapshot', started.copyInto({ release: false }));
       await within(
         context.eval(ISOLATE_START, { promise: true }),
@@ -237,7 +250,8 @@ export class PyodideCodeRunner implements CodeRunner {
       if (error instanceof CodeExecutionError) throw error;
       if (input.signal?.aborted) throw new CodeExecutionError('Code execution was cancelled');
       const message = (error as Error)?.message ?? String(error);
-      if (/memory limit|MemoryError/i.test(message) || isolate.isDisposed) throw this.memoryText();
+      // a file too big for the isolate (an unpacked wheel) ends in a failed ArrayBuffer allocation
+      if (/memory limit|MemoryError|allocation failed/i.test(message) || isolate.isDisposed) throw this.memoryText();
       throw new CodeExecutionError(message);
     } finally {
       input.signal?.removeEventListener('abort', dispose);
