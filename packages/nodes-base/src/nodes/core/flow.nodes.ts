@@ -20,9 +20,11 @@ import {
   type WorkflowDefinition,
 } from '@workflow/workflow';
 import { DateTime } from 'luxon';
-import { parseDate } from '../../utils/filter';
 import { errorItem, parseJsonParameter, withItemIndex } from '../../utils/utilities';
+import { waitFormOptions, waitFormProperties } from './form/fields';
+import { announceFormPage, FORM_TRIGGER_TYPE, waitFormWebhook } from './form/webhook';
 import { convertFieldValue, pairToInput } from './simple.nodes';
+import { intervalMs, limitedWaitUntil, limitWaitProperties, timeUnitOptions, waitDate } from './wait-limit';
 
 // ---------------------------------------------------------------------------------------------
 // Loop Over Items
@@ -162,44 +164,8 @@ export const SplitInBatchesNode: NodeType = {
 
 /** waits up to this long run in-process; longer ones persist the execution and resume later */
 export const IN_PROCESS_WAIT_LIMIT_MS = 65_000;
-/** "wait forever" for webhook resumes without a time limit */
-const WAIT_INDEFINITELY = new Date('3000-01-01T00:00:00.000Z');
 
-const UNIT_MS: Record<string, number> = {
-  seconds: 1000,
-  minutes: 60_000,
-  hours: 3_600_000,
-  days: 86_400_000,
-};
-
-function intervalMs(ctx: ExecuteContext, amountParam: string, unitParam: string): number {
-  const amount = Number(ctx.getNodeParameter(amountParam, 0, 1));
-  const unit = ctx.getNodeParameter(unitParam, 0, 'seconds') as string;
-  if (!Number.isFinite(amount) || amount < 0) {
-    throw new NodeOperationError(ctx.getNode(), 'The wait amount must be a positive number', {
-      parameter: amountParam,
-    });
-  }
-  return amount * (UNIT_MS[unit] ?? 1000);
-}
-
-function waitDate(ctx: ExecuteContext, param: string): Date {
-  const value = ctx.getNodeParameter(param, 0, '');
-  const date = parseDate(value, true, ctx.getTimezone());
-  if (!date?.isValid) {
-    throw new NodeOperationError(ctx.getNode(), `"${String(value)}" is not a valid date`, {
-      parameter: param,
-    });
-  }
-  return date.toJSDate();
-}
-
-const timeUnitOptions = [
-  { name: 'Seconds', value: 'seconds' },
-  { name: 'Minutes', value: 'minutes' },
-  { name: 'Hours', value: 'hours' },
-  { name: 'Days', value: 'days' },
-];
+const WAIT_SUFFIX = '={{ ($parameter.options ?? {}).webhookSuffix || "" }}';
 
 export const WaitNode: NodeType = {
   description: {
@@ -215,14 +181,40 @@ export const WaitNode: NodeType = {
     outputs: ['main'],
     categories: ['Core', 'Flow'],
     alias: ['pause', 'sleep', 'delay', 'timeout', 'resume', 'approval'],
+    credentials: [
+      {
+        name: 'httpBasicAuth',
+        required: true,
+        displayOptions: { show: { resume: ['form'], authentication: ['basicAuth'] } },
+      },
+    ],
     webhooks: [
       {
         name: 'default',
         httpMethod: '={{ $parameter.httpMethod || "POST" }}',
-        path: '={{ ($parameter.options ?? {}).webhookSuffix || "" }}',
+        path: WAIT_SUFFIX,
         responseMode: 'onReceived',
         restartWebhook: true,
         isFullPath: true,
+      },
+      {
+        name: 'default',
+        httpMethod: 'GET',
+        path: WAIT_SUFFIX,
+        responseMode: 'onReceived',
+        restartWebhook: true,
+        isFullPath: true,
+        nodeType: 'form',
+      },
+      {
+        name: 'default',
+        httpMethod: 'POST',
+        path: WAIT_SUFFIX,
+        responseMode: '={{$parameter["responseMode"]}}',
+        responseData: '={{$parameter["responseMode"] === "lastNode" ? "noData" : undefined}}',
+        restartWebhook: true,
+        isFullPath: true,
+        nodeType: 'form',
       },
     ],
     properties: [
@@ -243,6 +235,11 @@ export const WaitNode: NodeType = {
             name: 'On Webhook Call',
             value: 'webhook',
             description: 'Waits until $execution.resumeUrl is called',
+          },
+          {
+            name: 'On Form Submitted',
+            value: 'form',
+            description: 'Waits until the form at $execution.resumeFormUrl is submitted',
           },
         ],
       },
@@ -288,61 +285,24 @@ export const WaitNode: NodeType = {
         displayOptions: { show: { resume: ['webhook'] } },
       },
       {
-        displayName: 'Limit Wait Time',
-        name: 'limitWaitTime',
-        type: 'boolean',
-        default: false,
-        description: 'Whether the workflow resumes automatically after a time limit without a webhook call',
-        displayOptions: { show: { resume: ['webhook'] } },
-      },
-      {
-        displayName: 'Limit Type',
-        name: 'limitType',
-        type: 'options',
-        default: 'afterTimeInterval',
-        displayOptions: { show: { resume: ['webhook'], limitWaitTime: [true] } },
-        options: [
-          { name: 'After Time Interval', value: 'afterTimeInterval' },
-          { name: 'At Specified Time', value: 'atSpecifiedTime' },
-        ],
-      },
-      {
-        displayName: 'Amount',
-        name: 'resumeAmount',
-        type: 'number',
-        default: 1,
-        typeOptions: { minValue: 0, numberPrecision: 2 },
-        displayOptions: {
-          show: { resume: ['webhook'], limitWaitTime: [true], limitType: ['afterTimeInterval'] },
-        },
-      },
-      {
-        displayName: 'Unit',
-        name: 'resumeUnit',
-        type: 'options',
-        default: 'hours',
-        options: timeUnitOptions,
-        displayOptions: {
-          show: { resume: ['webhook'], limitWaitTime: [true], limitType: ['afterTimeInterval'] },
-        },
-      },
-      {
-        displayName: 'Max Date and Time',
-        name: 'maxDateAndTime',
-        type: 'dateTime',
+        displayName:
+          'The form is at {{ $execution.resumeFormUrl }}. Send that URL to the person who should answer it. After a Form Trigger the form opens by itself.',
+        name: 'formNotice',
+        type: 'notice',
         default: '',
-        displayOptions: {
-          show: { resume: ['webhook'], limitWaitTime: [true], limitType: ['atSpecifiedTime'] },
-        },
+        displayOptions: { show: { resume: ['form'] } },
       },
+      ...waitFormProperties,
+      ...limitWaitProperties({ resume: ['webhook', 'form'] }),
       {
         displayName: 'Options',
         name: 'options',
         type: 'collection',
         default: {},
         placeholder: 'Add option',
-        displayOptions: { show: { resume: ['webhook'] } },
+        displayOptions: { show: { resume: ['webhook', 'form'] } },
         options: [
+          ...waitFormOptions,
           {
             displayName: 'Webhook Suffix',
             name: 'webhookSuffix',
@@ -358,6 +318,7 @@ export const WaitNode: NodeType = {
             type: 'string',
             default: 'data',
             description: 'Prefix for uploaded files (data0, data1, ...)',
+            displayOptions: { show: { '/resume': ['webhook'] } },
           },
         ],
       },
@@ -373,15 +334,12 @@ export const WaitNode: NodeType = {
     } else if (resume === 'specificTime') {
       until = waitDate(ctx, 'dateTime');
     } else {
-      const limit = ctx.getNodeParameter('limitWaitTime', 0, false) as boolean;
-      if (!limit) until = WAIT_INDEFINITELY;
-      else if (ctx.getNodeParameter('limitType', 0, 'afterTimeInterval') === 'atSpecifiedTime') {
-        until = waitDate(ctx, 'maxDateAndTime');
-      } else {
-        until = new Date(Date.now() + intervalMs(ctx, 'resumeAmount', 'resumeUnit'));
+      // webhook and form resumes always persist the execution, however short the limit
+      await ctx.putExecutionToWait(limitedWaitUntil(ctx));
+      if (resume === 'form') {
+        const afterFormTrigger = ctx.getParentNodes().some((node) => node.type === FORM_TRIGGER_TYPE);
+        announceFormPage(ctx, afterFormTrigger);
       }
-      // webhook resumes always persist the execution, however short the limit
-      await ctx.putExecutionToWait(until);
       return [pairToInput(items)];
     }
 
@@ -395,8 +353,10 @@ export const WaitNode: NodeType = {
   },
 
   async webhook(ctx: WebhookContext): Promise<WebhookResponseData> {
+    const resume = ctx.getNodeParameter('resume', 0);
+    if (resume === 'form') return waitFormWebhook(ctx);
     // a time-based wait has a resume URL too, but only the time may end it
-    if (ctx.getNodeParameter('resume', 0) !== 'webhook') {
+    if (resume !== 'webhook') {
       return {
         webhookResponse: {
           statusCode: 404,

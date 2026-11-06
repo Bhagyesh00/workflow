@@ -44,13 +44,18 @@ export interface SimulationInput {
 }
 
 export interface SimulationResult {
-  status: 'success' | 'error' | 'canceled';
+  status: 'success' | 'error' | 'canceled' | 'waiting';
   runData: RunData;
   error?: ExecutionErrorShape;
   lastNodeExecuted?: string;
 }
 
 const evaluator = new ExpressionEvaluator({ timeoutMs: 500, maxSteps: 500_000 });
+/** the demo has no server: the URL only has the shape of the real one */
+const demoFormUrl = (executionId: string) => {
+  const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
+  return `${origin}/form-waiting/${executionId}/demo`;
+};
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class NodeFailure extends Error {
@@ -193,6 +198,12 @@ export async function simulateExecution(input: SimulationInput): Promise<Simulat
                 },
               },
             },
+          ],
+        ];
+      case 'core.formTrigger':
+        return [
+          input.triggerItems ?? [
+            { json: { Name: 'Mara Quinn', submittedAt: new Date().toISOString(), formMode: 'test' } },
           ],
         ];
       case 'core.scheduleTrigger':
@@ -457,13 +468,20 @@ export async function simulateExecution(input: SimulationInput): Promise<Simulat
     if (failure && node.onError === 'continueErrorOutput') {
       output = [...Array.from({ length: Math.max(1, output.length) }, () => [] as Item[]), inputs[0] ?? []];
     }
+    // a form page stops the run like the engine does, and tells the editor where the page is
+    const isFormPage =
+      !failure &&
+      !node.disabled &&
+      !workflow.pinData?.[node.name] &&
+      (node.type === 'core.form' || (node.type === 'core.wait' && node.parameters?.resume === 'form'));
     const task: TaskData = {
       startTime,
       executionTime: Date.now() - startTime + (input.stepDelayMs ? 40 + Math.round(Math.random() * 160) : 0),
-      executionStatus: failure && !node.onError ? 'error' : 'success',
+      executionStatus: isFormPage ? 'waiting' : failure && !node.onError ? 'error' : 'success',
       data: { main: output },
       error: failure && !node.onError ? failure : undefined,
       source: source ? [{ previousNode: source }] : [],
+      ...(isFormPage ? { metadata: { resumeFormUrl: demoFormUrl(executionId) } } : {}),
     };
     const runs = (runData[node.name] ??= []);
     runs.push(task);
@@ -478,6 +496,13 @@ export async function simulateExecution(input: SimulationInput): Promise<Simulat
         data: { executionId, workflowId: workflow.id ?? '', status: 'error', error: failure },
       });
       return { status: 'error', runData, error: failure, lastNodeExecuted: lastNode };
+    }
+    if (isFormPage) {
+      emit({
+        type: 'executionFinished',
+        data: { executionId, workflowId: workflow.id ?? '', status: 'waiting' },
+      });
+      return { status: 'waiting', runData, lastNodeExecuted: lastNode };
     }
     if (input.destinationNode === node.name) break;
 

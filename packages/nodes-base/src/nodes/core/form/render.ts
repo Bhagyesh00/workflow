@@ -102,6 +102,7 @@ const PAGE_SCRIPT = `
   var failure = document.getElementById('form-error');
   var ending = document.getElementById('form-ending');
   var EMAIL = /^[^\\s@]+@[^\\s@]+$/;
+  var SAFE_URL = /^https?:\\/\\//i;
 
   function showError(group, text) {
     var box = group.querySelector('.field-error');
@@ -180,12 +181,44 @@ const PAGE_SCRIPT = `
   }
 
   function answered(answer) {
+    if (answer.formWaitingUrl) {
+      poll(answer.formWaitingUrl);
+      return;
+    }
     var redirect = answer.redirectURL || config.redirectUrl;
-    if (redirect) {
+    if (redirect && SAFE_URL.test(redirect)) {
       location.href = redirect;
       return;
     }
     finish(answer.formSubmittedText || config.submittedText);
+  }
+
+  function stopped() {
+    showFailure(
+      'Problem submitting response',
+      'Please try again or contact support if the problem persists',
+    );
+    button.disabled = true;
+  }
+
+  /* the run goes on behind this page: go on once it stands at the next one */
+  function poll(url) {
+    function again() {
+      setTimeout(function () {
+        poll(url);
+      }, 1000);
+    }
+    fetch(url + '/n8n-execution-status')
+      .then(function (response) {
+        return response.ok ? response.text() : 'null';
+      })
+      .then(function (text) {
+        var status = text.trim();
+        if (status === 'form-waiting' && SAFE_URL.test(url)) location.href = url;
+        else if (status === 'success') answered({});
+        else if (status === 'error' || status === 'canceled' || status === 'crashed' || status === 'null') stopped();
+        else again();
+      }, again);
   }
 
   form.addEventListener('submit', function (event) {
@@ -366,6 +399,85 @@ ${data.fields.map(renderField)}
 ${data.attribution ? html`<p class="attribution">Form automated with Workflow</p>` : ''}
 <script type="application/json" id="form-config">${config}</script>
 <script>${new SafeHtml(PAGE_SCRIPT)}</script>`,
+    css,
+  );
+}
+
+/** a file of the ending page, downloaded from the page itself */
+export interface FormEndingFile {
+  fileName: string;
+  mimeType?: string;
+  /** base64 */
+  data: string;
+}
+
+export interface FormEndingData {
+  /** the browser tab */
+  pageTitle: string;
+  title: string;
+  message: string;
+  /** Show Text; sanitized here */
+  html?: string;
+  /** checked by the caller: http or https only */
+  redirectUrl?: string;
+  files?: FormEndingFile[];
+  customCss?: string;
+  attribution: boolean;
+  authToken?: string;
+}
+
+/**
+ * No value of a workflow is in this text. Its one POST lets the run finish; it outlives the page, so
+ * nodes after the ending hold up a redirect for a moment only.
+ */
+const ENDING_SCRIPT = `
+(function () {
+  var config = JSON.parse(document.getElementById('form-config').textContent);
+
+  function download(file, index) {
+    var text = atob(file.data);
+    var bytes = new Uint8Array(text.length);
+    for (var i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+    var link = document.getElementById('form-file-' + index);
+    link.href = URL.createObjectURL(new Blob([bytes], { type: file.mimeType || 'application/octet-stream' }));
+    link.download = file.fileName;
+    link.click();
+  }
+
+  function goOn() {
+    if (config.redirectUrl && /^https?:\\/\\//i.test(config.redirectUrl)) location.href = config.redirectUrl;
+  }
+
+  config.files.forEach(download);
+  var headers = config.authToken ? { 'x-auth-token': config.authToken } : {};
+  fetch(location.href, { method: 'POST', headers: headers, keepalive: true }).then(goOn, goOn);
+  setTimeout(goOn, 3000);
+})();
+`;
+
+export function renderCompletionPage(data: FormEndingData): string {
+  const files = data.files ?? [];
+  const config = scriptJson({
+    authToken: data.authToken ?? null,
+    redirectUrl: data.redirectUrl ?? null,
+    files,
+  });
+  const css = data.customCss
+    ? html`<style>${new SafeHtml(sanitizeCustomCss(data.customCss))}</style>`
+    : undefined;
+  const content =
+    data.html === undefined
+      ? html`<h1>${data.title}</h1>${data.message ? html`<p class="description">${data.message}</p>` : ''}`
+      : html`<div>${new SafeHtml(sanitizeHtml(data.html))}</div>`;
+  return htmlDocument(
+    data.pageTitle,
+    html`<div class="card">
+${data.redirectUrl ? '' : content}
+${files.map((file, index) => html`<p><a id="form-file-${index}" href="#">Download ${file.fileName}</a></p>`)}
+</div>
+${data.attribution && !data.redirectUrl ? html`<p class="attribution">Form automated with Workflow</p>` : ''}
+<script type="application/json" id="form-config">${config}</script>
+<script>${new SafeHtml(ENDING_SCRIPT)}</script>`,
     css,
   );
 }

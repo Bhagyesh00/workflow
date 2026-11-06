@@ -336,6 +336,231 @@ const respondWithOptions: NodeProperty = {
   ],
 };
 
+const FORM_ON_WAIT = { resume: ['form'] };
+const onWait = (property: NodeProperty): NodeProperty => ({
+  ...property,
+  displayOptions: { show: FORM_ON_WAIT },
+});
+
+/** Wait, "On Form Submitted": the form it shows */
+export const waitFormProperties: NodeProperty[] = [
+  onWait(formTitleProperty),
+  onWait(formDescriptionProperty),
+  onWait(formFieldsProperty),
+  onWait({
+    ...formResponseModeProperty,
+    options: [
+      ...(formResponseModeProperty.options ?? []),
+      {
+        name: 'Using Respond to Webhook Node',
+        value: 'responseNode',
+        description: 'When a Respond to Webhook node answers',
+      },
+    ],
+  }),
+  onWait({
+    ...formAuthenticationProperty,
+    options: formAuthenticationProperty.options?.filter(
+      (option) => 'value' in option && option.value !== 'n8nUserAuth',
+    ),
+  }),
+];
+
+const onlyOnFormWait = (option: NodeProperty): NodeProperty => ({
+  ...option,
+  displayOptions: { show: { '/resume': ['form'] } },
+});
+
+/** Wait, "On Form Submitted": its entries in the Options collection */
+export const waitFormOptions: NodeProperty[] = [
+  onlyOnFormWait(appendAttribution),
+  {
+    ...respondWithOptions,
+    displayOptions: { show: { '/resume': ['form'] }, hide: { '/responseMode': ['responseNode'] } },
+  },
+];
+
+/** Form, Next Form Page: the fields below or a JSON definition */
+export const defineFormProperties: NodeProperty[] = [
+  {
+    displayName: 'Define Form',
+    name: 'defineForm',
+    type: 'options',
+    default: 'fields',
+    noDataExpression: true,
+    displayOptions: { show: { operation: ['page'] } },
+    options: [
+      { name: 'Using Fields Below', value: 'fields' },
+      { name: 'Using JSON', value: 'json' },
+    ],
+  },
+  {
+    displayName: 'Form Fields',
+    name: 'jsonOutput',
+    type: 'json',
+    default: '[\n  {\n    "fieldLabel": "Name",\n    "fieldType": "text",\n    "requiredField": true\n  }\n]',
+    typeOptions: { rows: 5 },
+    description: 'A list of form elements, with the same names as in Form Elements',
+    displayOptions: { show: { operation: ['page'], defineForm: ['json'] } },
+  },
+  {
+    ...formFieldsProperty,
+    displayOptions: { show: { operation: ['page'], defineForm: ['fields'] } },
+  },
+];
+
+/** Form, Next Form Page: Options */
+export const formPageOptionsProperty: NodeProperty = {
+  displayName: 'Options',
+  name: 'options',
+  type: 'collection',
+  default: {},
+  placeholder: 'Add option',
+  displayOptions: { show: { operation: ['page'] } },
+  options: [
+    {
+      displayName: 'Form Title',
+      name: 'formTitle',
+      type: 'string',
+      default: '',
+      description: "Shown at the top of the page. Empty uses the Form Trigger's title.",
+    },
+    {
+      displayName: 'Form Description',
+      name: 'formDescription',
+      type: 'string',
+      default: '',
+      typeOptions: { rows: 2 },
+      description: 'Shown under the title. HTML is allowed; scripts, styles and inputs are removed.',
+    },
+    {
+      displayName: 'Button Label',
+      name: 'buttonLabel',
+      type: 'string',
+      default: '',
+      description: "Empty uses the Form Trigger's label",
+    },
+    customCss,
+  ],
+};
+
+const ON_ENDING = { operation: ['completion'] };
+
+/** Form, Form Ending: what the person sees */
+export const formEndingProperties: NodeProperty[] = [
+  {
+    displayName: 'On Form Submission',
+    name: 'respondWith',
+    type: 'options',
+    default: 'text',
+    noDataExpression: true,
+    displayOptions: { show: ON_ENDING },
+    options: [
+      { name: 'Show Completion Screen', value: 'text', description: 'Show a title and a message' },
+      { name: 'Redirect to URL', value: 'redirect', description: 'Go to an http or https URL' },
+      { name: 'Show Text', value: 'showText', description: 'Show text or HTML' },
+      { name: 'Return Binary File', value: 'returnBinary', description: 'Download files of the input' },
+    ],
+  },
+  {
+    displayName: 'URL',
+    name: 'redirectUrl',
+    type: 'string',
+    default: '',
+    required: true,
+    placeholder: 'e.g. https://www.example.com',
+    displayOptions: { show: { ...ON_ENDING, respondWith: ['redirect'] } },
+  },
+  {
+    displayName: 'Completion Title',
+    name: 'completionTitle',
+    type: 'string',
+    default: '',
+    required: true,
+    displayOptions: { show: { ...ON_ENDING, respondWith: ['text', 'returnBinary'] } },
+  },
+  {
+    displayName: 'Completion Message',
+    name: 'completionMessage',
+    type: 'string',
+    default: '',
+    typeOptions: { rows: 2 },
+    displayOptions: { show: { ...ON_ENDING, respondWith: ['text', 'returnBinary'] } },
+  },
+  {
+    displayName: 'Text',
+    name: 'responseText',
+    type: 'string',
+    default: '',
+    typeOptions: { rows: 2 },
+    description: 'HTML is allowed; each {{ }} is resolved once; scripts, styles and inputs are removed.',
+    displayOptions: { show: { ...ON_ENDING, respondWith: ['showText'] } },
+  },
+  {
+    displayName: 'Input Data Field Name(s)',
+    name: 'inputDataFieldName',
+    type: 'string',
+    default: 'data',
+    required: true,
+    placeholder: 'e.g. data',
+    description: 'The binary field or fields of the input to download, comma-separated',
+    displayOptions: { show: { ...ON_ENDING, respondWith: ['returnBinary'] } },
+  },
+  {
+    displayName: 'Options',
+    name: 'options',
+    type: 'collection',
+    default: {},
+    placeholder: 'Add option',
+    displayOptions: { show: ON_ENDING },
+    options: [
+      {
+        displayName: 'Completion Page Title',
+        name: 'formTitle',
+        type: 'string',
+        default: '',
+        description: "Shown in the browser tab. Empty uses the Form Trigger's title.",
+      },
+      appendAttribution,
+      customCss,
+    ],
+  },
+];
+
+const FIELD_TYPES = new Set<string>([
+  'checkbox',
+  'date',
+  'dropdown',
+  'email',
+  'file',
+  'hiddenField',
+  'html',
+  'number',
+  'password',
+  'radio',
+  'text',
+  'textarea',
+]);
+
+const isField = (entry: unknown): entry is FormField =>
+  typeof entry === 'object' &&
+  entry !== null &&
+  !Array.isArray(entry) &&
+  ((entry as FormField).fieldType === undefined || FIELD_TYPES.has(String((entry as FormField).fieldType)));
+
+/** Form Elements from a JSON definition; undefined when it is no list of known elements */
+export function parseFormFields(value: unknown): FormField[] | undefined {
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  return Array.isArray(parsed) && parsed.every(isField) ? parsed : undefined;
+}
+
 /** the Form Trigger's Options */
 export const formTriggerOptionsProperty: NodeProperty = {
   displayName: 'Options',

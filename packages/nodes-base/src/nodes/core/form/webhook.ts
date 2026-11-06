@@ -1,17 +1,36 @@
-/** The Form Trigger's two hooks: GET shows the form, POST turns the answers into the run's first item. */
-import type {
-  DataObject,
-  Item,
-  WebhookContext,
-  WebhookResponse,
-  WebhookResponseData,
+/**
+ * The hooks of the form nodes: GET shows a page, POST turns the answers into an item. The Form Trigger
+ * starts a run with it; the Form and Wait nodes resume theirs.
+ */
+import {
+  type DataObject,
+  type ExecuteContext,
+  type Item,
+  isExpression,
+  NodeOperationError,
+  type WebhookContext,
+  type WebhookResponse,
+  type WebhookResponseData,
 } from '@workflow/workflow';
 import { DateTime } from 'luxon';
 import { checkBasicAuth, ipAllowed, isIgnoredBot, WWW_AUTHENTICATE } from './access';
-import { FORM_DEFAULT_BUTTON_LABEL, FORM_DEFAULT_SUBMITTED_TEXT, type FormField } from './fields';
-import { type FormPageField, renderFormPage, renderMessagePage } from './render';
+import {
+  FORM_DEFAULT_BUTTON_LABEL,
+  FORM_DEFAULT_SUBMITTED_TEXT,
+  type FormField,
+  parseFormFields,
+} from './fields';
+import {
+  type FormEndingFile,
+  type FormPageField,
+  renderCompletionPage,
+  renderFormPage,
+  renderMessagePage,
+} from './render';
 import { safeRedirectUrl, sanitizeHtml } from './sanitize';
-import { checkFormUserAuth } from './user-auth';
+import { checkFormUserAuth, type FormUserAuthParams } from './user-auth';
+
+export const FORM_TRIGGER_TYPE = 'core.formTrigger';
 
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
 
@@ -25,6 +44,8 @@ const RESPOND_TO_WEBHOOK_TEXT =
   'The "Respond to Webhook" node is not supported in workflows initiated by the "Form Trigger"';
 const RESPOND_TO_WEBHOOK_DESCRIPTION =
   'To configure your response, add a "Form" node and set the "Page Type" to "Form Ending"';
+const PROBLEM_LOADING = 'Problem loading form';
+const FINISHED_TITLE = 'Form Submitted';
 
 const htmlReply = (
   statusCode: number,
@@ -67,6 +88,13 @@ function resolveOnce(ctx: WebhookContext, text: string): string {
   } catch {
     return text;
   }
+}
+
+/** an HTML parameter: its own `{{ }}` resolved once from its text; a `=` one is resolved as it is read */
+function htmlParameter(ctx: WebhookContext, name: string): string {
+  const raw = ctx.getNodeParameter(name, 0, '', { rawExpressions: true });
+  if (typeof raw === 'string' && !raw.startsWith('=')) return resolveOnce(ctx, raw);
+  return String(ctx.getNodeParameter(name, 0, '') ?? '');
 }
 
 /**
@@ -206,6 +234,62 @@ async function outputItem(
 const tokenOfCookie = (cookie: string | undefined) =>
   cookie ? /^ncb-form-auth-(?:wf|ex)-[^=;]+=([^;]+)/.exec(cookie)?.[1] : undefined;
 
+interface FormAccess {
+  /** the reply instead of the form */
+  denied?: WebhookResponseData;
+  authToken?: string;
+  replyHeaders: Record<string, string>;
+  user?: DataObject;
+}
+
+async function checkAccess(
+  ctx: WebhookContext,
+  authentication: string,
+  isPage: boolean,
+  userAuth: FormUserAuthParams,
+): Promise<FormAccess> {
+  if (authentication === 'basicAuth') {
+    const auth = await checkBasicAuth(ctx, { allowToken: !isPage });
+    if (!auth.allowed) return { denied: unauthorized('Authorization is required!'), replyHeaders: {} };
+    return { authToken: auth.token, replyHeaders: {} };
+  }
+  if (authentication !== 'n8nUserAuth') return { replyHeaders: {} };
+  const auth = await checkFormUserAuth(ctx, userAuth);
+  if (!auth.allowed) {
+    const { response } = auth;
+    return {
+      replyHeaders: {},
+      denied: {
+        webhookResponse: {
+          statusCode: response?.statusCode ?? 403,
+          body: response?.body,
+          headers: { ...auth.headers, ...response?.headers },
+        },
+      },
+    };
+  }
+  return {
+    replyHeaders: auth.headers,
+    authToken: tokenOfCookie(auth.headers['set-cookie']),
+    user: auth.user ? { ...auth.user } : undefined,
+  };
+}
+
+/** a page or an answer that says what is wrong with the workflow; the run stays as it is */
+function refused(
+  isPage: boolean,
+  statusCode: number,
+  message: string,
+  description: string,
+  headers: Record<string, string> = {},
+): WebhookResponseData {
+  if (isPage) {
+    const page = renderMessagePage({ title: PROBLEM_LOADING, message, detail: description });
+    return { webhookResponse: htmlReply(statusCode, page, headers) };
+  }
+  return { webhookResponse: { statusCode, headers, body: { message, description } } };
+}
+
 /** the Form Trigger's `webhook()` */
 export async function formTriggerWebhook(ctx: WebhookContext): Promise<WebhookResponseData> {
   const isPage = ctx.getRequestObject().method !== 'POST';
@@ -223,49 +307,16 @@ export async function formTriggerWebhook(ctx: WebhookContext): Promise<WebhookRe
   if (options.ignoreBots && isIgnoredBot(ctx)) return unauthorized();
 
   const authentication = String(ctx.getNodeParameter('authentication', 0, 'none'));
-  let authToken: string | undefined;
-  let replyHeaders: Record<string, string> = {};
-  let user: DataObject | undefined;
-  if (authentication === 'basicAuth') {
-    const auth = await checkBasicAuth(ctx, { allowToken: !isPage });
-    if (!auth.allowed) return unauthorized('Authorization is required!');
-    authToken = auth.token;
-  } else if (authentication === 'n8nUserAuth') {
-    const auth = await checkFormUserAuth(ctx, {
-      scope: 'trigger',
-      requireExecuteAccess: Boolean(ctx.getNodeParameter('requireExecuteAccess', 0, false)),
-    });
-    if (!auth.allowed) {
-      const { response } = auth;
-      return {
-        webhookResponse: {
-          statusCode: response?.statusCode ?? 403,
-          body: response?.body,
-          headers: { ...auth.headers, ...response?.headers },
-        },
-      };
-    }
-    replyHeaders = auth.headers;
-    authToken = tokenOfCookie(auth.headers['set-cookie']);
-    if (auth.user && options.includeUserInOutput !== false) user = { ...auth.user };
-  }
+  const access = await checkAccess(ctx, authentication, isPage, {
+    scope: 'trigger',
+    requireExecuteAccess: Boolean(ctx.getNodeParameter('requireExecuteAccess', 0, false)),
+  });
+  if (access.denied) return access.denied;
+  const { authToken, replyHeaders } = access;
+  const user = options.includeUserInOutput !== false ? access.user : undefined;
 
   if (ctx.getChildNodes().some((child) => child.type === RESPOND_TO_WEBHOOK)) {
-    if (isPage) {
-      const page = renderMessagePage({
-        title: 'Problem loading form',
-        message: RESPOND_TO_WEBHOOK_TEXT,
-        detail: RESPOND_TO_WEBHOOK_DESCRIPTION,
-      });
-      return { webhookResponse: htmlReply(409, page, replyHeaders) };
-    }
-    return {
-      webhookResponse: {
-        statusCode: 409,
-        headers: replyHeaders,
-        body: { message: RESPOND_TO_WEBHOOK_TEXT, description: RESPOND_TO_WEBHOOK_DESCRIPTION },
-      },
-    };
+    return refused(isPage, 409, RESPOND_TO_WEBHOOK_TEXT, RESPOND_TO_WEBHOOK_DESCRIPTION, replyHeaders);
   }
 
   const query = { ...ctx.getQueryData() };
@@ -295,6 +346,237 @@ export async function formTriggerWebhook(ctx: WebhookContext): Promise<WebhookRe
     webhookResponse: {
       statusCode: 200,
       headers: replyHeaders,
+      body: ending.redirectUrl
+        ? { redirectURL: ending.redirectUrl }
+        : { formSubmittedText: ending.submittedText },
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// later pages
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A page node is waiting: tells the editor where its form is. `sendNext` also answers the request
+ * that holds the previous page; the server turns the 307 into `{ redirectURL }` for that page.
+ */
+export function announceFormPage(ctx: ExecuteContext, sendNext: boolean): void {
+  const url = ctx.evaluateExpression('={{ $execution.resumeFormUrl }}', 0);
+  if (typeof url !== 'string' || !url) return;
+  ctx.setMetadata({ resumeFormUrl: url });
+  if (sendNext) ctx.sendResponse({ statusCode: 307, headers: { location: url } });
+}
+
+/** the raw parameters of the Form Trigger this page comes after */
+function triggerParameters(ctx: WebhookContext): DataObject | undefined {
+  const trigger = ctx.getParentNodes().find((node) => node.type === FORM_TRIGGER_TYPE);
+  if (!trigger) return undefined;
+  const expression = `={{ $(${JSON.stringify(trigger.name)}).params }}`;
+  return ctx.evaluateExpression(expression, 0) as DataObject;
+}
+
+const optionsOf = (parameters: DataObject | undefined) => (parameters?.options ?? {}) as DataObject;
+
+/** a parameter of the trigger, resolved once from its own text */
+function triggerText(ctx: WebhookContext, value: unknown): string {
+  if (isExpression(value)) return String(ctx.evaluateExpression(value, 0) ?? '');
+  return value === undefined || value === null ? '' : String(value);
+}
+
+/** a later page keeps the access of the trigger, with the cookie of this execution */
+function triggerAccess(ctx: WebhookContext, trigger: DataObject | undefined, isPage: boolean) {
+  return checkAccess(ctx, String(trigger?.authentication ?? 'none'), isPage, {
+    scope: 'waiting',
+    requireExecuteAccess: trigger?.requireExecuteAccess === true,
+  });
+}
+
+/** what a later page prefills from and its answers go with */
+const pageQuery = (ctx: WebhookContext, trigger: DataObject | undefined) => {
+  const query = { ...ctx.getQueryData() };
+  if (trigger?.authentication === 'n8nUserAuth') delete query[USER_AUTH_CODE];
+  return query;
+};
+
+function pageFields(ctx: WebhookContext): FormField[] {
+  if (ctx.getNodeParameter('defineForm', 0, 'fields') !== 'json') return formFields(ctx);
+  // a value in the definition is data, its HTML is not read for `{{ }}`
+  const fields = parseFormFields(ctx.getNodeParameter('jsonOutput', 0, '[]'));
+  if (!fields) throw new NodeOperationError(ctx.getNode(), 'The form fields JSON is not valid');
+  return fields;
+}
+
+const inputItems = (ctx: WebhookContext): Item[] =>
+  JSON.parse(JSON.stringify(ctx.evaluateExpression('={{ $input.all() }}', 0) ?? []));
+
+async function endingFiles(ctx: WebhookContext, items: Item[]): Promise<FormEndingFile[]> {
+  const files: FormEndingFile[] = [];
+  const names = String(ctx.getNodeParameter('inputDataFieldName', 0, 'data'))
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  for (const name of names) {
+    const found = items.flatMap((item) => (item.binary?.[name] ? [item.binary[name]] : []));
+    if (!found.length) {
+      throw new NodeOperationError(ctx.getNode(), `No binary data property "${name}" was found`);
+    }
+    for (const binary of found) {
+      files.push({
+        fileName: binary.fileName || name,
+        mimeType: binary.mimeType,
+        data: Buffer.from(await ctx.getBinaryBuffer(binary)).toString('base64'),
+      });
+    }
+  }
+  return files;
+}
+
+/** the Form node's ending: GET shows it, and its script's one POST lets the run finish */
+async function endingWebhook(
+  ctx: WebhookContext,
+  trigger: DataObject | undefined,
+  access: FormAccess,
+  isPage: boolean,
+): Promise<WebhookResponseData> {
+  const items = inputItems(ctx);
+  if (!isPage) {
+    return {
+      workflowData: [items],
+      webhookResponse: { statusCode: 200, headers: access.replyHeaders },
+    };
+  }
+  const options = ctx.getNodeParameter('options', 0, {}) as DataObject;
+  const respondWith = String(ctx.getNodeParameter('respondWith', 0, 'text'));
+  const redirectUrl =
+    respondWith === 'redirect'
+      ? safeRedirectUrl(String(ctx.getNodeParameter('redirectUrl', 0, '')))
+      : undefined;
+  const noUrl = respondWith === 'redirect' && !redirectUrl;
+  const page = renderCompletionPage({
+    pageTitle: String(options.formTitle || triggerText(ctx, trigger?.formTitle) || FINISHED_TITLE),
+    title: noUrl ? FINISHED_TITLE : String(ctx.getNodeParameter('completionTitle', 0, '') || FINISHED_TITLE),
+    message: noUrl ? FORM_DEFAULT_SUBMITTED_TEXT : String(ctx.getNodeParameter('completionMessage', 0, '')),
+    html: respondWith === 'showText' ? htmlParameter(ctx, 'responseText') : undefined,
+    redirectUrl,
+    files: respondWith === 'returnBinary' ? await endingFiles(ctx, items) : undefined,
+    customCss: options.customCss ? String(options.customCss) : undefined,
+    attribution: (options.appendAttribution ?? optionsOf(trigger).appendAttribution) !== false,
+    authToken: access.authToken,
+  });
+  return { webhookResponse: htmlReply(200, page, access.replyHeaders) };
+}
+
+/** the Form node's `webhook()` */
+export async function formNodeWebhook(ctx: WebhookContext): Promise<WebhookResponseData> {
+  const isPage = ctx.getRequestObject().method !== 'POST';
+  const trigger = triggerParameters(ctx);
+  const access = await triggerAccess(ctx, trigger, isPage);
+  if (access.denied) return access.denied;
+  if (ctx.getNodeParameter('operation', 0, 'page') === 'completion') {
+    return endingWebhook(ctx, trigger, access, isPage);
+  }
+
+  const triggerOptions = optionsOf(trigger);
+  const options = ctx.getNodeParameter('options', 0, {}) as DataObject;
+  const query = pageQuery(ctx, trigger);
+  const fields = pageFields(ctx);
+
+  if (isPage) {
+    const page = renderFormPage({
+      title: String(options.formTitle || triggerText(ctx, trigger?.formTitle)),
+      description: String(options.formDescription ?? ''),
+      fields: fields.map((field) => prefilled(field, query)),
+      buttonLabel: String(
+        options.buttonLabel || triggerText(ctx, triggerOptions.buttonLabel) || FORM_DEFAULT_BUTTON_LABEL,
+      ),
+      customCss: options.customCss ? String(options.customCss) : undefined,
+      testMode: ctx.getMode() === 'manual',
+      attribution: triggerOptions.appendAttribution !== false,
+      authToken: access.authToken,
+      submittedText: FORM_DEFAULT_SUBMITTED_TEXT,
+    });
+    return { webhookResponse: htmlReply(200, page, access.replyHeaders) };
+  }
+
+  const item = await outputItem(
+    ctx,
+    fields,
+    { useWorkflowTimezone: triggerOptions.useWorkflowTimezone } as DataObject,
+    query,
+  );
+  if (access.user && triggerOptions.includeUserInOutput !== false) item.json.user = access.user;
+  return {
+    workflowData: [[item]],
+    webhookResponse: { statusCode: 200, headers: access.replyHeaders },
+  };
+}
+
+/** Respond When and the Respond to Webhook nodes after this Wait have to agree (n8n's texts) */
+function responseModeProblem(ctx: WebhookContext, isPage: boolean): WebhookResponseData | undefined {
+  const usesNode = ctx.getNodeParameter('responseMode', 0, 'onReceived') === 'responseNode';
+  const hasNode = ctx.getChildNodes().some((child) => child.type === RESPOND_TO_WEBHOOK);
+  if (usesNode && !hasNode) {
+    return refused(
+      isPage,
+      500,
+      'No Respond to Webhook node found in the workflow',
+      'Insert a Respond to Webhook node to your workflow to respond to the form submission or choose another option for the "Respond When" parameter.',
+    );
+  }
+  if (!usesNode && hasNode) {
+    return refused(
+      isPage,
+      500,
+      `${ctx.getNode().name} node not correctly configured`,
+      'Set the "Respond When" parameter to "Using Respond to Webhook Node" or remove the Respond to Webhook node',
+    );
+  }
+  return undefined;
+}
+
+/** the Wait node's `webhook()` for "On Form Submitted" */
+export async function waitFormWebhook(ctx: WebhookContext): Promise<WebhookResponseData> {
+  const isPage = ctx.getRequestObject().method !== 'POST';
+  const options = ctx.getNodeParameter('options', 0, {}) as DataObject;
+  if (options.ignoreBots && isIgnoredBot(ctx)) return unauthorized();
+
+  const trigger = triggerParameters(ctx);
+  const own = String(ctx.getNodeParameter('authentication', 0, 'none'));
+  const access =
+    own === 'none'
+      ? await triggerAccess(ctx, trigger, isPage)
+      : await checkAccess(ctx, own, isPage, { scope: 'waiting', requireExecuteAccess: false });
+  if (access.denied) return access.denied;
+
+  const problem = responseModeProblem(ctx, isPage);
+  if (problem) return problem;
+
+  const query = pageQuery(ctx, trigger);
+  const fields = formFields(ctx);
+  const ending = completion(options);
+
+  if (isPage) {
+    const page = renderFormPage({
+      title: String(ctx.getNodeParameter('formTitle', 0, '')),
+      description: String(ctx.getNodeParameter('formDescription', 0, '')),
+      fields: fields.map((field) => prefilled(field, query)),
+      buttonLabel: FORM_DEFAULT_BUTTON_LABEL,
+      testMode: ctx.getMode() === 'manual',
+      attribution: options.appendAttribution !== false,
+      authToken: access.authToken,
+      ...ending,
+    });
+    return { webhookResponse: htmlReply(200, page, access.replyHeaders) };
+  }
+
+  const item = await outputItem(ctx, fields, options, query);
+  if (access.user) item.json.user = access.user;
+  return {
+    workflowData: [[item]],
+    webhookResponse: {
+      statusCode: 200,
+      headers: access.replyHeaders,
       body: ending.redirectUrl
         ? { redirectURL: ending.redirectUrl }
         : { formSubmittedText: ending.submittedText },

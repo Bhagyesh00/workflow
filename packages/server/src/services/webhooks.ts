@@ -3,6 +3,9 @@
  * test `/webhook-test/<tenantSlug>/<path>` and resume `/webhook-waiting/<executionId>/<signature>`.
  * Forms use the same handlers at `/form/...`, `/form-test/...` and `/form-waiting/...` (`kind: 'form'`).
  *
+ * Multi-page forms: a submission with a form page after it answers `{ formWaitingUrl }` or
+ * `{ redirectURL }`; the page polls `<formWaitingUrl>/n8n-execution-status` and goes on by itself.
+ *
  * Response modes: `onReceived` (answer at once), `lastNode` (answer with the last node's data),
  * `responseNode` (hold the request until a Respond to Webhook node answers or the run ends).
  *
@@ -33,6 +36,7 @@ import {
   isPlainObject,
   type WebhookRequest,
   type WebhookResponse,
+  type WebhookResponseData,
   Workflow,
   type WorkflowDefinition,
   type WorkflowNode,
@@ -125,6 +129,65 @@ const FORM_NOT_FOUND = {
   title: 'Problem loading form',
   message: 'This usually occurs if the workflow serving this form is deactivated or no longer exists',
 };
+const FORM_INVALID = { title: 'Problem loading form', message: 'This form link is not valid' };
+const FORM_BUSY = {
+  title: 'Problem loading form',
+  message: 'The workflow is still working on this form. Try again in a moment.',
+};
+const FORM_STOPPED = {
+  title: 'Problem loading form',
+  message: 'The workflow stopped before this form was finished',
+};
+const FORM_FINISHED = { title: 'Form Submitted', message: 'Your response has been recorded' };
+/** after the signed part of a `/form-waiting` URL: how far the run is */
+const FORM_STATUS_SUFFIX = 'n8n-execution-status';
+/** the run has persisted its wait well before this; a lost worker must not hold the page */
+const FORM_PAGE_READY_MS = 10_000;
+const WAITING_MESSAGE = 'Workflow is waiting';
+
+/** a node that shows a form page while the run waits at it */
+const isFormPage = (node: WorkflowNode | undefined): boolean => {
+  if (!node || node.disabled) return false;
+  return node.type === 'core.form' || (node.type === 'core.wait' && node.parameters.resume === 'form');
+};
+
+const formPageFollows = (workflow: Workflow, node: WorkflowNode): boolean =>
+  workflow.getChildNodes(node.name).some((name) => isFormPage(workflow.getNode(name)));
+
+const isHttpUrl = (value: string): boolean => {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * A later form page asks for the login of its Form Trigger: its webhook context reads that
+ * credential as its own. A credential of its own (Wait) stays.
+ */
+function withTriggerLogin(workflow: Workflow, node: WorkflowNode): WorkflowNode {
+  if (node.credentials?.httpBasicAuth) return node;
+  const trigger = workflow
+    .getParentNodes(node.name)
+    .map((name) => workflow.getNode(name))
+    .find((parent) => parent?.type === 'core.formTrigger');
+  const login = trigger?.credentials?.httpBasicAuth;
+  return login ? { ...node, credentials: { ...node.credentials, httpBasicAuth: login } } : node;
+}
+
+/** the headers of a preflight answer; requested headers are listed by name, `*` never covers `Authorization` */
+function preflightHeaders(methods: string[], requestHeaders: WebhookRequest['headers']) {
+  const reply: Record<string, string> = {
+    'access-control-allow-methods': [...new Set([...methods, 'OPTIONS'])].join(', '),
+    'access-control-max-age': '300',
+    vary: 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers',
+  };
+  const requested = headerNames(header(requestHeaders, 'access-control-request-headers'));
+  if (requested.length) reply['access-control-allow-headers'] = requested.join(', ');
+  return reply;
+}
 
 /** fixed texts only: nothing of the request or a workflow goes in this page */
 const formErrorPage = (statusCode: number, page: { title: string; message: string }): WebhookReply => ({
@@ -309,13 +372,7 @@ export class WebhookService {
       if (found && row && definition) target = { definition, nodeName: found.nodeName, workflowId: row.id };
     }
     if (!methods.length) return notRegistered('OPTIONS', path);
-    const reply: Record<string, string> = {
-      'access-control-allow-methods': [...new Set([...methods, 'OPTIONS'])].join(', '),
-      'access-control-max-age': '300',
-      vary: 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers',
-    };
-    const requestedHeaders = headerNames(header(headers, 'access-control-request-headers'));
-    if (requestedHeaders.length) reply['access-control-allow-headers'] = requestedHeaders.join(', ');
+    const reply = preflightHeaders(methods, headers);
     const nodeName = target?.nodeName;
     const node = target?.definition.nodes.find((n) => n.name === nodeName);
     if (!target || !node) return { statusCode: 204, headers: reply };
@@ -439,41 +496,83 @@ export class WebhookService {
   async handleWaiting(
     executionId: string,
     incoming: IncomingWebhook,
-    _kind: WebhookKind = 'webhook',
+    kind: WebhookKind = 'webhook',
   ): Promise<WebhookReply> {
-    const { repos, nodeTypes, executions } = this.deps;
+    const { repos, nodeTypes, executions, logger } = this.deps;
+    const notFound = (message: string) =>
+      formErrorFor(kind, incoming.headers, json(404, errorBody('not_found', message)), FORM_INVALID);
     // `<signature>[/<suffix>]`: an unsigned or forged URL is answered like an unknown execution
     const [signature = '', ...rest] = incoming.path.split('/');
-    if (!executions.verifyResumeSignature(executionId, signature))
-      return json(404, errorBody('not_found', 'Execution not found'));
+    if (!executions.verifyResumeSignature(executionId, signature)) return notFound('Execution not found');
     const path = rest.join('/');
     const tenantId = await repos.executions.findTenantOf(executionId);
-    if (!tenantId) return json(404, errorBody('not_found', 'Execution not found'));
+    if (!tenantId) return notFound('Execution not found');
     // every query below is scoped to the execution's own tenant
     const row = await repos.executions.get(tenantId, executionId);
     const data = await repos.executions.getData(tenantId, executionId);
     const tenant = await repos.tenants.get(tenantId);
-    if (!row || !data || !tenant) return json(404, errorBody('not_found', 'Execution not found'));
-    if (row.status !== 'waiting') return json(409, errorBody('not_waiting', 'The execution is not waiting'));
+    if (!row || !data || !tenant) return notFound('Execution not found');
 
     const definition = data.workflowData as unknown as WorkflowDefinition;
     const state = data.state as unknown as ExecutionState | null;
     const nodeName = state?.resultData.lastNodeExecuted;
     const node = definition.nodes.find((n) => n.name === nodeName);
+
+    if (kind === 'form' && path === FORM_STATUS_SUFFIX) {
+      const word = row.status === 'waiting' && isFormPage(node) ? 'form-waiting' : row.status;
+      // the page runs in the sandbox, with an opaque origin; the signature is what guards this
+      const headers = withCors(
+        { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+        '*',
+        incoming.headers,
+      );
+      return { statusCode: 200, headers, body: word };
+    }
+    if (row.status !== 'waiting') return this.notWaitingReply(kind, incoming, row.status);
+
     const type = node ? nodeTypes.get(node.type) : undefined;
     const workflow = new Workflow(definition, nodeTypes);
-    const hook = node && type ? nodeWebhooks(workflow, node, type, { restart: true })[0] : undefined;
+    const hooks = node && type ? nodeWebhooks(workflow, node, type, { restart: true }) : [];
+    // a Wait has hooks of both families and serves the one its Resume parameter picks
+    const family: WebhookKind | undefined =
+      node?.type === 'core.wait'
+        ? isFormPage(node)
+          ? 'form'
+          : 'webhook'
+        : hooks[0] && webhookUrlBase(hooks[0].description);
+    if (kind === 'form' ? family !== 'form' : family === 'form') {
+      return notFound('This execution does not resume on this path');
+    }
+    const own = hooks.filter((h) => webhookUrlBase(h.description) === kind);
+    const hook = own.find((h) => h.method === incoming.method) ?? own[0];
+    const source: CorsSource | undefined = node
+      ? { tenant, mode: row.mode as ExecutionMode, workflowId: row.workflowId ?? undefined, workflow, node }
+      : undefined;
+    const cors = async (reply: WebhookReply) =>
+      source ? this.decorate(reply, source, incoming.headers) : reply;
+
+    if (hook && incoming.method === 'OPTIONS') {
+      const methods = own.map((h) => h.method);
+      return cors({ statusCode: 204, headers: preflightHeaders(methods, incoming.headers) });
+    }
     if (hook && hook.method !== incoming.method) {
-      return json(404, errorBody('not_found', `This execution resumes on ${hook.method} requests`));
+      return cors(json(404, errorBody('not_found', `This execution resumes on ${hook.method} requests`)));
     }
     // a hook without its own path falls back to the node id; the resume URL then has no suffix
     const suffix = hook && hook.path !== (node?.webhookId || node?.id) ? hook.path : '';
-    if (hook && path !== suffix) {
-      return json(404, errorBody('not_found', 'This execution does not resume on this path'));
+    // the page that follows another goes to the bare form URL, whatever suffix its Wait has
+    if (hook && path !== suffix && !(kind === 'form' && !path)) {
+      return cors(json(404, errorBody('not_found', 'This execution does not resume on this path')));
     }
-    const { request } = await receive(incoming);
+    let request: WebhookRequest;
+    try {
+      ({ request } = await receive(incoming));
+    } catch (error) {
+      return cors(bodyErrorReply(error, kind));
+    }
 
     let output: Item[][];
+    let answer: WebhookResponse | undefined;
     if (node && type?.webhook && hook) {
       const services = await this.contextServices({
         tenant,
@@ -481,29 +580,122 @@ export class WebhookService {
         mode: row.mode as never,
         workflowId: row.workflowId ?? undefined,
       });
+      // the context sees what the node saw when it stopped: a page can read earlier nodes and its input
+      const runs = state?.resultData.runData[node.name];
+      const task = runs?.[runs.length - 1];
       const ctx = createWebhookContext(
-        { workflow, node, services, evaluator: this.evaluator, signal: AbortSignal.timeout(60_000) },
+        {
+          workflow,
+          node: kind === 'form' ? withTriggerLogin(workflow, node) : node,
+          services,
+          evaluator: this.evaluator,
+          signal: AbortSignal.timeout(60_000),
+          state: state ?? undefined,
+          runIndex: runs ? runs.length - 1 : undefined,
+          executeData: task
+            ? {
+                node: node.name,
+                data: { main: [task.data?.main?.[0] ?? []] },
+                source: { main: task.source ?? [] },
+              }
+            : undefined,
+        },
         request,
         hook.webhookName,
       );
-      const result = await type.webhook(ctx);
-      if (!result.workflowData) return fromWebhookResponse(result.webhookResponse ?? { statusCode: 200 });
+      let result: WebhookResponseData;
+      try {
+        result = await type.webhook(ctx);
+      } catch (error) {
+        if (kind !== 'form') throw error;
+        logger.warn({ err: error, tenantId, executionId, node: node.name }, 'Form page failed');
+        const message = row.mode === 'manual' ? (error as Error).message : 'The form could not be processed';
+        return cors(
+          formErrorFor(kind, incoming.headers, json(500, errorBody('webhook_error', message)), {
+            title: 'Problem loading form',
+            message,
+          }),
+        );
+      }
+      if (!result.workflowData)
+        return cors(fromWebhookResponse(result.webhookResponse ?? { statusCode: 200 }));
       output = result.workflowData;
+      answer = result.webhookResponse;
     } else {
       const body = request.body;
       output = [[{ json: isPlainObject(body) ? body : body === undefined || body === '' ? {} : { body } }]];
     }
 
-    const responseMode =
-      hook?.responseMode === 'streaming' ? 'lastNode' : (hook?.responseMode ?? 'onReceived');
+    // a submitted page with another page after it answers once the run stands there
+    const isFormSubmit = kind === 'form' && incoming.method === 'POST';
+    const pagesFollow = isFormSubmit && node !== undefined && formPageFollows(workflow, node);
+    const responseMode = pagesFollow
+      ? 'responseNode'
+      : hook?.responseMode === 'streaming'
+        ? 'lastNode'
+        : (hook?.responseMode ?? 'onReceived');
     const handle = this.responseHandle(responseMode);
     const resumed = await executions.resume(tenantId, executionId, output, {
       wait: responseMode !== 'onReceived',
       observer: responseMode === 'onReceived' ? undefined : handle.observer,
     });
-    if (!resumed) return json(409, errorBody('not_waiting', 'The execution is not waiting'));
-    if (responseMode === 'onReceived') return json(200, { message: 'Workflow was resumed' });
-    return this.awaitResponse(tenant, workflow, node!, hook!, resumed, handle);
+    if (!resumed) return cors(json(409, errorBody('not_waiting', 'The execution is not waiting')));
+    if (responseMode === 'onReceived') {
+      return cors(answer ? fromWebhookResponse(answer) : json(200, { message: 'Workflow was resumed' }));
+    }
+    const reply = await this.awaitResponse(
+      tenant,
+      workflow,
+      node!,
+      { ...hook!, responseMode },
+      resumed,
+      handle,
+    );
+    return cors(isFormSubmit ? await this.formSubmitReply(reply, resumed) : reply);
+  }
+
+  /** a form URL of a run that does not stand at a page: a finished run was answered, the rest cannot be */
+  private notWaitingReply(kind: WebhookKind, incoming: IncomingWebhook, status: string): WebhookReply {
+    const reply = json(409, errorBody('not_waiting', 'The execution is not waiting'));
+    if (kind !== 'form') return reply;
+    if (incoming.method === 'GET' && status === 'success') return formErrorPage(200, FORM_FINISHED);
+    const busy = status === 'new' || status === 'running';
+    return formErrorFor(kind, incoming.headers, reply, busy ? FORM_BUSY : FORM_STOPPED);
+  }
+
+  /**
+   * The page of a submit reads its answer with fetch, which would follow a 3xx with the same POST:
+   * a redirect becomes `{ redirectURL }`, a run that waits elsewhere first `{ formWaitingUrl }`.
+   */
+  private async formSubmitReply(reply: WebhookReply, execution: StartedExecution): Promise<WebhookReply> {
+    const formUrl = this.deps.executions.resumeFormUrl(execution.executionId);
+    if (
+      reply.statusCode === 202 &&
+      (reply.body as { message?: string } | undefined)?.message === WAITING_MESSAGE
+    ) {
+      return json(200, { formWaitingUrl: formUrl });
+    }
+    if (reply.statusCode < 300 || reply.statusCode >= 400) return reply;
+    const { location, ...headers } = reply.headers;
+    if (!location || !isHttpUrl(location)) {
+      return json(500, errorBody('bad_redirect', 'The form response has an invalid redirect URL'));
+    }
+    // the node asked for its own page before the engine stored the wait: that page opens only after it
+    if (location === formUrl) await this.settled(execution);
+    return { statusCode: 200, headers, body: { redirectURL: location } };
+  }
+
+  private async settled(execution: StartedExecution): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, FORM_PAGE_READY_MS);
+      timer.unref();
+    });
+    try {
+      await Promise.race([execution.finished, limit]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // -------------------------------------------------------------------------------------------
@@ -561,8 +753,14 @@ export class WebhookService {
       if (!result.workflowData) {
         reply = fromWebhookResponse(result.webhookResponse ?? { statusCode: 200, body: {} });
       } else {
-        const streaming = hook.responseMode === 'streaming' ? this.streamHandle(tenant) : undefined;
-        const handle = this.responseHandle(hook.responseMode);
+        // the submitter follows the run to its next page by polling, not on this request
+        const pagesFollow =
+          webhookUrlBase(hook.description) === 'form' &&
+          incoming.method === 'POST' &&
+          formPageFollows(workflow, node);
+        const responseMode = pagesFollow ? 'onReceived' : hook.responseMode;
+        const streaming = responseMode === 'streaming' ? this.streamHandle(tenant) : undefined;
+        const handle = this.responseHandle(responseMode);
         let execution: StartedExecution;
         try {
           execution = await executions.start({
@@ -576,9 +774,8 @@ export class WebhookService {
             userId: input.userId,
             // test runs use pinned data like other manual runs (the webhook's own output excluded)
             pinData: input.mode === 'manual' ? manualPinData(definition, node.name) : undefined,
-            wait: hook.responseMode !== 'onReceived',
-            observer:
-              streaming?.observer ?? (hook.responseMode === 'onReceived' ? undefined : handle.observer),
+            wait: responseMode !== 'onReceived',
+            observer: streaming?.observer ?? (responseMode === 'onReceived' ? undefined : handle.observer),
           });
         } catch (error) {
           if (error instanceof ApiError) {
@@ -591,7 +788,12 @@ export class WebhookService {
         input.onStarted?.(execution.executionId);
         if (streaming) {
           reply = streaming.attach(execution);
-        } else if (hook.responseMode === 'onReceived') {
+        } else if (pagesFollow) {
+          reply = fromWebhookResponse({
+            ...result.webhookResponse,
+            body: { formWaitingUrl: executions.resumeFormUrl(execution.executionId) },
+          });
+        } else if (responseMode === 'onReceived') {
           reply = result.webhookResponse
             ? fromWebhookResponse(result.webhookResponse)
             : json(this.responseCode(workflow, node), { message: 'Workflow was started' });
@@ -756,7 +958,7 @@ export class WebhookService {
   }
 
   private finishedWithoutResponse(outcome: ExecutionOutcome): WebhookReply {
-    if (outcome.status === 'waiting') return json(202, { message: 'Workflow is waiting' });
+    if (outcome.status === 'waiting') return json(202, { message: WAITING_MESSAGE });
     if (outcome.status !== 'success') return json(500, errorBody('workflow_error', 'Error in workflow'));
     return json(200, { message: 'Workflow finished without a response' });
   }
@@ -768,7 +970,7 @@ export class WebhookService {
     hook: NodeWebhook,
     outcome: ExecutionOutcome,
   ): Promise<WebhookReply> {
-    if (outcome.status === 'waiting') return json(202, { message: 'Workflow is waiting' });
+    if (outcome.status === 'waiting') return json(202, { message: WAITING_MESSAGE });
     if (outcome.status !== 'success') return json(500, errorBody('workflow_error', 'Error in workflow'));
     const statusCode = this.responseCode(workflow, node);
     const items = (outcome.lastNodeOutput ?? []).find((o) => o?.length) ?? [];
