@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { CodeRunnerInput } from '../src/engine/services';
 import { CodeExecutionError, IsolatedVmCodeRunner } from '../src/sandbox/code-runner';
 import { cappedWasmBytes, wasmMemoryMaxPages } from '../src/sandbox/python-assets';
-import { ISOLATE_SHIMS } from '../src/sandbox/python-bootstrap';
+import { ISOLATE_SHIMS, ISOLATE_WASM_GUARD } from '../src/sandbox/python-bootstrap';
 import { PyodideCodeRunner, type PyodideRunnerOptions } from '../src/sandbox/python-runner';
 
 const DENY = [
@@ -336,6 +336,64 @@ return {"found": found, "left": [m for m in sys.modules if m.split(".")[0] in ("
     );
     expect((error as Error).message).toContain("Import of standard library module 'os' is disallowed");
   });
+
+  it.each([
+    ['an attribute', 'import importlib\nreturn {"x": str(importlib.machinery.BuiltinImporter)}'],
+    ['import as', 'import importlib.machinery as m\nreturn {"x": str(m.BuiltinImporter)}'],
+    ['from import', 'from importlib.machinery import BuiltinImporter\nreturn {"x": str(BuiltinImporter)}'],
+    [
+      'import_module',
+      'import importlib\nreturn {"x": str(importlib.import_module("importlib.machinery").BuiltinImporter)}',
+    ],
+  ])('keeps importlib.machinery out through %s', async (_name, code) => {
+    const strict = make({ stdlibAllow: ['importlib'] });
+    const error = await failure(strict.run(all(code)));
+    expect((error as Error).message).toContain(
+      "Import of standard library module 'importlib.machinery",
+    );
+  });
+
+  it('leaves the parts of importlib that respect the lists', async () => {
+    const strict = make({ stdlibAllow: ['importlib', 'json'] });
+    const out = await strict.run(
+      all('import importlib\nimportlib.invalidate_caches()\nreturn {"x": importlib.import_module("json").loads("1")}'),
+    );
+    expect(out[0].json).toEqual({ x: 1 });
+    const open = make({ stdlibAllow: ['*'] });
+    const wide = await open.run(all('import importlib\nreturn {"x": importlib.util.find_spec("json") is not None}'));
+    expect(wide[0].json).toEqual({ x: true });
+  });
+
+  it('a missing attribute of an allowed module holds no real module', async () => {
+    const code = (read: string) =>
+      `import json\ntry:\n    json.nope\nexcept AttributeError as e:\n    return {"x": ${read}}`;
+    const strict = make({ stdlibAllow: ['json'] });
+    const error = await failure(strict.run(all(code('str(e.obj)'))));
+    expect((error as Error).message).toBe(
+      "Security violations detected:\nLine 5: Access to attribute 'obj' is disallowed, because it can be used to bypass security restrictions.",
+    );
+    const open = make({ stdlibAllow: ['json'], builtinsDeny: [] });
+    const out = await open.run(
+      all(code('[str(e), getattr(e, "ob" + "j"), getattr(e, "__con" + "text__")]')),
+    );
+    expect(out[0].json).toEqual({ x: ["module 'json' has no attribute 'nope'", null, null] });
+    const from = await failure(open.run(all('from json import nope\nreturn []')));
+    expect((from as Error).message).toContain("ImportError: cannot import name 'nope' from 'json'");
+  });
+
+  it('os.path comes with os and hands out no other module', async () => {
+    const strict = make({ stdlibAllow: ['os'] });
+    const out = await strict.run(
+      all(`import os
+import os.path as aliased
+from os import path
+from os.path import join
+return {"x": [os.path.join("a", "b"), aliased.join("a", "c"), path.join("a", "d"), join("a", "e")]}`),
+    );
+    expect(out[0].json).toEqual({ x: ['a/b', 'a/c', 'a/d', 'a/e'] });
+    const error = await failure(strict.run(all('import os\nreturn {"x": str(os.path.sys)}')));
+    expect((error as Error).message).toContain("Import of standard library module 'sys' is disallowed");
+  });
 });
 
 describe('Python builtins and the AST validator', () => {
@@ -370,6 +428,9 @@ describe('Python builtins and the AST validator', () => {
     'f_globals',
     'gi_frame',
     'tb_frame',
+    'obj',
+    'get_field',
+    'vformat',
   ])('blocks attribute %s', async (attr) => {
     const error = await failure(runner.run(all(`x = 1\nreturn {"x": str((1).${attr})}`)));
     expect((error as Error).message).toBe(
@@ -409,6 +470,14 @@ describe('Python builtins and the AST validator', () => {
     expect(called[0].json).toEqual({ x: '1!' });
     const list = await failure(runner.run(all('import os\nimport sys\nx = (1).__class__')));
     expect((list as Error).message.split('\n')).toHaveLength(4);
+  });
+
+  it('refuses string.Formatter reading a field whose name is built at run time', async () => {
+    const open = make({ stdlibAllow: ['string'] });
+    const error = await failure(
+      open.run(all('import string\nreturn {"x": str(string.Formatter().get_field("0." + "__cl" + "ass__", (1,), {}))}')),
+    );
+    expect((error as Error).message).toContain("Access to attribute 'get_field' is disallowed");
   });
 });
 
@@ -573,6 +642,127 @@ return {"ran": ran, "env": dict(os.environ)}`),
     expect((a[0].json.x as string).length).toBe(140000);
     expect((a[0].json.x as string).slice(0, 64)).not.toBe(b[0].json.x);
   });
+
+  it('random gives other numbers in every run', async () => {
+    const code = 'import random\nreturn {"x": [random.random(), random.randint(0, 10 ** 9)]}';
+    const a = await make({ stdlibAllow: ['random'] }).run(all(code));
+    const b = await make({ stdlibAllow: ['random'] }).run(all(code));
+    expect(a[0].json.x).not.toEqual(b[0].json.x);
+  });
+
+  it('leaves nothing of Pyodide in __main__ or on sys.meta_path, with every list set to all', async () => {
+    const out = await wide.run(
+      all(`import sys
+return {"core": "_pyodide_core" in vars(sys.modules["__main__"]), "finders": [repr(f) for f in sys.meta_path if "pyodide" in repr(f)]}`),
+    );
+    expect(out[0].json).toEqual({ core: false, finders: [] });
+  });
+
+  /** ctypes, when an admin allows it, is a way from Python into the isolate's JavaScript */
+  const inJs = (script: string) =>
+    `import ctypes\nreturn {"x": ctypes.CDLL(None).emscripten_run_script_int(b${JSON.stringify(script)})}`;
+
+  it('code that reaches the JavaScript cannot pass the cap with a new wasm memory', async () => {
+    const open = make({ stdlibAllow: ['ctypes'], memoryLimitMb: 128 });
+    const text = 'Code exceeded the memory limit of 128MB';
+    const memory = await failure(
+      open.run(
+        all(
+          inJs(
+            '(()=>{const m=new WebAssembly.Memory({initial:16384});const u=new Uint8Array(m.buffer);for(let i=0;i<u.length;i+=65536)u[i]=1;return u.length/1048576})()',
+          ),
+        ),
+      ),
+    );
+    expect((memory as Error).message).toBe(text);
+    const owned = await failure(
+      open.run(
+        all(
+          inJs(
+            '(()=>{const m=new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,5,4,1,0,128,2]));new WebAssembly.Instance(m);return 1})()',
+          ),
+        ),
+      ),
+    );
+    expect((owned as Error).message).toBe(text);
+  });
+
+  it('the wasm guard refuses a new memory for good and lets a module without one compile', async () => {
+    const out = await shimmed(async (context) => {
+      await context.eval('globalThis.older = new WebAssembly.Memory({ initial: 1 })');
+      await context.global.set('__compileLimit', 4096);
+      await context.eval(ISOLATE_WASM_GUARD);
+      return JSON.parse(
+        (await context.eval(
+          `(async () => {
+            const header = [0, 97, 115, 109, 1, 0, 0, 0];
+            const plain = new Uint8Array(header);
+            const withMemory = new Uint8Array([...header, 0, 2, 1, 97, 5, 3, 1, 0, 1]);
+            const refused = (work) => {
+              try {
+                work();
+                return false;
+              } catch (error) {
+                return /memory limit/.test(error.message);
+              }
+            };
+            const lying = new Uint8Array(withMemory);
+            Object.defineProperty(lying, 'buffer', { value: plain.buffer });
+            Object.defineProperty(lying, 'byteLength', { value: 8 });
+            const module = new WebAssembly.Module(plain);
+            const instance = new WebAssembly.Instance(module);
+            const compiled = await WebAssembly.compile(plain);
+            const instantiated = await WebAssembly.instantiate(plain);
+            const out = {
+              limitGone: !('__compileLimit' in globalThis),
+              memory: refused(() => new WebAssembly.Memory({ initial: 1 })),
+              memoryCall: refused(() => WebAssembly.Memory({ initial: 1 })),
+              noMemoryConstructor: older.constructor === Object && !refused(() => new older.constructor()),
+              noModuleConstructor: module.constructor === Object && instance instanceof WebAssembly.Instance,
+              isModule: module instanceof WebAssembly.Module && compiled instanceof WebAssembly.Module,
+              olderIsMemory: older instanceof WebAssembly.Memory,
+              instantiated: instantiated.instance instanceof WebAssembly.Instance,
+              exports: Array.isArray(WebAssembly.Module.exports(module)),
+              imports: Array.isArray(WebAssembly.Module.imports(module)),
+              sections: WebAssembly.Module.customSections(module, 'x').length,
+              withMemory: refused(() => new WebAssembly.Module(withMemory)),
+              withMemoryBuffer: refused(() => new WebAssembly.Module(withMemory.buffer)),
+              lying: refused(() => new WebAssembly.Module(lying)),
+              compile: await WebAssembly.compile(withMemory).then(() => 'compiled', (error) => error.message),
+              instantiate: await WebAssembly.instantiate(withMemory).then(() => 'made', (error) => error.message),
+            };
+            Object.defineProperty(Object.getPrototypeOf(Uint8Array.prototype), 'length', { get: () => 0 });
+            out.lengthGetter = refused(() => new WebAssembly.Module(withMemory));
+            const big = new Uint8Array(5000);
+            big.set([...header, 0, 0xfd, 0x26, 1, 97]);
+            out.total = refused(() => new WebAssembly.Module(big));
+            return JSON.stringify(out);
+          })()`,
+          { promise: true },
+        )) as string,
+      );
+    });
+    expect(out).toEqual({
+      limitGone: true,
+      memory: true,
+      memoryCall: true,
+      noMemoryConstructor: true,
+      noModuleConstructor: true,
+      isModule: true,
+      olderIsMemory: true,
+      instantiated: true,
+      exports: true,
+      imports: true,
+      sections: 0,
+      withMemory: true,
+      withMemoryBuffer: true,
+      lying: true,
+      compile: 'Code exceeded the memory limit',
+      instantiate: 'Code exceeded the memory limit',
+      lengthGetter: true,
+      total: true,
+    });
+  });
 });
 
 describe('Python limits', () => {
@@ -604,6 +794,11 @@ describe('Python limits', () => {
     // under the cap works
     const fits = await runner.run(all('x = bytearray(20 * 1024 * 1024)\nreturn [{"n": len(x)}]'));
     expect(fits[0].json).toEqual({ n: 20 * 1024 * 1024 });
+  });
+
+  it('runs 200 MB under the decided 256 MB cap', async () => {
+    const out = await make().run(all('x = bytearray(200 * 1024 * 1024)\nreturn [{"n": len(x)}]'));
+    expect(out[0].json).toEqual({ n: 200 * 1024 * 1024 });
   });
 
   it('patches the memory maximum of the wasm and leaves the rest of it', () => {

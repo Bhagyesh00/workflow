@@ -220,22 +220,27 @@ describe('Python runner tool mode', () => {
     expect(firstResult(items)).toBeNull();
   });
 
-  it('has _items too, as n8n does, but no _item', async () => {
-    const items = await pythonRunner.run(direct('return _items[0]["json"]["a"]', { query: 'q' }));
-    expect(firstResult(items)).toBe(1);
+  it('has _items as an empty list, since a tool run has no workflow items, and no _item', async () => {
+    const items = await pythonRunner.run(direct('return _items', { query: 'q' }));
+    expect(firstResult(items)).toEqual([]);
     await expect(pythonRunner.run(direct('return _item', { query: 'q' }))).rejects.toThrow('NameError');
   });
 
   it('keeps per-item code out of tool mode: one call, any value', async () => {
     const items = await pythonRunner.run(
-      direct('return [_query, _items[1]["json"]["a"]]', {
+      direct('return [_query, len(_items)]', {
         query: 'q',
         mode: 'runOnceForEachItem',
         items: [{ json: { a: 1 } }, { json: { a: 2 } }],
       }),
     );
     expect(items).toHaveLength(1);
-    expect(firstResult(items)).toEqual(['q', 2]);
+    expect(firstResult(items)).toEqual(['q', 0]);
+  });
+
+  it('gives the Code node its items', async () => {
+    const items = await pythonRunner.run(direct('return [{"n": len(_items)}]', {}));
+    expect(items.map((item) => item.json)).toEqual([{ n: 1 }]);
   });
 
   it('gives the Code node no _query and keeps its return rules', async () => {

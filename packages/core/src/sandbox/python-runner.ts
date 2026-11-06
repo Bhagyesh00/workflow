@@ -6,7 +6,8 @@
  * - Files are Emscripten's in-memory file system with the stdlib zip, plus the wheels a run imports.
  *   No socket, fetch or child exists: wasm cannot open one, and the shims offer none.
  * - Memory: the isolate's memoryLimit does not count wasm memory, so the wasm's own maximum is
- *   lowered (python-assets.ts). Time: the isolate is disposed at the timeout, which stops any loop.
+ *   lowered (python-assets.ts) and no other memory can be made (ISOLATE_WASM_GUARD).
+ * - Time: the isolate is disposed at the timeout, which stops any loop.
  * - Starting an interpreter takes seconds, so the first run builds a memory snapshot of a started one
  *   in its own isolate, before any user code exists. Every run restores that in about a second.
  *
@@ -199,7 +200,8 @@ export class PyodideCodeRunner implements CodeRunner {
     const payload = JSON.stringify({
       code: input.code,
       mode: input.mode,
-      items: input.items,
+      // a tool run has no workflow items, as in n8n; the name stays so code behaves the same
+      items: input.query === undefined ? input.items : [],
       query: input.query,
       stdlibAllow,
       externalAllow,
@@ -239,6 +241,7 @@ export class PyodideCodeRunner implements CodeRunner {
         () => new CodeExecutionError('Python could not start in time'),
       );
       await context.global.set('__payload', payload);
+      await context.global.set('__compileLimit', memoryLimitMb * 1024 * 1024);
       const json: string = await within(
         context.eval(ISOLATE_RUN, { promise: true }),
         timeoutMs,

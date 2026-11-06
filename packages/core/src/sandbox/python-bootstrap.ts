@@ -244,11 +244,77 @@ export const ISOLATE_MAKE_SNAPSHOT = `
 `;
 
 /**
+ * The isolate's memoryLimit does not count wasm memory or the bytes a compiled module keeps. Python can
+ * reach this JavaScript when an admin allows `ctypes` (emscripten_run_script) or `gc` (the real modules
+ * stay in memory), so the limit is kept here and not in Python. Pyodide is running by now, and a wheel's
+ * side module imports its memory, so no new memory is needed. `__compileLimit` is in bytes.
+ */
+export const ISOLATE_WASM_GUARD = `
+(() => {
+  const limit = __compileLimit;
+  delete globalThis.__compileLimit;
+  const Wasm = globalThis.WebAssembly;
+  const RealModule = Wasm.Module;
+  const RealMemory = Wasm.Memory;
+  const Bytes = Uint8Array;
+  const sizeOf = Function.prototype.call.bind(
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Bytes.prototype), 'length').get,
+  );
+  const MEMORY_SECTION = 5;
+  const WASM_HEADER_BYTES = 8;
+  const tooMuch = () => new Error('Code exceeded the memory limit');
+
+  function hasOwnMemory(bytes, size) {
+    let at = WASM_HEADER_BYTES;
+    while (at < size) {
+      const id = bytes[at++];
+      let length = 0;
+      let scale = 1;
+      let byte;
+      do {
+        byte = bytes[at++];
+        length += (byte & 0x7f) * scale;
+        scale *= 128;
+      } while (byte & 0x80);
+      if (id === MEMORY_SECTION) return true;
+      at += length;
+    }
+    return false;
+  }
+
+  let compiled = 0;
+  function Module(source) {
+    // what is compiled is this copy, so the bytes checked are the bytes used
+    const bytes = new Bytes(source);
+    const size = sizeOf(bytes);
+    compiled += size;
+    if (compiled > limit || hasOwnMemory(bytes, size)) throw tooMuch();
+    return new RealModule(bytes);
+  }
+  Module.prototype = RealModule.prototype;
+  Module.customSections = RealModule.customSections;
+  Module.exports = RealModule.exports;
+  Module.imports = RealModule.imports;
+  function Memory() {
+    throw tooMuch();
+  }
+  Memory.prototype = RealMemory.prototype;
+  // otherwise any module or memory object leads back to the real constructors
+  delete RealModule.prototype.constructor;
+  delete RealMemory.prototype.constructor;
+  Wasm.Module = Module;
+  Wasm.Memory = Memory;
+})();
+`;
+
+/**
  * Takes the guarded entry point out of the restored interpreter and calls it once with `__payload`.
- * Python's one way back to JavaScript is fetchWheel: a name in, a fixed in-memory file and a boolean
- * out. It has no prototype and throws nothing, so no JavaScript object reaches Python through it.
+ * The way back to JavaScript that the import rules leave is fetchWheel: a name in, a fixed in-memory
+ * file and a boolean out. It has no prototype and throws nothing, so no JavaScript object reaches
+ * Python through it.
  */
 export const ISOLATE_RUN = `
+${ISOLATE_WASM_GUARD}
 (async () => {
   const payload = __payload;
   delete globalThis.__payload;
@@ -314,6 +380,8 @@ def __make_sandbox():
         "__reduce__", "__reduce_ex__", "__self__", "__self_class__", "__set_name__", "__setattr__",
         "__setstate__", "__spec__", "__subclasses__", "__subclasshook__", "__thisclass__",
         "__traceback__", "__type_params__", "__wrapped__", "mro",
+        # an AttributeError's object, and string.Formatter's ways to read a field given as text
+        "obj", "get_field", "vformat",
         "ag_await", "ag_code", "ag_frame", "ag_running",
         "cr_await", "cr_code", "cr_frame", "cr_origin", "cr_running",
         "f_back", "f_builtins", "f_code", "f_globals", "f_lasti", "f_lineno", "f_locals", "f_trace",
@@ -416,6 +484,8 @@ def __make_sandbox():
 
     def make_import(options):
         transitive = options["allowTransitiveImports"]
+        # with everything allowed or transitive imports on, sys is open anyway
+        guard_importlib = not transitive and "*" not in options["stdlibAllow"]
 
         def module_view(module):
             view = ModuleView(module.__name__)
@@ -439,7 +509,26 @@ def __make_sandbox():
                     return checked_import_module
                 if target.__name__ == "importlib" and name == "__import__":
                     return checked_import
-                value = getattr(target, name)
+                # the rest of importlib loads any module (machinery.BuiltinImporter) past the lists
+                if (
+                    guard_importlib
+                    and root_of(target.__name__) == "importlib"
+                    and name != "invalidate_caches"
+                    and not name.startswith("__")
+                ):
+                    raise ImportError(STDLIB_TEXT.format("{}.{}".format(target.__name__, name), shown(options["stdlibAllow"])))
+                missing = None
+                try:
+                    value = getattr(target, name)
+                except AttributeError as error:
+                    missing = str(error)
+                if missing is not None:
+                    # raised out here, so its __context__ holds no real module; with a name set,
+                    # the interpreter does not fill in its obj
+                    raise AttributeError(missing, name=name)
+                # os.path is part of os, though its module is named posixpath
+                if target.__name__ == "os" and name == "path":
+                    return module_view(value)
                 if isinstance(value, types.ModuleType):
                     refusal = import_refusal(value.__name__, options)
                     if refusal and not (transitive and not is_blocked(root_of(value.__name__))):
@@ -506,7 +595,9 @@ def __make_sandbox():
         for name in list(sys.modules):
             if is_blocked(root_of(name)):
                 del sys.modules[name]
-        kept = [f for f in sys.meta_path if not is_blocked(root_of(getattr(type(f), "__module__", "")))]
+        # create_proxy is a way into JavaScript
+        sys.modules["__main__"].__dict__.pop("_pyodide_core", None)
+        kept = [f for f in sys.meta_path if not is_blocked(root_of(getattr(f, "__module__", "")))]
         finders = [BlockedFinder]
         if wheels["roots"] or wheels["unusable"]:
             os.makedirs(WHEELS_PATH)
@@ -514,6 +605,10 @@ def __make_sandbox():
             finders.append(make_wheel_finder(wheels, fetch_wheel))
         sys.meta_path[:] = finders + kept
         os.environ.clear()
+        # the snapshot holds a seeded generator, the same for every run
+        shared_random = sys.modules.get("random")
+        if shared_random:
+            shared_random.seed()
 
     def make_print(prints, state):
         def show(value):
