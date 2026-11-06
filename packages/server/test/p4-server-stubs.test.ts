@@ -272,7 +272,10 @@ describe('routes/data-tables.ts', () => {
       name: 'or',
       sortBy: { column: 'updatedAt', direction: 'asc' },
     });
-    expect((await send(instance, 'GET', `${base}?sortBy=size:asc`, 'viewer')).statusCode).toBe(400);
+    calls.length = 0;
+    await send(instance, 'GET', `${base}?sortBy=size:desc`, 'viewer');
+    expect(calls[0]?.args[1]).toMatchObject({ sortBy: { column: 'size', direction: 'desc' } });
+    expect((await send(instance, 'GET', `${base}?sortBy=bogus:asc`, 'viewer')).statusCode).toBe(400);
   });
 
   it('hands DELETE rows an empty filter so the service answers the "no filter" text', async () => {
