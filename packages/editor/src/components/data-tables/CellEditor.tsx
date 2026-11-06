@@ -4,14 +4,13 @@
  * they are stored and searched.
  */
 import type { DataTableCellValue, DataTableColumnType } from '@workflow/workflow';
-import { type KeyboardEvent, useRef, useState } from 'react';
+import { type KeyboardEvent, useCallback, useRef, useState } from 'react';
 import { Select } from '../ui/Field';
 
 /** above this many characters a cell shows a message instead of its value, as n8n */
 export const LARGE_VALUE_CHARS = 10_000;
 
-const dateInputValue = (value: DataTableCellValue) =>
-  typeof value === 'string' ? value.slice(0, 19) : '';
+const dateInputValue = (value: DataTableCellValue) => (typeof value === 'string' ? value.slice(0, 19) : '');
 
 export function CellValue({ value, type }: { value: DataTableCellValue; type: DataTableColumnType }) {
   if (value === null) return <span className="text-xs text-ink-3 italic">Null</span>;
@@ -42,8 +41,9 @@ export function CellEditor({
 }) {
   const settled = useRef(false);
   const nullButton = useRef<HTMLButtonElement>(null);
-  const initial =
-    type === 'date' ? dateInputValue(value) : value === null ? '' : String(value);
+  /** puts the cursor in the editor the moment it opens (a stable ref, so it runs once) */
+  const focusOnOpen = useCallback((element: HTMLElement | null) => element?.focus(), []);
+  const initial = type === 'date' ? dateInputValue(value) : value === null ? '' : String(value);
   const [draft, setDraft] = useState(initial);
   const [error, setError] = useState<string | null>(null);
 
@@ -125,7 +125,7 @@ export function CellEditor({
     <div className="flex flex-col gap-1">
       {type === 'string' ? (
         <textarea
-          autoFocus
+          ref={focusOnOpen}
           aria-label={label}
           rows={1}
           className={`${field} resize-y`}
@@ -139,7 +139,7 @@ export function CellEditor({
         />
       ) : (
         <input
-          autoFocus
+          ref={focusOnOpen}
           aria-label={label}
           aria-invalid={Boolean(error)}
           type={type === 'date' ? 'datetime-local' : 'text'}

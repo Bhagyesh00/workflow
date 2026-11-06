@@ -4,18 +4,18 @@
  * gets the same grid with nothing to change.
  */
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
+import type {
   DATA_TABLE_SYSTEM_COLUMNS,
-  type DataTableCellValue,
-  type DataTableColumn,
-  type DataTableColumnType,
-  type DataTableFilter,
-  type DataTablePage,
-  type DataTableRow,
-  type DataTableSortDirection,
+  DataTableCellValue,
+  DataTableColumn,
+  DataTableColumnType,
+  DataTableFilter,
+  DataTablePage,
+  DataTableRow,
+  DataTableSortDirection,
 } from '@workflow/workflow';
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Filter, Plus, Search, Trash2, X } from 'lucide-react';
-import { type DragEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { type DragEvent, type KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { dataTablesApi } from '../../api/endpoints';
 import { queryKeys } from '../../api/queries';
@@ -76,6 +76,7 @@ export function DataTableGrid({ table, canWrite }: { table: DataTableInfo; canWr
   const [adding, setAdding] = useState(false);
   const [saving, setSaving] = useState(0);
   const [saved, setSaved] = useState(false);
+  const pageSizeId = useId();
   const gridRef = useRef<HTMLTableElement>(null);
   const dragged = useRef<DataTableColumn | undefined>(undefined);
   const refocus = useRef<string | undefined>(undefined);
@@ -280,9 +281,7 @@ export function DataTableGrid({ table, canWrite }: { table: DataTableInfo; canWr
         column: Math.min(Math.max(columnIndex + move[1], 0), shown.length - 1),
       };
       setCursor(next);
-      gridRef.current
-        ?.querySelector<HTMLElement>(`[data-cell="${next.row}:${next.column}"]`)
-        ?.focus();
+      gridRef.current?.querySelector<HTMLElement>(`[data-cell="${next.row}:${next.column}"]`)?.focus();
     } else if ((event.key === 'Enter' || event.key === 'F2') && open) {
       event.preventDefault();
       open();
@@ -531,9 +530,10 @@ export function DataTableGrid({ table, canWrite }: { table: DataTableInfo; canWr
           </Button>
         )}
         <span className="flex-1" />
-        <label className="flex items-center gap-2 text-xs text-ink-2">
+        <label htmlFor={pageSizeId} className="flex items-center gap-2 text-xs text-ink-2">
           <span>Rows per page</span>
           <Select
+            id={pageSizeId}
             className="w-20"
             value={String(take)}
             onChange={(event) => {
