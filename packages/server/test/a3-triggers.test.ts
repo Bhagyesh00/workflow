@@ -245,6 +245,15 @@ describe('R21: binary data of activation-time contexts', () => {
     await client.data(client.post(`/rest/workflows/${wf.id}/deactivate`));
   });
 
+  it('polls once as the workflow is activated, not only on the schedule', async () => {
+    const { client } = await signup(server.app);
+    const hourly = { pollTimes: { item: [{ mode: 'everyHour', minute: 59 }] } };
+    const wf = await createWorkflow(client, { nodes: [node('Poller', 'a3.emptyPoll', hourly)] });
+    await activate(client, wf.id);
+    await waitFor(async () => polled.empty === 1, { timeout: 5000, message: 'the activation poll' });
+    await client.data(client.post(`/rest/workflows/${wf.id}/deactivate`));
+  });
+
   it('stores binaries emitted by trigger() in the execution directory', async () => {
     const { client, tenant } = await signup(server.app);
     const wf = await createWorkflow(client, { nodes: [node('Trigger', 'a3.binaryTrigger')] });

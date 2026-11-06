@@ -3,7 +3,7 @@
  * first event starts the test run and Stop closes it, on whichever main holds it.
  */
 import type { NodePackage, NodeTypeDescription, TriggerContext, TriggerRunResult } from '@workflow/workflow';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type ActiveWorkflowDeps, ActiveWorkflowManager } from '../src/services/active-workflows';
 import type { PushEvent } from '../src/services/bus';
 import type { Leadership } from '../src/services/queue';
@@ -37,6 +37,7 @@ let listening: TriggerContext | undefined;
 let modes: string[] = [];
 let closed = 0;
 let gate: Promise<void> | undefined;
+let sideEffects = 0;
 
 const countClose = async () => {
   closed++;
@@ -109,6 +110,13 @@ const listenPackage: NodePackage = {
       },
     },
     {
+      description: { ...description('tl.sideEffect'), group: ['transform'], inputs: ['main'] },
+      async execute(ctx) {
+        sideEffects++;
+        return [ctx.getInputData()];
+      },
+    },
+    {
       description: description('tl.neverStarts'),
       async trigger() {
         return new Promise(() => {});
@@ -135,6 +143,10 @@ beforeEach(async () => {
   modes = [];
   closed = 0;
   gate = undefined;
+  sideEffects = 0;
+});
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 const url = (id: string) => `/rest/workflows/${id}/listen-test-trigger`;
@@ -292,6 +304,76 @@ describe('POST /workflows/:id/listen-test-trigger', () => {
     expect(closed).toBe(2);
   });
 
+  it('two listen calls at once leave one listener, which Stop reaches', async () => {
+    const { client, tenant } = await signup(server.app);
+    const wf = await createWorkflow(client, events('tl.events'));
+    // both calls pass their stop with nothing to stop before either one sets its listener
+    const realPublish = server.ctx.bus.publish.bind(server.ctx.bus);
+    let bothStopping!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      bothStopping = resolve;
+    });
+    let stopping = 0;
+    vi.spyOn(server.ctx.bus, 'publish').mockImplementation(async (channel, message) => {
+      if ((message as { type?: string }).type === 'test-triggers:stop') {
+        if (++stopping === 2) bothStopping();
+        await barrier;
+      }
+      return realPublish(channel, message);
+    });
+
+    const row = await tenantRow(tenant.id);
+    const answers = await Promise.allSettled([
+      server.ctx.workflows.listenTestTrigger(row, wf.id, 'Events'),
+      server.ctx.workflows.listenTestTrigger(row, wf.id, 'Events'),
+    ]);
+    expect(answers.map((a) => a.status).sort()).toEqual(['fulfilled', 'rejected']);
+
+    await client.delete(url(wf.id));
+    await waitFor(async () => closed === modes.length);
+    expect(closed).toBeGreaterThan(0);
+  });
+
+  it('a test run uses the pinned data of the nodes after the trigger, as other manual runs do', async () => {
+    const { client, tenant } = await signup(server.app);
+    const wf = await client.data<{ id: string }>(
+      client.post('/rest/workflows', {
+        name: 'Pinned',
+        nodes: [node('Events', 'tl.events'), node('Send', 'tl.sideEffect', {}, [200, 0])],
+        connections: chain('Events', 'Send'),
+        pinData: { Events: [{ json: { pinned: 'trigger' } }], Send: [{ json: { pinned: 'send' } }] },
+      }),
+    );
+    await client.data(listen(client, wf.id, 'Events'));
+
+    listening?.emit([[{ json: { hello: 'world' } }]]);
+    const [run] = await waitFor(async () => {
+      const list = await runsOf(tenant.id);
+      return list.length && list[0].status === 'success' ? list : undefined;
+    });
+    expect(sideEffects).toBe(0);
+    const data = await server.ctx.repos.executions.getData(tenant.id, run.id);
+    const stored = data?.state as { resultData: { runData: Record<string, Array<{ data: unknown }>> } };
+    // the event, not the trigger's own pin, starts the run
+    expect(JSON.stringify(stored.resultData.runData.Events[0].data)).toContain('world');
+    expect(JSON.stringify(stored.resultData.runData.Send[0].data)).toContain('send');
+  });
+
+  it('the test run carries who started the listen', async () => {
+    const { client, tenant, user } = await signup(server.app);
+    const wf = await createWorkflow(client, events('tl.events'));
+    await client.data(listen(client, wf.id, 'Events'));
+
+    listening?.emit([[{ json: {} }]]);
+    const [run] = await waitFor(async () => {
+      const list = await runsOf(tenant.id);
+      return list.length ? list : undefined;
+    });
+    const data = await server.ctx.repos.executions.getData(tenant.id, run.id);
+    const runOptions = data?.runOptions as { userId?: string };
+    expect(runOptions.userId).toBe(user.id);
+  });
+
   it('a start that fails answers 400 with the reason', async () => {
     const { client, tenant } = await signup(server.app);
     const wf = await createWorkflow(client, events('tl.refuses'));
@@ -330,6 +412,12 @@ describe('POST /workflows/:id/listen-test-trigger', () => {
     // a real row: it shows in the execution list
     const [row] = await runsOf(tenant.id);
     expect(row).toMatchObject({ id: data.executionId, status: 'error', mode: 'manual' });
+    const stored = await server.ctx.repos.executions.getData(tenant.id, data.executionId);
+    const state = stored?.state as {
+      resultData: { error?: { message: string }; lastNodeExecuted?: string };
+    };
+    expect(state.resultData.error?.message).toBe('Events: Group authorization failed');
+    expect(state.resultData.lastNodeExecuted).toBe('Events');
     await waitFor(async () => closed === 1);
     unsubscribe();
   });

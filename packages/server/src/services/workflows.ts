@@ -872,6 +872,13 @@ export class WorkflowService {
     });
   }
 
+  /** why the triggers of a workflow are down; as in n8n, a workflow out of reach is a 400 */
+  async activationError(tenantId: string, id: string): Promise<string | null> {
+    const row = await this.repos.workflows.get(tenantId, id);
+    if (!row) throw ApiError.badRequest(`Workflow with ID "${id}" could not be found`);
+    return this.deps.activeWorkflows.activationErrorOf(id) ?? null;
+  }
+
   /** stops what listenTestTrigger started, on whichever main holds it */
   async stopTestTrigger(tenant: TenantRow, id: string): Promise<void> {
     await this.get(tenant.id, id);

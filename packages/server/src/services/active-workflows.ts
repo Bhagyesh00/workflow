@@ -83,6 +83,8 @@ interface ControlMessage {
   /** the reason of a `triggers:failed` answer */
   message?: string;
   node?: string | null;
+  /** a `triggers:start` whose asker does not act on a failure: the leader retries it by itself */
+  retry?: boolean;
   /** the test listener's node of a `test-webhooks:clear` */
   nodeName?: string;
   /** the main that sent a `test-webhooks:clear` or `test-triggers:stop`, which has already done its own part */
@@ -138,6 +140,12 @@ export interface TestTriggerEvents {
 }
 
 export const RESPOND_TO_WEBHOOK = 'core.respondToWebhook';
+
+/** the pinned data of a test run from `startNode`, whose own pin does not replace the event that starts it */
+export function manualPinData(definition: WorkflowDefinition, startNode: string) {
+  const entries = Object.entries(definition.pinData ?? {}).filter(([name]) => name !== startNode);
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
 
 /** path with parameter names erased: equal shapes match the same requests */
 const shapeOf = (path: string) =>
@@ -238,17 +246,33 @@ export class ActiveWorkflowManager {
       }
       if (!this.deps.leadership.isLeader) return;
       if (message.type === 'triggers:start') {
-        void this.answerRemoteStart(message.tenantId, message.workflowId, message.requestId);
+        void this.answerRemoteStart(message.tenantId, message.workflowId, message.requestId, message.retry);
       } else if (message.type === 'triggers:stop') {
         void this.stopTriggers(message.workflowId);
       }
     });
   }
 
-  /** leader: start the triggers another main asked for, log a failure and tell that main how it went */
-  private async answerRemoteStart(tenantId: string, workflowId: string, requestId?: string): Promise<void> {
+  /**
+   * Leader: start the triggers another main asked for, log a failure and tell that main how it went. A
+   * failure nobody acts on goes on the retry queue instead, as a start on this main does: a `retry` start
+   * (a rollback only logs it), or a start that outlasted the wait of the asker, which kept the activation.
+   */
+  private async answerRemoteStart(
+    tenantId: string,
+    workflowId: string,
+    requestId?: string,
+    retry = false,
+  ): Promise<void> {
     const { bus, logger } = this.deps;
-    const answer = await this.startTriggers(tenantId, workflowId, 'activate', true).then(
+    const waitEnds = Date.now() + (this.deps.triggerStartTimeoutMs ?? TRIGGER_START_TIMEOUT_MS);
+    const askerActs = () => !retry && Date.now() < waitEnds;
+    const answer = await this.startTriggers(
+      tenantId,
+      workflowId,
+      retry ? 'update' : 'activate',
+      askerActs,
+    ).then(
       (): Partial<ControlMessage> => ({ type: 'triggers:started' }),
       (error): Partial<ControlMessage> => {
         logger.warn({ err: error, tenantId, workflowId }, 'Trigger activation failed');
@@ -272,7 +296,7 @@ export class ActiveWorkflowManager {
    * while a new leader is elected nobody answers, and that leader's startAll() starts the triggers.
    * The timeout also bounds a publish that stalls; a publish that fails before the answer throws.
    */
-  private async startTriggersOnLeader(tenantId: string, workflowId: string): Promise<void> {
+  private async startTriggersOnLeader(tenantId: string, workflowId: string, retry = false): Promise<void> {
     const { bus } = this.deps;
     const requestId = randomUUID();
     const timeoutMs = this.deps.triggerStartTimeoutMs ?? TRIGGER_START_TIMEOUT_MS;
@@ -290,7 +314,13 @@ export class ActiveWorkflowManager {
     });
     const timer = setTimeout(() => settle(undefined), timeoutMs);
     try {
-      const published = bus.publish('control', { type: 'triggers:start', tenantId, workflowId, requestId });
+      const published = bus.publish('control', {
+        type: 'triggers:start',
+        tenantId,
+        workflowId,
+        requestId,
+        ...(retry ? { retry } : {}),
+      });
       published.catch(() => {});
       const answer = await Promise.race([published.then(() => answered), answered]);
       if (!answer) {
@@ -587,7 +617,9 @@ export class ActiveWorkflowManager {
       only: (n) => removed.get(n.name) !== hookSignature(n),
     }).catch(log('Restoring third-party webhooks failed'));
     if (this.deps.leadership.isLeader) await this.startTriggers(tenant.id, workflowId, 'update');
-    else await this.startTriggersOnLeader(tenant.id, workflowId).catch(log('Restarting triggers failed'));
+    else {
+      await this.startTriggersOnLeader(tenant.id, workflowId, true).catch(log('Restarting triggers failed'));
+    }
   }
 
   /**
@@ -779,6 +811,9 @@ export class ActiveWorkflowManager {
     };
     listener.timer = setTimeout(() => void this.closeTestListener(listener), ttlMs);
     listener.timer.unref();
+    // a listen call that overlaps this one passed the stop above too: only one listener stays reachable
+    const overlapping = this.testTriggers.get(listener.key);
+    if (overlapping) void this.closeTestListener(overlapping);
     this.testTriggers.set(listener.key, listener);
     try {
       const deps = await this.contextDeps(
@@ -902,6 +937,7 @@ export class ActiveWorkflowManager {
         executionId: listener.executionId,
         startNode: node.name,
         triggerItems: JSON.parse(JSON.stringify(items.length ? items : [{ json: {} }])),
+        pinData: manualPinData(workflow.definition, node.name),
         userId: events.userId,
         wait: Boolean(responsePromise),
         observer: this.responseObserver(tenant.id, workflow.id, node, responseHook),
@@ -1053,7 +1089,7 @@ export class ActiveWorkflowManager {
     tenantId: string,
     workflowId: string,
     mode: ActivationMode,
-    rethrow = false,
+    rethrow: boolean | (() => boolean) = false,
   ): Promise<void> {
     return this.serialize(workflowId, () => {
       // this start takes the place of a queued retry
@@ -1085,18 +1121,21 @@ export class ActiveWorkflowManager {
     return result;
   }
 
-  /** `rethrow`: the caller answers a failure (a publish). Otherwise the workflow goes on the retry queue. */
+  /**
+   * `rethrow`: the caller answers a failure (a publish), a function tells at the failure whether it still
+   * will. Otherwise the workflow goes on the retry queue.
+   */
   private async startTriggersNow(
     tenantId: string,
     workflowId: string,
     mode: ActivationMode,
-    rethrow: boolean,
+    rethrow: boolean | (() => boolean),
   ): Promise<void> {
     try {
       await this.startWorkflowTriggers(tenantId, workflowId, mode);
       this.activationErrors.delete(workflowId);
     } catch (error) {
-      if (rethrow) throw error;
+      if (typeof rethrow === 'function' ? rethrow() : rethrow) throw error;
       this.triggerFailed(tenantId, workflowId, toError(error));
     }
   }
@@ -1336,6 +1375,9 @@ export class ActiveWorkflowManager {
       const job = new Cron(expression, { timezone, protect: true }, () => void tick());
       entry.closers.push(async () => job.stop());
     }
+    // n8n polls once as the workflow is published, so the first check time is the activation time
+    // and an item that appears before the first scheduled poll is not lost (a restart does not)
+    if (mode === 'create' || mode === 'update' || mode === 'activate') void tick();
   }
 
   private async startFromTrigger(

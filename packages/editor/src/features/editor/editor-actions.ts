@@ -277,6 +277,8 @@ export async function runWorkflow(
 }
 
 let listenTimer: ReturnType<typeof setTimeout> | null = null;
+/** the newest listen call: the server closes a listener a newer call replaces, and that call fails */
+let listenCall = 0;
 
 function stopListeningAt(expiresAt: string): void {
   if (listenTimer) clearTimeout(listenTimer);
@@ -318,6 +320,7 @@ async function listenForTriggerEvent(deps: EditorDeps, nodeName: string): Promis
   const id = await ensureSaved(deps, true);
   if (!id) return;
   if (listenTimer) clearTimeout(listenTimer);
+  const call = ++listenCall;
   const run = useRunStore.getState();
   run.beginListening(id, { nodeName, expiresAt: '' }, ranDefinitionOf(useWorkflowStore.getState()));
   try {
@@ -331,8 +334,8 @@ async function listenForTriggerEvent(deps: EditorDeps, nodeName: string): Promis
       await workflowsApi.stopTestTrigger(id).catch(() => undefined);
     }
   } catch (error) {
-    // stopped while the call ran: the failure is the stop itself
-    if (useRunStore.getState().status !== 'listening') return;
+    // stopped or replaced while the call ran: the failure is the stop itself
+    if (call !== listenCall || useRunStore.getState().status !== 'listening') return;
     run.stopListening();
     toast.error('Could not listen for a test event', errorMessage(error));
   }
@@ -372,6 +375,22 @@ export function activationDetails(error: unknown): ActivationErrorDetail[] | nul
   return null;
 }
 
+/**
+ * Why an activate or publish failed: activation problems in their dialog, anything else in a toast. Both add
+ * the reason the server keeps for triggers that are down, as n8n's activation message does.
+ */
+export async function reportActivationFailure(id: string, title: string, error: unknown): Promise<void> {
+  const reason = await workflowsApi.activationError(id).catch(() => null);
+  const details = activationDetails(error);
+  const said = details ? details.map((d) => d.message).join(' ') : errorMessage(error);
+  const down = reason && !said.includes(reason) ? `The triggers are down: ${reason}` : null;
+  if (details) {
+    useUiStore.getState().setActivationErrors(down ? [...details, { node: '', message: down }] : details);
+  } else {
+    toast.error(title, down ? `${said} ${down}` : said);
+  }
+}
+
 export async function setWorkflowActive(deps: EditorDeps, active: boolean): Promise<boolean> {
   const id = await ensureSaved(deps, true);
   if (!id) return false;
@@ -382,13 +401,8 @@ export async function setWorkflowActive(deps: EditorDeps, active: boolean): Prom
     toast.success(dto.active ? 'Workflow activated' : 'Workflow deactivated');
     return true;
   } catch (error) {
-    const details = activationDetails(error);
-    if (details) useUiStore.getState().setActivationErrors(details);
-    else
-      toast.error(
-        active ? 'Could not activate the workflow' : 'Could not deactivate the workflow',
-        errorMessage(error),
-      );
+    if (active) await reportActivationFailure(id, 'Could not activate the workflow', error);
+    else toast.error('Could not deactivate the workflow', errorMessage(error));
     return false;
   }
 }

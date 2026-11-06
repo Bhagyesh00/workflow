@@ -14,12 +14,14 @@ import {
   isEventTrigger,
   listenForTestEvent,
   runWorkflow,
+  setWorkflowActive,
   stopExecution,
   webhookTriggerToListen,
 } from '../src/features/editor/editor-actions';
 import { ExecuteBar } from '../src/features/editor/ExecuteBar';
+import { publishWorkflow } from '../src/features/editor/publish-actions';
 import { useRunStore } from '../src/stores/run-store';
-import { useToastStore } from '../src/stores/ui-store';
+import { useToastStore, useUiStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
 import { backend, signedIn } from './backend';
 import { withProviders } from './utils';
@@ -142,6 +144,90 @@ describe('starting to listen', () => {
     await runWorkflow(deps, { destinationNode: 'Redis' });
     expect(useRunStore.getState().status).toBe('idle');
     expect(JSON.stringify(useToastStore.getState().toasts)).toContain('Connection refused');
+  });
+});
+
+describe('two listen calls at once', () => {
+  it('the older call failing because the newer one replaced it does not end the listening', async () => {
+    await open([nodeOf('Redis', 'app.redisTrigger')]);
+    const real = backend().handle.bind(backend());
+    let calls = 0;
+    vi.spyOn(backend(), 'handle').mockImplementation(async (request) =>
+      request.path.endsWith('/listen-test-trigger') && request.method === 'POST' && ++calls === 1
+        ? {
+            status: 400,
+            body: { error: { code: 'trigger_error', message: 'Redis: The test listener has stopped' } },
+          }
+        : real(request),
+    );
+    await Promise.all([listenForTestEvent(deps, 'Redis'), listenForTestEvent(deps, 'Redis')]);
+    expect(useRunStore.getState().status).toBe('listening');
+    expect(useToastStore.getState().toasts).toEqual([]);
+    await stopExecution();
+  });
+});
+
+describe('the reason kept for triggers that are down', () => {
+  const failingActivate = (
+    status: number,
+    message: string,
+    details?: unknown,
+    reason: string | null = null,
+  ) => {
+    const real = backend().handle.bind(backend());
+    vi.spyOn(backend(), 'handle').mockImplementation(async (request) => {
+      if (request.path.endsWith('/activate')) {
+        return { status, body: { error: { code: 'activation_failed', message, details } } };
+      }
+      if (request.path.startsWith('/active-workflows/error/')) return { status: 200, body: { data: reason } };
+      return real(request);
+    });
+  };
+  const toastText = () => JSON.stringify(useToastStore.getState().toasts);
+
+  beforeEach(() => {
+    useUiStore.setState({ activationErrors: null });
+  });
+
+  it('a failed activate says it in the toast', async () => {
+    await open([nodeOf('Redis', 'app.redisTrigger')]);
+    failingActivate(500, 'The server failed', undefined, 'Connection refused');
+    expect(await setWorkflowActive(deps, true)).toBe(false);
+    expect(toastText()).toContain('Could not activate the workflow');
+    expect(toastText()).toContain('The server failed The triggers are down: Connection refused');
+  });
+
+  it('a failed publish says it in the toast', async () => {
+    await open([nodeOf('Redis', 'app.redisTrigger')]);
+    failingActivate(500, 'The server failed', undefined, 'Connection refused');
+    expect(await publishWorkflow(deps)).toBe(false);
+    expect(toastText()).toContain("Couldn't publish the workflow");
+    expect(toastText()).toContain('The triggers are down: Connection refused');
+  });
+
+  it('a failure with activation problems adds it to their dialog', async () => {
+    await open([nodeOf('Redis', 'app.redisTrigger')]);
+    const details = [{ node: 'Redis', message: 'Bad password' }];
+    failingActivate(400, 'The workflow could not be activated', details, 'Connection refused');
+    expect(await publishWorkflow(deps)).toBe(false);
+    expect(useUiStore.getState().activationErrors).toEqual([
+      ...details,
+      { node: '', message: 'The triggers are down: Connection refused' },
+    ]);
+  });
+
+  it('adds nothing when the failure already says it, or no reason is kept', async () => {
+    await open([nodeOf('Redis', 'app.redisTrigger')]);
+    const details = [{ node: 'Redis', message: 'Connection refused' }];
+    failingActivate(400, 'The workflow could not be activated', details, 'Connection refused');
+    await publishWorkflow(deps);
+    expect(useUiStore.getState().activationErrors).toEqual(details);
+
+    vi.restoreAllMocks();
+    failingActivate(500, 'The server failed');
+    await setWorkflowActive(deps, true);
+    expect(toastText()).not.toContain('The triggers are down');
+    expect(toastText()).toContain('The server failed');
   });
 });
 

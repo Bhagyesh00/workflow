@@ -180,7 +180,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
     const auth = requireRole(request, 'editor');
     const { id } = parse(idParams, request.params);
     const { nodeName } = parse(z.object({ nodeName: z.string().min(1).max(256) }), request.body);
-    return { data: await workflows.listenTestTrigger(auth.tenant, id, nodeName) };
+    return { data: await workflows.listenTestTrigger(auth.tenant, id, nodeName, actor(request)) };
   });
 
   app.delete('/workflows/:id/listen-test-trigger', async (request) => {
@@ -188,6 +188,13 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
     const { id } = parse(idParams, request.params);
     await workflows.stopTestTrigger(auth.tenant, id);
     return { data: { ok: true } };
+  });
+
+  // why a published workflow's triggers are down (n8n's GET /active-workflows/error/:id)
+  app.get('/active-workflows/error/:id', async (request) => {
+    const auth = requireRole(request, 'viewer');
+    const { id } = parse(idParams, request.params);
+    return { data: await workflows.activationError(auth.tenant.id, id) };
   });
 
   app.get('/workflows/:id/webhook-urls', async (request) => {

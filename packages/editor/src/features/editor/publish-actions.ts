@@ -14,7 +14,7 @@ import type { PublishBody } from '../../api/types';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { reviewGate } from '../reviews/review-publish';
-import { activationDetails, type EditorDeps, saveWorkflow } from './editor-actions';
+import { type EditorDeps, reportActivationFailure, saveWorkflow } from './editor-actions';
 
 interface PublishTargetState {
   /** the version the dialog publishes; null = the draft (saved first) */
@@ -85,9 +85,7 @@ export async function publishWorkflow(deps: EditorDeps, body: PublishBody = {}):
     toast.success('Workflow published');
     return true;
   } catch (error) {
-    const details = activationDetails(error);
-    if (details) useUiStore.getState().setActivationErrors(details);
-    else toast.error("Couldn't publish the workflow", errorMessage(error));
+    await reportActivationFailure(target.id, "Couldn't publish the workflow", error);
     return false;
   } finally {
     bumpRevision();

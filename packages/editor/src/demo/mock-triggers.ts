@@ -15,6 +15,12 @@ function listeningOf(backend: MockBackend): Listening {
 }
 
 export function registerTriggerListenRoutes(backend: MockBackend): void {
+  // the demo has no running triggers, so none of them is down
+  backend.on('GET', '/active-workflows/error/:id', ({ params }) => {
+    backend.auth();
+    backend.workflow(params[0]);
+    return null;
+  });
   backend.on('POST', '/workflows/:id/listen-test-trigger', ({ params, body }) => {
     backend.requireRole('editor');
     const wf = backend.workflow(params[0]);

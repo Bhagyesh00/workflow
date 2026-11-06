@@ -291,7 +291,7 @@ describe('listen', () => {
     expect(listen.formTestUrls).toEqual([]);
   });
 
-  it('listen-test-trigger is 501 for an editor, 403 for a viewer, 401 signed out', async () => {
+  it('listen-test-trigger is 404 for an editor on an unknown workflow, 403 for a viewer, 401 signed out', async () => {
     const owner = await signup(server.app);
     const viewer = await member(owner, 'viewer');
     const editor = await member(owner, 'editor');
@@ -299,9 +299,9 @@ describe('listen', () => {
     expect((await new TestClient(server.app).post(url, { nodeName: 'A' })).statusCode).toBe(401);
     expect((await viewer.post(url, { nodeName: 'A' })).statusCode).toBe(403);
     expect((await viewer.delete(url)).statusCode).toBe(403);
-    expect((await editor.post(url, { nodeName: 'A' })).statusCode).toBe(501);
+    expect((await editor.post(url, { nodeName: 'A' })).statusCode).toBe(404);
     expect((await editor.post(url, {})).statusCode).toBe(400);
-    expect((await editor.delete(url)).statusCode).toBe(501);
+    expect((await editor.delete(url)).statusCode).toBe(404);
   });
 });
 
@@ -503,6 +503,7 @@ describe('every new /rest route requires its role', () => {
     ['POST', '/form-auth/code', 'viewer'],
     ['POST', `/workflows/${id}/listen-test-trigger`, 'editor'],
     ['DELETE', `/workflows/${id}/listen-test-trigger`, 'editor'],
+    ['GET', `/active-workflows/error/${id}`, 'viewer'],
   ];
 
   it('signed out 401, below the role 403, at the role the route answers', async () => {
@@ -522,7 +523,8 @@ describe('every new /rest route requires its role', () => {
       const lower = below[role];
       if (lower) expect((await lower.request(method, url, body)).statusCode, label).toBe(403);
       const res = await clients[role].request(method, url, body);
-      expect([200, 400, 501], `${label} ${res.body}`).toContain(res.statusCode);
+      // past the role gate: the handler answers (an unknown id is a 404, a bad body or id a 400)
+      expect([200, 400, 404], `${label} ${res.body}`).toContain(res.statusCode);
     }
   });
 });
@@ -713,12 +715,14 @@ describe('execution services', () => {
     return ctx.executions.buildServices({ tenant, executionId, mode: 'manual', workflowId: UNKNOWN_ID });
   };
 
-  it('resumeFormUrl is /form-waiting/<id> signed as resumeUrl', async () => {
+  it('resumeFormUrl is /form-waiting/<id> with its own signature', async () => {
     const owner = await signup(server.app);
     const built = await services(server.ctx, owner.tenant.id, UNKNOWN_ID);
-    const signature = built.resumeUrl?.split('/').at(-1);
+    const signature = String(built.resumeFormUrl).split('/').at(-1) ?? '';
     expect(built.resumeFormUrl).toBe(`${BASE_URL}/form-waiting/${UNKNOWN_ID}/${signature}`);
-    expect(server.ctx.executions.verifyResumeSignature(UNKNOWN_ID, String(signature))).toBe(true);
+    expect(signature).not.toBe(built.resumeUrl?.split('/').at(-1));
+    expect(server.ctx.executions.verifyResumeSignature(UNKNOWN_ID, signature, 'form')).toBe(true);
+    expect(server.ctx.executions.verifyResumeSignature(UNKNOWN_ID, signature)).toBe(false);
     expect((await services(server.ctx, owner.tenant.id, '')).resumeFormUrl).toBeUndefined();
   });
 
@@ -795,7 +799,7 @@ describe('context and test helpers', () => {
     const options = (on.pythonRunner as PyodideCodeRunner).options;
     const { config } = server.ctx;
     expect(options).toMatchObject({
-      memoryLimitMb: config.code.memoryMb,
+      memoryLimitMb: Math.max(config.code.memoryMb, 256),
       timeoutMs: config.code.timeoutMs,
       maxConcurrency: 5,
       stdlibAllow: [],

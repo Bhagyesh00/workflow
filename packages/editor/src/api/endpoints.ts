@@ -163,6 +163,8 @@ export const workflowsApi = {
   activate: (id: string, body?: PublishBody) =>
     api.post<WorkflowDTO>(`/workflows/${enc(id)}/activate`, body ?? {}),
   deactivate: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/deactivate`),
+  /** why the triggers of a published workflow are down, null when they are not */
+  activationError: (id: string) => api.get<string | null>(`/active-workflows/error/${enc(id)}`),
   archive: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/archive`),
   unarchive: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/unarchive`),
   move: (body: MoveWorkflowsBody) => api.post<{ moved: string[] }>('/workflows/move', body),

@@ -12,6 +12,8 @@ import type {
   WebhookResponse,
 } from '@workflow/workflow';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ActiveWorkflowManager } from '../src/services/active-workflows';
+import type { Leadership } from '../src/services/queue';
 import {
   closeBounded,
   TRIGGER_CLOSE_TIMEOUT_MS,
@@ -26,6 +28,7 @@ import {
   node,
   resetDatabase,
   signup as signupAs,
+  TestClient,
   type TestServer,
   waitFor,
 } from './helpers';
@@ -79,6 +82,13 @@ const runtimePackage: NodePackage = {
             remote.clients = remote.clients.filter((c) => c !== ctx);
           },
         };
+      },
+    },
+    {
+      description: description('rt.slowRefuses'),
+      async trigger() {
+        await new Promise((r) => setTimeout(r, 300));
+        throw new Error('Connection refused late');
       },
     },
     {
@@ -306,6 +316,118 @@ describe('restart after an error', () => {
     const tried = remote.attempts.length;
     await new Promise((r) => setTimeout(r, 1_300));
     expect(remote.attempts.length).toBe(tried);
+  });
+});
+
+describe('a start another main asked for', () => {
+  const notLeader: Leadership = { isLeader: false, start: async () => {}, stop: async () => {} };
+  const follower = (triggerStartTimeoutMs?: number) =>
+    new ActiveWorkflowManager({
+      config: server.ctx.config,
+      database: server.ctx.database,
+      repos: server.ctx.repos,
+      nodeTypes: server.ctx.registries.nodeTypes,
+      executions: server.ctx.executions,
+      logger: server.ctx.logger,
+      bus: server.ctx.bus,
+      leadership: notLeader,
+      triggerStartTimeoutMs,
+    });
+  /** the leader of the test server measures the wait with the same setting as the asker */
+  const leaderWait = (ms: number) => {
+    const { deps } = manager() as unknown as { deps: { triggerStartTimeoutMs?: number } };
+    deps.triggerStartTimeoutMs = ms;
+    return () => {
+      deps.triggerStartTimeoutMs = undefined;
+    };
+  };
+
+  it('a rollback that cannot restart the old version queues a retry on the leader', async () => {
+    const { wf, client, tenant } = await activated(reconnecting());
+    const updated = await client.data<{ versionId: string }>(
+      client.patch(`/rest/workflows/${wf.id}`, { name: 'Second', versionId: wf.versionId }),
+    );
+    // a second main publishes the new version while the broker is down
+    remote.up = false;
+    const warn = vi.spyOn(server.ctx.logger, 'warn');
+    const other = follower();
+    await expect(other.activate(tenant.id, wf.id, { versionId: updated.versionId })).rejects.toMatchObject({
+      code: 'activation_failed',
+    });
+
+    expect(warn.mock.calls.some((call) => call[1] === 'Restarting triggers failed')).toBe(false);
+    await waitFor(async () => manager().activationErrorOf(wf.id));
+    expect(manager().activationErrorOf(wf.id)).toContain('Connection refused');
+    remote.up = true;
+    await waitFor(async () => manager().runningWorkflowIds.includes(wf.id), LONG);
+    await waitFor(async () => !manager().activationErrorOf(wf.id), LONG);
+  });
+
+  it('a failure after the asker stopped waiting queues a retry, as nobody hears the answer', async () => {
+    const owner = await signup(server.app);
+    const wf = await createWorkflow(owner.client, { nodes: [node('Events', 'rt.slowRefuses')] });
+    const restore = leaderWait(100);
+    try {
+      const row = await follower(100).activate(owner.tenant.id, wf.id);
+      expect(row.active).toBe(true);
+      await waitFor(async () => manager().activationErrorOf(wf.id));
+      expect(manager().activationErrorOf(wf.id)).toContain('Connection refused late');
+    } finally {
+      restore();
+    }
+    await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/deactivate`));
+  });
+
+  it('a failure the asker still waits for only answers it', async () => {
+    const owner = await signup(server.app);
+    const wf = await createWorkflow(owner.client, reconnecting());
+    remote.up = false;
+    await expect(follower().activate(owner.tenant.id, wf.id)).rejects.toMatchObject({
+      code: 'activation_failed',
+    });
+    expect(manager().activationErrorOf(wf.id)).toBeUndefined();
+    const tried = remote.attempts.length;
+    await new Promise((r) => setTimeout(r, 1_300));
+    expect(remote.attempts.length).toBe(tried);
+  });
+});
+
+describe('GET /active-workflows/error/:id', () => {
+  const url = (id: string) => `/rest/active-workflows/error/${id}`;
+
+  it('answers why the triggers are down, and null once they are up', async () => {
+    const { wf, client } = await activated(reconnecting());
+    expect(await client.data(client.get(url(wf.id)))).toBeNull();
+    remote.up = false;
+    remote.drop();
+    await waitFor(async () => manager().activationErrorOf(wf.id));
+    expect(await client.data(client.get(url(wf.id)))).toContain('Connection lost');
+    remote.up = true;
+    await waitFor(async () => !manager().activationErrorOf(wf.id), LONG);
+    expect(await client.data(client.get(url(wf.id)))).toBeNull();
+  });
+
+  it('checks the role and the tenant', async () => {
+    const { wf, client } = await activated(reconnecting());
+    remote.up = false;
+    remote.drop();
+    await waitFor(async () => manager().activationErrorOf(wf.id));
+
+    const invite = await client.data<{ token: string }>(
+      client.post('/rest/members/invite', { email: 'viewer-p4-error@example.com', role: 'viewer' }),
+    );
+    const viewer = new TestClient(server.app);
+    await viewer.data(
+      viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'Viewer', password: 'Passw0rd!' }),
+    );
+    expect(await viewer.data(viewer.get(url(wf.id)))).toContain('Connection lost');
+
+    const other = await signup(server.app, { workspaceName: 'Other' });
+    const res = await other.client.get(url(wf.id));
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('could not be found');
+    expect(res.body).not.toContain('Connection lost');
+    expect((await new TestClient(server.app).get(url(wf.id))).statusCode).toBe(401);
   });
 });
 
