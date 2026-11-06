@@ -19,8 +19,12 @@ import {
 import kafkajs from 'kafkajs';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { credentials as allCredentials, nodes } from '../src';
-import { kafkaCredentialTest } from '../src/nodes/apps/kafka/client';
-import { guardedSocketFactory, kafkaTlsOptions, openKafka } from '../src/nodes/apps/kafka/client';
+import {
+  guardedSocketFactory,
+  kafkaCredentialTest,
+  kafkaTlsOptions,
+  openKafka,
+} from '../src/nodes/apps/kafka/client';
 import {
   compressLz4,
   compressSnappy,
@@ -280,9 +284,9 @@ describe('description', () => {
     expect(field('useSchemaRegistry')?.default).toBe(false);
     expect(field('schemaRegistryUrl')?.displayOptions).toEqual({ show: { useSchemaRegistry: [true] } });
 
-    const options = new Map(
-      (field('options')?.options as Array<{ name: string; default: unknown }>).map((o) => [o.name, o]),
-    );
+    const optionList = field('options')?.options as Array<{ name: string; default: unknown }> | undefined;
+    expect(optionList).toBeDefined();
+    const options = new Map((optionList ?? []).map((o) => [o.name, o]));
     const defaults = Object.fromEntries([...options].map(([name, o]) => [name, o.default]));
     expect(defaults).toEqual({
       autoCommitInterval: 0,
