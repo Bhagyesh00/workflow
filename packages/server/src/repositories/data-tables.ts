@@ -3,7 +3,7 @@
  * column name is never SQL text. Conditions come from services/data-table-filter.ts.
  */
 import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, inArray, type SQL, sql } from 'drizzle-orm';
+import { type AnyColumn, and, asc, desc, eq, inArray, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import {
   type DataTableColumnRow,
@@ -24,7 +24,7 @@ const DATA_TABLE_NODE_TYPES = ['core.dataTable', 'core.dataTableTool'];
 
 export interface DataTableListOptions {
   name?: string;
-  sortBy?: { column: 'name' | 'createdAt' | 'updatedAt'; direction: 'asc' | 'desc' };
+  sortBy?: { column: 'name' | 'createdAt' | 'updatedAt' | 'size'; direction: 'asc' | 'desc' };
   take: number;
   skip: number;
 }
@@ -86,18 +86,35 @@ export class DataTableRepository {
       .select({ count: sql<number>`count(*)::int` })
       .from(dataTables)
       .where(where);
+    const sort = options.sortBy ?? { column: 'updatedAt', direction: 'desc' };
+    const byDirection = (column: SQL | AnyColumn) => (sort.direction === 'desc' ? desc(column) : asc(column));
+    if (sort.column === 'size') {
+      // the size is the sum of the row sizes, as tableSizes counts it; an empty table is 0
+      const size = sql<string>`coalesce(sum(${dataTableRows.sizeBytes}), 0)`;
+      const sized = await this.db
+        .select({ table: dataTables })
+        .from(dataTables)
+        .leftJoin(
+          dataTableRows,
+          and(eq(dataTableRows.tenantId, dataTables.tenantId), eq(dataTableRows.tableId, dataTables.id)),
+        )
+        .where(where)
+        .groupBy(dataTables.id)
+        .orderBy(byDirection(size), asc(dataTables.id))
+        .limit(options.take)
+        .offset(options.skip);
+      return { count, rows: sized.map((row) => row.table) };
+    }
     const columns = {
       name: dataTables.name,
       createdAt: dataTables.createdAt,
       updatedAt: dataTables.updatedAt,
     };
-    const sort = options.sortBy ?? { column: 'updatedAt', direction: 'desc' };
-    const column = columns[sort.column];
     const rows = await this.db
       .select()
       .from(dataTables)
       .where(where)
-      .orderBy(sort.direction === 'desc' ? desc(column) : asc(column), asc(dataTables.id))
+      .orderBy(byDirection(columns[sort.column]), asc(dataTables.id))
       .limit(options.take)
       .offset(options.skip);
     return { count, rows };

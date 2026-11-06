@@ -6,7 +6,7 @@ import {
   type DataTableColumnInput,
   type DataTableColumnType,
 } from '@workflow/workflow';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { errorMessage } from '../../api/client';
 import { dataTablesApi } from '../../api/endpoints';
@@ -24,10 +24,12 @@ interface DraftColumn extends DataTableColumnInput {
   /** the name in the file */
   source: string;
   include: boolean;
+  /** identifies the entry in the list, whatever the name says */
+  key: number;
 }
 
 const DUPLICATE = 'Column names must be different';
-/** the server matches a renamed column by place, and leaving one out removes that */
+/** renaming while leaving a column out is not offered; delete the column after the table is made */
 const RENAME_AND_LEAVE_OUT =
   'Include every column to rename one. You can delete a column after the table is made.';
 
@@ -38,7 +40,13 @@ function columnError(column: DraftColumn, all: DraftColumn[]): string | null {
   return all.filter((c) => c.include && c.name === column.name).length > 1 ? DUPLICATE : null;
 }
 
-export function CreateTableDialog({ initialName = '', onClose }: { initialName?: string; onClose: () => void }) {
+export function CreateTableDialog({
+  initialName = '',
+  onClose,
+}: {
+  initialName?: string;
+  onClose: () => void;
+}) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [name, setName] = useState(initialName);
@@ -48,6 +56,7 @@ export function CreateTableDialog({ initialName = '', onClose }: { initialName?:
   const [preview, setPreview] = useState<DataTableCsvPreview>();
   const [columns, setColumns] = useState<DraftColumn[]>([]);
   const [saving, setSaving] = useState(false);
+  const nextKey = useRef(0);
 
   const fromCsv = source === 'csv';
   const trimmed = name.trim();
@@ -55,8 +64,7 @@ export function CreateTableDialog({ initialName = '', onClose }: { initialName?:
   const included = columns.filter((column) => column.include);
   const renameConflict =
     included.length < columns.length && included.some((column) => column.name !== column.source);
-  const csvReady =
-    Boolean(preview) && included.length > 0 && !errors.some(Boolean) && !renameConflict;
+  const csvReady = Boolean(preview) && included.length > 0 && !errors.some(Boolean) && !renameConflict;
   const canSubmit = trimmed.length > 0 && trimmed.length <= DATA_TABLE_NAME_MAX && (!fromCsv || csvReady);
 
   const readPreview = async (picked: { name: string; text: string }, headers: boolean) => {
@@ -66,7 +74,9 @@ export function CreateTableDialog({ initialName = '', onClose }: { initialName?:
       const answer = await dataTablesApi.csvPreview(picked.text, headers);
       setFile(picked);
       setPreview(answer);
-      setColumns(answer.columns.map((c) => ({ ...c, source: c.name, include: true })));
+      setColumns(
+        answer.columns.map((c) => ({ ...c, source: c.name, include: true, key: nextKey.current++ })),
+      );
     } catch (cause) {
       setFile(undefined);
       toast.error('Error uploading CSV file', errorMessage(cause));
@@ -82,7 +92,13 @@ export function CreateTableDialog({ initialName = '', onClose }: { initialName?:
     try {
       const table = await dataTablesApi.create({
         name: trimmed,
-        columns: included.map(({ name: column, type }) => ({ name: column, type })),
+        columns: fromCsv
+          ? included.map(({ name: column, type, source: header }) => ({
+              name: column,
+              type,
+              csvColumnName: header,
+            }))
+          : [],
         ...(fromCsv ? { csv: file?.text, hasHeaders } : {}),
       });
       await queryClient.invalidateQueries({ queryKey: ['data-tables'] });
@@ -184,8 +200,7 @@ export function CreateTableDialog({ initialName = '', onClose }: { initialName?:
             <p className="text-sm text-ink-2">{previewSummary(preview)}</p>
             <ul className="wf-scroll flex max-h-64 flex-col gap-2 overflow-auto">
               {columns.map((column, index) => (
-                // biome-ignore lint/suspicious/noArrayIndexKey: its place in the file identifies a column, names repeat and change while typing
-                <li key={index} className="flex flex-col gap-1">
+                <li key={column.key} className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">
                     <input
                       type="checkbox"
@@ -206,9 +221,7 @@ export function CreateTableDialog({ initialName = '', onClose }: { initialName?:
                       className="w-32 shrink-0"
                       disabled={!column.include}
                       value={column.type}
-                      onChange={(event) =>
-                        patch(index, { type: event.target.value as DataTableColumnType })
-                      }
+                      onChange={(event) => patch(index, { type: event.target.value as DataTableColumnType })}
                     >
                       {DATA_TABLE_COLUMN_TYPES.map((value) => (
                         <option key={value} value={value}>

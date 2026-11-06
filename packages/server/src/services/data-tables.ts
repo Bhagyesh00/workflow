@@ -407,7 +407,7 @@ export class DataTableService {
     const { repos } = this.deps;
     const { count, rows } = await repos.dataTables.list(tenantId, {
       name: query.name,
-      sortBy: query.sortBy as Parameters<Repositories['dataTables']['list']>[1]['sortBy'],
+      sortBy: query.sortBy,
       take: Math.min(query.take ?? DATA_TABLE_ROWS_TAKE_MAX, DATA_TABLE_ROWS_TAKE_MAX),
       skip: query.skip ?? 0,
     });

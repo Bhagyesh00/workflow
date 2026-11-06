@@ -612,7 +612,8 @@ export type {
 /** POST /data-tables; with `csv` the rows of the CSV text become the first rows */
 export interface DataTableCreateBody {
   name: string;
-  columns: DataTableColumnInput[];
+  /** `csvColumnName`: the header of the CSV column that fills the column */
+  columns: Array<DataTableColumnInput & { csvColumnName?: string }>;
   csv?: string;
   hasHeaders?: boolean;
 }

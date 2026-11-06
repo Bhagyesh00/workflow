@@ -1147,3 +1147,157 @@ describe('dependencies and favorites', () => {
     expect(rows).toEqual([]);
   });
 });
+
+describe('fix round: text Postgres refuses, filters, size sort, CSV source, table lock', () => {
+  it('answers 400, not 500, for a NUL byte or half a surrogate pair', async () => {
+    const owner = await signup();
+    const table = await makeTable(owner);
+    for (const bad of ['a\u0000b', 'a\ud800b']) {
+      expect(
+        (await errorOf(owner.client.post(`/rest/data-tables/${table.id}/insert`, { data: [{ title: bad }] })))
+          .status,
+      ).toBe(400);
+      expect((await errorOf(owner.client.post('/rest/data-tables', { name: bad, columns: [] }))).status).toBe(
+        400,
+      );
+      // a half pair cannot be URL encoded, so the search holds the NUL only
+      if (bad.includes('\u0000')) {
+        expect(
+          (await errorOf(owner.client.get(`/rest/data-tables/${table.id}/rows?search=%00`))).status,
+        ).toBe(400);
+      }
+      const filter = { type: 'and', filters: [{ columnName: 'title', condition: 'like', value: bad }] };
+      expect(
+        (
+          await errorOf(
+            owner.client.get(`/rest/data-tables/${table.id}/rows?${filterQuery(filter).slice(1)}`),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    // a CSV with a NUL passes the preview and is refused on import
+    const csv = 'title\nx\u0000y\n';
+    expect(
+      (await errorOf(owner.client.post(`/rest/data-tables/${table.id}/import-csv`, { csv }))).status,
+    ).toBe(400);
+    expect((await rowsOf(owner, table.id)).count).toBe(0);
+  });
+
+  it('a filter clause without a condition means eq, and like needs a text value', async () => {
+    const owner = await signup();
+    const table = await makeTable(owner);
+    await insert(owner, table.id, [{ title: 'a' }, { title: 'b' }]);
+    const bare = { type: 'and', filters: [{ columnName: 'title', value: 'b' }] };
+    expect((await rowsOf(owner, table.id, filterQuery(bare))).data.map((r) => r.title)).toEqual(['b']);
+    const nullLike = { type: 'and', filters: [{ columnName: 'title', condition: 'like', value: null }] };
+    expect(
+      (
+        await errorOf(
+          owner.client.get(`/rest/data-tables/${table.id}/rows?${filterQuery(nullLike).slice(1)}`),
+        )
+      ).status,
+    ).toBe(400);
+    const numberLike = { type: 'and', filters: [{ columnName: 'title', condition: 'ilike', value: 5 }] };
+    expect(
+      (
+        await errorOf(
+          owner.client.get(`/rest/data-tables/${table.id}/rows?${filterQuery(numberLike).slice(1)}`),
+        )
+      ).status,
+    ).toBe(400);
+    // no % is "contains", _ is a plain character
+    await insert(owner, table.id, [{ title: 'x_y' }, { title: 'xzy' }]);
+    const like = (value: string) => ({
+      type: 'and',
+      filters: [{ columnName: 'title', condition: 'like', value }],
+    });
+    expect((await rowsOf(owner, table.id, filterQuery(like('x_y')))).data.map((r) => r.title)).toEqual([
+      'x_y',
+    ]);
+    expect((await rowsOf(owner, table.id, filterQuery(like('x%y')))).data.map((r) => r.title)).toEqual([
+      'x_y',
+      'xzy',
+    ]);
+  });
+
+  it('sorts the list by size, largest and smallest, with an empty table as 0', async () => {
+    const owner = await signup();
+    const big = await makeTable(owner, 'Big');
+    const small = await makeTable(owner, 'Small');
+    await makeTable(owner, 'Empty');
+    await insert(
+      owner,
+      big.id,
+      Array.from({ length: 20 }, (_, i) => ({ title: `row ${i} ${'x'.repeat(50)}` })),
+    );
+    await insert(owner, small.id, [{ title: 'a' }]);
+    const names = async (query: string) =>
+      (await owner.client.data(owner.client.get(`/rest/data-tables?${query}`))).data.map(
+        (t: { name: string }) => t.name,
+      );
+    expect(await names('sortBy=size:desc')).toEqual(['Big', 'Small', 'Empty']);
+    expect(await names('sortBy=size:asc')).toEqual(['Empty', 'Small', 'Big']);
+    expect(await names('sortBy=size:desc&take=1&skip=1')).toEqual(['Small']);
+    const page = await owner.client.data(
+      owner.client.get('/rest/data-tables?sortBy=size:desc&filter=%7B%22name%22%3A%22sma%22%7D'),
+    );
+    expect(page.count).toBe(1);
+  });
+
+  it('creates from CSV by the source column, so a renamed column keeps its data', async () => {
+    const owner = await signup();
+    const made = await owner.client.data(
+      owner.client.post('/rest/data-tables', {
+        name: 'Swapped',
+        columns: [
+          { name: 'b', type: 'string', csvColumnName: 'a' },
+          { name: 'x', type: 'string', csvColumnName: 'b' },
+          { name: 'c', type: 'string', csvColumnName: 'c' },
+        ],
+        csv: 'a,b,c\n1,2,3\n',
+      }),
+    );
+    expect((await rowsOf(owner, made.id)).data[0]).toMatchObject({ b: '1', x: '2', c: '3' });
+    const missing = await errorOf(
+      owner.client.post('/rest/data-tables', {
+        name: 'Missing',
+        columns: [{ name: 'y', type: 'string', csvColumnName: 'nope' }],
+        csv: 'a\n1\n',
+      }),
+    );
+    expect(missing).toEqual({ status: 400, message: "Column 'nope' is not in the CSV file" });
+  });
+
+  it('reads the columns under the table lock: a rename that commits first is seen', async () => {
+    const owner = await signup();
+    const table = await makeTable(owner, 'Locked', [{ name: 'city', type: 'string' }]);
+    const client = await server.ctx.database.pool.connect();
+    try {
+      await client.query('begin');
+      await client.query('select 1 from data_tables where id = $1 for update', [table.id]);
+      await client.query("update data_table_columns set name = 'town' where table_id = $1", [table.id]);
+      const access = server.ctx.dataTables.forTenant(owner.tenant.id);
+      const pending = access.insertRows(table.id, [{ town: 'Pune' }], 'all');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await client.query('commit');
+      const [row] = await pending;
+      expect(row).toMatchObject({ town: 'Pune' });
+      expect(Object.keys((await dataOf(table.id))[0].data)).toEqual(['town']);
+    } finally {
+      client.release();
+    }
+  });
+
+  it('a table that goes before the write answers the not-found text', async () => {
+    const owner = await signup();
+    const table = await makeTable(owner, 'Gone');
+    const service = server.ctx.dataTables as unknown as {
+      writeRows(tenantId: string, id: string, rows: unknown[]): Promise<unknown>;
+    };
+    await owner.client.data(owner.client.delete(`/rest/data-tables/${table.id}`));
+    await expect(service.writeRows(owner.tenant.id, table.id, [{ title: 'a' }])).rejects.toMatchObject({
+      statusCode: 404,
+      message: DATA_TABLE_ERRORS.tableIdNotFound(table.id),
+    });
+  });
+});

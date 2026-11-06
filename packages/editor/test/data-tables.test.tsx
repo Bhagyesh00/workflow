@@ -409,8 +409,9 @@ describe('import and download', () => {
     await waitFor(() => expect(created).toHaveLength(2));
     await waitFor(() =>
       expect(
-        backend().requests.filter((r) => r.path.endsWith('/download-csv')).at(-1)?.query
-          ?.includeSystemColumns,
+        backend()
+          .requests.filter((r) => r.path.endsWith('/download-csv'))
+          .at(-1)?.query?.includeSystemColumns,
       ).toBe('false'),
     );
     const { csvContent } = await dataTablesApi.downloadCsv(table.id, false);
@@ -612,5 +613,152 @@ describe('the demo backend keeps the server rules', () => {
     expect(() =>
       simulateDataTableNode(tableNode({ operation: 'get', dataTableId: rl('Gone', 'name') }), [{ json: {} }]),
     ).toThrow(DATA_TABLE_ERRORS.tableNameNotFound('Gone'));
+  });
+});
+
+describe('fix round: size sort, kept sort, CSV source, demo node', () => {
+  it('sorts by size, largest and smallest, and keeps the sort for the next visit', async () => {
+    const big = await dataTablesApi.create({ name: 'Big', columns: [{ name: 'a', type: 'string' }] });
+    await dataTablesApi.create({ name: 'Empty', columns: [] });
+    const small = await dataTablesApi.create({ name: 'Small', columns: [{ name: 'a', type: 'string' }] });
+    await dataTablesApi.insertRows(
+      big.id,
+      Array.from({ length: 10 }, () => ({ a: 'x'.repeat(80) })),
+      'count',
+    );
+    await dataTablesApi.insertRows(small.id, [{ a: 'y' }], 'count');
+    const { unmount } = await openList();
+    await screen.findByRole('link', { name: 'Big' });
+    const options = within(screen.getByLabelText('Sort data tables'))
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+    expect(options).toEqual(expect.arrayContaining(['Largest', 'Smallest']));
+
+    fireEvent.change(screen.getByLabelText('Sort data tables'), { target: { value: 'size:desc' } });
+    await waitFor(() => expect(cardNames()).toEqual(['Big', 'Small', 'Empty']));
+    fireEvent.change(screen.getByLabelText('Sort data tables'), { target: { value: 'size:asc' } });
+    await waitFor(() => expect(cardNames()).toEqual(['Empty', 'Small', 'Big']));
+    unmount();
+
+    await openList();
+    expect((screen.getByLabelText('Sort data tables') as HTMLSelectElement).value).toBe('size:asc');
+    await waitFor(() => expect(cardNames()).toEqual(['Empty', 'Small', 'Big']));
+  });
+
+  it('opens on the first sort when the saved one is unknown or storage is blocked', async () => {
+    window.localStorage.setItem('workflow.dataTables.sort', 'colour:asc');
+    const first = await openList();
+    expect((screen.getByLabelText('Sort data tables') as HTMLSelectElement).value).toBe('updatedAt:desc');
+    first.unmount();
+    const get = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    await openList();
+    expect((screen.getByLabelText('Sort data tables') as HTMLSelectElement).value).toBe('updatedAt:desc');
+    get.mockRestore();
+  });
+
+  describe('create dialog', () => {
+    async function openDialog() {
+      await openList();
+      await userEvent.click(screen.getByRole('button', { name: 'New data table' }));
+      return screen.findByRole('dialog', { name: 'New data table' });
+    }
+
+    it('sends the columns it detected only while Import CSV is chosen', async () => {
+      const user = userEvent.setup();
+      const dialog = await openDialog();
+      await user.type(within(dialog).getByLabelText('Name'), 'Blank');
+      await user.click(within(dialog).getByRole('radio', { name: 'Import CSV' }));
+      await user.upload(within(dialog).getByLabelText('CSV file'), csvFile('a,b\n1,2\n'));
+      await within(dialog).findByText('1 row, 2 columns');
+      await user.click(within(dialog).getByRole('radio', { name: 'From scratch' }));
+      await user.click(within(dialog).getByRole('button', { name: 'Create' }));
+      await waitFor(() =>
+        expect(backend().requests.some((r) => r.method === 'POST' && r.path === '/data-tables')).toBe(true),
+      );
+      const post = backend().requests.find((r) => r.method === 'POST' && r.path === '/data-tables');
+      expect(post?.body).toEqual({ name: 'Blank', columns: [] });
+    });
+
+    it('keeps the values with their columns when two columns take other names', async () => {
+      const user = userEvent.setup();
+      const dialog = await openDialog();
+      await user.type(within(dialog).getByLabelText('Name'), 'Swapped');
+      await user.click(within(dialog).getByRole('radio', { name: 'Import CSV' }));
+      await user.upload(within(dialog).getByLabelText('CSV file'), csvFile('a,b,c\n1,2,3\n'));
+      await within(dialog).findByText('1 row, 3 columns');
+      const first = within(dialog).getByLabelText('Name of column 1');
+      await user.clear(first);
+      await user.type(first, 'b');
+      const second = within(dialog).getByLabelText('Name of column 2');
+      await user.clear(second);
+      await user.type(second, 'x');
+      await user.click(within(dialog).getByRole('button', { name: 'Create' }));
+      await waitFor(async () => expect((await dataTablesApi.list()).count).toBe(1));
+      const [table] = (await dataTablesApi.list()).data;
+      const { data } = await dataTablesApi.rows(table.id);
+      expect(data[0]).toMatchObject({ b: 1, x: 2, c: 3 });
+    });
+  });
+
+  describe('the demo Data Table node', () => {
+    const description = () => demoNodeTypes.find((d) => d.name === 'core.dataTable')!;
+
+    it('offers conditions, match type, the exists checks, order by and dry run', () => {
+      const names = description().properties.map((p) => p.name);
+      expect(names).toEqual(
+        expect.arrayContaining(['matchType', 'filters', 'returnAll', 'orderBy', 'orderByColumn', 'options']),
+      );
+      const operation = description().properties.find((p) => p.name === 'operation')!;
+      expect(operation.options?.map((o) => (o as { value: string }).value)).toEqual(
+        expect.arrayContaining(['rowExists', 'rowNotExists']),
+      );
+    });
+
+    it('ignores item fields that are no column, reads an unset match type as any, and checks existence', async () => {
+      const table = await dataTablesApi.create({
+        name: 'Leads',
+        columns: [
+          { name: 'n', type: 'number' },
+          { name: 's', type: 'string' },
+        ],
+      });
+      const run = (parameters: Record<string, unknown>, json: Record<string, unknown> = { n: 1 }) =>
+        simulateDataTableNode(tableNode({ dataTableId: rl(table.id), ...parameters }), [{ json }]);
+      const inserted = run(
+        { operation: 'insert', dataMode: 'autoMapInputData' },
+        { n: 1, extra: 'x', id: 99 },
+      );
+      expect(inserted[0][0].json).toMatchObject({ n: 1, id: 1 });
+      const conditions = [
+        { keyName: 'n', condition: 'eq', keyValue: 1 },
+        { keyName: 's', condition: 'eq', keyValue: 'nope' },
+      ];
+      expect(run({ operation: 'get', returnAll: true, filters: { conditions } })[0]).toHaveLength(1);
+      expect(
+        run({ operation: 'get', returnAll: true, matchType: 'allConditions', filters: { conditions } })[0],
+      ).toHaveLength(0);
+      expect(run({ operation: 'rowExists', filters: { conditions } })[0]).toHaveLength(1);
+      expect(run({ operation: 'rowNotExists', filters: { conditions } })[0]).toHaveLength(0);
+      const dry = run({
+        operation: 'update',
+        dataMode: 'autoMapInputData',
+        options: { dryRun: true },
+        filters: { conditions },
+      })[0];
+      expect(dry.map((i) => i.json.dryRunState)).toEqual(['before', 'after']);
+      expect((await dataTablesApi.rows(table.id)).data[0].n).toBe(1);
+    });
+  });
+
+  it('the demo list refuses like with null, as the server does', async () => {
+    const table = await dataTablesApi.create({ name: 'Names', columns: [{ name: 'a', type: 'string' }] });
+    await dataTablesApi.insertRows(table.id, [{ a: 'x' }], 'count');
+    await expect(
+      dataTablesApi.rows(table.id, {
+        filter: { type: 'and', filters: [{ columnName: 'a', condition: 'like', value: null }] },
+      }),
+    ).rejects.toThrow(/like needs a text value/);
   });
 });

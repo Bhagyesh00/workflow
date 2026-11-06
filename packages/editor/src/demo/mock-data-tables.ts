@@ -232,13 +232,16 @@ function matchesClause(table: StoredTable, row: DataTableRow, clause: DataTableF
   if (condition === 'isEmpty') return text === null || text === '';
   if (condition === 'isNotEmpty') return text !== null && text !== '';
   const input = clause.value ?? null;
+  if ((condition === 'like' || condition === 'ilike') && typeof input !== 'string') {
+    throw badRequest(DATA_TABLE_ERRORS.valueTypeMismatch(input, 'string', `${condition} needs a text value`));
+  }
   if (input === null) {
     if (condition === 'eq') return text === null;
     return condition === 'neq' && text !== null;
   }
   if (condition === 'like' || condition === 'ilike') {
     if (text === null) return false;
-    return likeRegex(String(input), condition === 'ilike' ? 'i' : '').test(text);
+    return likeRegex(input as string, condition === 'ilike' ? 'i' : '').test(text);
   }
   const value = coerce(input, type) as string | number | boolean;
   if (condition === 'neq') return cell === null || cell !== value;
@@ -475,14 +478,27 @@ const cellOf = (row: string[], index: number) => {
   return value === undefined || value === '' ? null : value;
 };
 
-/** which CSV column feeds each table column: same name, else same place when every column was kept */
-function matchCsvColumns(csv: ParsedCsv, columns: DataTableColumnInput[]): number[] {
-  const byName = columns.map((column) => csv.headers.indexOf(column.name));
-  const claimed = new Set(byName);
+type CreateColumn = DataTableColumnInput & { csvColumnName?: string };
+
+/** which CSV column feeds each table column: its csvColumnName, else same name, else same place when every column was kept */
+function matchCsvColumns(csv: ParsedCsv, columns: CreateColumn[]): number[] {
+  const explicit = columns.map((column) =>
+    column.csvColumnName === undefined ? undefined : csv.headers.indexOf(column.csvColumnName),
+  );
+  const claimed = new Set(explicit.filter((index) => index !== undefined && index !== -1));
+  const byName = columns.map((column, position) => {
+    if (explicit[position] !== undefined) return explicit[position];
+    const index = csv.headers.indexOf(column.name);
+    return claimed.has(index) ? -1 : index;
+  }) as number[];
+  for (const index of byName) if (index !== -1) claimed.add(index);
   const free = csv.headers.map((_, index) => index).filter((index) => !claimed.has(index));
   const positional = columns.length === csv.headers.length;
   return byName.map((index, position) => {
     if (index !== -1) return index;
+    if (columns[position].csvColumnName !== undefined) {
+      throw badRequest(`Column '${columns[position].csvColumnName}' is not in the CSV file`);
+    }
     if (!positional) throw badRequest(`Column '${columns[position].name}' is not in the CSV file`);
     return free.shift() as number;
   });
@@ -512,6 +528,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
       .filter((t) => !name || t.name.toLowerCase().includes(name.toLowerCase()))
       .sort((a, b) => {
         if (!sort) return b.updatedAt.localeCompare(a.updatedAt);
+        if (sort.column === 'size') return (sizeOf(a) - sizeOf(b)) * sign;
         const key = sort.column as 'name' | 'createdAt' | 'updatedAt';
         return a[key].localeCompare(b[key]) * sign;
       });
@@ -525,7 +542,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
     const tenantId = writer();
     const name = parseTableName(body.name);
     assertUniqueName(tenantId, name);
-    const input = (body.columns ?? []) as DataTableColumnInput[];
+    const input = (body.columns ?? []) as CreateColumn[];
     const csvText = typeof body.csv === 'string' ? body.csv : undefined;
     if (csvText !== undefined) assertCsvFits(tenantId, csvText);
     const csv = csvText === undefined ? undefined : parseCsv(csvText, body.hasHeaders !== false);
@@ -600,9 +617,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
       .map((w): DataTableDependency => ({ type: 'workflow', id: w.id, name: w.name }));
   });
 
-  backend.on('GET', '/data-tables/:id/columns', ({ params }) =>
-    copy(tableOf(reader(), params[0]).columns),
-  );
+  backend.on('GET', '/data-tables/:id/columns', ({ params }) => copy(tableOf(reader(), params[0]).columns));
 
   backend.on('POST', '/data-tables/:id/columns', ({ params, body }) => {
     const table = tableOf(writer(), params[0]);
@@ -796,8 +811,12 @@ export function simulateDataTableNode(node: WorkflowNode, items: Item[]): Item[]
     return table;
   };
 
-  const rowData = (item: Item, itemIndex: number): Record<string, unknown> => {
-    if (parameters.dataMode === 'autoMapInputData') return item.json;
+  const rowData = (table: StoredTable, item: Item, itemIndex: number): Record<string, unknown> => {
+    if (parameters.dataMode === 'autoMapInputData') {
+      // as on a real server: item fields that are no column, and the system columns, are not mapped
+      const names = new Set(table.columns.map((column) => column.name));
+      return Object.fromEntries(Object.entries(item.json).filter(([key]) => names.has(key)));
+    }
     const ui = parameters.fieldsUi as { fieldValues?: Array<{ columnName: string; value: unknown }> };
     const data: Record<string, unknown> = {};
     for (const { columnName, value } of ui?.fieldValues ?? []) {
@@ -813,7 +832,8 @@ export function simulateDataTableNode(node: WorkflowNode, items: Item[]): Item[]
       condition: (c.condition ?? 'eq') as DataTableFilterClause['condition'],
       value: resolve(c.keyValue, itemIndex) as DataTableCellValue,
     }));
-    return { type: parameters.matchType === 'anyCondition' ? 'or' : 'and', filters };
+    // an unset match type is "any", as in the node
+    return { type: parameters.matchType === 'allConditions' ? 'and' : 'or', filters };
   };
 
   const required = (filter: DataTableFilter) => {
@@ -821,29 +841,85 @@ export function simulateDataTableNode(node: WorkflowNode, items: Item[]): Item[]
     return filter;
   };
 
+  const dryRun = Boolean((parameters.options as { dryRun?: unknown } | undefined)?.dryRun);
+  const emptyRow = (table: StoredTable, state: 'before' | 'after') =>
+    ({
+      ...Object.fromEntries(
+        [...SYSTEM_TYPES.keys(), ...table.columns.map((c) => c.name)].map((n) => [n, null]),
+      ),
+      dryRunState: state,
+    }) as unknown as DataTableRow;
+  /** before and after of each matched row; nothing is written */
+  const dryPairs = (rows: DataTableRow[], patch: Record<string, DataTableCellValue>) =>
+    rows.flatMap((row) => [
+      { ...row, dryRunState: 'before' } as unknown as DataTableRow,
+      { ...row, ...patch, updatedAt: now(), dryRunState: 'after' } as unknown as DataTableRow,
+    ]);
+
   items.forEach((item, itemIndex) => {
     const table = tableFor(itemIndex);
     const push = (rows: DataTableRow[]) =>
       output.push(...rows.map((row) => ({ json: copy(row), pairedItem: { item: itemIndex } })));
     switch (operation) {
       case 'insert':
-        push(insert(table, [rowData(item, itemIndex)]));
+        push(insert(table, [rowData(table, item, itemIndex)]));
         break;
-      case 'get':
-        push(matching(table, filterFor(itemIndex)).slice(0, Number(parameters.limit ?? 50)));
-        break;
-      case 'update':
-        push(updateMatching(table, required(filterFor(itemIndex)), rowData(item, itemIndex)));
-        break;
-      case 'upsert': {
-        const filter = required(filterFor(itemIndex));
-        const data = rowData(item, itemIndex);
-        push(matching(table, filter).length ? updateMatching(table, filter, data) : insert(table, [data]));
+      case 'get': {
+        const rows = matching(table, filterFor(itemIndex));
+        const column = String(parameters.orderByColumn ?? 'createdAt');
+        const ordered = parameters.orderBy
+          ? sorted(table, rows, `${column}:${parameters.orderByDirection === 'ASC' ? 'asc' : 'desc'}`)
+          : rows;
+        push(parameters.returnAll ? ordered : ordered.slice(0, Number(parameters.limit ?? 50)));
         break;
       }
-      case 'deleteRows':
-        push(deleteMatching(table, required(filterFor(itemIndex))));
+      case 'update': {
+        const filter = required(filterFor(itemIndex));
+        const data = rowData(table, item, itemIndex);
+        push(
+          dryRun
+            ? dryPairs(matching(table, filter), toCells(table, data))
+            : updateMatching(table, filter, data),
+        );
         break;
+      }
+      case 'upsert': {
+        const filter = required(filterFor(itemIndex));
+        const data = rowData(table, item, itemIndex);
+        const found = matching(table, filter);
+        if (dryRun) {
+          push(
+            found.length
+              ? dryPairs(found, toCells(table, data))
+              : [
+                  emptyRow(table, 'before'),
+                  { ...emptyRow(table, 'after'), ...toCells(table, data), id: 0 } as unknown as DataTableRow,
+                ],
+          );
+        } else {
+          push(found.length ? updateMatching(table, filter, data) : insert(table, [data]));
+        }
+        break;
+      }
+      case 'deleteRows': {
+        const filter = required(filterFor(itemIndex));
+        push(
+          dryRun
+            ? matching(table, filter).flatMap((row) => [
+                { ...row, dryRunState: 'before' } as unknown as DataTableRow,
+                emptyRow(table, 'after'),
+              ])
+            : deleteMatching(table, filter),
+        );
+        break;
+      }
+      case 'rowExists':
+      case 'rowNotExists': {
+        const exists = matching(table, required(filterFor(itemIndex))).length > 0;
+        if (exists === (operation === 'rowExists'))
+          output.push({ ...copy(item), pairedItem: { item: itemIndex } });
+        break;
+      }
       default:
         throw new Error(`The demo has no Data Table operation "${operation}"`);
     }

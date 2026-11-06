@@ -44,7 +44,8 @@ export const dataTableFilterSchema = z.object({
     .array(
       z.object({
         columnName: z.string().min(1).max(DATA_TABLE_COLUMN_NAME_MAX),
-        condition: z.enum(DATA_TABLE_FILTER_CONDITIONS),
+        /** n8n: absent means eq */
+        condition: z.enum(DATA_TABLE_FILTER_CONDITIONS).default('eq'),
         value: cellValue.optional(),
       }),
     )
@@ -63,7 +64,7 @@ const sortBy = z
   });
 
 export const dataTableListSort = sortBy.pipe(
-  z.object({ column: z.enum(['name', 'createdAt', 'updatedAt']), direction }),
+  z.object({ column: z.enum(['name', 'createdAt', 'updatedAt', 'size']), direction }),
 );
 export const dataTableRowsSort = sortBy.pipe(
   z.object({ column: z.string().min(1).max(DATA_TABLE_COLUMN_NAME_MAX), direction }),
@@ -105,7 +106,10 @@ export const dataTableNameSchema = z.string().trim().min(1).max(DATA_TABLE_NAME_
 
 const createBody = z.object({
   name: dataTableNameSchema,
-  columns: z.array(dataTableColumnSchema).default([]),
+  /** `csvColumnName` is the header of the CSV column that fills the column */
+  columns: z
+    .array(dataTableColumnSchema.extend({ csvColumnName: z.string().max(1024).optional() }))
+    .default([]),
   /** size is held by the upload limit in the service, so a big file gets n8n's text */
   csv: z.string().optional(),
   hasHeaders: z.boolean().optional(),

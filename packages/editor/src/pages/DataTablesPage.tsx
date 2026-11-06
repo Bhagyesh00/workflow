@@ -43,7 +43,29 @@ const SORTS = [
   { value: 'createdAt:desc', label: 'Last created' },
   { value: 'name:asc', label: 'Name A-Z' },
   { value: 'name:desc', label: 'Name Z-A' },
+  { value: 'size:desc', label: 'Largest' },
+  { value: 'size:asc', label: 'Smallest' },
 ];
+const SORT_KEY = 'workflow.dataTables.sort';
+
+/** the sort chosen on an earlier visit; the first one when none is saved or the browser blocks storage */
+function savedSort(): string {
+  try {
+    const saved = window.localStorage.getItem(SORT_KEY);
+    if (saved && SORTS.some((option) => option.value === saved)) return saved;
+  } catch {
+    // storage is blocked: the default sort
+  }
+  return SORTS[0].value;
+}
+
+function saveSort(value: string): void {
+  try {
+    window.localStorage.setItem(SORT_KEY, value);
+  } catch {
+    // storage is blocked: the sort lasts until the page closes
+  }
+}
 const MEGABYTE = 1024 * 1024;
 
 const sizeText = (bytes: number) => `${(bytes / MEGABYTE).toFixed(bytes && bytes < MEGABYTE ? 2 : 1)} MB`;
@@ -331,7 +353,7 @@ export function DataTablesPage() {
   const [params, setParams] = useSearchParams();
   const [searchText, setSearchText] = useState('');
   const search = useDebounced(searchText.trim());
-  const [sort, setSort] = useState(SORTS[0].value);
+  const [sort, setSort] = useState(savedSort);
   const [skip, setSkip] = useState(0);
   const [creating, setCreating] = useState(false);
   const limits = useDataTableLimits();
@@ -406,6 +428,7 @@ export function DataTablesPage() {
           value={sort}
           onChange={(event) => {
             setSort(event.target.value);
+            saveSort(event.target.value);
             setSkip(0);
           }}
         >
