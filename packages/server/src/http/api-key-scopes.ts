@@ -1,10 +1,11 @@
 /**
  * API key scopes (P4-18), n8n's public API scopes. `API_KEY_SCOPES` is final: POST /api-keys
- * validates against it and every PUBLIC_ROUTES row names one. `assertApiKeyScope` is a no-op until
- * L7, which makes it fail closed: a key with non-empty scopes gets 403 on a route whose scope it
- * lacks and on a route with no scope; a key with empty scopes keeps full access.
+ * validates against it and every PUBLIC_ROUTES row names one. `assertApiKeyScope` fails closed: a key
+ * with non-empty scopes gets 403 on a route whose scope it lacks and on a route with no scope; a key
+ * with empty scopes keeps full access.
  */
 import type { AuthContext } from './auth';
+import { ApiError } from './errors';
 
 export const API_KEY_SCOPES = [
   'user:read',
@@ -71,7 +72,12 @@ export const API_KEY_SCOPES = [
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];
 
-/** Stub until L7: refuses nothing yet. */
-export function assertApiKeyScope(_auth: AuthContext, _scope?: ApiKeyScope): void {
-  // L7: fail closed, see the file comment
+/**
+ * Fails closed. A key with scopes gets 403 on a route whose scope it lacks and on a route with no
+ * scope; a key with no scopes, and a signed-in user (no key), keep full access.
+ */
+export function assertApiKeyScope(auth: AuthContext, scope?: ApiKeyScope): void {
+  const granted = auth.apiKeyScopes;
+  if (!granted || granted.length === 0) return;
+  if (scope === undefined || !granted.includes(scope)) throw ApiError.forbidden();
 }

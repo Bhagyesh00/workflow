@@ -2,7 +2,8 @@
  * Public API data tables (P4-18), n8n's public controller: 16 routes with API-key scopes and cursor
  * paging (limit default 100, max 250). PUBLIC_DATA_TABLE_ROUTES is final and carries everything a
  * PUBLIC_ROUTES row needs (C0c spreads it into public-api.ts, which has the role and scope gates).
- * The handlers are stubs until L7 and call the same DataTableService as /rest/data-tables.
+ * The handlers call the same DataTableService as /rest/data-tables; lists answer `{data, nextCursor}`
+ * where the cursor is an opaque offset.
  */
 import { z } from 'zod';
 import type { ServerContext } from '../context';
@@ -44,27 +45,186 @@ export type PublicDataTableHandler =
   | 'deleteRows'
   | 'clearRows';
 
-const notBuilt: Handler = async () => {
-  throw new ApiError(501, 'not_built', 'not built');
-};
+/** the cursor is an opaque offset: `o` and the number of rows already sent */
+const CURSOR_PREFIX = 'o';
+
+function decodeCursor(raw: string | undefined): number {
+  if (raw === undefined) return 0;
+  const text = Buffer.from(raw, 'base64url').toString('utf8');
+  const skip = text.startsWith(CURSOR_PREFIX) ? Number(text.slice(CURSOR_PREFIX.length)) : Number.NaN;
+  if (!Number.isSafeInteger(skip) || skip < 0 || Buffer.from(raw, 'base64url').toString('base64url') !== raw) {
+    throw ApiError.badRequest('Invalid cursor');
+  }
+  return skip;
+}
+
+const encodeCursor = (skip: number) => Buffer.from(`${CURSOR_PREFIX}${skip}`, 'utf8').toString('base64url');
+
+/** one page of `{count, data}` as `{data, nextCursor}` */
+function paged<T, U>(page: { count: number; data: T[] }, skip: number, map: (item: T) => U) {
+  const end = skip + page.data.length;
+  return {
+    data: page.data.map(map),
+    nextCursor: page.data.length > 0 && end < page.count ? encodeCursor(end) : null,
+  };
+}
+
+interface ColumnLike {
+  id: string;
+  name: string;
+  type: string;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** the public column carries n8n's `index` where the service has `position` */
+const columnDTO = ({ position, ...column }: ColumnLike) => ({ ...column, index: position });
+const tableDTO = <T extends { columns: ColumnLike[] }>(table: T) => ({
+  ...table,
+  columns: table.columns.map(columnDTO),
+});
+
+const actorOf = ({ auth, request }: PublicApiInput) => ({ userId: auth.user.id, ip: request.ip });
 
 export const publicDataTableHandlers: Record<PublicDataTableHandler, Handler> = {
-  list: notBuilt,
-  create: notBuilt,
-  get: notBuilt,
-  update: notBuilt,
-  remove: notBuilt,
-  dependencies: notBuilt,
-  listColumns: notBuilt,
-  addColumn: notBuilt,
-  updateColumn: notBuilt,
-  removeColumn: notBuilt,
-  listRows: notBuilt,
-  insertRows: notBuilt,
-  upsertRows: notBuilt,
-  updateRows: notBuilt,
-  deleteRows: notBuilt,
-  clearRows: notBuilt,
+  list: async (ctx, { auth, query }) => {
+    const skip = decodeCursor(query.cursor);
+    const page = await ctx.dataTables.list(auth.tenant.id, {
+      skip,
+      take: query.limit,
+      sortBy: query.sortBy,
+      name: query.filter?.name,
+    });
+    return paged(page, skip, tableDTO);
+  },
+  create: async (ctx, input) => ({
+    data: tableDTO(
+      await ctx.dataTables.create(
+        input.auth.tenant.id,
+        { name: input.body.name, columns: input.body.columns },
+        actorOf(input),
+      ),
+    ),
+  }),
+  get: async (ctx, { auth, params }) => ({
+    data: tableDTO(await ctx.dataTables.get(auth.tenant.id, params.dataTableId)),
+  }),
+  update: async (ctx, input) => ({
+    data: tableDTO(
+      await ctx.dataTables.patch(
+        input.auth.tenant.id,
+        input.params.dataTableId,
+        { name: input.body.name },
+        actorOf(input),
+      ),
+    ),
+  }),
+  remove: async (ctx, input) => {
+    await ctx.dataTables.delete(input.auth.tenant.id, input.params.dataTableId, actorOf(input));
+    return { data: true };
+  },
+  dependencies: async (ctx, { auth, params }) => ({
+    data: await ctx.dataTables.dependencies(auth.tenant.id, params.dataTableId),
+  }),
+  listColumns: async (ctx, { auth, params }) => ({
+    data: (await ctx.dataTables.columns.list(auth.tenant.id, params.dataTableId)).map(columnDTO),
+  }),
+  addColumn: async (ctx, input) => ({
+    data: columnDTO(
+      await ctx.dataTables.columns.add(
+        input.auth.tenant.id,
+        input.params.dataTableId,
+        input.body,
+        actorOf(input),
+      ),
+    ),
+  }),
+  updateColumn: async (ctx, input) => {
+    const { name, index } = input.body as { name?: string; index?: number };
+    if (name === undefined && index === undefined) {
+      throw ApiError.badRequest('Send a name, an index or both');
+    }
+    const tenantId = input.auth.tenant.id;
+    const { dataTableId, columnId } = input.params;
+    const actor = actorOf(input);
+    let column: ColumnLike | undefined;
+    if (name !== undefined) {
+      column = await ctx.dataTables.columns.rename(tenantId, dataTableId, columnId, { name }, actor);
+    }
+    if (index !== undefined) {
+      column = await ctx.dataTables.columns.move(tenantId, dataTableId, columnId, { targetIndex: index }, actor);
+    }
+    return { data: columnDTO(column as ColumnLike) };
+  },
+  removeColumn: async (ctx, input) => {
+    await ctx.dataTables.columns.delete(
+      input.auth.tenant.id,
+      input.params.dataTableId,
+      input.params.columnId,
+      actorOf(input),
+    );
+    return { data: true };
+  },
+  listRows: async (ctx, { auth, params, query }) => {
+    const skip = decodeCursor(query.cursor);
+    const page = await ctx.dataTables.rows.list(auth.tenant.id, params.dataTableId, {
+      skip,
+      take: query.limit,
+      sortBy: query.sortBy,
+      filter: query.filter,
+      search: query.search,
+    });
+    return paged(page, skip, (row) => row);
+  },
+  insertRows: async (ctx, input) => ({
+    data: await ctx.dataTables.rows.insert(
+      input.auth.tenant.id,
+      input.params.dataTableId,
+      input.body.data,
+      input.body.returnType,
+      actorOf(input),
+    ),
+  }),
+  upsertRows: async (ctx, input) => {
+    const { dryRun, returnData, ...change } = input.body;
+    return {
+      data: await ctx.dataTables.rows.upsert(
+        input.auth.tenant.id,
+        input.params.dataTableId,
+        change,
+        { dryRun, returnData },
+        actorOf(input),
+      ),
+    };
+  },
+  updateRows: async (ctx, input) => {
+    const { dryRun, returnData, ...change } = input.body;
+    return {
+      data: await ctx.dataTables.rows.update(
+        input.auth.tenant.id,
+        input.params.dataTableId,
+        change,
+        { dryRun, returnData },
+        actorOf(input),
+      ),
+    };
+  },
+  deleteRows: async (ctx, input) => {
+    const { filter, dryRun, returnData } = input.query;
+    return {
+      data: await ctx.dataTables.rows.delete(
+        input.auth.tenant.id,
+        input.params.dataTableId,
+        filter,
+        { dryRun, returnData },
+        actorOf(input),
+      ),
+    };
+  },
+  clearRows: async (ctx, input) => ({
+    data: await ctx.dataTables.rows.clear(input.auth.tenant.id, input.params.dataTableId, actorOf(input)),
+  }),
 };
 
 const limit = z.coerce.number().int().min(1).max(250).default(100);
