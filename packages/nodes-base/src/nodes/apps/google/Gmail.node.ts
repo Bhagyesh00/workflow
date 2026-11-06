@@ -11,6 +11,15 @@ import {
   type NodeType,
   type PollContext,
 } from '@workflow/workflow';
+import {
+  SEND_AND_WAIT,
+  SEND_AND_WAIT_OPERATION,
+  sendAndWaitProperties,
+  sendAndWaitWebhooks,
+} from '../../../utils/send-and-wait/descriptions';
+import { emailHtml, emailText } from '../../../utils/send-and-wait/pages';
+import { sendAndWait } from '../../../utils/send-and-wait/wait';
+import { sendAndWaitWebhook } from '../../../utils/send-and-wait/webhook';
 import { base64Url, fieldList, ItemList } from '../../../utils/utilities';
 import {
   compact,
@@ -490,6 +499,7 @@ const properties: NodeProperty[] = [
     'message',
     [
       { name: 'Send', value: 'send', action: 'Send a message' },
+      SEND_AND_WAIT_OPERATION,
       { name: 'Reply', value: 'reply', action: 'Reply to a message' },
       { name: 'Get', value: 'get', action: 'Get a message' },
       { name: 'Get Many', value: 'getAll', action: 'Get many messages' },
@@ -533,13 +543,14 @@ const properties: NodeProperty[] = [
       placeholder: 'info@example.com',
     },
     'message',
-    'send',
+    ['send', SEND_AND_WAIT],
   ),
   forOps(
     { displayName: 'Subject', name: 'subject', type: 'string', default: '' },
     ['message', 'draft'],
-    ['send', 'create'],
+    ['send', 'create', SEND_AND_WAIT],
   ),
+  ...sendAndWaitProperties({ resource: ['message'], operation: [SEND_AND_WAIT] }),
   forOps(emailTypeProperty, ['message', 'draft'], ['send', 'reply', 'create']),
   forOps(messageProperty, ['message', 'draft'], ['send', 'reply', 'create']),
   forOps({ ...labelIdsProperty, required: true }, 'message', ['addLabels', 'removeLabels']),
@@ -714,11 +725,29 @@ export const GmailNode: NodeType = {
     subtitle: '={{ $parameter.operation + ": " + $parameter.resource }}',
     usableAsTool: true,
     credentials: [{ name: 'gmailOAuth2', required: true }],
+    webhooks: sendAndWaitWebhooks,
     properties,
   },
   async execute(ctx) {
+    if (
+      ctx.getNodeParameter('resource', 0, 'message') === 'message' &&
+      ctx.getNodeParameter('operation', 0, 'send') === SEND_AND_WAIT
+    ) {
+      return sendAndWait(ctx, async ({ message, buttons }) => {
+        const to = String(ctx.getNodeParameter('sendTo', 0, '') ?? '').trim();
+        if (!to) throw new NodeOperationError(ctx.getNode(), 'Add at least one recipient');
+        const raw = buildMimeMessage({
+          to,
+          subject: String(ctx.getNodeParameter('subject', 0, '') ?? ''),
+          text: emailText(message, buttons),
+          html: emailHtml(message, buttons),
+        });
+        await gmailRequest(ctx, 'POST', '/messages/send', { raw: base64Url(raw) }, undefined, 0);
+      });
+    }
     return runOperations(ctx, handlers);
   },
+  webhook: sendAndWaitWebhook,
   methods: { loadOptions: { getLabels: loadGmailLabels } },
 };
 

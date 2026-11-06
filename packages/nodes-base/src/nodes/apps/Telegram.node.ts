@@ -21,6 +21,15 @@ import {
   type WebhookLifecycleContext,
   type WebhookResponseData,
 } from '@workflow/workflow';
+import {
+  SEND_AND_WAIT,
+  SEND_AND_WAIT_OPERATION,
+  sendAndWaitProperties,
+  sendAndWaitWebhooks,
+} from '../../utils/send-and-wait/descriptions';
+import { telegramKeyboard } from '../../utils/send-and-wait/pages';
+import { sendAndWait } from '../../utils/send-and-wait/wait';
+import { sendAndWaitWebhook } from '../../utils/send-and-wait/webhook';
 import { parseJsonParameter } from '../../utils/utilities';
 import {
   compact,
@@ -349,6 +358,7 @@ const properties: NodeProperty[] = [
     'message',
     [
       { name: 'Send Message', value: 'sendMessage', action: 'Send a text message' },
+      SEND_AND_WAIT_OPERATION,
       { name: 'Send Photo', value: 'sendPhoto', action: 'Send a photo' },
       { name: 'Send Document', value: 'sendDocument', action: 'Send a document' },
       { name: 'Send Location', value: 'sendLocation', action: 'Send a location' },
@@ -382,8 +392,9 @@ const properties: NodeProperty[] = [
       placeholder: '-1001234567890 or @channelusername',
     },
     ['message', 'chat'],
-    [...sendOps, 'sendChatAction', 'deleteMessage', 'pinChatMessage', 'get', 'administrators'],
+    [...sendOps, SEND_AND_WAIT, 'sendChatAction', 'deleteMessage', 'pinChatMessage', 'get', 'administrators'],
   ),
+  ...sendAndWaitProperties({ resource: ['message'], operation: [SEND_AND_WAIT] }),
   forOps(
     { displayName: 'Message ID', name: 'messageId', type: 'string', default: '', required: true },
     'message',
@@ -552,11 +563,26 @@ export const TelegramNode: NodeType = {
     subtitle: '={{ $parameter.operation + ": " + $parameter.resource }}',
     usableAsTool: true,
     credentials: [{ name: 'telegramApi', required: true }],
+    webhooks: sendAndWaitWebhooks,
     properties,
   },
   async execute(ctx) {
+    if (
+      ctx.getNodeParameter('resource', 0, 'message') === 'message' &&
+      ctx.getNodeParameter('operation', 0, 'sendMessage') === SEND_AND_WAIT
+    ) {
+      return sendAndWait(ctx, async ({ message, buttons }) => {
+        await telegramRequest(
+          ctx,
+          'sendMessage',
+          { chat_id: chatId(ctx, 0), text: message, reply_markup: telegramKeyboard(buttons) },
+          0,
+        );
+      });
+    }
     return runOperations(ctx, handlers);
   },
+  webhook: sendAndWaitWebhook,
 };
 
 // ---------------------------------------------------------------------------------------------

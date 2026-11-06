@@ -1,6 +1,15 @@
 /** Send Email over SMTP (nodemailer); the guarded transport is in utils/smtp-transport.ts. */
 import { type DataObject, NodeOperationError, type NodeType } from '@workflow/workflow';
 import { smtpCredentialTest } from '../../credential-tests/smtp';
+import {
+  SEND_AND_WAIT,
+  SEND_AND_WAIT_OPERATION,
+  sendAndWaitProperties,
+  sendAndWaitWebhooks,
+} from '../../utils/send-and-wait/descriptions';
+import { emailHtml, emailText } from '../../utils/send-and-wait/pages';
+import { sendAndWait } from '../../utils/send-and-wait/wait';
+import { sendAndWaitWebhook } from '../../utils/send-and-wait/webhook';
 import { createSmtpTransport, type SmtpCredentials } from '../../utils/smtp-transport';
 import { fieldList, mapItems } from '../../utils/utilities';
 
@@ -27,7 +36,16 @@ export const SendEmailNode: NodeType = {
     alias: ['email', 'smtp', 'mail', 'send', 'notify'],
     usableAsTool: true,
     credentials: [{ name: 'smtp', required: true, testedBy: 'smtpCredentialTest' }],
+    webhooks: sendAndWaitWebhooks,
     properties: [
+      {
+        displayName: 'Operation',
+        name: 'operation',
+        type: 'options',
+        noDataExpression: true,
+        default: 'send',
+        options: [{ name: 'Send', value: 'send', action: 'Send an email' }, SEND_AND_WAIT_OPERATION],
+      },
       {
         displayName: 'From Email',
         name: 'fromEmail',
@@ -51,6 +69,7 @@ export const SendEmailNode: NodeType = {
         name: 'emailFormat',
         type: 'options',
         default: 'html',
+        displayOptions: { show: { operation: ['send'] } },
         options: [
           { name: 'Text', value: 'text' },
           { name: 'HTML', value: 'html' },
@@ -63,7 +82,7 @@ export const SendEmailNode: NodeType = {
         type: 'string',
         default: '',
         typeOptions: { rows: 5 },
-        displayOptions: { show: { emailFormat: ['text', 'both'] } },
+        displayOptions: { show: { operation: ['send'], emailFormat: ['text', 'both'] } },
       },
       {
         displayName: 'HTML',
@@ -71,7 +90,7 @@ export const SendEmailNode: NodeType = {
         type: 'string',
         default: '',
         typeOptions: { rows: 5, editor: 'htmlEditor' },
-        displayOptions: { show: { emailFormat: ['html', 'both'] } },
+        displayOptions: { show: { operation: ['send'], emailFormat: ['html', 'both'] } },
       },
       {
         displayName: 'Options',
@@ -79,6 +98,7 @@ export const SendEmailNode: NodeType = {
         type: 'collection',
         default: {},
         placeholder: 'Add option',
+        displayOptions: { show: { operation: ['send'] } },
         options: [
           {
             displayName: 'Attachments',
@@ -99,10 +119,12 @@ export const SendEmailNode: NodeType = {
           },
         ],
       },
+      ...sendAndWaitProperties({ operation: [SEND_AND_WAIT] }),
     ],
   },
 
   async execute(ctx) {
+    const sendAndWaitOperation = ctx.getNodeParameter('operation', 0, 'send') === SEND_AND_WAIT;
     const creds = await ctx.getCredentials<SmtpCredentials>('smtp');
     const host = String(creds.host ?? '').trim();
     if (!host) throw new NodeOperationError(ctx.getNode(), 'The SMTP credential has no host');
@@ -110,6 +132,19 @@ export const SendEmailNode: NodeType = {
       allowUnauthorizedCerts: Boolean(ctx.getNodeParameter('options.allowUnauthorizedCerts', 0, false)),
     });
     try {
+      if (sendAndWaitOperation) {
+        return await sendAndWait(ctx, async (message) => {
+          const to = headerValue(ctx.getNodeParameter('toEmail', 0, ''));
+          if (!to) throw new NodeOperationError(ctx.getNode(), 'Add at least one recipient');
+          await transport.sendMail({
+            from: headerValue(ctx.getNodeParameter('fromEmail', 0, '')),
+            to,
+            subject: headerValue(ctx.getNodeParameter('subject', 0, '')),
+            text: emailText(message.message, message.buttons),
+            html: emailHtml(message.message, message.buttons),
+          });
+        });
+      }
       return [
         await mapItems(ctx, async (i) => {
           const options = ctx.getNodeParameter('options', i, {}) as DataObject;
@@ -149,6 +184,8 @@ export const SendEmailNode: NodeType = {
       transport.close();
     }
   },
+
+  webhook: sendAndWaitWebhook,
 
   methods: {
     credentialTest: { smtpCredentialTest },

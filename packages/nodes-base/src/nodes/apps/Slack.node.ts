@@ -11,6 +11,15 @@ import {
   type NodeProperty,
   type NodeType,
 } from '@workflow/workflow';
+import {
+  SEND_AND_WAIT,
+  SEND_AND_WAIT_OPERATION,
+  sendAndWaitProperties,
+  sendAndWaitWebhooks,
+} from '../../utils/send-and-wait/descriptions';
+import { slackBlocks } from '../../utils/send-and-wait/pages';
+import { sendAndWait } from '../../utils/send-and-wait/wait';
+import { sendAndWaitWebhook } from '../../utils/send-and-wait/webhook';
 import { fieldList, parseJsonParameter } from '../../utils/utilities';
 import {
   compact,
@@ -483,6 +492,7 @@ const properties: NodeProperty[] = [
     'message',
     [
       { name: 'Send', value: 'send', action: 'Send a message' },
+      SEND_AND_WAIT_OPERATION,
       { name: 'Update', value: 'update', action: 'Update a message' },
       { name: 'Delete', value: 'delete', action: 'Delete a message' },
       { name: 'Get Permalink', value: 'getPermalink', action: 'Get a message permalink' },
@@ -531,15 +541,19 @@ const properties: NodeProperty[] = [
       ],
     },
     'message',
-    'send',
+    ['send', SEND_AND_WAIT],
   ),
   {
     ...channelLocator,
-    displayOptions: { show: { resource: ['message'], operation: ['send'], select: ['channel'] } },
+    displayOptions: {
+      show: { resource: ['message'], operation: ['send', SEND_AND_WAIT], select: ['channel'] },
+    },
   },
   {
     ...userLocator,
-    displayOptions: { show: { resource: ['message'], operation: ['send'], select: ['user'] } },
+    displayOptions: {
+      show: { resource: ['message'], operation: ['send', SEND_AND_WAIT], select: ['user'] },
+    },
   },
   forOps(channelLocator, 'message', ['update', 'delete', 'getPermalink']),
   forOps(tsProperty, 'message', ['update', 'delete', 'getPermalink']),
@@ -599,6 +613,7 @@ const properties: NodeProperty[] = [
     'message',
     'send',
   ),
+  ...sendAndWaitProperties({ resource: ['message'], operation: [SEND_AND_WAIT] }),
   // message: search
   forOps(
     {
@@ -817,11 +832,29 @@ export const SlackNode: NodeType = {
       { name: 'slackApi', required: true, displayOptions: { show: { authentication: ['accessToken'] } } },
       { name: 'slackOAuth2Api', required: true, displayOptions: { show: { authentication: ['oAuth2'] } } },
     ],
+    webhooks: sendAndWaitWebhooks,
     properties,
   },
   async execute(ctx) {
+    if (ctx.getNodeParameter('resource', 0, 'message') === 'message') {
+      if (ctx.getNodeParameter('operation', 0, 'send') === SEND_AND_WAIT) {
+        return sendAndWait(ctx, async ({ message, buttons }) => {
+          const channel = messageTarget(ctx, 0);
+          await slackRequest(
+            ctx,
+            credentialType(ctx, 0),
+            'POST',
+            'chat.postMessage',
+            { channel, text: message, blocks: slackBlocks(message, buttons) },
+            undefined,
+            0,
+          );
+        });
+      }
+    }
     return runOperations(ctx, handlers);
   },
+  webhook: sendAndWaitWebhook,
   methods: {
     listSearch: {
       async searchChannels(ctx, filter, paginationToken): Promise<ListSearchResult> {
