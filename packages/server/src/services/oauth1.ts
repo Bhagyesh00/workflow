@@ -16,6 +16,7 @@ import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
 import { hasRole } from './auth';
 import type { CredentialService } from './credentials';
+import { credentialReadErrorText } from './secrets/resolver';
 
 const STATE_TTL_MS = 10 * 60_000;
 type Method = NonNullable<Parameters<typeof sign>[1]['signatureMethod']>;
@@ -110,7 +111,13 @@ export class OAuth1Service {
     if (!this.credentials.types.isA(row.type, 'oAuth1Api')) {
       throw ApiError.badRequest('This credential does not use OAuth1');
     }
-    const data = this.credentials.withDefaults(row.type, this.credentials.decrypt(row));
+    // the read of `$secrets`; what `saveData` writes below is the stored object, never this one
+    let data: DataObject;
+    try {
+      data = await this.credentials.readResolved(row);
+    } catch (error) {
+      throw ApiError.badRequest(credentialReadErrorText(error));
+    }
     return { row, data };
   }
 

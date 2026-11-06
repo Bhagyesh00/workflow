@@ -66,6 +66,9 @@ export function withDefaults(properties: NodeProperty[], values: NodeParameters)
   return merged;
 }
 
+/** the synthetic node id of a credential form (CredentialModal): only text fields take expressions there */
+export const CREDENTIAL_FORM_NODE_ID = 'credential';
+
 /** Converts a fixed value into an expression and back. */
 export function toExpression(value: unknown): string {
   if (isExpressionValue(value)) return value;
@@ -213,7 +216,11 @@ export function ParameterField({
   if (prop.type === 'notice') return <NoticeInput prop={prop} />;
   if (prop.type === 'button') return <ButtonInput prop={prop} />;
 
-  const canExpress = ctx.allowExpressions && !prop.noDataExpression && EXPRESSION_CAPABLE.has(prop.type);
+  const canExpress =
+    ctx.allowExpressions &&
+    !prop.noDataExpression &&
+    EXPRESSION_CAPABLE.has(prop.type) &&
+    (ctx.node.id !== CREDENTIAL_FORM_NODE_ID || prop.type === 'string');
   const rlExpression =
     prop.type === 'resourceLocator' &&
     value &&
@@ -230,6 +237,8 @@ export function ParameterField({
       onChange({ ...rl, value: isExpressionValue(inner) ? inner.slice(1) : toExpression(inner ?? '') });
       return;
     }
+    // a password is never copied into the visible expression text: the expression starts empty
+    if (!isExpr && prop.typeOptions?.password) return onChange(toExpression(''));
     onChange(isExpr ? fromExpression(String(value), prop) : toExpression(value));
   };
 

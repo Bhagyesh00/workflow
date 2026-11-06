@@ -16,6 +16,8 @@ import type { CredentialType, DataObject, NodeCredentialRef, NodeProperty } from
 import type { CredentialRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
+import type { SecretsManager } from './secrets/manager';
+import { collectSecretKeys, hasCredentialExpressions, resolveCredentialData } from './secrets/resolver';
 
 /** keys never returned to the browser in clear text (OAuth token material) */
 const ALWAYS_SECRET = ['oauthTokenData'];
@@ -29,11 +31,45 @@ function collectSecretFields(properties: NodeProperty[], out = new Set<string>()
 }
 
 export class CredentialService {
+  private secrets?: Pick<SecretsManager, 'secretsFor'>;
+
   constructor(
     private readonly repos: Repositories,
     private readonly cipher: CredentialCipher,
     readonly types: CredentialTypeRegistry,
   ) {}
+
+  /** where `$secrets` comes from: until this is called a read that names it fails closed */
+  useSecrets(secrets: Pick<SecretsManager, 'secretsFor'>): void {
+    this.secrets = secrets;
+  }
+
+  /**
+   * `data` with its expressions resolved over {$secrets, $vars}. Everything that reads a credential to
+   * use it comes through here (or `readResolved`); what is stored stays the expression. Errors thrown
+   * have fixed texts.
+   */
+  async resolveData(tenantId: string, data: DataObject): Promise<DataObject> {
+    if (!hasCredentialExpressions(data)) return data;
+    return resolveCredentialData(data, {
+      tenantId,
+      vars: await this.repos.variables.map(tenantId),
+      secrets: this.secrets,
+    });
+  }
+
+  /** a stored credential as a node or a token call uses it. Type defaults are not expressions of the user. */
+  async readResolved(row: CredentialRow): Promise<DataObject> {
+    return this.withDefaults(row.type, await this.resolveData(row.tenantId, this.decrypt(row)));
+  }
+
+  private async saveSecretKeys(row: CredentialRow, data: DataObject): Promise<CredentialRow> {
+    const vars = hasCredentialExpressions(data) ? await this.repos.variables.map(row.tenantId) : {};
+    const secretKeys = collectSecretKeys(data, vars);
+    if (secretKeys.join() === row.secretKeys.join()) return row;
+    await this.repos.secrets.setCredentialSecretKeys(row.tenantId, row.id, secretKeys);
+    return { ...row, secretKeys };
+  }
 
   resolvedType(type: string): CredentialType {
     const resolved = this.types.getResolved(type);
@@ -80,13 +116,14 @@ export class CredentialService {
     this.resolvedType(input.type);
     const id = randomUUID();
     const clean = stripSentinels(input.data);
-    return this.repos.credentials.create(tenantId, {
+    const row = await this.repos.credentials.create(tenantId, {
       id,
       name: input.name,
       type: input.type,
       dataEnc: this.encrypt(tenantId, id, clean),
       createdBy: userId,
     });
+    return this.saveSecretKeys(row, clean);
   }
 
   async update(tenantId: string, id: string, patch: { name?: string; data?: DataObject }) {
@@ -94,8 +131,10 @@ export class CredentialService {
     if (!row) throw ApiError.notFound('Credential');
     const update: { name?: string; dataEnc?: string } = {};
     if (patch.name !== undefined) update.name = patch.name;
-    if (patch.data) update.dataEnc = this.encrypt(tenantId, id, this.merge(this.decrypt(row), patch.data));
-    return (await this.repos.credentials.update(tenantId, id, update)) ?? row;
+    const merged = patch.data ? this.merge(this.decrypt(row), patch.data) : undefined;
+    if (merged) update.dataEnc = this.encrypt(tenantId, id, merged);
+    const updated = (await this.repos.credentials.update(tenantId, id, update)) ?? row;
+    return merged ? this.saveSecretKeys(updated, merged) : updated;
   }
 
   /**
@@ -133,13 +172,13 @@ export class CredentialService {
       return row;
     };
     return {
-      get: async (ref, type) => {
-        const row = await find(ref, type);
-        return this.withDefaults(row.type, this.decrypt(row));
-      },
+      get: async (ref, type) => this.readResolved(await find(ref, type)),
+      // OAuth2 write-back: `data` holds resolved values, so only the new token goes into the stored object
       update: async (ref, type, data) => {
         const row = await find(ref, type);
-        await this.saveData(tenantId, row.id, data);
+        if (data.oauthTokenData === undefined) return;
+        const stored = this.decrypt(row);
+        await this.saveData(tenantId, row.id, { ...stored, oauthTokenData: data.oauthTokenData });
       },
     };
   }

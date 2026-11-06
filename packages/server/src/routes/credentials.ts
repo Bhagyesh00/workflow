@@ -16,6 +16,7 @@ import {
 import { toWorkflowLogger } from '../logger';
 import { testCredential } from '../services/credential-test';
 import { oauthCallbackPage } from '../services/oauth2';
+import { credentialReadErrorText, resolvedValues, scrubValues } from '../services/secrets/resolver';
 
 export function credentialSummary(
   row: Pick<CredentialRow, 'id' | 'name' | 'type' | 'createdAt' | 'updatedAt'>,
@@ -67,6 +68,8 @@ export async function deleteCredential(
 
 export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContext): void {
   const { repos, credentials, config } = ctx;
+  // a process that serves routes reads `$secrets` even before startMain
+  credentials.useSecrets(ctx.secrets);
 
   // viewers may list names/types (the editor shows which credential a node uses), never data
   app.get('/credentials', async (request) => {
@@ -133,13 +136,19 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
       data = credentials.merge(credentials.decrypt(row), data);
     }
     credentials.resolvedType(body.type);
-    return {
-      data: await testCredential(credentials, ctx.http, body.type, data, {
-        nodeTypes: ctx.registries.nodeTypes,
-        tenantId: auth.tenant.id,
-        logger: toWorkflowLogger(ctx.logger),
-      }),
-    };
+    let resolved: DataObject;
+    try {
+      resolved = await credentials.resolveData(auth.tenant.id, data);
+    } catch (error) {
+      return { data: { status: 'Error', message: credentialReadErrorText(error) } };
+    }
+    const result = await testCredential(credentials, ctx.http, body.type, resolved, {
+      nodeTypes: ctx.registries.nodeTypes,
+      tenantId: auth.tenant.id,
+      logger: toWorkflowLogger(ctx.logger),
+    });
+    // a client error can quote the URL or header it was given, which may be a vault value
+    return { data: { ...result, message: scrubValues(result.message, resolvedValues(data, resolved)) } };
   });
 
   app.get('/oauth1/authorize', async (request) => {

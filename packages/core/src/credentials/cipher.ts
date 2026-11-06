@@ -86,13 +86,23 @@ export class CredentialCipher {
 /** Replace secret values with a sentinel before sending credential data to the browser. */
 export const REDACTED = '__REDACTED__';
 
+/**
+ * An expression in a credential field: `=` and at least one `{{ }}`. A value without braces is a literal,
+ * because a typed password may begin with `=`.
+ */
+export function isCredentialExpression(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith('=') && value.includes('{{');
+}
+
+/** An expression stays visible: it is a reference such as `={{ $secrets.vault.key }}`, not the secret. */
 export function redactCredentialData(
   data: Record<string, unknown>,
   secretFields: Set<string>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(data)) {
-    out[k] = secretFields.has(k) && v !== '' && v !== undefined && v !== null ? REDACTED : v;
+    const hide = secretFields.has(k) && v !== '' && v !== undefined && v !== null;
+    out[k] = hide && !isCredentialExpression(v) ? REDACTED : v;
   }
   return out;
 }

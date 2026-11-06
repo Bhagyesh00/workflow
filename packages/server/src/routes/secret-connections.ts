@@ -1,7 +1,6 @@
 /**
  * /rest/secret-providers (P4-07), n8n's connections model without projects. Admin and owner manage
- * connections and read provider types; editor and above list secret names, never values. The type
- * routes are real; the rest of the manager is a stub until L9.
+ * connections and read provider types; editor and above list secret names, never values.
  */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';

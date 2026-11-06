@@ -11,6 +11,8 @@ export interface CompletionData {
   /** keys at a path of `$('Node').item.json` */
   nodeFields(node: string, path: Array<string | number>): string[];
   variables: string[];
+  /** secret names by connection key (credential forms only; `$secrets` is undefined in nodes and Code) */
+  secrets?: Record<string, string[]>;
 }
 
 export interface Suggestion {
@@ -61,6 +63,13 @@ const ROOTS: Suggestion[] = [
   { label: 'Math', type: 'variable' },
   { label: 'JSON', type: 'variable' },
 ];
+
+/** offered only when the form can read secrets: a credential field */
+const SECRETS_ROOT: Suggestion = {
+  label: '$secrets',
+  type: 'variable',
+  detail: 'Secrets of your connections',
+};
 
 const INPUT_MEMBERS: Suggestion[] = [
   { label: 'item', type: 'property', detail: 'Current input item' },
@@ -194,6 +203,12 @@ export function completeExpression(
       return null;
     }
     if (root === '$vars' && !chain) return done(fields(data.variables));
+    if (root === '$secrets' && data.secrets) {
+      const path = parseAccessPath(chain);
+      if (!path || path.length > 1) return null;
+      if (path.length === 0) return done(fields(Object.keys(data.secrets)));
+      return done(fields(data.secrets[String(path[0])] ?? []));
+    }
     if (root === '$execution' && !chain) return done(EXECUTION_MEMBERS);
     if (root === '$workflow' && !chain) return done(WORKFLOW_MEMBERS);
     if (root === '$prevNode' && !chain) {
@@ -210,7 +225,8 @@ export function completeExpression(
   const word = before.match(/(\$?[A-Za-z_][\w$]*|\$)$/);
   if (word) {
     const typed = word[1];
-    const roots = filter(options.codeNode ? [...ROOTS, ...CODE_ROOTS] : ROOTS, typed);
+    const all = options.codeNode ? [...ROOTS, ...CODE_ROOTS] : ROOTS;
+    const roots = filter(data.secrets ? [...all, SECRETS_ROOT] : all, typed);
     return roots.length ? { from: before.length - typed.length, options: roots } : null;
   }
   return null;

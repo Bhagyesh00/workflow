@@ -59,9 +59,13 @@ export function StringInput({ prop, value, onChange, id }: InputProps) {
           placeholder={redacted ? 'Saved. Type to replace it.' : prop.placeholder}
           readOnly={ctx.readOnly}
           data-redacted={redacted || undefined}
-          onChange={(e) =>
-            onChange(e.target.value === '' && ctx.keepSecretOnEmpty ? REDACTED : e.target.value)
-          }
+          onChange={(e) => {
+            const next = e.target.value;
+            // typing `{{` makes the field an expression (a credential field reading `$secrets`), which then shows its text
+            if (ctx.allowExpressions && !prop.noDataExpression && next.includes('{{'))
+              return onChange(`=${next}`);
+            onChange(next === '' && ctx.keepSecretOnEmpty ? REDACTED : next);
+          }}
         />
         <button
           type="button"

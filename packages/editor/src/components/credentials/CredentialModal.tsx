@@ -8,14 +8,15 @@ import { type NodeParameters, resolveNodeParameters, type WorkflowNode } from '@
 import { CheckCircle2, KeyRound, Link2, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
-import { credentialsApi } from '../../api/endpoints';
+import { credentialsApi, secretsApi } from '../../api/endpoints';
 import { queryKeys, useCredentialTypes, useSettings } from '../../api/queries';
 import type { CredentialTestResult } from '../../api/types';
 import { setIn } from '../../lib/workflow-ops';
 import { toast } from '../../stores/ui-store';
+import type { CompletionData } from '../code/completions';
 import { NodeIcon } from '../NodeIcon';
-import { ParameterContext, type ParameterContextValue } from '../parameters/context';
-import { ParameterList } from '../parameters/ParameterForm';
+import { isExpressionValue, ParameterContext, type ParameterContextValue } from '../parameters/context';
+import { CREDENTIAL_FORM_NODE_ID, ParameterList } from '../parameters/ParameterForm';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { FormField, TextInput } from '../ui/Field';
@@ -59,6 +60,14 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
     queryFn: () => credentialsApi.get(credentialId!),
     enabled: open && Boolean(credentialId),
     staleTime: 0,
+  });
+  // P4-07: names of the secrets in the enabled connections (editors may read names, never values)
+  const secretNames = useQuery({
+    queryKey: queryKeys.secretCompletions,
+    queryFn: secretsApi.completions,
+    enabled: open,
+    staleTime: 30_000,
+    retry: false,
   });
   const typeName = existing.data?.type ?? type ?? '';
   const typeDescription = credentialTypes.get(typeName);
@@ -189,8 +198,8 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
 
   const node: WorkflowNode = useMemo(
     () => ({
-      id: 'credential',
-      name: 'credential',
+      id: CREDENTIAL_FORM_NODE_ID,
+      name: CREDENTIAL_FORM_NODE_ID,
       type: typeName,
       typeVersion: 1,
       position: [0, 0],
@@ -198,19 +207,30 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
     }),
     [typeName, data],
   );
+  // the expression toggle shows when a connection exists, or when a field already holds an expression
+  const secrets = secretNames.data;
+  const hasConnections = Boolean(secrets && Object.keys(secrets).length > 0);
+  const hasExpression = Object.values(data).some(isExpressionValue);
   const context: ParameterContextValue = useMemo(
     () => ({
       node,
       rootValues: data,
       readOnly: false,
-      allowExpressions: false,
+      allowExpressions: hasConnections || hasExpression,
+      completions: (): CompletionData => ({
+        inputFields: () => [],
+        nodeNames: [],
+        nodeFields: () => [],
+        variables: [],
+        secrets: secrets ?? {},
+      }),
       keepSecretOnEmpty: Boolean(savedId),
       onChange: (path, value) => {
         setTestResult(null);
         setData((d) => setIn(d, path, value) as NodeParameters);
       },
     }),
-    [node, data, savedId],
+    [node, data, savedId, hasConnections, hasExpression, secrets],
   );
 
   const loading = Boolean(credentialId) && existing.isLoading;
