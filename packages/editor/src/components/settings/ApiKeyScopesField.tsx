@@ -118,10 +118,9 @@ export function ApiKeyScopesField({ value, onChange, onModeChange, disabled }: A
             {withScopes.map((group) => {
               const count = group.all.filter((scope) => picked.has(scope)).length;
               return (
-                <div
+                <fieldset
                   key={group.resource}
-                  className="flex flex-col gap-1"
-                  role="group"
+                  className="m-0 flex min-w-0 flex-col gap-1 border-0 p-0"
                   aria-label={group.label}
                 >
                   <Checkbox
@@ -145,7 +144,7 @@ export function ApiKeyScopesField({ value, onChange, onModeChange, disabled }: A
                       />
                     ))}
                   </div>
-                </div>
+                </fieldset>
               );
             })}
           </div>
