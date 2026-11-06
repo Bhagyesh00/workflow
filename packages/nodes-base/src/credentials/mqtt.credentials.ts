@@ -1,4 +1,4 @@
-/** Stub: final name and display name; L20 writes the fields. */
+/** The MQTT credential, with the field names of n8n. */
 import type { CredentialType } from '@workflow/workflow';
 
 export const mqtt: CredentialType = {
@@ -6,6 +6,97 @@ export const mqtt: CredentialType = {
   displayName: 'MQTT',
   // sends no HTTP requests with the credential: no "Allowed HTTP Request Domains" fields
   hideDomainRestrictionFields: true,
-  // one final field until the lane: descriptions.test.ts wants every credential type to have one
-  properties: [{ displayName: 'Host', name: 'host', type: 'string', default: '' }],
+  properties: [
+    {
+      displayName: 'Protocol',
+      name: 'protocol',
+      type: 'options',
+      default: 'mqtt',
+      options: [
+        { name: 'Mqtt', value: 'mqtt' },
+        { name: 'Mqtts', value: 'mqtts' },
+        { name: 'Ws', value: 'ws' },
+      ],
+    },
+    { displayName: 'Host', name: 'host', type: 'string', default: '', placeholder: 'localhost' },
+    { displayName: 'Port', name: 'port', type: 'number', default: 1883 },
+    {
+      displayName: 'Username',
+      name: 'username',
+      type: 'string',
+      default: '',
+      description: 'Sent only together with a password',
+    },
+    {
+      displayName: 'Password',
+      name: 'password',
+      type: 'string',
+      default: '',
+      typeOptions: { password: true },
+    },
+    {
+      displayName: 'Clean Session',
+      name: 'clean',
+      type: 'boolean',
+      default: true,
+      description: 'Whether the broker should forget this client when it disconnects',
+    },
+    {
+      displayName: 'Client ID',
+      name: 'clientId',
+      type: 'string',
+      default: '',
+      description: 'Left empty, a random ID is used',
+    },
+    {
+      displayName: 'SSL',
+      name: 'ssl',
+      type: 'boolean',
+      default: false,
+      description: 'Whether to connect over TLS (mqtts, or wss for the ws protocol)',
+    },
+    {
+      displayName: 'Passwordless',
+      name: 'passwordless',
+      type: 'boolean',
+      default: true,
+      displayOptions: { show: { ssl: [true] } },
+      description: 'Whether to sign in with a client certificate instead of a password',
+    },
+    {
+      displayName: 'CA Certificates',
+      name: 'ca',
+      type: 'string',
+      default: '',
+      typeOptions: { rows: 4, password: true },
+      displayOptions: { show: { ssl: [true] } },
+      description: 'PEM certificate of the authority that signed the broker certificate',
+    },
+    {
+      displayName: 'Reject Unauthorized Certificate',
+      name: 'rejectUnauthorized',
+      type: 'boolean',
+      default: true,
+      displayOptions: { show: { ssl: [true] } },
+      description: 'Whether to refuse a broker whose certificate cannot be verified. Turn off only for tests.',
+    },
+    {
+      displayName: 'Client Certificate',
+      name: 'cert',
+      type: 'string',
+      default: '',
+      typeOptions: { rows: 4, password: true },
+      displayOptions: { show: { ssl: [true], passwordless: [true] } },
+      description: 'PEM client certificate. Needs the Client Key too.',
+    },
+    {
+      displayName: 'Client Key',
+      name: 'key',
+      type: 'string',
+      default: '',
+      typeOptions: { rows: 4, password: true },
+      displayOptions: { show: { ssl: [true], passwordless: [true] } },
+      description: 'PEM private key of the client certificate',
+    },
+  ],
 };
