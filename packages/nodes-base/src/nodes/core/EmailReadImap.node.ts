@@ -244,9 +244,10 @@ class MailboxWatcher {
       return skip(`${size} bytes is over the limit of ${this.maxMailBytes} bytes for one mail`);
     }
     const message = await client.fetchOne(String(uid), { uid: true, source: true }, { uid: true });
-    if (!message || !message.source) return skip('message source missing');
+    const source = message ? message.source : undefined;
+    if (!source) return skip('message source missing');
     try {
-      return await this.toItem(message.source, uid);
+      return await this.toItem(source, uid);
     } catch (error) {
       if (error instanceof UnreadableMail) return skip(error.message);
       throw error;

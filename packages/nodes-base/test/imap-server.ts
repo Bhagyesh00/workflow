@@ -491,7 +491,7 @@ export class ImapTestServer {
         const name = text(queue.shift());
         const wanted = text(queue.shift()).toLowerCase();
         const value = headerOf(mail, name);
-        return value !== undefined && value.toLowerCase().includes(wanted);
+        return value?.toLowerCase().includes(wanted) === true;
       }
       case 'BODY': {
         const wanted = text(queue.shift()).toLowerCase();
