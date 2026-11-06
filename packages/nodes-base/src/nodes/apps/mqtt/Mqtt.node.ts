@@ -4,7 +4,7 @@
  */
 import { type DataObject, type Item, NodeOperationError, type NodeType } from '@workflow/workflow';
 import type { MqttClient } from 'mqtt';
-import { mqttCredentialTest, type MqttCredentials, openMqtt } from './client';
+import { closeMqtt, mqttCredentialTest, type MqttCredentials, openMqtt } from './client';
 
 export const MqttNode: NodeType = {
   description: {
@@ -102,6 +102,11 @@ export const MqttNode: NodeType = {
     const creds = (await ctx.getCredentials('mqtt')) as MqttCredentials;
     const client: MqttClient = await openMqtt(ctx, creds);
     client.on('error', () => undefined);
+    // the client never reconnects, so a publish that is open when the connection goes never settles
+    const lost = new Promise<never>((_resolve, reject) => {
+      client.once('close', () => reject(new Error('The MQTT connection closed')));
+    });
+    lost.catch(() => undefined);
     const results: Item[] = [];
     try {
       for (let index = 0; index < items.length; index++) {
@@ -119,7 +124,7 @@ export const MqttNode: NodeType = {
               ? String(ctx.getNodeParameter('message', index, '') ?? '')
               : JSON.stringify(item.json);
           try {
-            await client.publishAsync(topic, message, { qos, retain: options.retain === true });
+            await Promise.race([client.publishAsync(topic, message, { qos, retain: options.retain === true }), lost]);
           } catch {
             throw new NodeOperationError(ctx.getNode(), "Couldn't publish the MQTT message", { itemIndex: index });
           }
@@ -133,7 +138,7 @@ export const MqttNode: NodeType = {
         }
       }
     } finally {
-      await client.endAsync().catch(() => undefined);
+      await closeMqtt(client);
     }
     return [results];
   },

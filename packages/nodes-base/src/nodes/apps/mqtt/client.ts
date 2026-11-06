@@ -16,6 +16,7 @@ import { formatPemBlock } from '../../../utils/pem';
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const KEEPALIVE_SECONDS = 60;
+const CLOSE_WAIT_MS = 2000;
 const COMPLETE_PEM = /-----BEGIN ([A-Z0-9 ]+)-----[\s\S]+-----END \1-----/;
 
 export type MqttProtocol = 'mqtt' | 'mqtts' | 'ws';
@@ -127,8 +128,15 @@ function isGuardRefusal(error: unknown): error is Error {
   );
 }
 
-/** check the host, then connect to the checked addresses only; resolves once the broker accepted us */
-export async function openMqtt(ctx: GuardedConnectContext, creds: MqttCredentials): Promise<MqttClient> {
+/**
+ * check the host, then connect to the checked addresses only; resolves once the broker accepted us.
+ * `onClient` runs before the broker can answer: what is delivered right after CONNACK needs its listener by then.
+ */
+export async function openMqtt(
+  ctx: GuardedConnectContext,
+  creds: MqttCredentials,
+  onClient?: (client: MqttClient) => void,
+): Promise<MqttClient> {
   const plan = connectionPlan(creds);
   let client: MqttClient;
   try {
@@ -152,6 +160,7 @@ export async function openMqtt(ctx: GuardedConnectContext, creds: MqttCredential
     // the guard's own refusal says why; a network failure gets a fixed text
     throw isGuardRefusal(error) ? error : new Error(describeConnectError(error));
   }
+  onClient?.(client);
 
   return await new Promise<MqttClient>((resolve, reject) => {
     const settle = (error?: unknown) => {
@@ -174,6 +183,22 @@ export async function openMqtt(ctx: GuardedConnectContext, creds: MqttCredential
     client.once('error', onError);
     client.once('close', onClose);
   });
+}
+
+/**
+ * End the client within a bound. A plain end waits for every unanswered publish, and on a lost connection
+ * they never get an answer. A second end returns at once while the first waits, so the socket goes by hand.
+ */
+export async function closeMqtt(client: MqttClient): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    client.endAsync(!client.connected).catch(() => undefined),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, CLOSE_WAIT_MS);
+    }),
+  ]);
+  clearTimeout(timer);
+  client.stream?.destroy();
 }
 
 /** connect and sign in; the answer is ours, never the text of the broker */

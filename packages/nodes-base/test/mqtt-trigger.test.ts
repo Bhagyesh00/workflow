@@ -333,6 +333,41 @@ describe('subscribing and messages', () => {
     await pub.publishAsync(topic, '', { qos: 1, retain: true });
   });
 
+  /** a session the broker keeps, with one message that waits for it */
+  async function sessionWithWaitingMessage(topic: string) {
+    const clientId = `sess-${randomUUID().slice(0, 8)}`;
+    const session = await mqtt.connectAsync(`mqtt://127.0.0.1:${tcpPort}`, {
+      username: USER,
+      password: PASS,
+      clientId,
+      clean: false,
+    });
+    await session.subscribeAsync(topic, { qos: 1 });
+    await session.endAsync();
+    const pub = await publisher();
+    await pub.publishAsync(topic, 'while away', { qos: 1 });
+    return creds({ clientId, clean: false });
+  }
+
+  it('a resumed session gets the messages that waited while it was away', async () => {
+    const topic = unique('offline');
+    const resumed = await sessionWithWaitingMessage(topic);
+    const t = await start(topics([topic, 1]), { creds: resumed });
+    await until(() => t.runs.length === 1, 3000);
+    expect(t.runs[0].items[0].json).toEqual({ topic, message: 'while away' });
+  });
+
+  it('a test run keeps the message of a resumed session until it starts waiting', async () => {
+    const topic = unique('offline-manual');
+    const resumed = await sessionWithWaitingMessage(topic);
+    const t = await start(topics([topic, 1]), { creds: resumed, mode: 'manual' });
+    await sleep(300);
+    expect(t.runs).toHaveLength(0);
+    await t.response.manualTriggerFunction!();
+    expect(t.runs).toHaveLength(1);
+    expect(t.runs[0].items[0].json).toEqual({ topic, message: 'while away' });
+  });
+
   it('parallel processing starts runs without waiting for the one before', async () => {
     const topic = unique('par');
     const t = await start(topics([topic]), { onRun: () => undefined });

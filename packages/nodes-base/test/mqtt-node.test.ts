@@ -125,6 +125,49 @@ describe('errors', () => {
     expect(ok.outputs[0]?.[0]).toHaveProperty('error');
   });
 
+  /** a broker that drops the client when it gets a publish on `topic` */
+  function dropOnPublish(topic: string) {
+    const before = broker.authorizePublish;
+    broker.authorizePublish = (client, packet, done) => {
+      if (packet.topic === topic) client?.conn.destroy();
+      else done(null);
+    };
+    return () => {
+      broker.authorizePublish = before;
+    };
+  }
+
+  it('a connection that drops during a publish fails the node instead of hanging', { timeout: 10_000 }, async () => {
+    const topic = unique('drop');
+    const restore = dropOnPublish(topic);
+    try {
+      const r = await run({ topic, sendInputData: true, options: { qos: 1 } });
+      expect(r.status).toBe('error');
+      expect(String(r.error?.message)).toBe("Couldn't publish the MQTT message");
+    } finally {
+      restore();
+    }
+  });
+
+  it('continue on fail gets past a lost connection, for the item after it too', { timeout: 10_000 }, async () => {
+    const topic = unique('drop-continue');
+    const restore = dropOnPublish(topic);
+    try {
+      const r = await runNode(
+        'app.mqtt',
+        { topic, sendInputData: true, options: { qos: 1 } } as never,
+        [{ json: { a: 1 } }, { json: { a: 2 } }] as never,
+        { creds: creds(), services: { http: localHttp() }, node: { onError: 'continueRegularOutput' } as never },
+      );
+      expect(r.outputs[0]).toEqual([
+        { error: "Couldn't publish the MQTT message" },
+        { error: "Couldn't publish the MQTT message" },
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
   it('refuses a private host through the guard', async () => {
     const r = await runNode('app.mqtt', { topic: 't', sendInputData: true } as never, [{ json: {} }] as never, {
       creds: creds({ host: '10.0.0.5' }),

@@ -1,11 +1,10 @@
 /** MQTT Trigger: behaviour of n8n's node on mqtt.js, with the SSRF guard on the broker socket. */
 import type { DataObject, Item, NodeType, TriggerContext } from '@workflow/workflow';
 import type { MqttClient } from 'mqtt';
-import { type MqttCredentials, mqttCredentialTest, openMqtt } from './client';
+import { closeMqtt, type MqttCredentials, mqttCredentialTest, openMqtt } from './client';
 
 /** more messages than this waiting for the previous run (ordered mode) are dropped with a warning */
 export const ORDERED_BACKLOG_LIMIT = 1000;
-const CLOSE_WAIT_MS = 2000;
 
 export interface TopicSetting {
   topic: string;
@@ -157,62 +156,25 @@ export const MqttTriggerNode: NodeType = {
   async trigger(ctx) {
     const settings = readSettings(ctx);
     const credentials = await ctx.getCredentials<MqttCredentials>('mqtt');
-    const client: MqttClient = await openMqtt(ctx, credentials);
-
-    let closing = false;
-    let failed = false;
-    const fail = (error: Error) => {
-      if (closing || failed) return;
-      failed = true;
-      ctx.emitError(error);
-    };
-    client.on('error', () => fail(new Error('The MQTT connection failed')));
-    client.on('close', () => fail(new Error('The MQTT connection closed unexpectedly')));
-
-    const closeFunction = async () => {
-      closing = true;
-      await Promise.race([
-        client.endAsync().catch(() => undefined),
-        new Promise((resolve) => setTimeout(resolve, CLOSE_WAIT_MS)),
-      ]);
-      await client.endAsync(true).catch(() => undefined);
-    };
-
-    try {
-      const granted = await client.subscribeAsync(
-        Object.fromEntries(settings.topics.map(({ topic, qos }) => [topic, { qos }])),
-      );
-      // 128 is the broker's refusal of a topic
-      const refused = granted.find((grant) => grant.qos === 128);
-      if (refused) throw new Error(`MQTT refused the subscription to ${refused.topic}`);
-    } catch (error) {
-      await closeFunction();
-      throw error instanceof Error && error.message.startsWith('MQTT refused')
-        ? error
-        : new Error("Couldn't subscribe to the MQTT topics");
-    }
-
+    const manual = ctx.getActivationMode() === 'manual';
     const itemOf = (topic: string, payload: Buffer) =>
       buildItem(topic, payload, settings, (message) => ctx.logger.warn(message));
 
-    if (ctx.getActivationMode() === 'manual') {
-      // a test run: the first message starts one run and ends the wait
-      const manualTriggerFunction = () =>
-        new Promise<void>((resolve) => {
-          let taken = false;
-          client.on('message', (topic, payload) => {
-            if (taken) return;
-            taken = true;
-            ctx.emit([[itemOf(topic, payload)]]);
-            resolve();
-          });
-        });
-      return { closeFunction, manualTriggerFunction };
-    }
+    let closing = false;
+    let failed = false;
+
+    // a test run: the first message starts one run and ends the wait, also when it came before the wait
+    let first: Item | undefined;
+    let takeFirst: (() => void) | undefined;
+    const onTestMessage = (topic: string, payload: Buffer) => {
+      if (first) return;
+      first = itemOf(topic, payload);
+      takeFirst?.();
+    };
 
     let previous: Promise<void> = Promise.resolve();
     let waiting = 0;
-    client.on('message', (topic, payload) => {
+    const onMessage = (topic: string, payload: Buffer) => {
       const item = itemOf(topic, payload);
       if (settings.parallelProcessing) {
         ctx.emit([[item]]);
@@ -238,7 +200,52 @@ export const MqttTriggerNode: NodeType = {
             ctx.emit([[item]], { resolve: finish, reject: finish });
           }),
       );
-    });
+    };
+
+    // mqtt.js acknowledges a message with or without a listener, and a resumed session and a retained
+    // message can come at once after the connect: the listener has to be there before the broker answers
+    const client: MqttClient = await openMqtt(ctx, credentials, (opened) =>
+      opened.on('message', manual ? onTestMessage : onMessage),
+    );
+
+    const fail = (error: Error) => {
+      if (closing || failed) return;
+      failed = true;
+      ctx.emitError(error);
+    };
+    client.on('error', () => fail(new Error('The MQTT connection failed')));
+    client.on('close', () => fail(new Error('The MQTT connection closed unexpectedly')));
+
+    const closeFunction = async () => {
+      closing = true;
+      await closeMqtt(client);
+    };
+
+    try {
+      const granted = await client.subscribeAsync(
+        Object.fromEntries(settings.topics.map(({ topic, qos }) => [topic, { qos }])),
+      );
+      // 128 is the broker's refusal of a topic
+      const refused = granted.find((grant) => grant.qos === 128);
+      if (refused) throw new Error(`MQTT refused the subscription to ${refused.topic}`);
+    } catch (error) {
+      await closeFunction();
+      throw error instanceof Error && error.message.startsWith('MQTT refused')
+        ? error
+        : new Error("Couldn't subscribe to the MQTT topics");
+    }
+
+    if (manual) {
+      const manualTriggerFunction = () =>
+        new Promise<void>((resolve) => {
+          takeFirst = () => {
+            ctx.emit([[first!]]);
+            resolve();
+          };
+          if (first) takeFirst();
+        });
+      return { closeFunction, manualTriggerFunction };
+    }
 
     return { closeFunction };
   },
