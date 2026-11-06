@@ -59,6 +59,7 @@ beforeEach(() => {
 interface CallOptions {
   method?: 'GET' | 'POST';
   url?: string;
+  secure?: boolean;
   query?: DataObject;
   headers?: WebhookRequest['headers'];
   parameters?: DataObject;
@@ -84,9 +85,10 @@ function contextOf(options: CallOptions) {
     },
     nodeTypes,
   );
-  const request: WebhookRequest & { url?: string } = {
+  const request: WebhookRequest = {
     method,
     url: options.url ?? FORM_URL,
+    secure: options.secure,
     headers: options.headers ?? {},
     query: options.query ?? {},
     params: {},
@@ -193,10 +195,25 @@ describe('a visitor with no token', () => {
 });
 
 describe('the code from sign-in', () => {
+  it('the cookie is Secure only when the request came over https', async () => {
+    const swap = async (secure?: boolean) => {
+      codes.set('fresh', FORM_URL);
+      const result = await call({ url: `${FORM_URL}?code=fresh`, query: { code: 'fresh' }, secure });
+      return String(result.webhookResponse?.headers?.['set-cookie']);
+    };
+    expect(await swap(true)).toMatch(/; Secure$/);
+    for (const secure of [false, undefined]) {
+      const cookie = await swap(secure);
+      expect(cookie).toContain('HttpOnly');
+      expect(cookie).not.toContain('Secure');
+    }
+  });
+
   it('is swapped once for a cookie and a redirect to the URL without the code', async () => {
     const result = await call({
       url: `${FORM_URL}?code=good-code&ref=mail`,
       query: { code: 'good-code', ref: 'mail' },
+      secure: true,
     });
     expect(result.webhookResponse?.statusCode).toBe(302);
     expect(result.webhookResponse?.headers?.location).toBe(`${FORM_URL}?ref=mail`);

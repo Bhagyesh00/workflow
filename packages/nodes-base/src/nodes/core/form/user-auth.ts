@@ -10,7 +10,6 @@ import type {
   FormUser,
   NodeProperty,
   WebhookContext,
-  WebhookRequest,
   WebhookResponse,
 } from '@workflow/workflow';
 import { headerValue } from './access';
@@ -67,8 +66,7 @@ export interface FormUserAuthResult {
 }
 
 /** the address the browser asked for; the route passes it on, a context has no other way to know */
-const requestPath = (ctx: WebhookContext) =>
-  (ctx.getRequestObject() as WebhookRequest & { url?: string }).url?.split('?')[0];
+const requestPath = (ctx: WebhookContext) => ctx.getRequestObject().url?.split('?')[0];
 
 /** this form's path: a later page's signed URL, or the address of the trigger's form */
 function formPath(ctx: WebhookContext, scope: FormUserAuthParams['scope']): string | undefined {
@@ -155,7 +153,9 @@ function issueCookie(
 ): string {
   const token = ctx.signFormToken({ ...tokenBinding(ctx, scope), userId: user.id }, TOKEN_TTL_SECONDS);
   const scopePath = scope === 'trigger' ? cookiePath(path) : `/form-waiting/${ctx.getExecutionId()}`;
-  return `${cookieName(ctx, scope)}=${token}; Path=${scopePath}; Max-Age=${TOKEN_TTL_SECONDS}; HttpOnly; SameSite=Lax; Secure`;
+  // over plain http a browser drops a Secure cookie and the visitor would go back to sign-in for ever
+  const secure = ctx.getRequestObject().secure ? '; Secure' : '';
+  return `${cookieName(ctx, scope)}=${token}; Path=${scopePath}; Max-Age=${TOKEN_TTL_SECONDS}; HttpOnly; SameSite=Lax${secure}`;
 }
 
 function refusal(isPage: boolean, statusCode: number, message: string): FormUserAuthResult {

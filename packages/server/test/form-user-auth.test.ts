@@ -1,6 +1,7 @@
 /** P4-16: a form only signed-in workspace members open: sign-in, code, cookie, token, later pages. */
 import type { DataObject, WebhookRequest, WorkflowNode } from '@workflow/workflow';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { redactUrl } from '../src/logger';
 import { FormAuthService } from '../src/services/form-auth';
 import { normalizePath } from '../src/services/webhook-paths';
 import type { WebhookReply } from '../src/services/webhooks';
@@ -78,6 +79,7 @@ interface Hit {
   method?: 'GET' | 'POST';
   headers?: WebhookRequest['headers'];
   body?: DataObject;
+  secure?: boolean;
 }
 
 /**
@@ -91,6 +93,7 @@ function requestOf(url: string, hit: Hit) {
   const request = {
     method,
     url,
+    secure: hit.secure,
     headers,
     query: Object.fromEntries(new URLSearchParams(search)),
     params: {},
@@ -354,7 +357,7 @@ describe('the Form Trigger with User Auth', () => {
 
     const viewer = await member(admin, 'viewer');
     const code = await issueCode(viewer.client, `${url}?ref=mail`);
-    const swap = await hitForm(`${url}?ref=mail&code=${code}`);
+    const swap = await hitForm(`${url}?ref=mail&code=${code}`, { secure: true });
     expect(swap.statusCode).toBe(302);
     expect(swap.headers.location).toBe(`${url}?ref=mail`);
     expect(swap.headers.location).not.toContain('code');
@@ -614,7 +617,7 @@ describe('through the routes', () => {
     expect(swap.headers.location).toBe(url);
     const cookie = String(swap.headers['set-cookie']);
     expect(cookie).toMatch(new RegExp(`^ncb-form-auth-wf-${wf.id}=`));
-    for (const part of ['HttpOnly', 'SameSite=Lax', 'Secure', `Path=${url}`]) expect(cookie).toContain(part);
+    for (const part of ['HttpOnly', 'SameSite=Lax', `Path=${url}`]) expect(cookie).toContain(part);
 
     const opened = await server.app.inject({
       method: 'GET',
@@ -623,5 +626,51 @@ describe('through the routes', () => {
     });
     expect(opened.statusCode).toBe(200);
     expect(String(opened.headers['set-cookie'])).toMatch(new RegExp(`^ncb-form-auth-wf-${wf.id}=`));
+  });
+
+  it('the cookie follows the scheme, and a proxy header counts only when proxies are trusted', async () => {
+    const admin = await owner();
+    await active(admin.client, [form()]);
+    const url = `/form/${admin.tenant.slug}/who`;
+    const cookieFrom = async (app: TestServer['app'], proto?: string) => {
+      const code = await issueCode(admin.client, url);
+      const swap = await app.inject({
+        method: 'GET',
+        url: `${url}?code=${code}`,
+        headers: proto ? { 'x-forwarded-proto': proto } : {},
+      });
+      expect(swap.statusCode).toBe(302);
+      return String(swap.headers['set-cookie']);
+    };
+
+    // plain http with a plain-http BASE_URL: a Secure cookie would be dropped, and the visitor would loop
+    expect(await cookieFrom(server.app)).not.toContain('Secure');
+    // nobody trusts this caller's word
+    expect(await cookieFrom(server.app, 'https')).not.toContain('Secure');
+
+    const proxied = await createTestServer({ REDIS_URL: TEST_REDIS, TRUST_PROXY: 'true' }, { reset: false });
+    try {
+      expect(await cookieFrom(proxied.app, 'https')).toMatch(/; Secure$/);
+      expect(await cookieFrom(proxied.app, ' https , http')).toMatch(/; Secure$/);
+      expect(await cookieFrom(proxied.app, 'http, https')).not.toContain('Secure');
+      expect(await cookieFrom(proxied.app)).not.toContain('Secure');
+    } finally {
+      await proxied.close();
+    }
+  });
+
+  it('the one-time code of a form URL stays out of the request log', () => {
+    const code = 'a'.repeat(43);
+    expect(redactUrl(`/form/acme/who?code=${code}`)).toBe('/form/acme/who?code=[redacted]');
+    expect(redactUrl(`/form-test/acme/who?ref=mail&code=${code}&x=1`)).toBe(
+      '/form-test/acme/who?ref=mail&code=[redacted]&x=1',
+    );
+    expect(redactUrl(`/form-waiting/e1/sig?code=${code}`)).toBe('/form-waiting/[redacted]?code=[redacted]');
+    expect(redactUrl(`/%66orm/acme/who?code=${code}`)).not.toContain(code);
+    // the rest of the log stays as it was
+    expect(redactUrl('/form/acme/who?ref=mail')).toBe('/form/acme/who?ref=mail');
+    expect(redactUrl('/rest/oauth2-credential/callback?state=s')).toBe(
+      '/rest/oauth2-credential/callback?state=s',
+    );
   });
 });
