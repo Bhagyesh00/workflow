@@ -361,6 +361,29 @@ describe('test form', () => {
     expect((await server.app.inject({ method: 'POST', url, ...multipart({}) })).statusCode).toBe(404);
   });
 
+  it('a refused POST leaves the test form listening', async () => {
+    const { client, tenant } = await owner();
+    const wf = await createWorkflow(client, {
+      nodes: [form({ ...textField, options: { ignoreBots: true } })],
+    });
+    await client.data(client.post(`/rest/workflows/${wf.id}/listen-test-webhook`, { nodeName: 'Form' }));
+    const url = `/form-test/${tenant.slug}/sign-up`;
+
+    const refused = await server.app.inject({
+      method: 'POST',
+      url,
+      ...multipart({ 'field-0': 'Bot' }),
+      headers: { ...multipart({ 'field-0': 'Bot' }).headers, 'user-agent': 'Googlebot/2.1' },
+    });
+    expect(refused.statusCode).toBe(401);
+    expect(await executionsOf(server.ctx, tenant.id, wf.id)).toHaveLength(0);
+    expect((await server.app.inject({ method: 'GET', url })).statusCode).toBe(200);
+
+    const posted = await server.app.inject({ method: 'POST', url, ...multipart({ 'field-0': 'Ann' }) });
+    expect(posted.statusCode).toBe(200);
+    expect((await server.app.inject({ method: 'GET', url })).statusCode).toBe(404);
+  });
+
   it('a browser gets the page that says what to do, a script the JSON', async () => {
     const { tenant } = await owner();
     const url = `/form-test/${tenant.slug}/sign-up`;

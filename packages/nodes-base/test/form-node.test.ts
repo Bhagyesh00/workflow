@@ -477,6 +477,33 @@ describe('later pages keep the trigger access', () => {
     expect(without.workflowData?.[0]?.[0]?.json.user).toBeUndefined();
   });
 
+  it('reads an expression of the trigger as its own page does', async () => {
+    const user = { id: 'u1', email: 'a@b.c', firstName: 'A', lastName: 'B' };
+    vi.mocked(checkFormUserAuth).mockResolvedValue({ allowed: true, user, headers: {} });
+    const asked = async (requireExecuteAccess: unknown) => {
+      vi.mocked(checkFormUserAuth).mockClear();
+      await call(textField, { trigger: { authentication: 'n8nUserAuth', requireExecuteAccess } });
+      return vi.mocked(checkFormUserAuth).mock.calls[0][1].requireExecuteAccess;
+    };
+    expect(await asked('={{ true }}')).toBe(true);
+    expect(await asked('={{ false }}')).toBe(false);
+    expect(await asked(true)).toBe(true);
+    expect(await asked(undefined)).toBe(false);
+    // an expression that fails refuses rather than lets everyone in
+    expect(await asked('={{ $nodeThatIsNotThere.x }}')).toBe(true);
+
+    const output = async (includeUserInOutput: unknown) =>
+      (
+        await call(textField, {
+          trigger: { authentication: 'n8nUserAuth', options: { includeUserInOutput } },
+          method: 'POST',
+        })
+      ).workflowData?.[0]?.[0]?.json.user;
+    expect(await output('={{ false }}')).toBeUndefined();
+    expect(await output('={{ $nodeThatIsNotThere.x }}')).toBeUndefined();
+    expect(await output('={{ true }}')).toMatchObject({ id: 'u1' });
+  });
+
   it('sends a visitor who is not allowed where the user auth says', async () => {
     vi.mocked(checkFormUserAuth).mockResolvedValue({
       allowed: false,
@@ -502,6 +529,22 @@ describe('Wait: On Form Submitted', () => {
     type: 'core.wait',
     noTrigger: true,
     ...extra,
+  });
+
+  it('Include User in Output off on the trigger keeps the user out of the output', async () => {
+    const user = { id: 'u1', email: 'a@b.c', firstName: 'A', lastName: 'B' };
+    vi.mocked(checkFormUserAuth).mockResolvedValue({ allowed: true, user, headers: {} });
+    const output = async (triggerOptions: DataObject) =>
+      (
+        await call(wait(), {
+          type: 'core.wait',
+          method: 'POST',
+          trigger: { authentication: 'n8nUserAuth', options: triggerOptions },
+        })
+      ).workflowData?.[0]?.[0]?.json.user;
+    expect(await output({})).toMatchObject({ id: 'u1' });
+    expect(await output({ includeUserInOutput: false })).toBeUndefined();
+    expect(await output({ includeUserInOutput: '={{ false }}' })).toBeUndefined();
   });
 
   it('offers the option, its form parameters and the hooks', () => {

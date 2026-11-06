@@ -133,7 +133,8 @@ export async function sendAndWaitWebhook(ctx: WebhookContext): Promise<WebhookRe
       return pageReply(400, 'Response not taken', 'This link is incomplete. Use the buttons in the message.');
     }
     // a mail scanner or a link preview opens the link without a person: it must not answer
-    if (isBotUserAgent(headerValue(ctx, 'user-agent'))) {
+    const agent = headerValue(ctx, 'user-agent');
+    if (!agent?.trim() || isBotUserAgent(agent)) {
       return pageReply(
         200,
         'Open this link in a browser',

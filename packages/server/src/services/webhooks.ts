@@ -144,6 +144,12 @@ const FORM_STATUS_SUFFIX = 'n8n-execution-status';
 /** the run has persisted its wait well before this; a lost worker must not hold the page */
 const FORM_PAGE_READY_MS = 10_000;
 const WAITING_MESSAGE = 'Workflow is waiting';
+/** the link of a Send and Wait node ends in this (nodes-base send-and-wait/descriptions.ts) */
+const ANSWER_SUFFIX = 'answer';
+const ANSWER_CLOSED = {
+  title: 'Nothing more to do',
+  message: 'This request was already answered, or it has closed.',
+};
 
 /** a node that shows a form page while the run waits at it */
 const isFormPage = (node: WorkflowNode | undefined): boolean => {
@@ -209,6 +215,21 @@ function formErrorFor(
   return formErrorPage(reply.statusCode, page);
 }
 
+/** a browser on the link of a Send and Wait node the run no longer stands at gets a page, not JSON */
+function closedAnswerPage(
+  kind: WebhookKind,
+  incoming: IncomingWebhook,
+  definition: WorkflowDefinition,
+  path: string,
+): WebhookReply | undefined {
+  if (kind !== 'webhook' || incoming.method !== 'GET') return undefined;
+  if (!header(incoming.headers, 'accept')?.includes('text/html')) return undefined;
+  const [nodeKey, suffix, ...more] = path.split('/');
+  if (suffix !== ANSWER_SUFFIX || more.length) return undefined;
+  const node = definition.nodes.find((n) => (n.webhookId || n.id) === nodeKey);
+  return node?.parameters.operation === 'sendAndWait' ? formErrorPage(409, ANSWER_CLOSED) : undefined;
+}
+
 export interface WebhookServiceDeps {
   config: Config;
   repos: Repositories;
@@ -233,6 +254,8 @@ interface RunInput {
   params: Record<string, string>;
   userId?: string;
   onStarted?: (executionId: string) => void;
+  /** takes the test registration once the node accepted the request; a reply means another request took it */
+  claim?: () => Promise<WebhookReply | undefined>;
 }
 
 /** the node whose `allowedOrigins` option grants CORS, and the run settings its expressions resolve with */
@@ -466,16 +489,16 @@ export class WebhookService {
       };
       return this.decorate(bodyErrorReply(error, kind), source, incoming.headers);
     }
-    // showing a test form uses nothing up: only its submission does, and then for both of its hooks
-    const showsForm = kind === 'form' && hook.method === 'GET';
-    if (!showsForm) {
-      // one-shot: the first call consumes the registration
-      if (!(await testWebhooks.remove(found.registration))) return missing();
-      if (kind === 'form') {
-        await testWebhooks.removeForNode(tenant.id, registration.workflowId, registration.nodeName);
-      }
-    }
+    // one-shot: the first call consumes the registration. A form uses it up only with an accepted
+    // submission, and then for both of its hooks: its page and a refused POST leave it listening.
+    if (kind !== 'form' && !(await testWebhooks.remove(registration))) return missing();
+    const claim = async () => {
+      if (!(await testWebhooks.remove(registration))) return missing();
+      await testWebhooks.removeForNode(tenant.id, registration.workflowId, registration.nodeName);
+      return undefined;
+    };
     return this.run({
+      claim: kind === 'form' ? claim : undefined,
       tenant,
       definition,
       workflowId: registration.workflowId,
@@ -503,7 +526,9 @@ export class WebhookService {
       formErrorFor(kind, incoming.headers, json(404, errorBody('not_found', message)), FORM_INVALID);
     // `<signature>[/<suffix>]`: an unsigned or forged URL is answered like an unknown execution
     const [signature = '', ...rest] = incoming.path.split('/');
-    if (!executions.verifyResumeSignature(executionId, signature)) return notFound('Execution not found');
+    if (!executions.verifyResumeSignature(executionId, signature, kind)) {
+      return notFound('Execution not found');
+    }
     const path = rest.join('/');
     const tenantId = await repos.executions.findTenantOf(executionId);
     if (!tenantId) return notFound('Execution not found');
@@ -528,7 +553,8 @@ export class WebhookService {
       );
       return { statusCode: 200, headers, body: word };
     }
-    if (row.status !== 'waiting') return this.notWaitingReply(kind, incoming, row.status);
+    const closedPage = () => closedAnswerPage(kind, incoming, definition, path);
+    if (row.status !== 'waiting') return closedPage() ?? this.notWaitingReply(kind, incoming, row.status);
 
     const type = node ? nodeTypes.get(node.type) : undefined;
     const workflow = new Workflow(definition, nodeTypes);
@@ -562,7 +588,9 @@ export class WebhookService {
     const suffix = hook && hook.path !== (node?.webhookId || node?.id) ? hook.path : '';
     // the page that follows another goes to the bare form URL, whatever suffix its Wait has
     if (hook && path !== suffix && !(kind === 'form' && !path)) {
-      return cors(json(404, errorBody('not_found', 'This execution does not resume on this path')));
+      return cors(
+        closedPage() ?? json(404, errorBody('not_found', 'This execution does not resume on this path')),
+      );
     }
     let request: WebhookRequest;
     try {
@@ -639,7 +667,9 @@ export class WebhookService {
       wait: responseMode !== 'onReceived',
       observer: responseMode === 'onReceived' ? undefined : handle.observer,
     });
-    if (!resumed) return cors(json(409, errorBody('not_waiting', 'The execution is not waiting')));
+    if (!resumed) {
+      return cors(closedPage() ?? json(409, errorBody('not_waiting', 'The execution is not waiting')));
+    }
     if (responseMode === 'onReceived') {
       return cors(answer ? fromWebhookResponse(answer) : json(200, { message: 'Workflow was resumed' }));
     }
@@ -753,6 +783,8 @@ export class WebhookService {
       if (!result.workflowData) {
         reply = fromWebhookResponse(result.webhookResponse ?? { statusCode: 200, body: {} });
       } else {
+        const lost = await input.claim?.();
+        if (lost) return lost;
         // the submitter follows the run to its next page by polling, not on this request
         const pagesFollow =
           webhookUrlBase(hook.description) === 'form' &&

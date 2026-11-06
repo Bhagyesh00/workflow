@@ -1,11 +1,12 @@
 /**
  * The run side of "Send and Wait for Response": what the message holds, and putting the run to wait.
- * The links come from the run's signed resume URL, so nothing else is needed to tell who answers.
+ * The links come from the run's signed resume URL plus the node, so a link answers only this node.
  */
 import { type DataObject, type ExecuteContext, type Item, NodeOperationError } from '@workflow/workflow';
 import { WAIT_INDEFINITELY } from '../../nodes/core/wait-limit';
 import { parseDate } from '../filter';
 import {
+  ANSWER_PATH,
   DEFAULT_APPROVE_LABEL,
   DEFAULT_DECLINE_LABEL,
   DEFAULT_RESPOND_LABEL,
@@ -36,13 +37,14 @@ const text = (value: unknown, fallback: string): string =>
 const styleOf = (value: unknown, fallback: 'primary' | 'secondary'): 'primary' | 'secondary' =>
   value === 'primary' || value === 'secondary' ? value : fallback;
 
-/** the run's resume URL, signed by the server; the answers come back through it */
-function resumeUrl(ctx: ExecuteContext): string {
+/** the run's resume URL, signed by the server, for this node; the answers come back through it */
+function answerUrl(ctx: ExecuteContext): string {
   const url = ctx.evaluateExpression('={{ $execution.resumeUrl }}', 0);
   if (typeof url !== 'string' || !url) {
     throw new NodeOperationError(ctx.getNode(), 'This run has no URL to wait for an answer on');
   }
-  return url;
+  const node = ctx.getNode();
+  return `${url}/${node.webhookId || node.id}/${ANSWER_PATH}`;
 }
 
 const withQuery = (url: string, name: string, value: string): string => {
@@ -59,7 +61,7 @@ export function planMessage(ctx: ExecuteContext): SendAndWaitMessage {
   if (!isResponseType(responseType)) {
     throw new NodeOperationError(ctx.getNode(), `"${responseType}" is not a response type`);
   }
-  const url = resumeUrl(ctx);
+  const url = answerUrl(ctx);
 
   if (responseType === 'approval') {
     const approval = (ctx.getNodeParameter('approvalOptions', 0, {}) as { values?: DataObject }).values ?? {};

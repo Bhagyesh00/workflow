@@ -5,6 +5,7 @@
 import { type BaseContext, type DataObject, NodeOperationError } from '@workflow/workflow';
 import { type FormField, parseFormFields } from '../../nodes/core/form/fields';
 import { renderFormPage, renderMessagePage } from '../../nodes/core/form/render';
+import { prefilled } from '../../nodes/core/form/webhook';
 import { DEFAULT_SUBMIT_LABEL } from './descriptions';
 
 export type ResponseType = 'approval' | 'freeText' | 'customForm';
@@ -131,7 +132,7 @@ export function responsePage(input: ResponsePageInput): string {
     title: text(options.responseFormTitle) || DEFAULT_PAGE_TITLE,
     // the message is text, so it is escaped here; the description option may carry HTML
     description: `<p>${messageAsHtml(input.message)}</p>${extra}`,
-    fields: input.fields,
+    fields: input.fields.map((field) => prefilled(field, {})),
     buttonLabel: text(options.responseFormButtonLabel) || DEFAULT_SUBMIT_LABEL,
     customCss: text(options.responseFormCustomCss) || undefined,
     testMode: input.testMode,

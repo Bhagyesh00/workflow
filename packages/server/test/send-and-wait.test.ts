@@ -13,6 +13,7 @@ import {
   setNode,
   signup,
   type TestServer,
+  waitFor,
   waitForExecution,
 } from './helpers';
 
@@ -120,7 +121,7 @@ describe('approval links', () => {
     expect(sent[0]).toMatchObject({ chat_id: '42', text: 'Ship the order?' });
     expect(Object.keys(run.links)).toEqual(['Approve']);
     expect(run.links.Approve).toMatch(
-      new RegExp(`^/webhook-waiting/${run.executionId}/[A-Za-z0-9_-]+\\?approved=true$`),
+      new RegExp(`^/webhook-waiting/${run.executionId}/[A-Za-z0-9_-]+/[\\w-]+/answer\\?approved=true$`),
     );
 
     const res = await get(run.links.Approve);
@@ -149,11 +150,96 @@ describe('approval links', () => {
     await run.finished();
     const again = await get(run.links.Approve);
     expect(again.statusCode).toBe(409);
+    expect(again.json().error.code).toBe('not_waiting');
+  });
+
+  it('a browser on a link that was answered gets a page', async () => {
+    const run = await waitingRun({ message: 'Ship it?' });
+    const browser = { accept: 'text/html,application/xhtml+xml' };
+    expect((await get(run.links.Approve, browser)).statusCode).toBe(200);
+    await run.finished();
+    const again = await get(run.links.Approve, browser);
+    expect(again.statusCode).toBe(409);
+    expect(again.headers['content-type']).toContain('text/html');
+    expect(again.headers['content-security-policy']).toContain('sandbox');
+    expect(again.body).toContain('already answered');
+  });
+
+  it('the URL a form submitter holds does not answer an approval (scenario A)', async () => {
+    const run = await waitingRun({ message: 'Ship it?' });
+    const form = new URL(server.ctx.executions.resumeFormUrl(run.executionId)).pathname;
+    const signature = form.split('/').at(-1);
+    const nodePart = new URL(run.links.Approve, 'http://x').pathname.split('/').slice(-2).join('/');
+    const hook = `/webhook-waiting/${run.executionId}/${signature}`;
+    expect((await get(`${hook}?approved=true`)).statusCode).toBe(404);
+    expect((await get(`${hook}/${nodePart}?approved=true`)).statusCode).toBe(404);
+    expect((await get(`${form}?approved=true`)).statusCode).toBe(404);
+    expect((await get(`${form}/${nodePart}?approved=true`)).statusCode).toBe(404);
+    expect(await run.status()).toBe('waiting');
+    expect((await get(run.links.Approve)).statusCode).toBe(200);
+    await run.finished();
+  });
+
+  it('a link answers only its own node, not the next gate of the run (scenario B)', async () => {
+    const { client, tenant } = await owner();
+    const credential = await client.data(
+      client.post('/rest/credentials', {
+        name: 'Bot',
+        type: 'telegramApi',
+        data: { accessToken: TOKEN, baseUrl },
+      }),
+    );
+    const gate = (name: string, position: [number, number]) =>
+      node(
+        name,
+        'app.telegram',
+        { resource: 'message', operation: 'sendAndWait', chatId: '42', message: name },
+        position,
+        { credentials: { telegramApi: { id: credential.id, name: 'Bot' } } },
+      );
+    const wf = await createWorkflow(client, {
+      nodes: [node('Start', 'core.manualTrigger'), gate('Employee', [200, 0]), gate('Manager', [400, 0])],
+      connections: chain('Start', 'Employee', 'Manager'),
+    });
+    const { executionId } = await client.data(client.post(`/rest/workflows/${wf.id}/run`, {}));
+    await waitForExecution(server.ctx, tenant.id, executionId, ['waiting']);
+    const linkOf = (index: number) => {
+      const markup = sent[index].reply_markup as { inline_keyboard: Array<Array<{ url: string }>> };
+      const url = new URL(markup.inline_keyboard[0][0].url);
+      return url.pathname + url.search;
+    };
+    const status = async () => (await server.ctx.repos.executions.get(tenant.id, executionId))?.status;
+    const employee = linkOf(0);
+    expect((await get(employee)).statusCode).toBe(200);
+    await waitFor(async () => sent.length === 2 && (await status()) === 'waiting');
+
+    const again = await get(employee);
+    expect(again.statusCode).toBe(404);
+    const page = await get(employee, { accept: 'text/html' });
+    expect(page.statusCode).toBe(409);
+    expect(page.body).toContain('already answered');
+    // the signed URL alone opens no gate either
+    expect((await get(`${employee.split('/').slice(0, 4).join('/')}?approved=true`)).statusCode).toBe(404);
+    expect(await status()).toBe('waiting');
+
+    const manager = linkOf(1);
+    expect(manager).not.toBe(employee);
+    expect((await get(manager)).statusCode).toBe(200);
+    await waitForExecution(server.ctx, tenant.id, executionId, ['success']);
   });
 
   it('a link preview or mail scanner does not answer', async () => {
     const run = await waitingRun({ message: 'Ship it?' });
-    for (const agent of ['Slackbot-LinkExpanding 1.0', 'Mozilla/5.0 (compatible; Googlebot/2.1)']) {
+    for (const agent of [
+      'Slackbot-LinkExpanding 1.0',
+      'Mozilla/5.0 (compatible; Googlebot/2.1)',
+      'facebookexternalhit/1.1',
+      'WhatsApp/2.23.20.0',
+      'curl/8.5.0',
+      'python-requests/2.31',
+      'Go-http-client/1.1',
+      'Microsoft Office/16.0',
+    ]) {
       const res = await get(run.links.Approve, { 'user-agent': agent });
       expect(res.statusCode).toBe(200);
     }
@@ -170,6 +256,9 @@ describe('approval links', () => {
     expect((await get(`${base}/forged?approved=true`)).statusCode).toBe(404);
     expect((await get(`${base}?approved=true`)).statusCode).toBe(404);
     const signed = run.links.Approve.split('?')[0];
+    // the signature without the node opens nothing
+    const bare = signed.split('/').slice(0, 4).join('/');
+    expect((await get(`${bare}?approved=true`)).statusCode).toBe(404);
     expect((await get(signed)).statusCode).toBe(400);
     expect((await get(`${signed}?approved=maybe`)).statusCode).toBe(400);
     expect(

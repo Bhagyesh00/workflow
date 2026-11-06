@@ -10,12 +10,15 @@ export const SEND_AND_WAIT_OPERATION = {
   action: 'Send a message and wait for response',
 };
 
+/** after the node's id on the resume URL: a link opens only while the run stands at that node */
+export const ANSWER_PATH = 'answer';
+
 /** the page (GET) and the answer (GET with `approved`, or POST) on the resume URL of the waiting run */
 export const sendAndWaitWebhooks: WebhookDescription[] = (['GET', 'POST'] as const).map((httpMethod) => ({
   name: 'default',
   httpMethod,
-  path: '',
-  isFullPath: true,
+  path: ANSWER_PATH,
+  isFullPath: false,
   restartWebhook: true,
   responseMode: 'onReceived',
 }));

@@ -193,19 +193,26 @@ export class ExecutionService {
     return `${this.deps.config.baseUrl}/webhook-waiting/${executionId}/${this.resumeSignature(executionId)}`;
   }
 
-  /** `/form-waiting/<executionId>/<signature>`: the form page of a waiting execution, signed as resumeUrl */
+  /**
+   * `/form-waiting/<executionId>/<signature>`: the form page of a waiting execution. Signed apart from
+   * resumeUrl: a public form's submitter holds this one, and it must not open /webhook-waiting.
+   */
   resumeFormUrl(executionId: string): string {
-    return `${this.deps.config.baseUrl}/form-waiting/${executionId}/${this.resumeSignature(executionId)}`;
+    return `${this.deps.config.baseUrl}/form-waiting/${executionId}/${this.resumeSignature(executionId, 'form')}`;
   }
 
-  private resumeSignature(executionId: string): string {
-    return createHmac('sha256', this.resumeKeys[0]).update(executionId).digest('base64url');
+  private resumeSignature(executionId: string, kind: 'webhook' | 'form' = 'webhook'): string {
+    return createHmac('sha256', this.resumeKeys[0]).update(`${kind}:${executionId}`).digest('base64url');
   }
 
-  verifyResumeSignature(executionId: string, signature: string): boolean {
+  verifyResumeSignature(
+    executionId: string,
+    signature: string,
+    kind: 'webhook' | 'form' = 'webhook',
+  ): boolean {
     const given = Buffer.from(signature, 'base64url');
     return this.resumeKeys.some((key) => {
-      const expected = createHmac('sha256', key).update(executionId).digest();
+      const expected = createHmac('sha256', key).update(`${kind}:${executionId}`).digest();
       return given.length === expected.length && timingSafeEqual(given, expected);
     });
   }

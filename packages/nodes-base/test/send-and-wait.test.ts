@@ -6,6 +6,9 @@ import { FakeHttpClient, runNode } from './harness';
 import { localHttp, startSmtpServer } from './servers';
 
 const RESUME = 'http://localhost:5678/webhook-waiting/e1/sig';
+/** the resume URL for the node the harness runs: a link answers only that node */
+const LINK = `${RESUME}/n/answer`;
+const BROWSER = 'Mozilla/5.0 Firefox/130.0';
 const services = (extra: object = {}) => ({ resumeUrl: RESUME, ...extra });
 const input: Item[] = [{ json: { id: 7 } }];
 
@@ -37,6 +40,8 @@ describe('descriptions', () => {
     expect(hooks.map((h) => h.httpMethod).sort()).toEqual(['GET', 'POST']);
     // plain /webhook-waiting hooks, not the form family
     expect(hooks.every((h) => h.nodeType === undefined && h.responseMode === 'onReceived')).toBe(true);
+    // the hook hangs under the node's id, so another node's URL does not open it
+    expect(hooks.every((h) => h.path === 'answer' && h.isFullPath === false)).toBe(true);
     for (const property of ['message', 'responseType', 'approvalOptions', 'formFields', 'options']) {
       expect(description.properties.some((p) => p.name === property)).toBe(true);
     }
@@ -110,8 +115,8 @@ describe('Slack', () => {
     expect(
       (actions.elements as DataObject[]).map((e) => [(e.text as DataObject).text, e.url, e.style]),
     ).toEqual([
-      ['Ship it', `${RESUME}?approved=true`, 'primary'],
-      ['Stop', `${RESUME}?approved=false`, undefined],
+      ['Ship it', `${LINK}?approved=true`, 'primary'],
+      ['Stop', `${LINK}?approved=false`, undefined],
     ]);
   });
 
@@ -195,8 +200,8 @@ describe('Telegram', () => {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: 'Approve', url: `${RESUME}?approved=true` },
-            { text: 'Decline', url: `${RESUME}?approved=false` },
+            { text: 'Approve', url: `${LINK}?approved=true` },
+            { text: 'Decline', url: `${LINK}?approved=false` },
           ],
         ],
       },
@@ -220,7 +225,7 @@ describe('Telegram', () => {
       );
       expect(r.status).toBe('waiting');
       expect((http.requests[0].body as DataObject).reply_markup).toEqual({
-        inline_keyboard: [[{ text: 'Open form', url: RESUME }]],
+        inline_keyboard: [[{ text: 'Open form', url: LINK }]],
       });
     }
   });
@@ -284,9 +289,9 @@ describe('Gmail', () => {
       (m) => Buffer.from(m[1].replace(/\s/g, ''), 'base64').toString('utf8'),
     );
     const html = parts.find((p) => p.includes('<a ')) ?? '';
-    expect(html).toContain(`href="${RESUME}?approved=true"`);
+    expect(html).toContain(`href="${LINK}?approved=true"`);
     expect(html).toContain('Please &lt;b&gt;review&lt;/b&gt;');
-    expect(parts.some((p) => p.includes(`Approve: ${RESUME}?approved=true`))).toBe(true);
+    expect(parts.some((p) => p.includes(`Approve: ${LINK}?approved=true`))).toBe(true);
   });
 });
 
@@ -318,8 +323,8 @@ describe('Send Email', () => {
     const decoded = data
       .replace(/=\r\n/g, '')
       .replace(/=([0-9A-F]{2})/g, (_m, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
-    expect(decoded).toContain(`href="${RESUME}?approved=true"`);
-    expect(decoded).toContain(`Approve: ${RESUME}?approved=true`);
+    expect(decoded).toContain(`href="${LINK}?approved=true"`);
+    expect(decoded).toContain(`Approve: ${LINK}?approved=true`);
     expect(decoded).toContain('Line &quot;two&quot;');
     expect(data).not.toMatch(/^Bcc:/m);
   });
@@ -337,7 +342,7 @@ describe('the answers', () => {
         method: request.method ?? 'GET',
         query: request.query,
         body: request.body,
-        headers: request.headers ?? {},
+        headers: request.headers ?? { 'user-agent': BROWSER },
       }),
     );
   };
@@ -372,6 +377,18 @@ describe('the answers', () => {
         'Mozilla/5.0 (compatible; Googlebot/2.1)',
         'Slackbot-LinkExpanding 1.0',
         'link preview',
+        'facebookexternalhit/1.1',
+        'WhatsApp/2.23.20.0',
+        'curl/8.5.0',
+        'Wget/1.21',
+        'python-requests/2.31',
+        'Go-http-client/1.1',
+        'Java/17.0.2',
+        'okhttp/4.12',
+        'Mozilla/5.0 HeadlessChrome/120.0',
+        'Microsoft Office/16.0',
+        '',
+        '   ',
       ]) {
         const result = await answer(
           name,
@@ -477,6 +494,35 @@ describe('the answers', () => {
       expect(page).toContain('type="checkbox"');
     });
 
+    it('the page opens with the default values, and the query fills in nothing', async () => {
+      const page = body(
+        await answer(
+          'app.telegram',
+          {
+            message: 'Details please',
+            responseType: 'customForm',
+            formFields: {
+              values: [
+                { fieldLabel: 'City', fieldType: 'text', requiredField: true, defaultValue: 'Pune' },
+                { fieldLabel: 'Tag', fieldType: 'hiddenField', fieldName: 'tag', fieldValue: 'vip' },
+                {
+                  fieldLabel: 'Tools',
+                  fieldType: 'checkbox',
+                  defaultValue: 'b',
+                  fieldOptions: { values: [{ option: 'a' }, { option: 'b' }] },
+                },
+              ],
+            },
+          },
+          { query: { City: 'from-the-link' } },
+        ),
+      );
+      expect(page).toContain('value="Pune"');
+      expect(page).toContain('value="vip"');
+      expect(page).toMatch(/value="b"[^>]*\bchecked\b/);
+      expect(page).not.toContain('from-the-link');
+    });
+
     it('POST resumes with the answers of each element', async () => {
       const result = await answer('app.telegram', parameters, {
         method: 'POST',
@@ -524,7 +570,7 @@ describe('the answers', () => {
         },
         { method: 'POST', body: { 'field-0': 'x', 'field-1': 'y' } },
       );
-      const data = (result.workflowData?.[0]?.[0]?.json as DataObject).data as DataObject;
+      const data = (result.workflowData?.[0]?.[0]?.json as DataObject | undefined)?.data as DataObject;
       expect(Object.keys(data)).toEqual(['ok']);
       expect(({} as DataObject).x).toBeUndefined();
     });

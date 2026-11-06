@@ -116,7 +116,7 @@ function formFields(ctx: WebhookContext): FormField[] {
 const outputKey = (field: FormField) => String(field.fieldName || field.fieldLabel || '');
 
 /** what a field holds when the page opens: the query wins over the default */
-function prefilled(field: FormField, query: DataObject): FormPageField {
+export function prefilled(field: FormField, query: DataObject): FormPageField {
   const type = field.fieldType ?? 'text';
   if (type === 'password' || type === 'file' || type === 'html') return field;
   const key = outputKey(field);
@@ -384,11 +384,26 @@ function triggerText(ctx: WebhookContext, value: unknown): string {
   return value === undefined || value === null ? '' : String(value);
 }
 
+/** a raw parameter of the trigger as the trigger's own page reads it; `whenFailed` if its expression fails */
+function triggerValue(ctx: WebhookContext, value: unknown, whenFailed: unknown): unknown {
+  if (!isExpression(value)) return value;
+  try {
+    return ctx.evaluateExpression(value, 0);
+  } catch {
+    return whenFailed;
+  }
+}
+
+/** Include User in Output of the trigger; a later page that cannot tell leaves the user out */
+const includesUser = (ctx: WebhookContext, trigger: DataObject | undefined) =>
+  triggerValue(ctx, optionsOf(trigger).includeUserInOutput, false) !== false;
+
 /** a later page keeps the access of the trigger, with the cookie of this execution */
 function triggerAccess(ctx: WebhookContext, trigger: DataObject | undefined, isPage: boolean) {
   return checkAccess(ctx, String(trigger?.authentication ?? 'none'), isPage, {
     scope: 'waiting',
-    requireExecuteAccess: trigger?.requireExecuteAccess === true,
+    // a failed expression asks for the permission rather than letting everyone in
+    requireExecuteAccess: Boolean(triggerValue(ctx, trigger?.requireExecuteAccess, true)),
   });
 }
 
@@ -505,7 +520,7 @@ export async function formNodeWebhook(ctx: WebhookContext): Promise<WebhookRespo
     { useWorkflowTimezone: triggerOptions.useWorkflowTimezone } as DataObject,
     query,
   );
-  if (access.user && triggerOptions.includeUserInOutput !== false) item.json.user = access.user;
+  if (access.user && includesUser(ctx, trigger)) item.json.user = access.user;
   return {
     workflowData: [[item]],
     webhookResponse: { statusCode: 200, headers: access.replyHeaders },
@@ -571,7 +586,7 @@ export async function waitFormWebhook(ctx: WebhookContext): Promise<WebhookRespo
   }
 
   const item = await outputItem(ctx, fields, options, query);
-  if (access.user) item.json.user = access.user;
+  if (access.user && includesUser(ctx, trigger)) item.json.user = access.user;
   return {
     workflowData: [[item]],
     webhookResponse: {
