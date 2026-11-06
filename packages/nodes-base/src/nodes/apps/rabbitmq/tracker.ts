@@ -49,7 +49,7 @@ const isObject = (value: unknown): value is DataObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** the key/value rows of a fixedCollection, as the table the broker takes: 5 -> 5, true -> true */
-function keyValueTable(collection: unknown, rowsName: string): DataObject {
+export function keyValueTable(collection: unknown, rowsName: string): DataObject {
   const rows = isObject(collection) ? collection[rowsName] : undefined;
   const table: DataObject = {};
   if (!Array.isArray(rows)) return table;
