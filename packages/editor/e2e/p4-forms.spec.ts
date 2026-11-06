@@ -2,6 +2,11 @@
  * P4-01 Form Trigger in a real browser against a live server (not run by the lane builders): the page
  * lives in the CSP sandbox, so its POST has Origin null, and a redirect and a sanitized description
  * can only be proved here. The rest is covered by server/test/forms.test.ts.
+ *
+ * Run it against the server, not Vite, with the editor built (pnpm --filter @workflow/editor build):
+ * CORS_ORIGINS=http://localhost:5678 make start, then E2E_BASE_URL=http://localhost:5678. The server
+ * only accepts cookie-authenticated writes from BASE_URL and CORS_ORIGINS, and make start sets BASE_URL
+ * to the Vite port.
  */
 import { expect, type Page, test } from '@playwright/test';
 
