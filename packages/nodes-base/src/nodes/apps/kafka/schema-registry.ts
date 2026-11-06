@@ -20,6 +20,8 @@ interface SchemaRegistryCredentials extends DataObject {
 
 export interface KafkaSchemaRegistry {
   decode(value: Buffer): Promise<unknown>;
+  /** the wire format of the latest schema registered for `subject` */
+  encode(subject: string, payload: unknown): Promise<Buffer>;
   close(): void;
 }
 
@@ -107,6 +109,7 @@ export async function openSchemaRegistry(
   });
   return {
     decode: (value) => registry.decode(value),
+    encode: async (subject, payload) => registry.encode(await registry.getLatestSchemaId(subject), payload),
     close: () => agent.destroy(),
   };
 }
