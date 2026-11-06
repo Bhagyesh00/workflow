@@ -17,6 +17,7 @@ import {
   type DataTableColumn,
   type DataTableColumnInput,
   type DataTableColumnType,
+  type DataTableCreateColumn,
   type DataTableDryRunOption,
   type DataTableDryRunRow,
   type DataTableFilter,
@@ -36,6 +37,7 @@ import type { DataTableColumnRow, DataTableRowRow, DataTableRow as DataTableTabl
 import { ApiError } from '../http/errors';
 import { dataTableQuotaBytes, effectiveLimits, type TenantSettings } from '../plans';
 import { createRepositories, type Repositories } from '../repositories';
+import type { DataTableRepository } from '../repositories/data-tables';
 import { isUniqueViolation, now } from '../repositories/util';
 import {
   buildCsv,
@@ -47,7 +49,13 @@ import {
   parseCsv,
   previewCsv,
 } from './data-table-csv';
-import { buildFilterSql, buildOrderBySql, buildSearchSql, coerceCellValue } from './data-table-filter';
+import {
+  assertStorableText,
+  buildFilterSql,
+  buildOrderBySql,
+  buildSearchSql,
+  coerceCellValue,
+} from './data-table-filter';
 import { assertWithinQuota, DataTableSizeCache, quotaStatus, warningBytes } from './data-table-size';
 
 /** n8n's text; not in DATA_TABLE_ERRORS, which is the shared contract */
@@ -69,7 +77,7 @@ function tableName(name: string): string {
   if (!trimmed || trimmed.length > DATA_TABLE_NAME_MAX) {
     throw ApiError.badRequest(`A data table name has 1 to ${DATA_TABLE_NAME_MAX} characters`);
   }
-  return trimmed;
+  return assertStorableText(trimmed);
 }
 
 function assertColumnName(name: string): void {
@@ -149,7 +157,7 @@ export interface DataTableActor {
 
 export interface DataTableCreateInput {
   name: string;
-  columns: DataTableColumnInput[];
+  columns: DataTableCreateColumn[];
   /** CSV text whose rows go in with the new table (columns then come from it) */
   csv?: string;
   hasHeaders?: boolean;
@@ -700,10 +708,8 @@ export class DataTableService {
     actor?: DataTableActor,
   ): Promise<DataTableInsertResult<T>> {
     await this.requireTable(tenantId, id);
-    const columns = await this.deps.repos.dataTables.listColumns(tenantId, id);
-    const stored = rows.map((row) => this.toCells(row, columns));
     await this.assertQuota(tenantId);
-    const inserted = stored.length ? await this.writeRows(tenantId, id, stored) : [];
+    const { inserted, columns } = await this.writeRows(tenantId, id, rows);
     if (actor && inserted.length) {
       await this.audit(this.deps.repos, tenantId, actor, 'dataTable.rows.inserted', id, {
         rows: inserted.length,
@@ -712,22 +718,34 @@ export class DataTableService {
     return this.insertAnswer(inserted, columns, returnType);
   }
 
+  /**
+   * The table row first, then the columns, so a column change or a delete that commits meanwhile
+   * cannot leave a cell under a name the table no longer has; gone means n8n's 404 text.
+   */
+  private async lockColumns(repo: DataTableRepository, tenantId: string, id: string) {
+    if (!(await repo.lock(tenantId, id))) throw tableNotFound(id);
+    return repo.listColumns(tenantId, id);
+  }
+
   /** takes the ids and writes the rows in one transaction */
   private async writeRows(
     tenantId: string,
     id: string,
-    stored: Array<Record<string, DataTableCellValue>>,
-  ): Promise<DataTableRowRow[]> {
-    const inserted = await this.deps.database.db.transaction(async (tx) => {
+    rows: DataTableRowInput[],
+  ): Promise<{ inserted: DataTableRowRow[]; columns: DataTableColumnRow[] }> {
+    const written = await this.deps.database.db.transaction(async (tx) => {
       const { dataTables } = createRepositories(tx);
+      const columns = await this.lockColumns(dataTables, tenantId, id);
+      const stored = rows.map((row) => this.toCells(row, columns));
+      if (!stored.length) return { inserted: [], columns };
       const first = await dataTables.reserveRowIds(tenantId, id, stored.length);
-      return dataTables.insertRows(tenantId, id, first, stored);
+      return { inserted: await dataTables.insertRows(tenantId, id, first, stored), columns };
     });
     this.sizes.added(
       tenantId,
-      inserted.reduce((sum, row) => sum + row.sizeBytes, 0),
+      written.inserted.reduce((sum, row) => sum + row.sizeBytes, 0),
     );
-    return inserted;
+    return written;
   }
 
   private insertAnswer<T extends DataTableInsertReturnType>(
@@ -786,9 +804,20 @@ export class DataTableService {
       return this.dryRunPairs(rows, columns, patch);
     }
     await this.assertQuota(tenantId);
-    const rows = await dataTables.updateRows(tenantId, id, condition, patch);
-    await this.afterRowChange(tenantId, id, rows.length, 'dataTable.rows.updated', actor);
-    return options.returnData ? rows.map((row) => toRow(row, columns)) : true;
+    // the columns are read again under the table lock, so a rename in between cannot misplace the cells
+    const written = await this.deps.database.db.transaction(async (tx) => {
+      const repo = createRepositories(tx).dataTables;
+      const locked = await this.lockColumns(repo, tenantId, id);
+      const rows = await repo.updateRows(
+        tenantId,
+        id,
+        buildFilterSql(change.filter, locked),
+        this.toCells(change.data, locked),
+      );
+      return { rows, columns: locked };
+    });
+    await this.afterRowChange(tenantId, id, written.rows.length, 'dataTable.rows.updated', actor);
+    return options.returnData ? written.rows.map((row) => toRow(row, written.columns)) : true;
   }
 
   private async upsertRow(
@@ -820,10 +849,21 @@ export class DataTableService {
     await this.assertQuota(tenantId);
     const written = await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx).dataTables;
-      const updated = await repos.updateRows(tenantId, id, condition, patch);
-      if (updated.length) return { rows: updated, inserted: false };
+      const locked = await this.lockColumns(repos, tenantId, id);
+      const lockedPatch = this.toCells(change.data, locked);
+      const updated = await repos.updateRows(
+        tenantId,
+        id,
+        buildFilterSql(change.filter, locked),
+        lockedPatch,
+      );
+      if (updated.length) return { rows: updated, inserted: false, columns: locked };
       const first = await repos.reserveRowIds(tenantId, id, 1);
-      return { rows: await repos.insertRows(tenantId, id, first, [patch]), inserted: true };
+      return {
+        rows: await repos.insertRows(tenantId, id, first, [lockedPatch]),
+        inserted: true,
+        columns: locked,
+      };
     });
     await this.afterRowChange(
       tenantId,
@@ -832,7 +872,7 @@ export class DataTableService {
       written.inserted ? 'dataTable.rows.inserted' : 'dataTable.rows.updated',
       actor,
     );
-    return options.returnData ? written.rows.map((row) => toRow(row, columns)) : true;
+    return options.returnData ? written.rows.map((row) => toRow(row, written.columns)) : true;
   }
 
   private async deleteRows(
@@ -924,13 +964,11 @@ export class DataTableService {
   ): Promise<DataTableCsvImportResult> {
     await this.requireTable(tenantId, id);
     await this.assertCsvFits(tenantId, input.csv);
-    const columns = await this.deps.repos.dataTables.listColumns(tenantId, id);
     const { rows, systemColumnsIgnored } = csvRowsForImport(parseCsv(input.csv, true));
-    const stored = rows.map((row) => this.toCells(row, columns));
     await this.assertQuota(tenantId);
-    if (stored.length) await this.writeRows(tenantId, id, stored);
-    await this.audit(this.deps.repos, tenantId, actor, 'dataTable.imported', id, { rows: stored.length });
-    return { importedRows: stored.length, systemColumnsIgnored };
+    if (rows.length) await this.writeRows(tenantId, id, rows);
+    await this.audit(this.deps.repos, tenantId, actor, 'dataTable.imported', id, { rows: rows.length });
+    return { importedRows: rows.length, systemColumnsIgnored };
   }
 
   /** every row, with text cells a spreadsheet would run escaped */

@@ -7,6 +7,7 @@ import {
   type DataTableCellValue,
   type DataTableColumnInput,
   type DataTableColumnType,
+  type DataTableCreateColumn,
   type DataTableRowInput,
 } from '@workflow/workflow';
 import Papa from 'papaparse';
@@ -73,17 +74,30 @@ const cellOf = (row: string[], index: number) => {
 };
 
 /**
- * Which CSV column feeds each table column of a new table: the one of the same name, else (when the
- * caller kept every column and only renamed some) the one at the same place. Any other column could
- * be filled from the wrong data, so it is refused.
+ * Which CSV column feeds each table column of a new table: the one a column names in `csvColumnName`
+ * (n8n's way, so a renamed column keeps its data); else the one of the same name; else (when the caller
+ * kept every column and only renamed some) the one at the same place. Any other column could be filled
+ * from the wrong data, so it is refused.
  */
-export function matchCsvColumns(csv: ParsedCsv, columns: DataTableColumnInput[]): number[] {
-  const byName = columns.map((column) => csv.headers.indexOf(column.name));
-  const claimed = new Set(byName);
+export function matchCsvColumns(csv: ParsedCsv, columns: DataTableCreateColumn[]): number[] {
+  const explicit = columns.map((column) =>
+    column.csvColumnName === undefined ? undefined : csv.headers.indexOf(column.csvColumnName),
+  );
+  const claimed = new Set(explicit.filter((index) => index !== undefined && index !== -1));
+  // a name that another column already claimed through csvColumnName is not a match
+  const byName = columns.map((column, position) => {
+    if (explicit[position] !== undefined) return explicit[position];
+    const index = csv.headers.indexOf(column.name);
+    return claimed.has(index) ? -1 : index;
+  }) as number[];
+  for (const index of byName) if (index !== -1) claimed.add(index);
   const free = csv.headers.map((_, index) => index).filter((index) => !claimed.has(index));
   const positional = columns.length === csv.headers.length;
   return byName.map((index, position) => {
     if (index !== -1) return index;
+    if (columns[position].csvColumnName !== undefined) {
+      throw ApiError.badRequest(`Column '${columns[position].csvColumnName}' is not in the CSV file`);
+    }
     if (!positional) {
       throw ApiError.badRequest(`Column '${columns[position].name}' is not in the CSV file`);
     }

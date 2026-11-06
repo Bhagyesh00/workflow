@@ -8,13 +8,16 @@
  * ISO text with a four-digit year, which compares correctly as bytes and needs no cast at all.
  */
 import {
+  DATA_TABLE_EARLIEST_DATE_MS,
   DATA_TABLE_ERRORS,
+  DATA_TABLE_LATEST_DATE_MS,
   type DataTableCellValue,
   type DataTableColumnType,
   type DataTableFilter,
   type DataTableFilterClause,
   type DataTableInputValue,
   type DataTableSortDirection,
+  parseDataTableDate,
 } from '@workflow/workflow';
 import { sql } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm/sql';
@@ -26,38 +29,18 @@ export interface DataTableFilterColumn {
   type: DataTableColumnType;
 }
 
-const LATEST_DATE_MS = Date.UTC(9999, 11, 31, 23, 59, 59, 999);
-const EARLIEST_DATE_MS = Date.parse('0000-01-01T00:00:00.000Z');
+// one reader for the node and the server, kept under this name for the callers here
+export { parseDataTableDate };
 
-const ISO_DATE =
-  /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?\s?(Z|z|[+-]\d{2}(?::?\d{2})?)?)?$/;
-const MAIL_DATE =
-  /^(?:[A-Za-z]{3},\s*)?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}(?::\d{2})?\s+(?:GMT|UTC|[+-]\d{4})$/;
+/** a NUL byte, or half of a surrogate pair: Postgres refuses both in text and jsonb */
+const HALF_PAIR = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
-function parseIsoDate(match: RegExpExecArray): Date | undefined {
-  const [, y, mo, d, h = '00', mi = '00', s = '00', fraction = '', zone = 'Z'] = match;
-  const day = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d)));
-  // Date would carry 02-31 over to March
-  if (day.getUTCMonth() !== Number(mo) - 1 || day.getUTCDate() !== Number(d)) return undefined;
-  const offset = /^[zZ]$/.test(zone) ? 'Z' : `${zone.slice(0, 3)}:${zone.slice(3).replace(':', '') || '00'}`;
-  const millis = fraction.padEnd(3, '0').slice(0, 3);
-  const date = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}.${millis}${offset}`);
-  return Number.isNaN(date.getTime()) ? undefined : date;
-}
-
-/**
- * ISO 8601, SQL style and RFC 2822 dates; no zone means UTC. Not Date.parse alone: its fallback takes
- * "Room 5" as a date, and CSV type detection relies on this.
- */
-export function parseDataTableDate(text: string): Date | undefined {
-  const trimmed = text.trim();
-  const iso = ISO_DATE.exec(trimmed);
-  let date: Date | undefined;
-  if (iso) date = parseIsoDate(iso);
-  else if (MAIL_DATE.test(trimmed)) date = new Date(trimmed);
-  if (!date || Number.isNaN(date.getTime())) return undefined;
-  const time = date.getTime();
-  return time < EARLIEST_DATE_MS || time > LATEST_DATE_MS ? undefined : date;
+/** Text Postgres would refuse answers 400 with a reason, not 500. Returns the text. */
+export function assertStorableText(text: string): string {
+  if (text.includes('\0') || HALF_PAIR.test(text)) {
+    throw ApiError.badRequest('Text must not hold a NUL character or half of a surrogate pair');
+  }
+  return text;
 }
 
 const TRUE_WORDS = new Set(['true', '1', 't', 'yes']);
@@ -77,7 +60,8 @@ function mismatch(value: unknown, type: DataTableColumnType, expected: string): 
 function toDateText(value: DataTableInputValue): string | undefined {
   if (value instanceof Date) {
     const time = value.getTime();
-    if (Number.isNaN(time) || time < EARLIEST_DATE_MS || time > LATEST_DATE_MS) return undefined;
+    if (Number.isNaN(time) || time < DATA_TABLE_EARLIEST_DATE_MS || time > DATA_TABLE_LATEST_DATE_MS)
+      return undefined;
     return value.toISOString();
   }
   return typeof value === 'string' ? parseDataTableDate(value)?.toISOString() : undefined;
@@ -88,7 +72,7 @@ export function coerceCellValue(value: DataTableInputValue, type: DataTableColum
   if (value === null) return null;
   switch (type) {
     case 'string':
-      return value instanceof Date ? (toDateText(value) ?? String(value)) : String(value);
+      return assertStorableText(value instanceof Date ? (toDateText(value) ?? String(value)) : String(value));
     case 'number': {
       const number =
         typeof value === 'number'
@@ -195,17 +179,23 @@ function clauseSql(clause: DataTableFilterClause, columns: readonly DataTableFil
   if (condition === 'isNotEmpty') return sql`(${column.text} is not null and ${column.text} <> '')`;
 
   const input = clause.value ?? null;
+  if (condition === 'like' || condition === 'ilike') {
+    // n8n: a pattern is text; null and numbers are a validation error, not "match nothing"
+    if (typeof input !== 'string') {
+      throw ApiError.badRequest(
+        DATA_TABLE_ERRORS.valueTypeMismatch(input, 'string', `${condition} needs a text value`),
+      );
+    }
+    const pattern = likePattern(assertStorableText(input));
+    return condition === 'like'
+      ? sql`${column.text} like ${pattern}::text`
+      : sql`${column.text} ilike ${pattern}::text`;
+  }
   if (input === null) {
     if (condition === 'eq') return sql`${column.text} is null`;
     if (condition === 'neq') return sql`${column.text} is not null`;
     // as in SQL: comparing with null matches nothing
     return sql`false`;
-  }
-  if (condition === 'like' || condition === 'ilike') {
-    const text = input instanceof Date ? input.toISOString() : String(input);
-    return condition === 'like'
-      ? sql`${column.text} like ${likePattern(text)}::text`
-      : sql`${column.text} ilike ${likePattern(text)}::text`;
   }
 
   const value = column.bind(coerceCellValue(input, column.type));
@@ -238,7 +228,8 @@ export function buildFilterSql(
 /** Any user column as text, case-insensitively; a blank search is no search. */
 export function buildSearchSql(search: string | undefined): SQL | undefined {
   if (!search?.trim()) return undefined;
-  return sql`exists (select 1 from jsonb_each_text(${dataTableRows.data}) cell where cell.value ilike ${likePattern(search)}::text)`;
+  const pattern = likePattern(assertStorableText(search));
+  return sql`exists (select 1 from jsonb_each_text(${dataTableRows.data}) cell where cell.value ilike ${pattern}::text)`;
 }
 
 /** The requested order, with `id` ascending as the tie break and the default. */

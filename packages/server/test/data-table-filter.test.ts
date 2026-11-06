@@ -138,10 +138,39 @@ describe('buildFilterSql', () => {
     expect(neq.sql).toContain('is null');
   });
 
-  it('matches nothing for a comparison or a pattern against null', () => {
-    for (const condition of ['gt', 'gte', 'lt', 'lte', 'like', 'ilike'] as const) {
+  it('matches nothing for a comparison against null', () => {
+    for (const condition of ['gt', 'gte', 'lt', 'lte'] as const) {
       expect(one({ columnName: 'title', condition, value: null }).sql).toContain('false');
     }
+  });
+
+  it('refuses like and ilike with null or a value that is not text', () => {
+    for (const condition of ['like', 'ilike'] as const) {
+      for (const value of [null, undefined, 5, true, new Date(0)]) {
+        expect(() => one({ columnName: 'title', condition, value: value as never })).toThrow(
+          `${condition} needs a text value`,
+        );
+      }
+    }
+  });
+
+  it('like and ilike: no % means contains, only % is a wildcard, _ and backslash are literal', () => {
+    for (const condition of ['like', 'ilike'] as const) {
+      expect(one({ columnName: 'title', condition, value: 'a_b' }).params[1]).toBe('%a\\_b%');
+      expect(one({ columnName: 'title', condition, value: 'a%b_' }).params[1]).toBe('a%b\\_');
+      expect(one({ columnName: 'title', condition, value: 'x\\y' }).params[1]).toBe('%x\\\\y%');
+    }
+  });
+
+  it('refuses a NUL or half a surrogate pair in a value, a pattern or a search with a 400', () => {
+    for (const bad of ['a\u0000b', 'a\ud800b', 'a\udc00b']) {
+      for (const condition of ['eq', 'like', 'ilike'] as const) {
+        expect(() => one({ columnName: 'title', condition, value: bad })).toThrow(/NUL|surrogate/);
+      }
+      expect(() => buildSearchSql(bad)).toThrow(/NUL|surrogate/);
+      expect(() => coerceCellValue(bad, 'string')).toThrow(/NUL|surrogate/);
+    }
+    expect(coerceCellValue('ok \ud83d\ude00', 'string')).toBe('ok \ud83d\ude00');
   });
 
   it('isEmpty and isNotEmpty read no value', () => {
