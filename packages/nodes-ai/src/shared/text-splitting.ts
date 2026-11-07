@@ -2,6 +2,7 @@
  * Text splitting: a separator-based splitter and the recursive splitter that tries separators
  * from coarse (paragraphs) to fine (characters) until every chunk fits `chunkSize`.
  */
+import { codeSeparators } from './code-separators';
 
 export interface SplitOptions {
   chunkSize: number;
@@ -60,12 +61,24 @@ export function splitRecursively(
   text: string,
   options: SplitOptions,
   separators: string[] = DEFAULT_SEPARATORS,
+  keepSeparator = false,
 ): string[] {
   checkOptions(options);
-  return recurse(text, separators, options);
+  return recurse(text, separators, options, keepSeparator);
 }
 
-function recurse(text: string, separators: string[], options: SplitOptions): string[] {
+/** Recursive split with the separators of one programming language; each marker stays at the start of its chunk. */
+export function splitCode(text: string, options: SplitOptions, language: string): string[] {
+  return splitRecursively(text, options, codeSeparators(language), true);
+}
+
+/** Split on `separator` but keep it at the front of the piece that follows. */
+function splitKeeping(text: string, separator: string): string[] {
+  const parts = text.split(separator);
+  return parts.map((part, i) => (i === 0 ? part : separator + part));
+}
+
+function recurse(text: string, separators: string[], options: SplitOptions, keep: boolean): string[] {
   let separator = separators[separators.length - 1] ?? '';
   let rest: string[] = [];
   for (let i = 0; i < separators.length; i++) {
@@ -76,7 +89,11 @@ function recurse(text: string, separators: string[], options: SplitOptions): str
       break;
     }
   }
-  const pieces = (separator ? text.split(separator) : [...text]).filter((p) => p !== '');
+  const keeping = keep && separator !== '';
+  const joiner = keeping ? '' : separator;
+  const pieces = (
+    separator ? (keeping ? splitKeeping(text, separator) : text.split(separator)) : [...text]
+  ).filter((p) => p !== '');
   const chunks: string[] = [];
   let small: string[] = [];
   for (const piece of pieces) {
@@ -85,13 +102,13 @@ function recurse(text: string, separators: string[], options: SplitOptions): str
       continue;
     }
     if (small.length) {
-      chunks.push(...mergeSplits(small, separator, options));
+      chunks.push(...mergeSplits(small, joiner, options));
       small = [];
     }
-    if (rest.length) chunks.push(...recurse(piece, rest, options));
+    if (rest.length) chunks.push(...recurse(piece, rest, options, keep));
     else chunks.push(...hardSplit(piece, options));
   }
-  if (small.length) chunks.push(...mergeSplits(small, separator, options));
+  if (small.length) chunks.push(...mergeSplits(small, joiner, options));
   return chunks;
 }
 
