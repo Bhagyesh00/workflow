@@ -79,7 +79,7 @@ export const weaviateApi: CredentialType = {
     const key = text(credentials.apiKey);
     return key ? withHeaders(request, { authorization: `Bearer ${key}` }) : request;
   },
-  test: { request: { url: '={{$credentials.url}}/v1/nodes' } },
+  test: { request: { url: '={{$credentials.url}}/v1/nodes', followRedirects: false } },
 };
 
 export const azureAiSearchApi: CredentialType = {

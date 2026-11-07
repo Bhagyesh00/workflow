@@ -150,6 +150,8 @@ describe('registry', () => {
     const test = (name: string) => credential(name).test?.request;
     expect(test('pineconeApi')?.url).toBe('https://api.pinecone.io/indexes');
     expect(test('weaviateApi')?.url).toBe('={{$credentials.url}}/v1/nodes');
+    // the test request carries the API key, so it never follows a redirect to another host
+    expect(test('weaviateApi')?.followRedirects).toBe(false);
     expect(test('azureAiSearchApi')).toMatchObject({
       url: '={{$credentials.endpoint}}/indexes',
       qs: { 'api-version': '2024-07-01' },

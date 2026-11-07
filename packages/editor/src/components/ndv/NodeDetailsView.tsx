@@ -48,7 +48,6 @@ import { ToolTestModal } from './ToolTestModal';
 /**
  * Tools that take one string and have no `$fromAI` to scan, from n8n's list: only these among the tools with no scan
  * ask for a value, and it goes out bare, under the tool's name. A Calculator or a Call Workflow Tool runs with none.
- * n8n's list also holds the MCP Client Tool, which comes in a later stage.
  */
 const TOOL_TYPES_TAKING_INPUT: ReadonlySet<string> = new Set(['ai.toolCode', 'ai.toolWikipedia']);
 const IMPLICIT_INPUT: FromAiArgument[] = [{ key: 'input', type: 'string' }];
