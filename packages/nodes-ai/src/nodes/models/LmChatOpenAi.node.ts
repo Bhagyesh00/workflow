@@ -309,6 +309,7 @@ export const LmChatOpenAiNode: NodeType = {
         baseUrl,
         model,
         credentialType: 'openAiApi',
+        responseFormatMode: (options.responseFormat as ResponseFormatMode) ?? 'jsonSchema',
         temperature: common.temperature,
         topP: common.topP,
         maxTokens: common.maxTokens,

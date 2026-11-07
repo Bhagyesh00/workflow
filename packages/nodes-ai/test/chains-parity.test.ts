@@ -1,6 +1,10 @@
 import { HttpClient } from '@workflow/core';
 import type { AiChatRequest, Connections, DataObject, Item, WorkflowNode } from '@workflow/workflow';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { toAnthropicMessages } from '../src/providers/anthropic';
+import { openAiChatBody } from '../src/providers/openai';
+import { openAiResponsesBody } from '../src/providers/openai-responses';
+import { runInBatches } from '../src/shared/batching';
 import { connect, FakeHttpClient, modelRequests, node, reply, run, scriptModel, services } from './harness';
 
 beforeEach(() => modelRequests.clear());
@@ -120,9 +124,72 @@ describe('Basic LLM Chain image messages', () => {
     expect(http.requests).toHaveLength(1);
     expect(http.requests[0].url).toBe('https://img.example.com/cat.png');
     expect(requests[0].messages).toEqual([
-      { role: 'user', content: [{ type: 'image', mimeType: 'image/png', data: PNG.toString('base64') }] },
+      {
+        role: 'user',
+        content: [{ type: 'image', mimeType: 'image/png', data: PNG.toString('base64'), detail: 'low' }],
+      },
       { role: 'user', content: 'Describe it' },
     ]);
+  });
+
+  describe('Image Resolution', () => {
+    const request = (detail?: 'auto' | 'low' | 'high'): AiChatRequest => ({
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'image', mimeType: 'image/png', data: 'QQ==', ...(detail ? { detail } : {}) }],
+        },
+      ],
+    });
+    const chat = (detail?: 'auto' | 'low' | 'high') => {
+      const body = openAiChatBody(
+        request(detail),
+        {
+          baseUrl: 'https://api.openai.com/v1',
+          model: 'gpt-5',
+          credentialType: 'openAiApi',
+          maxTokensField: 'max_tokens',
+          responseFormatMode: 'none',
+        },
+        false,
+      ) as any;
+      return body.messages[0].content[0];
+    };
+    const responses = (detail?: 'auto' | 'low' | 'high') => {
+      const body = openAiResponsesBody(
+        request(detail),
+        { baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', credentialType: 'openAiApi' },
+        false,
+      ) as any;
+      return body.input[0].content[0];
+    };
+
+    it('low and high reach the OpenAI request body; auto and unset do not', () => {
+      expect(chat('low').image_url.detail).toBe('low');
+      expect(chat('high').image_url.detail).toBe('high');
+      expect(chat('auto').image_url).not.toHaveProperty('detail');
+      expect(chat().image_url).not.toHaveProperty('detail');
+      expect(responses('low').detail).toBe('low');
+      expect(responses('auto')).not.toHaveProperty('detail');
+      expect(responses()).not.toHaveProperty('detail');
+    });
+
+    it('other providers get no detail', () => {
+      expect(JSON.stringify(toAnthropicMessages(request('low').messages))).not.toContain('detail');
+    });
+
+    it('Auto puts no detail on the part, for a binary image too', async () => {
+      const requests = scriptModel('Model', ['A cat', 'A dog']);
+      const binary = { data: { mimeType: 'image/png', data: PNG.toString('base64') } };
+      const item = (imageDetail: string) =>
+        chain(imageChain({ messageType: 'imageBinary', binaryImageDataKey: 'data', imageDetail }), [
+          { json: {}, binary },
+        ] as Item[]);
+      await item('auto');
+      await item('high');
+      expect((requests[0].messages[0].content as any[])[0]).not.toHaveProperty('detail');
+      expect((requests[1].messages[0].content as any[])[0].detail).toBe('high');
+    });
   });
 
   it('takes the type from the file name when the server sends none', async () => {
@@ -359,6 +426,38 @@ describe('batching', () => {
       expect(r.status, root.type).toBe('success');
       expect(requests, root.type).toHaveLength(2);
     }
+  });
+
+  it('stops after the batch with the failed item when continue-on-fail is off', async () => {
+    let calls = 0;
+    scriptModel('Model', () => {
+      calls++;
+      throw new Error('Revoked key');
+    });
+    const r = await chain(
+      node('Chain', 'ai.chainLlm', {
+        promptType: 'define',
+        text: '={{ $json.q }}',
+        options: { batching: { batchSize: 2 } },
+      }),
+      json(...Array.from({ length: 10 }, (_, n) => ({ q: `q${n}` }))),
+    );
+    expect(r.status).toBe('error');
+    expect(calls).toBe(2);
+  });
+
+  it('runInBatches stops only when asked', async () => {
+    const run = async (stopOnFailure: boolean) => {
+      const started: number[] = [];
+      const results = await runInBatches(6, { batchSize: 2, delayMs: 0, stopOnFailure }, async (i) => {
+        started.push(i);
+        if (i === 1) throw new Error('boom');
+        return i;
+      });
+      return { started, results: results.map((x) => x.status) };
+    };
+    expect(await run(true)).toEqual({ started: [0, 1], results: ['fulfilled', 'rejected'] });
+    expect((await run(false)).started).toEqual([0, 1, 2, 3, 4, 5]);
   });
 
   it('keeps continue-on-fail per item inside a batch', async () => {

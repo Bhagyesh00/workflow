@@ -21,6 +21,7 @@ import {
 } from '../shared/chat-model';
 import { isObjectSchema } from '../shared/json-schema';
 import { messageText } from '../shared/utils';
+import type { ResponseFormatMode } from './openai';
 
 export interface OpenAiWebSearchTool {
   /** `low`, `medium` or `high` */
@@ -59,6 +60,8 @@ export interface OpenAiResponsesConfig {
   model: string;
   credentialType: string;
   provider?: string;
+  /** how JSON is asked for when a parser wants it (the Structured Output option); unset is 'jsonSchema' */
+  responseFormatMode?: ResponseFormatMode;
   temperature?: number;
   topP?: number;
   maxTokens?: number;
@@ -103,7 +106,11 @@ export function toResponsesInput(messages: AiChatMessage[]): DataObject[] {
             if (p.type === 'file') {
               return { type: 'input_file', filename: p.fileName ?? 'file', file_data: dataUrl };
             }
-            return { type: 'input_image', image_url: dataUrl };
+            return {
+              type: 'input_image',
+              image_url: dataUrl,
+              ...(p.detail && p.detail !== 'auto' ? { detail: p.detail } : {}),
+            };
           }),
         });
         break;
@@ -181,10 +188,12 @@ export function openAiResponsesBody(
   const text: DataObject = {};
   const format = request.responseFormat;
   if (format?.type === 'json') {
-    text.format =
-      format.schema && isObjectSchema(format.schema)
-        ? { type: 'json_schema', name: 'response', schema: format.schema, strict: false }
-        : { type: 'json_object' };
+    if (config.responseFormatMode !== 'none') {
+      text.format =
+        config.responseFormatMode !== 'jsonObject' && format.schema && isObjectSchema(format.schema)
+          ? { type: 'json_schema', name: 'response', schema: format.schema, strict: false }
+          : { type: 'json_object' };
+    }
   } else if (config.textFormat) {
     text.format = config.textFormat;
   }
@@ -373,7 +382,10 @@ export function openAiResponsesAdapter(config: OpenAiResponsesConfig): ChatAdapt
     provider: config.provider ?? 'openai',
     model: config.model,
     credentialType: config.credentialType,
-    capabilities: { structuredOutput: true, structuredOutputWithTools: true },
+    capabilities: {
+      structuredOutput: config.responseFormatMode !== 'none',
+      structuredOutputWithTools: config.responseFormatMode !== 'none',
+    },
     buildRequest: (request, stream) => ({
       url: `${trimSlash(config.baseUrl)}/responses`,
       method: 'POST',

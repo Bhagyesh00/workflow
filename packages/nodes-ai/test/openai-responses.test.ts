@@ -162,6 +162,22 @@ describe('OpenAI Responses mode', () => {
     expect(body.tool_choice).toBeUndefined();
   });
 
+  it('follows the Structured Output option', async () => {
+    const parsed = async (responseFormat: string) => {
+      const http = new FakeHttpClient(sequence(textReply('{"result": 42}')));
+      const r = await runAgent(
+        http,
+        { useResponsesApi: true, options: { responseFormat } },
+        { parser: true, tools: false },
+      );
+      expect(r.output('Agent')).toEqual([{ output: { result: 42 } }]);
+      return http.bodies[0] as any;
+    };
+    expect((await parsed('jsonSchema')).text.format.type).toBe('json_schema');
+    expect((await parsed('jsonObject')).text.format).toEqual({ type: 'json_object' });
+    expect((await parsed('none')).text).toBeUndefined();
+  });
+
   it('sends the node options: service tier, metadata, logprobs, cache key, safety id, conversation, stored prompt, extra body', async () => {
     const http = new FakeHttpClient(sequence(textReply('hi')));
     await runAgent(
