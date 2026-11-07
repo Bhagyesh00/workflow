@@ -150,9 +150,9 @@ export async function resumableUpload(
   };
   let done: HttpFullResponse<unknown>;
   try {
-    // the key goes only to the credential's own host; the session address carries its own upload id
+    // the key goes only to the credential's own host over https; the session address carries its own upload id
     done =
-      target.hostname === (await geminiAuthHost(ctx, itemIndex))
+      target.protocol === 'https:' && target.hostname === (await geminiAuthHost(ctx, itemIndex))
         ? ((await ctx.helpers.httpRequestWithAuthentication<unknown>(
             GEMINI_CREDENTIAL,
             finalize,
