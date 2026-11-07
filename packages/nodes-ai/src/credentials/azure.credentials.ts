@@ -39,7 +39,7 @@ function parseHttps(raw: string, what: string): URL {
   } catch {
     url = undefined;
   }
-  if (!url || url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+  if (url?.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
     throw new Error(`${what} must be an https URL with no credentials, query or fragment`);
   }
   return url;
@@ -153,7 +153,7 @@ function assertOwnHost(target: AzureTarget, request: HttpRequestOptions): URL {
   } catch {
     url = undefined;
   }
-  if (!url || url.protocol !== 'https:' || url.hostname !== new URL(target.origin).hostname) {
+  if (url?.protocol !== 'https:' || url.hostname !== new URL(target.origin).hostname) {
     throw new Error('This credential only signs https requests to its own endpoint');
   }
   return url;

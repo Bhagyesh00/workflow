@@ -60,7 +60,10 @@ export const EmbeddingsMistralCloudNode: NodeType = {
     await ctx.getCredentials('mistralCloudApi', itemIndex);
     const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
     const model = String(ctx.getNodeParameter('model', itemIndex, 'mistral-embed')).trim() || 'mistral-embed';
-    const batchSize = Math.max(1, Math.min(MISTRAL_EMBED_BATCH, Number(options.batchSize ?? MISTRAL_EMBED_BATCH)));
+    const batchSize = Math.max(
+      1,
+      Math.min(MISTRAL_EMBED_BATCH, Number(options.batchSize ?? MISTRAL_EMBED_BATCH)),
+    );
     return {
       response: new HttpEmbeddings(ctx, {
         credentialType: 'mistralCloudApi',

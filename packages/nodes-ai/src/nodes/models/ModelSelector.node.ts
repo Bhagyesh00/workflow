@@ -119,11 +119,11 @@ export const ModelSelectorNode: NodeType = {
       if (!matched) continue;
       const index = Number(rule.model ?? 1);
       if (!Number.isInteger(index) || index < 1 || index > models.length) {
-        return fail('Invalid model index ' + index, `Model index must be between 1 and ${models.length}`);
+        return fail(`Invalid model index ${index}`, `Model index must be between 1 and ${models.length}`);
       }
       const model = models[index - 1];
       if (model === undefined || model === null) {
-        return fail('Invalid model index ' + index, `Model ${index} is not connected`);
+        return fail(`Invalid model index ${index}`, `Model ${index} is not connected`);
       }
       return { response: model };
     }

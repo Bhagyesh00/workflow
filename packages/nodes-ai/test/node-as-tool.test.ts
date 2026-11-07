@@ -382,7 +382,7 @@ describe('an agent calls a node as a tool', () => {
     expect(new Set(results)).toEqual(new Set(['first/a', 'second/b']));
   });
 
-  it('$input in a tool parameter is one item, the arguments, and $itemIndex stays the agent\'s', async () => {
+  it("$input in a tool parameter is one item, the arguments, and $itemIndex stays the agent's", async () => {
     const value = `={{ $fromAI('k') && $input.all().length }}|{{ $input.first().json.k }}|{{ $input.last().json.k }}|{{ $input.item.json.k }}|{{ $input.first().json.who }}|{{ $('Set').item.json.who }}|{{ $itemIndex }}`;
     const { requests } = await agentRun(
       [node('Echo', 'test.echoTool', { value })],
@@ -402,7 +402,7 @@ describe('an agent calls a node as a tool', () => {
     expect(new Set(results)).toEqual(new Set(['1|a|a|a||first|0', '1|b|b|b||second|1']));
   });
 
-  it('a credential id that is an expression resolves at the agent\'s item, on every call', async () => {
+  it("a credential id that is an expression resolves at the agent's item, on every call", async () => {
     const asked: string[] = [];
     const http = new FakeHttpClient(() => ({ body: {}, headers: { 'content-type': 'application/json' } }));
     const svc = toolServices({

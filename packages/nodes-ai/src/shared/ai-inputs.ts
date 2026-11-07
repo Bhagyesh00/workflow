@@ -227,7 +227,8 @@ export function getPrompt(
     return chatInput;
   }
   const text = ctx.getNodeParameter('text', itemIndex, '');
-  const prompt = typeof text === 'string' ? text : text === undefined || text === null ? '' : JSON.stringify(text);
+  const prompt =
+    typeof text === 'string' ? text : text === undefined || text === null ? '' : JSON.stringify(text);
   if (!prompt.trim()) {
     throw new NodeOperationError(ctx.getNode(), options?.emptyText ?? 'The prompt is empty', {
       itemIndex,

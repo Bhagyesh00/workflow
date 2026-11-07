@@ -85,7 +85,12 @@ describe('Model Selector', () => {
       combinator: 'or',
       conditions: [
         ...kindIs('A').conditions,
-        { id: 'c2', leftValue: '={{ $json.kind }}', rightValue: 'b', operator: { type: 'string', operation: 'equals' } },
+        {
+          id: 'c2',
+          leftValue: '={{ $json.kind }}',
+          rightValue: 'b',
+          operator: { type: 'string', operation: 'equals' },
+        },
       ],
     };
     const r = await run(

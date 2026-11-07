@@ -99,7 +99,8 @@ function restoreToolErrors(state: AgentLoopState): void {
     }),
   );
   for (const message of [...state.messages, ...state.results]) {
-    if (message.role === 'tool' && message.toolCallId && failed.has(message.toolCallId)) markToolError(message);
+    if (message.role === 'tool' && message.toolCallId && failed.has(message.toolCallId))
+      markToolError(message);
   }
 }
 
@@ -109,7 +110,10 @@ export function restoreMessages(state: AgentLoopState, attachments?: AiContentPa
   const messages = attachments?.length
     ? state.messages.map((message, index) =>
         index === state.promptIndex
-          ? { ...message, content: [{ type: 'text' as const, text: String(message.content) }, ...attachments] }
+          ? {
+              ...message,
+              content: [{ type: 'text' as const, text: String(message.content) }, ...attachments],
+            }
           : message,
       )
     : [...state.messages];

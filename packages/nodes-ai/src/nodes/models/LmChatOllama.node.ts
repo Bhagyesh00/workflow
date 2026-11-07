@@ -7,7 +7,13 @@ import {
   ollamaAdapter,
 } from '../../providers/ollama';
 import { HttpChatModel, readCommonOptions, trimSlash } from '../../shared/chat-model';
-import { modelDescription, modelOptionsProperty, sortOptions, temperatureOption, topPOption } from './model-options';
+import {
+  modelDescription,
+  modelOptionsProperty,
+  sortOptions,
+  temperatureOption,
+  topPOption,
+} from './model-options';
 
 /** The options of the Ollama chat and text models. Each is sent only when added to the node. */
 export const ollamaOptions: NodeProperty[] = [

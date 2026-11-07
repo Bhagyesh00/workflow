@@ -370,7 +370,11 @@ describe('Workflow start node', () => {
   });
 
   it('a tool placed above the trigger does not take its place', () => {
-    const graph = workflow([at('Sched', 't.schedule', 100), at('Agent', 't.agent'), at('Mail', 't.mailTool', -100)]);
+    const graph = workflow([
+      at('Sched', 't.schedule', 100),
+      at('Agent', 't.agent'),
+      at('Mail', 't.mailTool', -100),
+    ]);
     expect(graph.getTriggerNodes().map((n) => n.name)).toEqual(['Sched']);
     expect(graph.getStartNode()?.name).toBe('Sched');
   });

@@ -89,7 +89,12 @@ export class OAuth2Service {
    * resolved here: a typed value was resolved when it was read, and a second pass would expose stored
    * secrets. The https-only type refuses any other scheme.
    */
-  private flowUrl(type: string, data: DataObject, field: 'authUrl' | 'accessTokenUrl', label: string): string {
+  private flowUrl(
+    type: string,
+    data: DataObject,
+    field: 'authUrl' | 'accessTokenUrl',
+    label: string,
+  ): string {
     let resolved: string;
     try {
       const raw = String(data[field] ?? '');

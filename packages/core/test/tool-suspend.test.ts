@@ -6,8 +6,8 @@ import {
   type ExecuteContext,
   type ExecutionResult,
   type ExecutionState,
-  isToolSuspension,
   type Item,
+  isToolSuspension,
   type NodeOutput,
   type NodeType,
   type NodeTypeDescription,
@@ -18,7 +18,7 @@ import {
 } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { NodeTypes, reviewNodeKey, WorkflowExecute } from '../src';
-import { node, services as baseServices } from './helpers';
+import { services as baseServices, node } from './helpers';
 
 const WAIT_UNTIL = new Date('2030-01-02T03:04:05Z');
 
@@ -86,11 +86,7 @@ const types = new NodeTypes([
   { description: description('test.start', [], ['main']), execute: passThrough },
   { description: description('test.after', ['main'], ['main']), execute: passThrough },
   {
-    description: description(
-      'test.agent',
-      ['main', { type: 'ai_tool', displayName: 'Tool' }],
-      ['main'],
-    ),
+    description: description('test.agent', ['main', { type: 'ai_tool', displayName: 'Tool' }], ['main']),
     async execute(ctx) {
       return agentBody(ctx, (await ctx.getInputConnectionData('ai_tool', 0)) as AiTool[]);
     },
@@ -113,11 +109,7 @@ const types = new NodeTypes([
     },
   },
   {
-    description: description(
-      'test.subAgent',
-      [{ type: 'ai_tool', displayName: 'Tool' }],
-      ['ai_tool'],
-    ),
+    description: description('test.subAgent', [{ type: 'ai_tool', displayName: 'Tool' }], ['ai_tool']),
     async execute(ctx) {
       await ctx.getInputConnectionData('ai_tool', 0);
       return [[{ json: {} }]];
@@ -188,7 +180,9 @@ function callInTurn(plan: Array<'Instant' | 'Wait'>) {
     const resume = ctx.getResumeData();
     const seen = [
       ...((resume?.checkpoint.seen as DataObject[] | undefined) ?? []),
-      ...(resume ? [{ toolCallId: resume.toolCallId, answer: resume.answer as unknown as DataObject[] }] : []),
+      ...(resume
+        ? [{ toolCallId: resume.toolCallId, answer: resume.answer as unknown as DataObject[] }]
+        : []),
     ] as DataObject[];
     let remaining = (resume?.checkpoint.remaining as string[] | undefined) ?? plan;
     while (remaining.length) {

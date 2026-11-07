@@ -72,7 +72,9 @@ function modelAcceptsSampling(model: string): boolean {
  * the user set them, thinking is off and the model takes them; everywhere else they are left out with
  * no error and the call stays on the current version.
  */
-export function anthropicSampling(config: Pick<AnthropicChatConfig, 'model' | 'thinking' | 'topK' | 'topP'>): {
+export function anthropicSampling(
+  config: Pick<AnthropicChatConfig, 'model' | 'thinking' | 'topK' | 'topP'>,
+): {
   fields: DataObject;
   version: string;
 } {
@@ -213,7 +215,8 @@ export function anthropicRequestBody(
       body.tool_choice = { type: 'any' };
     }
   }
-  if (thinkingOn) body.thinking = adaptive ? { type: 'adaptive' } : { type: 'enabled', budget_tokens: budget };
+  if (thinkingOn)
+    body.thinking = adaptive ? { type: 'adaptive' } : { type: 'enabled', budget_tokens: budget };
   Object.assign(body, sampling.fields);
   const outputConfig: DataObject = {};
   if (request.responseFormat?.type === 'json' && request.responseFormat.schema) {

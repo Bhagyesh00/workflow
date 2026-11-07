@@ -87,7 +87,8 @@ export const databricksOAuth2Api: CredentialType = {
     if (!helpers) throw new Error('This credential can only get a token through the workflow engine');
     const clientId = text(credentials.clientId);
     const clientSecret = text(credentials.clientSecret);
-    if (!clientId || !clientSecret) throw new Error('The Databricks credential needs a client ID and a secret');
+    if (!clientId || !clientSecret)
+      throw new Error('The Databricks credential needs a client ID and a secret');
     const tokenUrl = `${host}/oidc/v1/token`;
     const token = await helpers.cachedToken(
       clientSecret,

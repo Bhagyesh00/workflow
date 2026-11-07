@@ -469,7 +469,10 @@ export const GuardrailsNode: NodeType = {
             try {
               return await getChatModel(ctx, i, { chatOnly: true });
             } catch (error) {
-              if (error instanceof NodeOperationError && /^(Connect a |A sub-node must be connected)/.test(error.message)) {
+              if (
+                error instanceof NodeOperationError &&
+                /^(Connect a |A sub-node must be connected)/.test(error.message)
+              ) {
                 throw new NodeOperationError(ctx.getNode(), 'Chat Model is required', { itemIndex: i });
               }
               throw error;

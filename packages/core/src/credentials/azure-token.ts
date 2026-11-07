@@ -37,7 +37,11 @@ function readJson(body: unknown): unknown {
 
 function readSeconds(value: unknown): number {
   const seconds =
-    typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN;
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim()
+        ? Number(value)
+        : Number.NaN;
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : DEFAULT_SECONDS;
 }
 

@@ -87,7 +87,12 @@ const testTypes: NodeType[] = [
       name: 'test.sendAsking',
       properties: [
         ...sendType.description.properties,
-        { displayName: 'Reason', name: 'reason', type: 'string', default: "={{ $fromAI('reason', 'Why ask') }}" },
+        {
+          displayName: 'Reason',
+          name: 'reason',
+          type: 'string',
+          default: "={{ $fromAI('reason', 'Why ask') }}",
+        },
       ],
     },
     async execute(ctx) {
@@ -118,7 +123,8 @@ const testTypes: NodeType[] = [
     }),
     async execute(ctx) {
       messages.push(String(ctx.getNodeParameter('operation', 0, '')));
-      if (ctx.getNodeParameter('operation', 0, '') === 'sendAndWait') await ctx.putExecutionToWait(WAIT_UNTIL);
+      if (ctx.getNodeParameter('operation', 0, '') === 'sendAndWait')
+        await ctx.putExecutionToWait(WAIT_UNTIL);
       return [[{ json: { posted: true } }]];
     },
   },
@@ -220,7 +226,10 @@ const agent = (options: DataObject = {}, parameters: DataObject = {}) =>
   node('Agent', 'ai.agent', { promptType: 'define', text: 'Go', options, ...parameters });
 
 const graph = (nodes: WorkflowNode[], ...links: Link[]) => {
-  const placed = [TRIGGER, MODEL, ...nodes].map((n, i) => ({ ...n, position: [i * 200, 0] as [number, number] }));
+  const placed = [TRIGGER, MODEL, ...nodes].map((n, i) => ({
+    ...n,
+    position: [i * 200, 0] as [number, number],
+  }));
   const connections: Connections = connect(
     ['Trigger', 'Agent'],
     ['Model', 'Agent', 'ai_languageModel'],
@@ -252,11 +261,11 @@ beforeEach(() => {
 });
 
 describe('a plain waiting tool', () => {
-  const plain = () => graph([agent({ returnIntermediateSteps: true, returnUsage: true }), node('Waiter', 'test.waiter')], [
-    'Waiter',
-    'Agent',
-    'ai_tool',
-  ]);
+  const plain = () =>
+    graph(
+      [agent({ returnIntermediateSteps: true, returnUsage: true }), node('Waiter', 'test.waiter')],
+      ['Waiter', 'Agent', 'ai_tool'],
+    );
 
   it('stops the run, and the answer goes back to the model', async () => {
     const requests = scriptModel('Model', [toolCalls(['Waiter', {}, 'w1']), 'done']);
@@ -267,7 +276,11 @@ describe('a plain waiting tool', () => {
     const { resultData, executionData } = waiting.state;
     expect(resultData.runData.Agent).toBeUndefined();
     expect(resultData.lastNodeExecuted).toBe('Waiter');
-    expect(executionData.suspended).toMatchObject({ agentNode: 'Agent', toolNode: 'Waiter', toolCallId: 'w1' });
+    expect(executionData.suspended).toMatchObject({
+      agentNode: 'Agent',
+      toolNode: 'Waiter',
+      toolCallId: 'w1',
+    });
     expect(requests).toHaveLength(1);
 
     const result = await resume(definition, waiting, [[{ json: { answer: 42 } }]]);
@@ -287,7 +300,9 @@ describe('a plain waiting tool', () => {
     const definition = plain();
     const result = await resume(definition, await start(definition));
     expect(result.status).toBe('success');
-    expect(toolMessages(requests[1].messages)).toEqual([['w1', 'The tool finished waiting without a response.']]);
+    expect(toolMessages(requests[1].messages)).toEqual([
+      ['w1', 'The tool finished waiting without a response.'],
+    ]);
   });
 
   it('the other calls of the turn finish first and the results keep the call order', async () => {
@@ -296,11 +311,7 @@ describe('a plain waiting tool', () => {
       'done',
     ]);
     const definition = graph(
-      [
-        agent(),
-        node('Waiter', 'test.waiter'),
-        node('Echo', 'test.echo', { value: 'hi' }),
-      ],
+      [agent(), node('Waiter', 'test.waiter'), node('Echo', 'test.echo', { value: 'hi' })],
       ['Waiter', 'Agent', 'ai_tool'],
       ['Echo', 'Agent', 'ai_tool'],
     );
@@ -328,22 +339,17 @@ describe('a plain waiting tool', () => {
 
   it('iterations carry over the wait', async () => {
     scriptModel('Model', [toolCalls(['Waiter', {}, 'w1'])]);
-    const definition = graph([agent({ maxIterations: 1 }), node('Waiter', 'test.waiter')], [
-      'Waiter',
-      'Agent',
-      'ai_tool',
-    ]);
+    const definition = graph(
+      [agent({ maxIterations: 1 }), node('Waiter', 'test.waiter')],
+      ['Waiter', 'Agent', 'ai_tool'],
+    );
     const result = await resume(definition, await start(definition), APPROVED);
     expect(result.status).toBe('error');
     expect(result.state.resultData.error?.message).toContain('Max iterations (1) reached');
   });
 
   it('the parser retry is not repeated after a wait', async () => {
-    const requests = scriptModel('Model', [
-      'bad',
-      toolCalls(['Waiter', {}, 'w1']),
-      'still bad',
-    ]);
+    const requests = scriptModel('Model', ['bad', toolCalls(['Waiter', {}, 'w1']), 'still bad']);
     const definition = graph(
       [agent(), node('Waiter', 'test.waiter'), node('Parser', 'test.parser')],
       ['Waiter', 'Agent', 'ai_tool'],
@@ -359,11 +365,10 @@ describe('a plain waiting tool', () => {
 describe('the checkpoint', () => {
   it('holds no image or file data, and the resumed run reads them from the binary again', async () => {
     const requests = scriptModel('Model', [toolCalls(['Waiter', {}, 'w1']), 'done']);
-    const definition = graph([agent({ passthroughBinaryPdfs: true }), node('Waiter', 'test.waiter')], [
-      'Waiter',
-      'Agent',
-      'ai_tool',
-    ]);
+    const definition = graph(
+      [agent({ passthroughBinaryPdfs: true }), node('Waiter', 'test.waiter')],
+      ['Waiter', 'Agent', 'ai_tool'],
+    );
     const png = Buffer.from('PNG-SECRET-BYTES').toString('base64');
     const pdf = Buffer.from('PDF-SECRET-BYTES').toString('base64');
     const waiting = await start(definition, [
@@ -394,11 +399,10 @@ describe('the checkpoint', () => {
 
   it('holds no text file either, and the resumed prompt has the file once', async () => {
     const requests = scriptModel('Model', [toolCalls(['Waiter', {}, 'w1']), 'done']);
-    const definition = graph([agent({ passthroughBinaryPdfs: true }), node('Waiter', 'test.waiter')], [
-      'Waiter',
-      'Agent',
-      'ai_tool',
-    ]);
+    const definition = graph(
+      [agent({ passthroughBinaryPdfs: true }), node('Waiter', 'test.waiter')],
+      ['Waiter', 'Agent', 'ai_tool'],
+    );
     const body = 'BODY-OF-THE-TEXT-FILE';
     const waiting = await start(definition, [
       {
@@ -429,7 +433,8 @@ describe('the checkpoint', () => {
       pending: [],
       usage: {},
     };
-    const read = (checkpoint: DataObject) => readCheckpoint(TRIGGER, { checkpoint, toolCallId: 'c1', answer: null });
+    const read = (checkpoint: DataObject) =>
+      readCheckpoint(TRIGGER, { checkpoint, toolCallId: 'c1', answer: null });
     expect(read(good).version).toBe(1);
     for (const broken of [
       { version: 2 },
@@ -443,14 +448,18 @@ describe('the checkpoint', () => {
       { usage: null },
       { rawContent: {} },
     ]) {
-      expect(() => read({ ...good, ...broken })).toThrow('This run cannot continue from the point where it waited');
+      expect(() => read({ ...good, ...broken })).toThrow(
+        'This run cannot continue from the point where it waited',
+      );
     }
   });
 
   it('a tool that failed before the wait is still flagged as failed after it', async () => {
     const flagged: Array<Array<[string | undefined, boolean]>> = [];
     const requests = scriptModel('Model', (request) => {
-      flagged.push(request.messages.filter((m) => m.role === 'tool').map((m) => [m.toolCallId, isToolError(m)]));
+      flagged.push(
+        request.messages.filter((m) => m.role === 'tool').map((m) => [m.toolCallId, isToolError(m)]),
+      );
       return flagged.length === 1
         ? toolCalls(['Echo', { value: 'x' }, 'c0'])
         : flagged.length === 2
@@ -525,7 +534,11 @@ describe('the checkpoint', () => {
     });
 
     it('made by the fallback goes back to the fallback', async () => {
-      const fail = { get message(): never { throw new Error('main down'); } } as unknown as AiChatResponse;
+      const fail = {
+        get message(): never {
+          throw new Error('main down');
+        },
+      } as unknown as AiChatResponse;
       thinking.Main = { recalled: [], replies: [fail, fail] };
       thinking.Spare = { recalled: [], replies: [toolCalls(['Waiter', {}, 'w1']), say('done')] };
       const definition = thinkingGraph('Main', 'Spare');
@@ -558,7 +571,10 @@ describe('the checkpoint', () => {
 
   it('a tool result that holds a secret stays out of the model through the error path', async () => {
     const requests = scriptModel('Model', [toolCalls(['Echo', {}, 'e1']), 'done']);
-    const definition = graph([agent(), node('Echo', 'test.echo', { fail: true })], ['Echo', 'Agent', 'ai_tool']);
+    const definition = graph(
+      [agent(), node('Echo', 'test.echo', { fail: true })],
+      ['Echo', 'Agent', 'ai_tool'],
+    );
     const result = await start(definition);
     expect(result.status).toBe('success');
     const [[, text]] = toolMessages(requests[1].messages);
@@ -569,7 +585,10 @@ describe('the checkpoint', () => {
   it('a tool that returns its error as a result gets it redacted too', async () => {
     const requests = scriptModel('Model', [toolCalls(['Soft', {}, 's1']), 'done']);
     const definition = graph(
-      [agent({ returnIntermediateSteps: true }), node('Soft', 'test.softFail', {}, { onError: 'continueRegularOutput' })],
+      [
+        agent({ returnIntermediateSteps: true }),
+        node('Soft', 'test.softFail', {}, { onError: 'continueRegularOutput' }),
+      ],
       ['Soft', 'Agent', 'ai_tool'],
     );
     const result = await start(definition);
@@ -596,7 +615,10 @@ describe('the checkpoint', () => {
 describe('items', () => {
   const items: Item[] = ['a', 'b', 'c'].map((chatInput) => ({ json: { chatInput } }));
   const perItem = (options: DataObject) =>
-    graph([agent(options, { promptType: 'auto' }), node('Waiter', 'test.waiter')], ['Waiter', 'Agent', 'ai_tool']);
+    graph(
+      [agent(options, { promptType: 'auto' }), node('Waiter', 'test.waiter')],
+      ['Waiter', 'Agent', 'ai_tool'],
+    );
 
   it('a tool that can wait makes the items run one by one, with a hint', async () => {
     const running: string[] = [];
@@ -651,9 +673,7 @@ describe('items', () => {
     expect(requests).toHaveLength(2);
     const checkpoint = waiting.state.executionData.suspended?.checkpoint as DataObject;
     expect(checkpoint.itemIndex).toBe(1);
-    expect(checkpoint.finishedItems).toEqual([
-      { json: { output: 'a answered' }, pairedItem: { item: 0 } },
-    ]);
+    expect(checkpoint.finishedItems).toEqual([{ json: { output: 'a answered' }, pairedItem: { item: 0 } }]);
 
     const result = await resume(definition, waiting, APPROVED);
     expect(result.status).toBe('success');
@@ -741,7 +761,11 @@ describe('the human review gate', () => {
       });
       expect(first.status).toBe('waiting');
       const state = JSON.parse(JSON.stringify(first.state)) as ExecutionState;
-      const second = await new WorkflowExecute(new Workflow(definition, types), withCredentials(), state).resume({
+      const second = await new WorkflowExecute(
+        new Workflow(definition, types),
+        withCredentials(),
+        state,
+      ).resume({
         output: DECLINED,
       });
       expect(second.status).toBe('waiting');
@@ -759,10 +783,11 @@ describe('the human review gate', () => {
     expect(ran).toEqual([]);
     // the model sees the gated tool under its own name with the two groups of arguments
     expect(requests[0].tools?.map((t) => t.name)).toEqual(['Echo']);
-    expect(Object.keys((requests[0].tools?.[0].parameters as DataObject).properties as DataObject)).toEqual([
-      'toolParameters',
-      'hitlParameters',
-    ]);
+    expect(
+      Object.keys(
+        ((requests[0].tools?.[0]?.parameters as DataObject | undefined)?.properties ?? {}) as DataObject,
+      ),
+    ).toEqual(['toolParameters', 'hitlParameters']);
 
     const result = await resume(definition, waiting, APPROVED);
     expect(result.status).toBe('success');
@@ -802,7 +827,9 @@ describe('the human review gate', () => {
     expect(result.status).toBe('success');
     expect(ran).toHaveLength(1);
     expect(toolMessages(requests[1].messages).map(([id]) => id)).toEqual(['c1', 'c2']);
-    expect(toolMessages(requests[1].messages)[1][1]).toContain('User rejected the tool call to Echo (id: c2)');
+    expect(toolMessages(requests[1].messages)[1][1]).toContain(
+      'User rejected the tool call to Echo (id: c2)',
+    );
   });
 
   it('a retry after an approval starts over and asks again: one approval runs the tool once', async () => {
@@ -901,7 +928,11 @@ describe('under an AI Agent Tool', () => {
   });
 
   it('an operation set by an expression is refused when it waits, or when it can only be known later', async () => {
-    for (const operation of ["={{ 'sendAndWait' }}", "={{ $fromAI('operation', 'Which one') }}", '={{ $json.nothing }}']) {
+    for (const operation of [
+      "={{ 'sendAndWait' }}",
+      "={{ $fromAI('operation', 'Which one') }}",
+      '={{ $json.nothing }}',
+    ]) {
       const outer = scriptModel('Model', [toolCalls(['Sub', { input: 'go' }, 's1']), 'done']);
       const inner = scriptModel('Sub Model', [toolCalls(['Post', {}, 'p1']), 'never']);
       const result = await start(underSubAgent(operation));

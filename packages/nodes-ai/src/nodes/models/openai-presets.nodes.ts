@@ -485,7 +485,9 @@ function presetNode(preset: Preset): NodeType {
       if (!modelId) throw new Error('Choose a model');
       const num = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : Number(v));
       const reasoningEffort =
-        preset.name === 'ai.lmChatXAiGrok' && options.reasoningEffort ? String(options.reasoningEffort) : undefined;
+        preset.name === 'ai.lmChatXAiGrok' && options.reasoningEffort
+          ? String(options.reasoningEffort)
+          : undefined;
       // the option asks for JSON on every call; responseFormatMode covers only a request from a parser
       const extraBody: DataObject = {
         ...(preset.extraBody?.(options) ?? {}),

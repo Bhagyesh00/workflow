@@ -1,4 +1,4 @@
-import { NodeTypes, createBaseContext, type ExecutionServices } from '@workflow/core';
+import { createBaseContext, type ExecutionServices, NodeTypes } from '@workflow/core';
 import {
   type DataObject,
   ExpressionEvaluator,
@@ -12,7 +12,10 @@ import { describe, expect, it } from 'vitest';
 import { ToolWorkflowNode } from '../src/nodes/tools/tools.nodes';
 import { connect, node, run, scriptModel, services, toolCalls } from './harness';
 
-const SUB = (inputs: Array<{ name: string; type: string }>, inputSource = 'workflowInputs'): WorkflowDefinition => ({
+const SUB = (
+  inputs: Array<{ name: string; type: string }>,
+  inputSource = 'workflowInputs',
+): WorkflowDefinition => ({
   name: 'Orders',
   nodes: [
     {
@@ -57,7 +60,11 @@ async function callTool(parameters: DataObject, args: DataObject) {
   const result = await run(
     [
       node('Trigger', 'test.trigger'),
-      node('Agent', 'ai.agent', { promptType: 'define', text: 'go', options: { returnIntermediateSteps: true } }),
+      node('Agent', 'ai.agent', {
+        promptType: 'define',
+        text: 'go',
+        options: { returnIntermediateSteps: true },
+      }),
       node('Model', 'test.fakeChatModel'),
       node('Order tool', 'ai.toolWorkflow', { toolDescription: 'Order lookup', ...parameters }),
     ],
@@ -109,10 +116,16 @@ describe('Call Workflow Tool parity', () => {
     const { received } = await callTool(
       {
         workflowId: 'wf-2',
-        workflowInputs: mapping(
-          { note: "={{ $fromAI('note') }}", gone: "={{ $fromAI('gone') }}" },
-          [{ id: 'gone', displayName: 'gone', required: false, defaultMatch: false, display: true, removed: true }],
-        ),
+        workflowInputs: mapping({ note: "={{ $fromAI('note') }}", gone: "={{ $fromAI('gone') }}" }, [
+          {
+            id: 'gone',
+            displayName: 'gone',
+            required: false,
+            defaultMatch: false,
+            display: true,
+            removed: true,
+          },
+        ]),
       },
       { note: '={{ 1 + 1 }}', gone: 'x' },
     );
@@ -195,7 +208,9 @@ describe('Call Workflow Tool parity', () => {
     expect(pass.fields).toEqual([]);
     expect(pass.emptyFieldsNotice).toContain('Define Using Fields Below');
     await expect(
-      load(loadCtx({ source: 'database', workflowId: 'other-tenant' }, { readWorkflow: async () => undefined })),
+      load(
+        loadCtx({ source: 'database', workflowId: 'other-tenant' }, { readWorkflow: async () => undefined }),
+      ),
     ).rejects.toThrow('The workflow was not found');
     expect((await load(loadCtx({ source: 'database', workflowId: '' }))).fields).toEqual([]);
   });

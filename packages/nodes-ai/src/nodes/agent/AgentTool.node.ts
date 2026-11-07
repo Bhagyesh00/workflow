@@ -20,7 +20,8 @@ const PROMPT_PROPERTIES: NodeProperty[] = [
     default: TOOL_DESCRIPTION,
     required: true,
     typeOptions: { rows: 2 },
-    description: 'Tells the calling model what this agent does; a specific description gets the agent called at the right time',
+    description:
+      'Tells the calling model what this agent does; a specific description gets the agent called at the right time',
   },
   {
     displayName: 'Prompt (User Message)',
@@ -36,7 +37,9 @@ const PROMPT_PROPERTIES: NodeProperty[] = [
 /** the Agent's parameters, except its own prompt source; this node has one version, so the parser switch always shows */
 const SHARED = agentProperties
   .filter(({ name }) => !['promptType', 'text'].includes(name))
-  .map((property) => (property.name === 'hasOutputParser' ? { ...property, displayOptions: undefined } : property));
+  .map((property) =>
+    property.name === 'hasOutputParser' ? { ...property, displayOptions: undefined } : property,
+  );
 
 /** the Agent's inputs without `main`; the fallback model is the second chat-model port, as on the Agent */
 const AGENT_TOOL_INPUTS = `={{ [${JSON.stringify(modelPort('Chat Model'))}, ...($parameter.needsFallback === true ? [${JSON.stringify(modelPort('Fallback Model'))}] : []), { type: 'ai_memory', displayName: 'Memory', maxConnections: 1 }, { type: 'ai_tool', displayName: 'Tool' }, ...($parameter.hasOutputParser !== false ? [{ type: 'ai_outputParser', displayName: 'Output Parser', maxConnections: 1 }] : [])] }}`;

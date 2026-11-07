@@ -32,7 +32,7 @@ export function MatchingColumns({
         {label}
       </label>
       {multiKeyMatch ? (
-        <div id={id} className="space-y-1" role="group" aria-label={label}>
+        <fieldset id={id} className="m-0 min-w-0 space-y-1 border-0 p-0" aria-label={label}>
           {fields.map((field) => (
             <Checkbox
               key={field.id}
@@ -44,7 +44,7 @@ export function MatchingColumns({
               }
             />
           ))}
-        </div>
+        </fieldset>
       ) : (
         <Select
           id={id}

@@ -62,7 +62,9 @@ describe('resource mapper control', () => {
     expect(rowOf('notes')).toBeNull();
     expect(rowOf('name')).toBeNull();
     // the schema is saved with the value, the default match column chosen
-    await waitFor(() => expect(stored(node).schema.map((f) => f.id)).toEqual(['email', 'name', 'age', 'active', 'notes']));
+    await waitFor(() =>
+      expect(stored(node).schema.map((f) => f.id)).toEqual(['email', 'name', 'age', 'active', 'notes']),
+    );
     expect(stored(node).matchingColumns).toEqual(['email']);
     expect(screen.getByRole('group', { name: 'Columns to match on' })).toBeTruthy();
   });
@@ -122,7 +124,14 @@ describe('resource mapper control', () => {
       parameters: initial('contacts', {
         schema: [
           { id: 'email', displayName: 'Email', required: true, defaultMatch: true, display: true },
-          { id: 'name', displayName: 'Name', required: false, defaultMatch: false, display: true, removed: true },
+          {
+            id: 'name',
+            displayName: 'Name',
+            required: false,
+            defaultMatch: false,
+            display: true,
+            removed: true,
+          },
         ],
         matchingColumns: ['email'],
       }),
@@ -141,7 +150,10 @@ describe('resource mapper control', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Name' }));
     await waitFor(() => expect(stored(node).matchingColumns).toEqual(['email']));
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Mapping column mode' }), 'autoMapInputData');
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Mapping column mode' }),
+      'autoMapInputData',
+    );
     await waitFor(() => expect(stored(node).mappingMode).toBe('autoMapInputData'));
     expect(rowOf('email')).toBeNull();
     await user.click(screen.getByRole('switch', { name: 'Attempt to convert types' }));
@@ -279,8 +291,22 @@ describe('mapper helpers', () => {
   });
 
   it('sameSync does not depend on the key order of a field or of the values', () => {
-    const one = { id: 'x', displayName: 'X', required: false, defaultMatch: false, display: true, type: 'string' as const };
-    const reordered = { type: 'string' as const, display: true, defaultMatch: false, required: false, displayName: 'X', id: 'x' };
+    const one = {
+      id: 'x',
+      displayName: 'X',
+      required: false,
+      defaultMatch: false,
+      display: true,
+      type: 'string' as const,
+    };
+    const reordered = {
+      type: 'string' as const,
+      display: true,
+      defaultMatch: false,
+      required: false,
+      displayName: 'X',
+      id: 'x',
+    };
     expect(sameSync(base([one]), { ...base([reordered]), value: { b: 2, a: 1 } })).toBe(true);
     expect(sameSync(base([one]), base([{ ...one, required: true }]))).toBe(false);
     expect(sameSync(base([one, { ...one, id: 'y' }]), base([{ ...one, id: 'y' }, one]))).toBe(false);

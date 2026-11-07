@@ -44,7 +44,12 @@ const CASES: Case[] = [
     creds: { baseUrl: 'http://ollama.test:11434' },
     params: { model: 'llama3.2', options: { temperature: 0.1, topK: 20, numCtx: 2048 } },
     url: 'http://ollama.test:11434/api/chat',
-    reply: { model: 'llama3.2', message: { role: 'assistant', content: 'Bonjour' }, done: true, done_reason: 'stop' },
+    reply: {
+      model: 'llama3.2',
+      message: { role: 'assistant', content: 'Bonjour' },
+      done: true,
+      done_reason: 'stop',
+    },
     check: (b) => expect(b).toMatchObject({ model: 'llama3.2' }),
   },
   {

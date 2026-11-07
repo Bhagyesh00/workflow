@@ -1,7 +1,7 @@
 /** P5-77: human review on an agent's tool, from the message through the link to the model's next turn. */
 import { createServer, type Server } from 'node:http';
-import net from 'node:net';
 import type { AddressInfo } from 'node:net';
+import net from 'node:net';
 import { nodesAiPackage } from '@workflow/nodes-ai';
 import type {
   AiChatMessage,
@@ -166,9 +166,12 @@ const get = (url: string, headers: Record<string, string> = {}) =>
 
 const AGENT_NODE = (options: DataObject = {}) =>
   node('Agent', 'ai.agent', { promptType: 'define', text: 'Pay it back', options }, [200, 0]);
-const REFUND = node('Refund', 'test.refund', { amount: `={{ $fromAI('amount', 'How much', 'string') }}` }, [
-  200, 400,
-]);
+const REFUND = node(
+  'Refund',
+  'test.refund',
+  { amount: `={{ $fromAI('amount', 'How much', 'string') }}` },
+  [200, 400],
+);
 
 /** the shared part: Start -> Agent -> After, with the model, plus the gate and the tool */
 function workflow(gate: ReturnType<typeof node>, extra: ReturnType<typeof node>[] = [], connections = {}) {
@@ -278,7 +281,9 @@ describe('a gated tool on the agent', () => {
   it('a timeout counts as denied', async () => {
     scripts.Model = [call('10', 'c1'), say('stopped')];
     const run = await telegramReview({
-      options: { limitWaitTime: { values: { limitType: 'afterTimeInterval', resumeAmount: 1, resumeUnit: 'hours' } } },
+      options: {
+        limitWaitTime: { values: { limitType: 'afterTimeInterval', resumeAmount: 1, resumeUnit: 'hours' } },
+      },
     });
     // what the wait tracker does when the time is up
     expect(await server.ctx.executions.resume(run.tenantId, run.executionId)).toBeTruthy();
@@ -340,9 +345,9 @@ describe('a gated tool on the agent', () => {
     const { Approve } = linksOf(sent[0]);
     const { repos } = server.ctx;
     // the run stands here while the other tools of the turn finish
-    expect(await repos.executions.transition(run.tenantId, run.executionId, ['waiting'], { status: 'running' })).toBe(
-      true,
-    );
+    expect(
+      await repos.executions.transition(run.tenantId, run.executionId, ['waiting'], { status: 'running' }),
+    ).toBe(true);
     const busy = await get(Approve, { accept: 'text/html,application/xhtml+xml' });
     expect(busy.statusCode).toBe(409);
     expect(busy.headers['content-type']).toContain('text/html');
@@ -350,9 +355,9 @@ describe('a gated tool on the agent', () => {
     expect(busy.body).not.toContain('already answered');
     expect(refunds).toEqual([]);
 
-    expect(await repos.executions.transition(run.tenantId, run.executionId, ['running'], { status: 'waiting' })).toBe(
-      true,
-    );
+    expect(
+      await repos.executions.transition(run.tenantId, run.executionId, ['running'], { status: 'waiting' }),
+    ).toBe(true);
     expect((await get(Approve)).statusCode).toBe(200);
     await run.finished();
     expect(refunds).toEqual([{ amount: '10' }]);
@@ -489,9 +494,9 @@ describe('the email of a review', () => {
     );
     const run = await startRun(session, workflow(gate));
     expect(mails).toHaveLength(1);
-    const decoded = mails[0].replace(/=\r\n/g, '').replace(/=([0-9A-F]{2})/g, (_all, hex: string) =>
-      String.fromCharCode(Number.parseInt(hex, 16)),
-    );
+    const decoded = mails[0]
+      .replace(/=\r\n/g, '')
+      .replace(/=([0-9A-F]{2})/g, (_all, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
     const html = decoded.slice(decoded.indexOf('text/html'));
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
     expect(html).not.toContain('<img src=x');

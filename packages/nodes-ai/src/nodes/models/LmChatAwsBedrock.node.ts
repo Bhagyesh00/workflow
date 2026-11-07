@@ -1,6 +1,6 @@
 /** AWS Bedrock Chat Model sub-node: chat models on Bedrock through the Converse API. */
 import type { DataObject, NodeType } from '@workflow/workflow';
-import { type BedrockChatConfig, bedrockAdapter, type BedrockGuardrailTrace } from '../../providers/bedrock';
+import { type BedrockChatConfig, type BedrockGuardrailTrace, bedrockAdapter } from '../../providers/bedrock';
 import {
   additionalFieldsOption,
   authenticationProperty,

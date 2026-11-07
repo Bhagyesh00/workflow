@@ -109,7 +109,9 @@ export class CredentialService {
       const fixed = p.type === 'hidden' && p.default !== '' && !ALWAYS_SECRET.includes(p.name);
       const current = out[p.name];
       const badChoice =
-        p.type === 'options' && p.name === 'url' && !p.options?.some((o) => 'value' in o && o.value === current);
+        p.type === 'options' &&
+        p.name === 'url' &&
+        !p.options?.some((o) => 'value' in o && o.value === current);
       if (fixed || badChoice || current === undefined || current === null || current === '') {
         out[p.name] = p.default;
       }

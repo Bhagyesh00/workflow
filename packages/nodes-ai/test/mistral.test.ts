@@ -118,9 +118,15 @@ describe('Mistral Cloud chat model', () => {
 
   it('streams without stream_options and skips thinking chunks', async () => {
     const body = sse(
-      { model: 'magistral-small-latest', choices: [{ delta: { content: [{ type: 'thinking', thinking: [] }] } }] },
+      {
+        model: 'magistral-small-latest',
+        choices: [{ delta: { content: [{ type: 'thinking', thinking: [] }] } }],
+      },
       { choices: [{ delta: { content: [{ type: 'text', text: 'It is ' }] } }] },
-      { choices: [{ delta: { content: '42.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 2 } },
+      {
+        choices: [{ delta: { content: '42.' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 3, completion_tokens: 2 },
+      },
     );
     const http = new FakeHttpClient(sequence({ body }));
     const r = await runAgent(http, { model: 'magistral-small-latest' }, true);
@@ -200,7 +206,9 @@ describe('Embeddings Mistral Cloud', () => {
 
   it('batches by 512 texts', async () => {
     const http = new FakeHttpClient((req) => ({
-      body: { data: (req.body as { input: string[] }).input.map((_t, index) => ({ index, embedding: [1, 2] })) },
+      body: {
+        data: (req.body as { input: string[] }).input.map((_t, index) => ({ index, embedding: [1, 2] })),
+      },
     }));
     const embeddings = await embeddingsFor(http, {});
     const texts = Array.from({ length: 1100 }, (_v, i) => `t${i}`);

@@ -25,7 +25,13 @@ const ADVANCED_OPTIONS: NodeProperty[] = [
     description: 'Texts sent per request',
   },
   { displayName: 'Timeout (ms)', name: 'timeout', type: 'number', default: 60_000 },
-  { displayName: 'Max Retries', name: 'maxRetries', type: 'number', default: 2, typeOptions: { minValue: 0 } },
+  {
+    displayName: 'Max Retries',
+    name: 'maxRetries',
+    type: 'number',
+    default: 2,
+    typeOptions: { minValue: 0 },
+  },
 ];
 
 function description(

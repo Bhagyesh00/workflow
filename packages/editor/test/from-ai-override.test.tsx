@@ -47,17 +47,22 @@ describe('canUseFromAiOverride', () => {
     expect(canUseFromAiOverride(tool('x.tool', { outputs: ['main'] }), prop('string'), ['url'])).toBe(false);
   });
 
-  it.each(['ai.toolCode', 'ai.toolHttpRequest', 'ai.mcpClientTool', 'ai.vectorStoreQdrant', 'ai.toolVectorStore'])(
-    'refuses %s',
-    (name) => expect(canUseFromAiOverride(tool(name), prop('string'), ['url'])).toBe(false),
-  );
+  it.each([
+    'ai.toolCode',
+    'ai.toolHttpRequest',
+    'ai.mcpClientTool',
+    'ai.vectorStoreQdrant',
+    'ai.toolVectorStore',
+  ])('refuses %s', (name) => expect(canUseFromAiOverride(tool(name), prop('string'), ['url'])).toBe(false));
 
   it('offers the Call Workflow Tool only the mapped inputs, the part its schema is built from', () => {
     const workflowTool = tool('ai.toolWorkflow');
     expect(canUseFromAiOverride(workflowTool, prop('resourceLocator'), ['workflowId'])).toBe(false);
     expect(canUseFromAiOverride(workflowTool, prop('string'), ['responsePropertyName'])).toBe(false);
     expect(canUseFromAiOverride(workflowTool, prop('json'), ['workflowJson'])).toBe(false);
-    expect(canUseFromAiOverride(workflowTool, prop('string'), ['workflowInputs', 'value', 'city'])).toBe(true);
+    expect(canUseFromAiOverride(workflowTool, prop('string'), ['workflowInputs', 'value', 'city'])).toBe(
+      true,
+    );
   });
 
   it.each([['toolName'], ['description'], ['toolDescription']])('refuses the path %s', (name) => {
@@ -111,7 +116,7 @@ describe('value round trip', () => {
     'all \' " ` together',
     'back\\slash',
     'line\nbreak\r\n',
-    'tick ` and ${x}',
+    `tick \` and \${x}`,
     "}} ) $fromAI('x') end",
     'unicode é 日本',
   ])('reads back %j', (description) => {

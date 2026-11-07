@@ -303,9 +303,7 @@ describe('URL rules', () => {
   });
 
   it('judges data:, javascript:, vbscript: and mailto: by scheme only', () => {
-    expect(check('click javascript:alert(1) now').blockedReasons).toEqual([
-      'Scheme is not allowed',
-    ]);
+    expect(check('click javascript:alert(1) now').blockedReasons).toEqual(['Scheme is not allowed']);
     expect(check('mail mailto:a@b.co now', { allowedSchemes: ['https', 'mailto'] }).blocked).toEqual([]);
     expect(check('see data:text/html;base64,AAAA ok').blocked).toHaveLength(1);
   });
@@ -381,7 +379,9 @@ describe('URL rules', () => {
     expect(lookalike.blockedReasons).toEqual(['Not in the allow list']);
     const text = 'go m\u00fcnchen.de now';
     expect(maskSpans(text, check(text).blocked)).toBe('go <URL> now');
-    expect(check('go \u0928\u092e\u0938\u094d\u0924\u0947.\u092d\u093e\u0930\u0924 now').blocked).toHaveLength(1);
+    expect(
+      check('go \u0928\u092e\u0938\u094d\u0924\u0947.\u092d\u093e\u0930\u0924 now').blocked,
+    ).toHaveLength(1);
   });
 
   it('compares a Unicode allow-list entry as punycode', () => {
@@ -496,7 +496,11 @@ describe('custom regex', () => {
         expect(ticks).toBeGreaterThan(3);
         expect(r.status).toBe('success');
         expect(r.fail).toHaveLength(1);
-        expect(checksOf(r.fail[0])[0]).toMatchObject({ name: 'slow', triggered: false, executionFailed: true });
+        expect(checksOf(r.fail[0])[0]).toMatchObject({
+          name: 'slow',
+          triggered: false,
+          executionFailed: true,
+        });
         expect(JSON.stringify(checksOf(r.fail[0])[0].exception)).toMatch(/Couldn't run the custom regex/);
         expect(JSON.stringify(checksOf(r.fail[0])[0].exception)).not.toContain('aaaa');
       } finally {

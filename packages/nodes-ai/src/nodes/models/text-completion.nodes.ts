@@ -104,10 +104,7 @@ const LmOllamaNode: NodeType = {
       credential: 'ollamaApi',
       defaultsName: 'Ollama Model',
     },
-    [
-      modelOptionsProperty('model', OLLAMA_DEFAULT_MODEL),
-      collection(ollamaOptions),
-    ],
+    [modelOptionsProperty('model', OLLAMA_DEFAULT_MODEL), collection(ollamaOptions)],
   ),
   async supplyData(ctx, itemIndex) {
     const creds = await ctx.getCredentials('ollamaApi', itemIndex);
@@ -147,8 +144,16 @@ const LmLemonadeNode: NodeType = {
     [
       modelOptionsProperty('model', LEMONADE_DEFAULT_MODEL),
       collection([
-        penalty('Frequency Penalty', 'frequencyPenalty', 'Positive values lower the chance of repeating the same words'),
-        penalty('Presence Penalty', 'presencePenalty', 'Positive values raise the chance of talking about new topics'),
+        penalty(
+          'Frequency Penalty',
+          'frequencyPenalty',
+          'Positive values lower the chance of repeating the same words',
+        ),
+        penalty(
+          'Presence Penalty',
+          'presencePenalty',
+          'Positive values raise the chance of talking about new topics',
+        ),
         {
           ...maxTokensOption(-1),
           typeOptions: { minValue: -1 },
@@ -220,8 +225,16 @@ const LmHuggingFaceNode: NodeType = {
           placeholder: 'https://example.endpoints.huggingface.cloud/v1',
           description: 'Base URL of an OpenAI-compatible endpoint. Empty uses the Hugging Face router.',
         },
-        penalty('Frequency Penalty', 'frequencyPenalty', 'Positive values lower the chance of repeating the same words'),
-        penalty('Presence Penalty', 'presencePenalty', 'Positive values raise the chance of talking about new topics'),
+        penalty(
+          'Frequency Penalty',
+          'frequencyPenalty',
+          'Positive values lower the chance of repeating the same words',
+        ),
+        penalty(
+          'Presence Penalty',
+          'presencePenalty',
+          'Positive values raise the chance of talking about new topics',
+        ),
         {
           displayName: 'Top K',
           name: 'topK',
@@ -263,4 +276,9 @@ const LmHuggingFaceNode: NodeType = {
   },
 };
 
-export const textCompletionNodes: NodeType[] = [LmCohereNode, LmOllamaNode, LmLemonadeNode, LmHuggingFaceNode];
+export const textCompletionNodes: NodeType[] = [
+  LmCohereNode,
+  LmOllamaNode,
+  LmLemonadeNode,
+  LmHuggingFaceNode,
+];

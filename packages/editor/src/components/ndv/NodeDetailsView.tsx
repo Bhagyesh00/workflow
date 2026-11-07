@@ -64,7 +64,9 @@ function fromAiScanTarget(nodeType: string, parameters: NodeParameters): unknown
   const value = mapping?.value;
   if (!value || typeof value !== 'object') return {};
   const removed = new Set(
-    (Array.isArray(mapping.schema) ? mapping.schema : []).flatMap((field) => (field?.removed === true ? [field.id] : [])),
+    (Array.isArray(mapping.schema) ? mapping.schema : []).flatMap((field) =>
+      field?.removed === true ? [field.id] : [],
+    ),
   );
   return Object.entries(value).flatMap(([key, entry]) => (removed.has(key) ? [] : [entry]));
 }
@@ -256,7 +258,9 @@ export function NodeDetailsView({
         : extractFromAiArguments(
             fromAiScanTarget(
               node.type,
-              resolveNodeParameters(description.properties, node.parameters, { nodeVersion: node.typeVersion }),
+              resolveNodeParameters(description.properties, node.parameters, {
+                nodeVersion: node.typeVersion,
+              }),
             ),
           );
     } catch (error) {

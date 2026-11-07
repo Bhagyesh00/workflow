@@ -208,7 +208,11 @@ describe('Basic LLM Chain image messages', () => {
   it('sends an Image (Binary) message from the item', async () => {
     const requests = scriptModel('Model', ['A dog']);
     const svc = services();
-    const stored = await svc.binaryData.store(PNG, { fileName: 'dog.png', mimeType: 'image/png', executionId: 'e1' });
+    const stored = await svc.binaryData.store(PNG, {
+      fileName: 'dog.png',
+      mimeType: 'image/png',
+      executionId: 'e1',
+    });
     const r = await chain(
       imageChain({ messageType: 'imageBinary', binaryImageDataKey: 'photo' }),
       [{ json: {}, binary: { photo: stored } }],

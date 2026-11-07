@@ -92,7 +92,7 @@ const modelProperty = (defaultModel: string, description?: string): NodeProperty
 });
 
 /** The API's base64 form: little-endian float32 values. */
-const NEWLINE = new RegExp(String.fromCharCode(13) + '?' + String.fromCharCode(10), 'g');
+const NEWLINE = new RegExp(`${String.fromCharCode(13)}?${String.fromCharCode(10)}`, 'g');
 
 function decodeBase64Vector(encoded: string): number[] {
   const bytes = Buffer.from(encoded, 'base64');

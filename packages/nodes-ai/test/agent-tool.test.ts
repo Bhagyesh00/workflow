@@ -1,17 +1,8 @@
-import { withToolVariants } from '@workflow/workflow';
 import { NodeTypes } from '@workflow/core';
-import { nodes } from '../src';
+import { withToolVariants } from '@workflow/workflow';
 import { describe, expect, it } from 'vitest';
-import {
-  connect,
-  node,
-  reply,
-  run,
-  scriptModel,
-  services,
-  testNodes,
-  toolCalls,
-} from './harness';
+import { nodes } from '../src';
+import { connect, node, reply, run, scriptModel, services, testNodes, toolCalls } from './harness';
 
 const types = new NodeTypes(withToolVariants([...nodes, ...testNodes]));
 
@@ -33,7 +24,11 @@ describe('AI Agent Tool', () => {
     const result = await run(
       [
         node('Trigger', 'test.trigger'),
-        node('Agent', 'ai.agent', { promptType: 'define', text: 'ask', options: { returnIntermediateSteps: true } }),
+        node('Agent', 'ai.agent', {
+          promptType: 'define',
+          text: 'ask',
+          options: { returnIntermediateSteps: true },
+        }),
         node('Outer', 'test.fakeChatModel'),
         tool(),
         node('Inner', 'test.fakeChatModel'),
@@ -188,7 +183,11 @@ describe('AI Agent Tool', () => {
         ['Outer', 'Agent', 'ai_languageModel'],
         ['S1', 'Agent', 'ai_tool'],
         ...names.slice(1).map((name, i): [string, string, 'ai_tool'] => [name, names[i], 'ai_tool']),
-        ...names.map((name, i): [string, string, 'ai_languageModel'] => [models[i], name, 'ai_languageModel']),
+        ...names.map((name, i): [string, string, 'ai_languageModel'] => [
+          models[i],
+          name,
+          'ai_languageModel',
+        ]),
       ),
       { services: services({ nodeTypes: types }), nodeTypes: types },
     );

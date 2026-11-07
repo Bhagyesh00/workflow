@@ -80,7 +80,8 @@ export function syncWithFields(
       ? schema.filter((f) => f.defaultMatch && canMatch(f)).map((f) => f.id)
       : kept;
   const entries = value.value ? Object.entries(value.value).filter(([key]) => known.has(key)) : null;
-  const dropped = value.value !== null && entries !== null && entries.length !== Object.keys(value.value).length;
+  const dropped =
+    value.value !== null && entries !== null && entries.length !== Object.keys(value.value).length;
   return {
     ...value,
     schema,

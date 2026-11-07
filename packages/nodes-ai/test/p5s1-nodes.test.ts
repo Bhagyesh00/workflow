@@ -148,7 +148,9 @@ describe('node registrations', () => {
     expect(inputs.filter((port) => portType(port) === 'ai_languageModel')).toHaveLength(1);
     const noParser = ports(byName('ai.agentTool'), 'inputs', { hasOutputParser: false }) as NodeInputConfig[];
     expect(noParser.map(portType)).not.toContain('ai_outputParser');
-    const withFallback = ports(byName('ai.agentTool'), 'inputs', { needsFallback: true }) as NodeInputConfig[];
+    const withFallback = ports(byName('ai.agentTool'), 'inputs', {
+      needsFallback: true,
+    }) as NodeInputConfig[];
     expect(withFallback.filter((port) => portType(port) === 'ai_languageModel')).toMatchObject([
       { displayName: 'Chat Model', required: true },
       { displayName: 'Fallback Model', required: true },

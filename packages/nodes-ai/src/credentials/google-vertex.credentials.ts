@@ -90,7 +90,7 @@ export const googleVertexAiApi: CredentialType = {
     } catch {
       target = undefined;
     }
-    if (!target || target.protocol !== 'https:' || !GOOGLE_API_HOST.test(target.hostname)) {
+    if (target?.protocol !== 'https:' || !GOOGLE_API_HOST.test(target.hostname)) {
       throw new Error('The Vertex AI credential signs only requests to a Google API host over https');
     }
     const subject = credentials.inpersonate === true ? text(credentials.delegatedEmail).trim() : '';

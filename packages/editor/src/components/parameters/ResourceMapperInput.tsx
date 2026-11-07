@@ -5,8 +5,8 @@
  */
 import type { NodeProperty, ResourceMapperField, ResourceMapperValue } from '@workflow/workflow';
 import { RefreshCw, RotateCcw } from 'lucide-react';
-import { useEffect } from 'react';
 import type { ReactElement } from 'react';
+import { useEffect } from 'react';
 import type { ParameterPath } from '../../lib/workflow-ops';
 import { Button, IconButton } from '../ui/Button';
 import { Select, Switch } from '../ui/Field';
@@ -34,7 +34,13 @@ export interface ResourceMapperInputProps {
 const hasValue = (values: Record<string, unknown> | null, id: string) =>
   values !== null && Object.hasOwn(values, id);
 
-export function ResourceMapperInput({ prop, value, onChange, id, path }: ResourceMapperInputProps): ReactElement {
+export function ResourceMapperInput({
+  prop,
+  value,
+  onChange,
+  id,
+  path,
+}: ResourceMapperInputProps): ReactElement {
   const ctx = useParameterContext();
   const options = prop.typeOptions?.resourceMapper;
   const mode = options?.mode ?? 'add';
@@ -57,9 +63,7 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
   const showAll = options?.addAllFields !== false;
   const shown = schema.filter(
     (f) =>
-      f.display &&
-      !f.removed &&
-      (showAll || f.required || matching.includes(f.id) || hasValue(values, f.id)),
+      f.display && !f.removed && (showAll || f.required || matching.includes(f.id) || hasValue(values, f.id)),
   );
   const addable = schema.filter((f) => f.display && !f.removed && !shown.includes(f));
   const removed = schema.filter((f) => f.display && f.removed);
@@ -128,9 +132,7 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
         </IconButton>
       </div>
 
-      {!options && (
-        <Callout tone="warn">This parameter has no resource mapper settings.</Callout>
-      )}
+      {!options && <Callout tone="warn">This parameter has no resource mapper settings.</Callout>}
       {isFetching && <p className="text-xs text-ink-3">Loading {words.plural}…</p>}
       {error && (
         <Callout tone="err" title={`Could not load ${words.plural}`}>
@@ -171,7 +173,9 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
                 path={[...path, 'value', field.id]}
                 isMatch={matching.includes(field.id)}
                 onChange={(next) => setField(field.id, next)}
-                onRemove={field.required || matching.includes(field.id) ? undefined : () => removeField(field.id)}
+                onRemove={
+                  field.required || matching.includes(field.id) ? undefined : () => removeField(field.id)
+                }
               />
             ))}
           </div>
@@ -194,7 +198,10 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
             ))}
           </Select>
           {!showAll && (
-            <Button size="sm" onClick={() => addFields(schema.filter((f) => f.display && !f.removed).map((f) => f.id))}>
+            <Button
+              size="sm"
+              onClick={() => addFields(schema.filter((f) => f.display && !f.removed).map((f) => f.id))}
+            >
               Add all {words.plural}
             </Button>
           )}
@@ -209,7 +216,11 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
               <li key={f.id} className="flex items-center gap-2 text-sm text-ink-3 line-through">
                 <span className="min-w-0 flex-1 truncate">{f.displayName}</span>
                 {!readOnly && (
-                  <IconButton label={`Restore ${f.displayName}`} size="sm" onClick={() => addFields([f.id], true)}>
+                  <IconButton
+                    label={`Restore ${f.displayName}`}
+                    size="sm"
+                    onClick={() => addFields([f.id], true)}
+                  >
                     <RotateCcw size={12} />
                   </IconButton>
                 )}

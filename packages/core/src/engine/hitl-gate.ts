@@ -19,8 +19,8 @@ import {
   fromAiVariables,
   type GetNodeParameterOptions,
   hitlApproved,
-  isToolNode,
   type Item,
+  isToolNode,
   type JsonSchema,
   NodeOperationError,
   type NodeType,
@@ -49,11 +49,7 @@ export interface HitlGatedTool extends AiTool {
  * What stands for the node in the links of one review. The run index keeps a link to its own wait: the URL of an
  * answered review cannot answer the next review on the same node. The signature keeps it there when someone edits it.
  */
-export function reviewNodeKey(
-  node: WorkflowNode,
-  runIndex: number,
-  sign?: (key: string) => string,
-): string {
+export function reviewNodeKey(node: WorkflowNode, runIndex: number, sign?: (key: string) => string): string {
   const key = `${node.webhookId || node.id}-${runIndex}`;
   return sign ? `${key}-${sign(key)}` : key;
 }
@@ -174,7 +170,10 @@ export async function createHitlGate(
     assertValidOutput(hitlNode, output);
     // nothing else can stand for an answer: a node that does not wait approves nothing
     if (!waitTill) {
-      throw new NodeOperationError(hitlNode, `Human review node "${hitlNode.name}" did not wait for an answer`);
+      throw new NodeOperationError(
+        hitlNode,
+        `Human review node "${hitlNode.name}" did not wait for an answer`,
+      );
     }
     return waitTill;
   };

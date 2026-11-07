@@ -11,16 +11,7 @@ import {
   type WorkflowNode,
 } from '@workflow/workflow';
 import { describe, expect, it } from 'vitest';
-import {
-  connect,
-  FakeHttpClient,
-  node,
-  nodeTypes,
-  run,
-  sequence,
-  services,
-  toolNodeTypes,
-} from './harness';
+import { connect, FakeHttpClient, node, nodeTypes, run, sequence, services, toolNodeTypes } from './harness';
 
 const completion = (content: string): { body: unknown } => ({
   body: {
@@ -177,7 +168,13 @@ describe('a node reads the credential URL', () => {
 
   it('MiniMax takes the China region', async () => {
     const http = new FakeHttpClient(sequence(completion('ok')));
-    await runAgent('ai.lmChatMinimax', 'minimaxApi', { ...KEY, url: 'https://api.minimaxi.com/v1' }, {}, http);
+    await runAgent(
+      'ai.lmChatMinimax',
+      'minimaxApi',
+      { ...KEY, url: 'https://api.minimaxi.com/v1' },
+      {},
+      http,
+    );
     expect(http.requests[0].url).toBe('https://api.minimaxi.com/v1/chat/completions');
   });
 
@@ -190,7 +187,9 @@ describe('a node reads the credential URL', () => {
       {},
       http,
     );
-    expect(http.requests[0].url).toBe('https://dashscope-us.aliyuncs.com/compatible-mode/v1/chat/completions');
+    expect(http.requests[0].url).toBe(
+      'https://dashscope-us.aliyuncs.com/compatible-mode/v1/chat/completions',
+    );
   });
 
   it('Lemonade sends no Authorization header without a key', async () => {
@@ -208,7 +207,13 @@ describe('a node reads the credential URL', () => {
 
   it('Lemonade sends the key when there is one', async () => {
     const http = new FakeHttpClient(sequence(completion('ok')));
-    await runAgent('ai.lmChatLemonade', 'lemonadeApi', { ...KEY, baseUrl: 'http://127.0.0.1:8000/api/v1' }, {}, http);
+    await runAgent(
+      'ai.lmChatLemonade',
+      'lemonadeApi',
+      { ...KEY, baseUrl: 'http://127.0.0.1:8000/api/v1' },
+      {},
+      http,
+    );
     expect(http.requests[0].headers?.authorization).toBe('Bearer preset-test-key');
   });
 });
@@ -279,7 +284,13 @@ describe('provider extras', () => {
     expect(hidden.requests[0].body).toMatchObject({ reasoning_split: true });
 
     const kept = new FakeHttpClient(sequence(thought));
-    const k = await runAgent('ai.lmChatMinimax', 'minimaxApi', KEY, { options: { hideThinking: false } }, kept);
+    const k = await runAgent(
+      'ai.lmChatMinimax',
+      'minimaxApi',
+      KEY,
+      { options: { hideThinking: false } },
+      kept,
+    );
     expect(String(k.output('Agent')[0].output)).toContain('<think>');
     expect(kept.requests[0].body).not.toHaveProperty('reasoning_split');
   });
@@ -373,18 +384,21 @@ describe('Databricks', () => {
     expect(http.requests[0].headers?.authorization).toBe('Bearer user-token');
   });
 
-  it.each(['client credentials', 'user grant'])('refuses an http host, %s, and sends nothing', async (grant) => {
-    const http = fakeHost();
-    const creds = clientCreds({
-      host: 'http://adb-42.azuredatabricks.net',
-      grantType: grant === 'user grant' ? 'pkce' : 'clientCredentials',
-      oauthTokenData: { access_token: 'user-token', expires_at: Date.now() + 3_600_000 },
-    });
-    const r = await runAgent('ai.lmChatDatabricks', 'databricksOAuth2Api', creds, {}, http);
-    expect(r.status).not.toBe('success');
-    expect(String(r.error?.message)).toContain('https');
-    expect(http.requests).toEqual([]);
-  });
+  it.each(['client credentials', 'user grant'])(
+    'refuses an http host, %s, and sends nothing',
+    async (grant) => {
+      const http = fakeHost();
+      const creds = clientCreds({
+        host: 'http://adb-42.azuredatabricks.net',
+        grantType: grant === 'user grant' ? 'pkce' : 'clientCredentials',
+        oauthTokenData: { access_token: 'user-token', expires_at: Date.now() + 3_600_000 },
+      });
+      const r = await runAgent('ai.lmChatDatabricks', 'databricksOAuth2Api', creds, {}, http);
+      expect(r.status).not.toBe('success');
+      expect(String(r.error?.message)).toContain('https');
+      expect(http.requests).toEqual([]);
+    },
+  );
 
   it('lists the chat serving endpoints of the workspace', async () => {
     const http = new FakeHttpClient((req) =>

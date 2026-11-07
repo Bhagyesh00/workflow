@@ -113,7 +113,13 @@ describe('googleJwtAssertion', () => {
   it('names the subject and the token URL when given', () => {
     const { claims } = decodeJwt(
       googleJwtAssertion(
-        { email: 'sa@p.iam', privateKey, scopes: ['one'], subject: 'me@x.test', tokenUrl: 'https://t.test/x' },
+        {
+          email: 'sa@p.iam',
+          privateKey,
+          scopes: ['one'],
+          subject: 'me@x.test',
+          tokenUrl: 'https://t.test/x',
+        },
         NOW,
       ),
     );
@@ -370,7 +376,9 @@ describe('createCredentialHelpers on the real builders', () => {
     const helpers = createCredentialHelpers(http, undefined);
     await helpers.jwtBearerToken({ email: 'e', privateKey, scopes: ['s'] });
     expect(requests[0]?.url).toBe(GOOGLE_TOKEN_URL);
-    expect(decodeJwt(String((requests[0]?.body as { assertion: string }).assertion)).valid).toBe(true);
+    expect(decodeJwt(String((requests[0]?.body as { assertion: string } | undefined)?.assertion)).valid).toBe(
+      true,
+    );
   });
 
   it('refuses a token host outside the allowed domains before any call', async () => {

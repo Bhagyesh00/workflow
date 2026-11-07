@@ -1014,7 +1014,8 @@ export class WorkflowExecute {
     // a node with a choice of operations waits only at this one
     const offered = properties.some(
       ({ name, options }) =>
-        name === 'operation' && options?.some((option) => 'value' in option && option.value === 'sendAndWait'),
+        name === 'operation' &&
+        options?.some((option) => 'value' in option && option.value === 'sendAndWait'),
     );
     if (offered && !this.operationCanWait(tool, parentExec, itemIndex, signal)) return;
     throw new NodeOperationError(

@@ -359,7 +359,10 @@ describe('Execute step on a tool node', () => {
 
     it('a Call Workflow Tool with no $fromAI in its inputs runs at once', async () => {
       const user = userEvent.setup();
-      await openNdv('Flow', toolGraph('Flow', 'ai.toolWorkflow', { description: "={{ $fromAI('typed', 'Typed') }}" }));
+      await openNdv(
+        'Flow',
+        toolGraph('Flow', 'ai.toolWorkflow', { description: "={{ $fromAI('typed', 'Typed') }}" }),
+      );
       await user.click(await executeStep());
       await waitFor(() => expect(runCalls()).toHaveLength(1));
       expect(screen.queryByRole('dialog', { name: 'Test Flow' })).toBeNull();

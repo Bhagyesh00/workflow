@@ -358,8 +358,7 @@ describe('Vertex AI credential', () => {
     clientCredentialsToken: vi.fn(),
     jwtBearerToken: vi.fn(async (_input: DataObject) => ({ token: 't', expiresInSeconds: 3600 })),
     cachedToken: vi.fn(
-      async (_secret: string, _scope: string, load: () => Promise<{ token: string }>) =>
-        (await load()).token,
+      async (_secret: string, _scope: string, load: () => Promise<{ token: string }>) => (await load()).token,
     ),
   };
   const sa = serviceAccount('svc@p.iam.gserviceaccount.com');

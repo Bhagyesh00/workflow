@@ -69,11 +69,7 @@ class GcpSecretsProvider extends MemoryProvider {
 
   private async accessToken(timeoutMs: number): Promise<string> {
     if (this.token && Date.now() < this.tokenUntil - 60_000) return this.token;
-    const answer = await vaultCall(
-      this.deps,
-      jwtBearerRequest(this.assertion(), GCP_TOKEN_URL),
-      timeoutMs,
-    );
+    const answer = await vaultCall(this.deps, jwtBearerRequest(this.assertion(), GCP_TOKEN_URL), timeoutMs);
     try {
       const { token, expiresInSeconds } = parseAccessToken(answer.body);
       this.token = token;

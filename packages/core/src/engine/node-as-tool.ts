@@ -246,7 +246,9 @@ export function createNodeAsTool(
       assertValidOutput(tool, output);
       const maxItems = host.services.limits?.maxItemsPerOutput ?? MAX_ITEMS_PER_OUTPUT;
       if (output?.some((items) => (items?.length ?? 0) > maxItems)) {
-        throw new QuotaExceededError(`Node "${tool.name}" returned more than ${maxItems} items in one output`);
+        throw new QuotaExceededError(
+          `Node "${tool.name}" returned more than ${maxItems} items in one output`,
+        );
       }
       if (waitTill) throw new ToolSuspension({ toolNode: tool.name, waitTill, toolName: name, toolCallId });
       const items = output?.[0] ?? [];

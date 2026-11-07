@@ -146,7 +146,7 @@ describe('databricksOAuth2Api client credentials', () => {
   });
 });
 
-describe('databricksOAuth2Api type', () => {
+describe('databricksOAuth2Api OAuth2 URLs', () => {
   it('extends oAuth2Api with the OIDC URLs of the host', () => {
     expect(databricksOAuth2Api.extends).toEqual(['oAuth2Api']);
     const data = { host: HOST };

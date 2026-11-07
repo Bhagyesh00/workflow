@@ -59,7 +59,8 @@ export const LmChatAnthropicNode: NodeType = {
             type: 'options',
             default: 'adaptive',
             displayOptions: { show: { thinking: [true] } },
-            description: 'Adaptive lets the model size its thinking. Fixed Budget is for older models, such as Haiku 4.5.',
+            description:
+              'Adaptive lets the model size its thinking. Fixed Budget is for older models, such as Haiku 4.5.',
             options: [
               { name: 'Adaptive', value: 'adaptive' },
               { name: 'Fixed Budget', value: 'budget' },

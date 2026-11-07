@@ -33,7 +33,11 @@ async function runAgent(
       node('Calculator', 'ai.toolCalculator'),
       model,
     ],
-    connect(['Trigger', 'Agent'], ['Calculator', 'Agent', 'ai_tool'], [model.name, 'Agent', 'ai_languageModel']),
+    connect(
+      ['Trigger', 'Agent'],
+      ['Calculator', 'Agent', 'ai_tool'],
+      [model.name, 'Agent', 'ai_languageModel'],
+    ),
     { services: services({ creds, http }) },
   );
 }
@@ -78,7 +82,11 @@ describe('Anthropic options', () => {
   });
 
   it('sends adaptive thinking without a budget', async () => {
-    const { body } = await anthropicRequest({ thinking: true, thinkingMode: 'adaptive', thinkingBudget: 5000 });
+    const { body } = await anthropicRequest({
+      thinking: true,
+      thinkingMode: 'adaptive',
+      thinkingBudget: 5000,
+    });
     expect(body.thinking).toEqual({ type: 'adaptive' });
   });
 
@@ -173,7 +181,12 @@ describe('Anthropic options', () => {
   it('sends the custom header of the credential and no n8n header', async () => {
     const http = new FakeHttpClient(sequence(anthropicReply));
     await runAgent(claude({}), http, {
-      anthropicApi: { ...ANTHROPIC.anthropicApi, header: true, headerName: ' X-Gateway-Key ', headerValue: 'gw-1' },
+      anthropicApi: {
+        ...ANTHROPIC.anthropicApi,
+        header: true,
+        headerName: ' X-Gateway-Key ',
+        headerValue: 'gw-1',
+      },
     });
     const headers = http.requests[0].headers ?? {};
     expect(headers['x-gateway-key']).toBe('gw-1');
@@ -212,10 +225,16 @@ describe('OpenAI custom header', () => {
 
 describe('Ollama options', () => {
   const OLLAMA = { ollamaApi: { baseUrl: 'https://ollama.example.com' } };
-  const reply = { body: { model: 'llama3.2', message: { role: 'assistant', content: '42' }, done_reason: 'stop' } };
+  const reply = {
+    body: { model: 'llama3.2', message: { role: 'assistant', content: '42' }, done_reason: 'stop' },
+  };
   async function ollamaBody(options: DataObject) {
     const http = new FakeHttpClient(sequence(reply));
-    const r = await runAgent(withCreds(node('Ollama', 'ai.lmChatOllama', { options }), 'ollamaApi'), http, OLLAMA);
+    const r = await runAgent(
+      withCreds(node('Ollama', 'ai.lmChatOllama', { options }), 'ollamaApi'),
+      http,
+      OLLAMA,
+    );
     expect(r.status).toBe('success');
     return http.bodies[0] as Record<string, any>;
   }

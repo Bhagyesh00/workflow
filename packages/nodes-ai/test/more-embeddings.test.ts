@@ -102,7 +102,9 @@ describe('Databricks embeddings', () => {
 
   it('calls <host>/ai-gateway/openai/v1 with the token', async () => {
     const http = new FakeHttpClient((req) =>
-      req.url.endsWith('/oidc/v1/token') ? { body: { access_token: 'cc-token', expires_in: 3600 } } : vectors(req),
+      req.url.endsWith('/oidc/v1/token')
+        ? { body: { access_token: 'cc-token', expires_in: 3600 } }
+        : vectors(req),
     );
     const e = await embedder('ai.embeddingsDatabricks', 'databricksOAuth2Api', clientCreds(), {}, http);
     expect(await e.embedQuery('hello')).toEqual([5, 1]);
@@ -193,7 +195,9 @@ describe('OpenAI embeddings options', () => {
     const buf = Buffer.alloc(8);
     buf.writeFloatLE(1.5, 0);
     buf.writeFloatLE(-2, 4);
-    const http = new FakeHttpClient(() => ({ body: { data: [{ index: 0, embedding: buf.toString('base64') }] } }));
+    const http = new FakeHttpClient(() => ({
+      body: { data: [{ index: 0, embedding: buf.toString('base64') }] },
+    }));
     const e = await embedder(
       'ai.embeddingsOpenAi',
       'openAiApi',

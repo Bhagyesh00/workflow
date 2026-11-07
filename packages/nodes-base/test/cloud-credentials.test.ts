@@ -72,8 +72,7 @@ async function send(
   return authed;
 }
 
-const fakeWith = () =>
-  new FakeHttpClient().on('*', /bedrock-runtime|aiplatform|example/, () => ({ ok: 1 }));
+const fakeWith = () => new FakeHttpClient().on('*', /bedrock-runtime|aiplatform|example/, () => ({ ok: 1 }));
 
 /** recomputes the signature from what was recorded, as the service does */
 function expectSigned(
@@ -211,7 +210,12 @@ describe('aws', () => {
 
   it('refuses a multipart body: its boundary is not known when signing', async () => {
     const message = await messageOf(
-      send(fakeWith(), aws, awsKeys(), { url: BEDROCK, method: 'POST', bodyType: 'multipart', body: { a: 1 } }),
+      send(fakeWith(), aws, awsKeys(), {
+        url: BEDROCK,
+        method: 'POST',
+        bodyType: 'multipart',
+        body: { a: 1 },
+      }),
     );
     expect(message).toContain('multipart');
   });
@@ -352,12 +356,20 @@ describe('awsAssumeRole', () => {
       'eu-west-1',
     );
     expect(call.headers['x-amz-security-token']).toBe('tmp-session-token');
-    expectSigned(call, { accessKeyId: 'ASIATEMP', secretAccessKey: 'tmp/secret+1&2' }, 'bedrock', 'us-east-1');
+    expectSigned(
+      call,
+      { accessKeyId: 'ASIATEMP', secretAccessKey: 'tmp/secret+1&2' },
+      'bedrock',
+      'us-east-1',
+    );
   });
 
   it('sends the STS session token on the AssumeRole call', async () => {
     const fake = stsFake();
-    await send(fake, awsAssumeRole, roleKeys({ stsSessionToken: 'sts-tok' }), { url: BEDROCK, method: 'GET' });
+    await send(fake, awsAssumeRole, roleKeys({ stsSessionToken: 'sts-tok' }), {
+      url: BEDROCK,
+      method: 'GET',
+    });
     expect(fake.requests[0]?.headers['x-amz-security-token']).toBe('sts-tok');
     expect(fake.requests[1]?.headers['x-amz-security-token']).toBe('tmp-session-token');
   });
@@ -456,7 +468,12 @@ describe('awsAssumeRole', () => {
     const [scope] = await cacheScopes(stsFake(), awsAssumeRole, creds, { url: BEDROCK, method: 'GET' });
     const parsed = JSON.parse(scope ?? '') as Record<string, unknown>;
     expect(Object.keys(parsed)).toEqual(CACHE_SCOPE_FIELDS);
-    expect(parsed).toMatchObject({ tokenUrl: STS, scopes: [], resource: creds.externalId, role: creds.roleArn });
+    expect(parsed).toMatchObject({
+      tokenUrl: STS,
+      scopes: [],
+      resource: creds.externalId,
+      role: creds.roleArn,
+    });
     expect(scope).not.toContain(String(creds.stsSecretAccessKey));
   });
 
@@ -499,7 +516,7 @@ describe('googleApi', () => {
   const claimsOf = (r: RecordedRequest | undefined) =>
     JSON.parse(
       Buffer.from(
-        String((r?.body as { assertion: string }).assertion).split('.')[1] ?? '',
+        String((r?.body as { assertion: string } | undefined)?.assertion).split('.')[1] ?? '',
         'base64url',
       ).toString('utf8'),
     ) as Record<string, unknown>;
@@ -561,7 +578,9 @@ describe('googleApi', () => {
 
   it('ignores the delegated email when impersonation is off, and splits scopes on commas too', async () => {
     const fake = tokenFake();
-    await send(fake, googleApi, googleKeys({ delegatedEmail: 'one@x.test', scopes: ' a,b\nc ' }), { url: API });
+    await send(fake, googleApi, googleKeys({ delegatedEmail: 'one@x.test', scopes: ' a,b\nc ' }), {
+      url: API,
+    });
     expect(claimsOf(fake.requests[0]).sub).toBeUndefined();
     expect(claimsOf(fake.requests[0]).scope).toBe('a b c');
   });
@@ -662,7 +681,11 @@ describe('through a running node', () => {
     },
     async execute(ctx) {
       const url = String(ctx.getNodeParameter('url', 0));
-      const body = await ctx.helpers.httpRequestWithAuthentication('aws', { url, method: 'POST', body: { a: 1 } }, 0);
+      const body = await ctx.helpers.httpRequestWithAuthentication(
+        'aws',
+        { url, method: 'POST', body: { a: 1 } },
+        0,
+      );
       return [[{ json: { body: body as never } }]];
     },
   };

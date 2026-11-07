@@ -325,7 +325,11 @@ describe('Cohere chat model', () => {
 });
 
 describe('Embeddings Cohere', () => {
-  const embeddingsFor = async (http: FakeHttpClient, params: DataObject, creds: Record<string, DataObject> = CREDS) => {
+  const embeddingsFor = async (
+    http: FakeHttpClient,
+    params: DataObject,
+    creds: Record<string, DataObject> = CREDS,
+  ) => {
     const type = nodeTypes.get('ai.embeddingsCohere')!;
     const base = ctxFor('ai.embeddingsCohere', services({ creds, http }), params);
     const ctx = {
