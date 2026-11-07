@@ -28,6 +28,12 @@ export const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash';
 /** ids we invent for calls the API returned without one; never echoed back */
 const GENERATED_ID_PREFIX = 'gemini_call_';
 
+/** where a Vertex AI model lives: project and location (`global`, `eu`, `us` or a region) */
+export interface VertexTarget {
+  project: string;
+  location: string;
+}
+
 export interface GeminiChatConfig {
   host: string;
   model: string;
@@ -37,6 +43,34 @@ export interface GeminiChatConfig {
   maxTokens?: number;
   credentialType?: string;
   safetySettings?: Array<{ category: string; threshold: string }>;
+  /** tokens the model may spend thinking: -1 lets the model decide, 0 turns thinking off */
+  thinkingBudget?: number;
+  /** Vertex AI paths and host instead of the Gemini API ones */
+  vertex?: VertexTarget;
+}
+
+const LOCATION = /^[a-z][a-z0-9-]{0,40}$/;
+const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/**
+ * The Vertex host of a location. `global` has no prefix, `eu` and `us` are multi-region endpoints, anything
+ * else is a region. The location is checked, so it cannot move the request to another host.
+ */
+export function vertexHost(location: string): string {
+  if (!LOCATION.test(location)) throw new Error('The Vertex AI region is not valid');
+  if (location === 'global') return 'https://aiplatform.googleapis.com';
+  if (location === 'eu' || location === 'us') return `https://aiplatform.${location}.rep.googleapis.com`;
+  return `https://${location}-aiplatform.googleapis.com`;
+}
+
+/** `<host>/v1/projects/<p>/locations/<l>/publishers/google/models/<m>`, the base of every model call */
+export function vertexModelBase(target: VertexTarget, model: string): string {
+  if (!PROJECT.test(target.project)) throw new Error('The Google Cloud project ID is not valid');
+  const m = geminiModelPath(model).replace(/^publishers\/google\/models\//, '');
+  return (
+    `${vertexHost(target.location)}/v1/projects/${encodeURIComponent(target.project)}` +
+    `/locations/${target.location}/publishers/google/models/${encodeURIComponent(m)}`
+  );
 }
 
 type Part = DataObject;
@@ -150,6 +184,8 @@ export function geminiRequestBody(
       generationConfig.responseSchema = toGeminiSchema(request.responseFormat.schema);
     }
   }
+  if (config.thinkingBudget !== undefined)
+    generationConfig.thinkingConfig = { thinkingBudget: config.thinkingBudget };
   if (Object.keys(generationConfig).length) body.generationConfig = generationConfig;
   if (config.safetySettings?.length) body.safetySettings = config.safetySettings;
   return body;
@@ -271,11 +307,13 @@ export function parseGeminiStream(
 
 export function geminiAdapter(config: GeminiChatConfig): ChatAdapter {
   const cache = new RawContentCache<Part[]>();
-  const base = `${trimSlash(config.host)}/v1beta/models/${encodeURIComponent(geminiModelPath(config.model))}`;
+  const base = config.vertex
+    ? vertexModelBase(config.vertex, config.model)
+    : `${trimSlash(config.host)}/v1beta/models/${encodeURIComponent(geminiModelPath(config.model))}`;
   return {
-    provider: 'google',
+    provider: config.vertex ? 'google-vertex' : 'google',
     model: config.model,
-    credentialType: config.credentialType ?? 'googleGeminiApi',
+    credentialType: config.credentialType ?? (config.vertex ? 'googleApi' : 'googleGeminiApi'),
     capabilities: { structuredOutput: true, structuredOutputWithTools: false },
     buildRequest: (request, stream): HttpRequestOptions => ({
       url: stream ? `${base}:streamGenerateContent` : `${base}:generateContent`,
