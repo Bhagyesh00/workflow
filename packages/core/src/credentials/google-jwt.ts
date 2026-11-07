@@ -46,6 +46,7 @@ export function jwtBearerRequest(assertion: string, tokenUrl: string): HttpReque
     bodyType: 'form-urlencoded',
     headers: { accept: 'application/json' },
     followRedirects: false,
+    timeout: 30_000,
     body: { grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion },
   };
 }

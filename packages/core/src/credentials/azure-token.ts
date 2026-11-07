@@ -15,6 +15,7 @@ export function clientCredentialsRequest(input: ClientCredentialsInput): HttpReq
     bodyType: 'form-urlencoded',
     headers: { accept: 'application/json' },
     followRedirects: false,
+    timeout: 30_000,
     ...(inHeader ? { auth: { username: input.clientId, password: input.clientSecret } } : {}),
     body: {
       grant_type: 'client_credentials',

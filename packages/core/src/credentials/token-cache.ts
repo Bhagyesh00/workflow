@@ -4,11 +4,20 @@
  * passes as scope the JSON of its token URL, subject, scopes, resource and role.
  */
 import { createHash } from 'node:crypto';
-import type { AccessToken } from '@workflow/workflow';
+import { type AccessToken, ExecutionCancelledError, ExecutionTimeoutError } from '@workflow/workflow';
 
 const MAX_ENTRIES = 1000;
 /** a token this close to its end is not handed out: the request it goes on still has to arrive */
 const EARLY_EXPIRY_MS = 60_000;
+
+/** the run that owned the fetch was stopped: that says nothing about the token host */
+function stoppedByItsRun(error: unknown): boolean {
+  return (
+    error instanceof ExecutionCancelledError ||
+    error instanceof ExecutionTimeoutError ||
+    (error as Error | undefined)?.name === 'AbortError'
+  );
+}
 
 interface CachedToken {
   token: string;
@@ -26,7 +35,14 @@ export class TokenCache {
     const cached = this.entries.get(key);
     if (cached && Date.now() < cached.usableUntil) return Promise.resolve(cached.token);
     const running = this.fetching.get(key);
-    if (running) return running;
+    if (running) {
+      // the fetch uses the signal of the run that started it. When that run is stopped, a waiter fetches
+      // with its own closure and signal instead of failing with it.
+      return running.catch((error: unknown) => {
+        if (stoppedByItsRun(error)) return this.get(secret, scope, fetch);
+        throw error;
+      });
+    }
     const started = this.fetchAndKeep(key, fetch).finally(() => this.fetching.delete(key));
     this.fetching.set(key, started);
     return started;

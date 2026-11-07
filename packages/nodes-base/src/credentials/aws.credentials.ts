@@ -290,6 +290,7 @@ async function assumeRole(credentials: DataObject, helpers: CredentialAuthHelper
         bodyType: 'raw',
         responseType: 'text',
         followRedirects: false,
+        timeout: 30_000,
       });
       const xml = typeof answer === 'string' ? answer : '';
       const keys: AwsKeys = {
@@ -317,6 +318,7 @@ const stsConnectionTest: CredentialTestRequest = {
 export const aws: CredentialType = {
   name: 'aws',
   displayName: 'AWS (IAM)',
+  icon: 'simple:amazonaws',
   properties: [
     region,
     { displayName: 'Access Key ID', name: 'accessKeyId', type: 'string', default: '', required: true },
@@ -363,6 +365,7 @@ export const aws: CredentialType = {
 export const awsAssumeRole: CredentialType = {
   name: 'awsAssumeRole',
   displayName: 'AWS (Assume Role)',
+  icon: 'simple:amazonaws',
   properties: [
     region,
     { displayName: 'STS Access Key ID', name: 'stsAccessKeyId', type: 'string', default: '', required: true },

@@ -3,7 +3,14 @@
  * client credentials request, the token answer, the token cache, and the helpers on the real builders.
  */
 import { createPublicKey, createVerify, generateKeyPairSync } from 'node:crypto';
-import { CredentialDomainError, type HttpRequestOptions } from '@workflow/workflow';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import {
+  CredentialDomainError,
+  ExecutionCancelledError,
+  ExecutionTimeoutError,
+  type HttpRequestOptions,
+} from '@workflow/workflow';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   amzDate,
@@ -11,7 +18,7 @@ import {
   createCredentialHelpers,
   GOOGLE_TOKEN_URL,
   googleJwtAssertion,
-  type HttpClient,
+  HttpClient,
   jwtBearerRequest,
   parseAccessToken,
   signAwsRequest,
@@ -135,6 +142,7 @@ describe('googleJwtAssertion', () => {
       method: 'POST',
       bodyType: 'form-urlencoded',
       followRedirects: false,
+      timeout: 30_000,
       body: { grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: 'a.b.c' },
     });
   });
@@ -150,6 +158,7 @@ describe('clientCredentialsRequest', () => {
       method: 'POST',
       bodyType: 'form-urlencoded',
       followRedirects: false,
+      timeout: 30_000,
     });
     expect(request.body).toEqual({
       grant_type: 'client_credentials',
@@ -260,6 +269,86 @@ describe('TokenCache', () => {
     const both = await Promise.all([cache.get('s', 'x', fetch), cache.get('s', 'x', fetch)]);
     expect(both).toEqual(['a', 'a']);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a waiter fetches for itself when the run that owns the fetch is stopped', async () => {
+    const reasons = [
+      new ExecutionCancelledError('Execution was stopped'),
+      new ExecutionTimeoutError(5),
+      new DOMException('This operation was aborted', 'AbortError'),
+    ];
+    for (const reason of reasons) {
+      const cache = new TokenCache();
+      let stop = (_reason: unknown) => {};
+      const owner = cache.get(
+        's',
+        'x',
+        () =>
+          new Promise((_resolve, reject) => {
+            stop = reject;
+          }),
+      );
+      const own = vi.fn(async () => token('own'));
+      const waiters = [cache.get('s', 'x', own), cache.get('s', 'x', own)];
+      stop(reason);
+      await expect(owner).rejects.toBe(reason);
+      expect(await Promise.all(waiters)).toEqual(['own', 'own']);
+      expect(own).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('a run that nobody stopped gets its token when the run that owns the fetch is stopped', async () => {
+    let calls = 0;
+    const server = createServer((req, res) => {
+      calls += 1;
+      req.resume();
+      // the first call hangs until the run that made it is stopped
+      if (calls === 1) return;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ access_token: 'second' }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const client = new HttpClient({ ssrf: { allow: ['127.0.0.1'] } });
+    try {
+      const tokenUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/token`;
+      const stopped = new AbortController();
+      const asRun = (signal?: AbortSignal) => {
+        const helpers = createCredentialHelpers(client, undefined, signal);
+        return helpers.cachedToken('stop-secret', 'stop-scope', () =>
+          helpers.clientCredentialsToken({ tokenUrl, clientId: 'i', clientSecret: 's' }),
+        );
+      };
+      const first = asRun(stopped.signal);
+      const second = asRun();
+      await vi.waitFor(() => expect(calls).toBe(1));
+      const reason = new ExecutionCancelledError('Execution was stopped');
+      stopped.abort(reason);
+      await expect(first).rejects.toBe(reason);
+      await expect(second).resolves.toBe('second');
+    } finally {
+      await client.close();
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('a waiter shares a real failure of the fetch, with no second call', async () => {
+    const cache = new TokenCache();
+    let fail = (_reason: unknown) => {};
+    const owner = cache.get(
+      's',
+      'x',
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    const own = vi.fn(async () => token('own'));
+    const waiter = cache.get('s', 'x', own);
+    fail(new DOMException('The operation timed out', 'TimeoutError'));
+    await expect(owner).rejects.toThrow('timed out');
+    await expect(waiter).rejects.toThrow('timed out');
+    expect(own).not.toHaveBeenCalled();
   });
 });
 
