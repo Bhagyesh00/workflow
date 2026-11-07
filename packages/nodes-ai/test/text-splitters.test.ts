@@ -78,6 +78,38 @@ describe('Token Text Splitter', () => {
     expect(spaces.join('').length).toBeGreaterThan(0);
   });
 
+  it.each([
+    ['a', 400],
+    ['ab', 400],
+    ['!', 400],
+    ['😀', 200],
+    ['中', 400],
+    ['中', 16],
+    ['x', 47],
+    ['é', 24],
+  ])('a megabyte of "%s" runs of %i characters finishes in under 5 seconds', async (unit, length) => {
+    const text = `${unit.repeat(length)} `.repeat(Math.ceil(1_000_000 / (length + 1)));
+    const started = Date.now();
+    const chunks = await splitByTokens(text, { chunkSize: 1000, chunkOverlap: 0 });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(chunks.join('')).toBe(text);
+  });
+
+  it('a megabyte of mixed CJK prose and ASCII finishes in under 5 seconds', async () => {
+    const sentence = '这是一个很长的句子，没有空格，用来测试分词器的速度。hello world 日本語のテキストです。';
+    const text = sentence.repeat(Math.ceil(1_000_000 / sentence.length));
+    const started = Date.now();
+    const chunks = await splitByTokens(text, { chunkSize: 1000, chunkOverlap: 100 });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(chunks.length).toBeGreaterThan(100);
+  });
+
+  it('counts a CJK run past the encode limit near one token per character', async () => {
+    const run = '中'.repeat(300);
+    const chunks = await splitByTokens(run, { chunkSize: 100, chunkOverlap: 0 });
+    expect(chunks.map((c) => c.length)).toEqual([100, 100, 100]);
+  });
+
   it('the node uses defaults 1000 and 0 and splits a loader document', async () => {
     const text = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
     const r = await splitThrough(
