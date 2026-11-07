@@ -243,6 +243,53 @@ describe('credential test templates', () => {
     expect(recorded.requests[0].url).toBe('https://api.openai.com/v1/models');
   });
 
+  describe('region credentials hold a URL from their list only', () => {
+    const REGIONS: Array<[string, string, string]> = [
+      ['moonshotApi', 'https://api.moonshot.ai/v1', 'https://api.moonshot.cn/v1'],
+      ['minimaxApi', 'https://api.minimax.io/v1', 'https://api.minimaxi.com/v1'],
+      ['alibabaCloudApi', 'https://dashscope-intl.aliyuncs.com', 'https://dashscope.aliyuncs.com'],
+    ];
+
+    it.each(REGIONS)('%s: another URL gets the default, a listed one stays', (type, first, second) => {
+      const service = aiService();
+      expect(service.withDefaults(type, { apiKey: 'k', url: 'https://evil.example/v1' }).url).toBe(first);
+      expect(service.withDefaults(type, { apiKey: 'k', url: second }).url).toBe(second);
+    });
+
+    it.each(REGIONS)('%s: the test request and its key do not reach another host', async (type, first) => {
+      const recorded = recordingHttp();
+      await testCredential(aiService(), recorded.http, type, { apiKey: 'k', url: 'https://evil.example/v1' });
+      expect(recorded.requests).toHaveLength(1);
+      expect(recorded.requests[0].url.startsWith(first)).toBe(true);
+    });
+  });
+
+  describe('a test rule on the body of a 2xx answer', () => {
+    const answering = (statusCode: number, body: unknown) =>
+      ({ request: async () => ({ statusCode, headers: {}, body }) }) as unknown as HttpClient;
+    const minimax = (http: HttpClient) => testCredential(aiService(), http, 'minimaxApi', { apiKey: 'bad' });
+
+    it('MiniMax fails on the codes it answers a bad key with', async () => {
+      expect(await minimax(answering(200, { base_resp: { status_code: 1004 } }))).toEqual({
+        status: 'Error',
+        message: 'Authentication failed. Check your API key.',
+      });
+      expect(await minimax(answering(200, { base_resp: { status_code: 2049 } }))).toEqual({
+        status: 'Error',
+        message: 'Invalid API key. Check that your key matches the selected region.',
+      });
+    });
+
+    it('MiniMax passes on any other answer, and a failed status keeps its own text', async () => {
+      expect((await minimax(answering(200, { base_resp: { status_code: 0 } }))).status).toBe('OK');
+      expect((await minimax(answering(200, { files: [] }))).status).toBe('OK');
+      expect(await minimax(answering(500, { base_resp: { status_code: 1004 } }))).toEqual({
+        status: 'Error',
+        message: 'The service answered with HTTP 500',
+      });
+    });
+  });
+
   it('hits {baseUrl}/v1/models for Anthropic with the version header', async () => {
     const result = await testCredential(aiService(), server.ctx.http, 'anthropicApi', {
       apiKey: 'ak-test',

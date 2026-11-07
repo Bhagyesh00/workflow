@@ -347,6 +347,32 @@ describe('token URL templates', () => {
     expect(http.request).not.toHaveBeenCalled();
   });
 
+  it('refuses an http token URL before any call when the credential type asks for https', async () => {
+    const http = fakeHttp({ access_token: 'tok' });
+    const data = oauth({ host: 'http://db.example.com', httpsOnlyTokenUrl: 'true' });
+    for (const grant of [
+      { type: 'client_credentials' } as const,
+      { type: 'refresh_token', refreshToken: 'REFRESH' } as const,
+    ]) {
+      await expect(requestOAuth2Token(http.client, data, grant)).rejects.toThrow('must use https');
+    }
+    expect(http.request).not.toHaveBeenCalled();
+  });
+
+  it('keeps an http token URL for a credential type that does not ask for https', async () => {
+    const http = fakeHttp({ access_token: 'tok' });
+    await requestOAuth2Token(http.client, oauth({ host: 'http://db.example.com' }), {
+      type: 'client_credentials',
+    });
+    expect(http.sent()[0]?.url).toBe('http://db.example.com/oidc/v1/token');
+  });
+
+  it('follows no redirect with the token call', async () => {
+    const http = fakeHttp({ access_token: 'tok' });
+    await requestOAuth2Token(http.client, oauth(), { type: 'refresh_token', refreshToken: 'REFRESH' });
+    expect(http.sent()[0]?.followRedirects).toBe(false);
+  });
+
   it('refuses a template that resolves to nothing', async () => {
     const http = fakeHttp({ access_token: 'tok' });
     const data = oauth({ accessTokenUrl: '={{$credentials.missing}}' });

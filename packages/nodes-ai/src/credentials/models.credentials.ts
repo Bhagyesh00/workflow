@@ -2,7 +2,8 @@
  * Credential types for the named model providers. Every base URL sits in the field `url` (Lemonade:
  * `baseUrl`) as plain text, so nodes and test requests read one value. A hidden `url` is fixed, as
  * `CredentialService.withDefaults` always gives its default. A region is a choice of base URL: it is
- * stored in `url`, because a test request cannot derive a URL from another field.
+ * stored in `url`, because a test request cannot derive a URL from another field, and `withDefaults`
+ * resets a value outside the list.
  */
 import type { CredentialType, DataObject, HttpRequestOptions, NodeProperty } from '@workflow/workflow';
 
@@ -163,7 +164,24 @@ export const minimaxApi: CredentialType = {
     ]),
   ],
   authenticate: bearer,
-  test: { request: { url: '={{$credentials.url}}/files/list', qs: { purpose: 'voice_clone' } } },
+  test: {
+    request: { url: '={{$credentials.url}}/files/list', qs: { purpose: 'voice_clone' } },
+    // MiniMax answers a bad key with HTTP 200 and a code in the body
+    rules: [
+      {
+        type: 'responseSuccessBody',
+        key: 'base_resp.status_code',
+        value: 1004,
+        message: 'Authentication failed. Check your API key.',
+      },
+      {
+        type: 'responseSuccessBody',
+        key: 'base_resp.status_code',
+        value: 2049,
+        message: 'Invalid API key. Check that your key matches the selected region.',
+      },
+    ],
+  },
 };
 
 /** `url` is the region's host; the OpenAI-compatible API is at `<url>/compatible-mode/v1` */

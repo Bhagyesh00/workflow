@@ -3,7 +3,12 @@
  * (`testedBy`). Run with TEST_DATABASE_URL=.../workflow_test_p4_credtest and TEST_REDIS_URL=redis://127.0.0.1:6379/10.
  */
 import { HttpClient, NodeTypes } from '@workflow/core';
-import type { CredentialTestContext, DataObject, NodeType } from '@workflow/workflow';
+import {
+  CredentialDomainError,
+  type CredentialTestContext,
+  type DataObject,
+  type NodeType,
+} from '@workflow/workflow';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startSshServer } from '../../nodes-base/test/ssh-server';
 import { testCredential } from '../src/services/credential-test';
@@ -145,6 +150,31 @@ describe('testCredential with a node that names a test', () => {
     // the signal ends with the test, so nothing it left open keeps running
     expect(seen?.ctx.signal.aborted).toBe(true);
     await expect(seen!.ctx.helpers.resolveAllowedHost('127.0.0.1')).resolves.toBeDefined();
+  });
+
+  it('gives the test the guarded client with the allowed domains of the credential', async () => {
+    let refused: unknown;
+    const node = fakeNode('fakeCred', async (ctx) => {
+      refused = await ctx.helpers.auth?.http({ url: 'https://other.example/' }).catch((e: unknown) => e);
+      return OK;
+    });
+    const data = { allowedHttpRequestDomains: 'domains', allowedDomains: 'api.example.com' };
+    expect(await testCredential(credentials(), http, 'fakeCred', data, opts(node))).toEqual(OK);
+    expect(refused).toBeInstanceOf(CredentialDomainError);
+  });
+
+  it('runs no test when the allowed domains of the credential cannot be read', async () => {
+    let ran = false;
+    const node = fakeNode('fakeCred', async () => {
+      ran = true;
+      return OK;
+    });
+    const data = { allowedHttpRequestDomains: 'domains', allowedDomains: '' };
+    expect(await testCredential(credentials(), http, 'fakeCred', data, opts(node))).toEqual({
+      status: 'Error',
+      message: "Couldn't test the credential",
+    });
+    expect(ran).toBe(false);
   });
 
   it('runs the test of the parent type a credential extends', async () => {

@@ -400,7 +400,7 @@ describe('OAuth2 token calls', () => {
     expect(r.outputs[0][0].bearer).toBe('Bearer tok-second');
   });
 
-  it('a token call that redirects to an unlisted host is refused on the hop', async () => {
+  it('a token call that answers with a redirect follows no hop', async () => {
     // /token-redirect on the first server sends the token call to the second server
     const redirecting = await serve('127.0.0.1', (_req, res) => {
       res.writeHead(307, { location: `${second.url}/token` });
@@ -409,7 +409,7 @@ describe('OAuth2 token calls', () => {
     try {
       const r = await oauth(`${redirecting.url}/token`, '127.0.0.1');
       expect(r.status).toBe('error');
-      expect(String(r.error?.message)).toContain('Domain not allowed');
+      expect(String(r.error?.message)).toContain('did not contain an access_token');
       expect(second.seen).toHaveLength(0);
     } finally {
       await redirecting.close();

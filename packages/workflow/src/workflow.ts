@@ -163,7 +163,10 @@ export class Workflow {
   }
 
   getTriggerNodes(): WorkflowNode[] {
-    return Object.values(this.nodes).filter((n) => !n.disabled && this.isTriggerNode(n));
+    // a tool variant keeps the `webhook` of the node it copies, but only its agent can run it
+    return Object.values(this.nodes).filter(
+      (n) => !n.disabled && this.isTriggerNode(n) && !this.isSubNode(n),
+    );
   }
 
   /**

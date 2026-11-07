@@ -35,7 +35,7 @@ export class ToolSuspension extends Error {
 }
 
 export function isToolSuspension(e: unknown): e is ToolSuspension {
-  return e instanceof Error && (e as unknown as Record<symbol, unknown>)[TOOL_SUSPENSION_BRAND] === true;
+  return e instanceof Error && TOOL_SUSPENSION_BRAND in e && e[TOOL_SUSPENSION_BRAND] === true;
 }
 
 /** stored at `ExecutionState.executionData.suspended` while the execution waits */

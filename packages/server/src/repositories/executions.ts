@@ -148,6 +148,29 @@ export class ExecutionRepository {
     return rows.length > 0;
   }
 
+  /** claims a waiting run only while it stands at this tool's wait: an answer checked against an earlier wait fails */
+  async claimToolWait(
+    tenantId: string,
+    id: string,
+    wait: { toolNode: string; toolRunIndex: number },
+    patch: Partial<ExecutionInsert>,
+  ): Promise<boolean> {
+    if (!isUuid(id)) return false;
+    const rows = await this.db
+      .update(executions)
+      .set(withoutNulFields(patch))
+      .where(
+        and(
+          eq(executions.tenantId, tenantId),
+          eq(executions.id, id),
+          eq(executions.status, 'waiting'),
+          sql`exists (select 1 from ${executionData} where ${executionData.tenantId} = ${executions.tenantId} and ${executionData.executionId} = ${executions.id} and ${executionData.state} #> '{executionData,suspended}' @> ${JSON.stringify(wait)}::jsonb)`,
+        ),
+      )
+      .returning({ id: executions.id });
+    return rows.length > 0;
+  }
+
   async saveState(tenantId: string, id: string, state: unknown): Promise<void> {
     await this.db
       .update(executionData)

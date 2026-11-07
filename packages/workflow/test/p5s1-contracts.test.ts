@@ -315,6 +315,67 @@ describe('Workflow.getSubNodesBySlot', () => {
   });
 });
 
+describe('Workflow start node', () => {
+  const type = (name: string, fields: Partial<NodeType['description']>, webhook = false): NodeType =>
+    ({
+      description: {
+        name,
+        displayName: name,
+        description: name,
+        group: ['transform'],
+        version: 1,
+        defaults: { name },
+        inputs: ['main'],
+        outputs: ['main'],
+        properties: [],
+        ...fields,
+      },
+      ...(webhook ? { webhook: async () => ({}) } : {}),
+    }) as NodeType;
+  const types = new Map(
+    [
+      type('t.plain', {}),
+      type('t.agent', {}),
+      type('t.schedule', { group: ['trigger'], inputs: [] }),
+      // a tool variant keeps the `webhook` of the node it copies
+      type('t.mailTool', { inputs: [], outputs: ['ai_tool'] }, true),
+    ].map((t) => [t.description.name, t]),
+  );
+  const at = (name: string, nodeType: string, y = 0) => ({
+    id: name,
+    name,
+    type: nodeType,
+    typeVersion: 1,
+    position: [0, y] as [number, number],
+    parameters: {},
+  });
+  const workflow = (nodes: ReturnType<typeof at>[]) =>
+    new Workflow(
+      {
+        id: 'w',
+        name: 'w',
+        nodes,
+        connections: {
+          Edit: { main: [[{ node: 'Agent', type: 'main', index: 0 }]] },
+          Mail: { ai_tool: [[{ node: 'Agent', type: 'ai_tool', index: 0 }]] },
+        },
+      },
+      { get: (name: string) => types.get(name) } as never,
+    );
+
+  it('a tool that has a webhook is no trigger: with no trigger the run starts at the first root', () => {
+    const graph = workflow([at('Edit', 't.plain'), at('Agent', 't.agent'), at('Mail', 't.mailTool', -100)]);
+    expect(graph.getTriggerNodes()).toEqual([]);
+    expect(graph.getStartNode()?.name).toBe('Edit');
+  });
+
+  it('a tool placed above the trigger does not take its place', () => {
+    const graph = workflow([at('Sched', 't.schedule', 100), at('Agent', 't.agent'), at('Mail', 't.mailTool', -100)]);
+    expect(graph.getTriggerNodes().map((n) => n.name)).toEqual(['Sched']);
+    expect(graph.getStartNode()?.name).toBe('Sched');
+  });
+});
+
 describe('highlighted data keys', () => {
   it.each([
     ['Chat Trigger', 'chat_trigger'],

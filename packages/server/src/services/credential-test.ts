@@ -16,6 +16,7 @@ import {
   type CredentialTestContext,
   type DataObject,
   evaluateSimple,
+  getByPath,
   getCredentialAllowedDomains,
   type HttpFullResponse,
   type HttpRequestOptions,
@@ -91,16 +92,21 @@ async function runNodeTest(
 ): Promise<CredentialTestResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), NODE_TEST_TIMEOUT_MS);
-  const ctx: CredentialTestContext = {
-    helpers: {
-      resolveAllowedHost: (host) => http.resolveAllowedHost(host),
-      assertHostAllowed: (host) => http.assertHostAllowed(host),
-    },
-    logger: opts.logger,
-    signal: controller.signal,
-    getTenantId: () => opts.tenantId,
-  };
   try {
+    const ctx: CredentialTestContext = {
+      helpers: {
+        resolveAllowedHost: (host) => http.resolveAllowedHost(host),
+        assertHostAllowed: (host) => http.assertHostAllowed(host),
+        auth: createCredentialHelpers(
+          http,
+          getCredentialAllowedDomains(data, { userUrl: false }),
+          controller.signal,
+        ),
+      },
+      logger: opts.logger,
+      signal: controller.signal,
+      getTenantId: () => opts.tenantId,
+    };
     const result = await Promise.race([
       test(ctx, { type, data }),
       new Promise<never>((_, reject) =>
@@ -183,6 +189,11 @@ export async function testCredential(
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       return { status: 'Error', message: `The service answered with HTTP ${response.statusCode}` };
+    }
+    for (const rule of resolvedType.test.rules ?? []) {
+      if (rule.type === 'responseSuccessBody' && getByPath(response.body, rule.key) === rule.value) {
+        return { status: 'Error', message: rule.message };
+      }
     }
     return { status: 'OK', message: 'Connection tested successfully' };
   } catch (error) {

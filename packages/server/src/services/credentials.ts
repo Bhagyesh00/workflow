@@ -98,7 +98,8 @@ export class CredentialService {
   /**
    * the (resolved) type's defaults for properties the user left unset or blank. Hidden properties
    * are fixed by the type (Google URLs, scopes): their default always wins, except for the OAuth
-   * token material, which only the OAuth2 callback writes.
+   * token material, which only the OAuth2 callback writes. A base URL chosen from a list (a region)
+   * must be one of the list: any other value could send the key to another host.
    */
   withDefaults(type: string, data: DataObject): DataObject {
     const resolved = this.types.getResolved(type);
@@ -107,7 +108,11 @@ export class CredentialService {
       if (p.type === 'notice' || p.default === undefined) continue;
       const fixed = p.type === 'hidden' && p.default !== '' && !ALWAYS_SECRET.includes(p.name);
       const current = out[p.name];
-      if (fixed || current === undefined || current === null || current === '') out[p.name] = p.default;
+      const badChoice =
+        p.type === 'options' && p.name === 'url' && !p.options?.some((o) => 'value' in o && o.value === current);
+      if (fixed || badChoice || current === undefined || current === null || current === '') {
+        out[p.name] = p.default;
+      }
     }
     return out;
   }

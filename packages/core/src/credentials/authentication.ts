@@ -27,6 +27,8 @@ export interface OAuth2Data extends DataObject {
   authUrl?: string;
   scope?: string;
   authentication?: 'header' | 'body';
+  /** `'true'`: a token call only goes to an https URL. A credential type fixes it with a hidden field. */
+  httpsOnlyTokenUrl?: string;
   oauthTokenData?: {
     access_token: string;
     refresh_token?: string;
@@ -110,6 +112,14 @@ export function createCredentialHelpers(
   };
 }
 
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 /** Fetch a token with the client-credentials grant or refresh an existing token. */
 export async function requestOAuth2Token(
   http: HttpClient,
@@ -120,8 +130,12 @@ export async function requestOAuth2Token(
   if (!data.accessTokenUrl) throw new Error('OAuth2 credential has no access token URL');
   const accessTokenUrl = resolveCredentialUrl(data.accessTokenUrl, data);
   if (!accessTokenUrl) throw new Error('OAuth2 credential has no access token URL');
+  if (data.httpsOnlyTokenUrl === 'true' && !isHttpsUrl(accessTokenUrl)) {
+    throw new Error("Couldn't get a token: this credential's access token URL must use https");
+  }
   // the credential's own token calls honour its allowed domains too (the token URL is not typed by the
-  // user of a node, so the `none` mode does not apply): checked here and on every redirect hop
+  // user of a node, so the `none` mode does not apply). No redirect is followed: a 307 would carry the
+  // refresh token and the secret to the next host, and a 3xx answer ends in the missing token error below.
   const allowedDomains = getCredentialAllowedDomains(data, { userUrl: false });
   assertCredentialUrlAllowed(accessTokenUrl, allowedDomains);
   const body: Record<string, string> =
@@ -144,6 +158,7 @@ export async function requestOAuth2Token(
       bodyType: 'form-urlencoded',
       headers,
       auth,
+      followRedirects: false,
       ...(allowedDomains === undefined ? {} : { allowedDomains }),
     },
     signal,

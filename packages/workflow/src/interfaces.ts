@@ -283,6 +283,8 @@ export interface NodePropertyTypeOptions {
     multiKeyMatch?: boolean;
     supportAutoMap?: boolean;
     noFieldsError?: string;
+    /** the mapper shows the "convert types" switches, for a node that reads them */
+    showTypeConversionOptions?: boolean;
   };
 }
 
@@ -503,7 +505,11 @@ export interface GenericAuthentication {
 export interface CredentialTestRequest {
   request: HttpRequestOptions;
   /** optional checks on the response */
-  rules?: Array<{ type: 'responseCode'; value: number; message: string }>;
+  rules?: Array<
+    | { type: 'responseCode'; value: number; message: string }
+    /** a 2xx answer that still means failure: the value at the dotted path `key` of its body equals `value` */
+    | { type: 'responseSuccessBody'; key: string; value: unknown; message: string }
+  >;
 }
 
 export interface AwsSignInput {

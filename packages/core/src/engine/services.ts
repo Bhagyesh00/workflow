@@ -114,6 +114,8 @@ export interface ExecutionLimits {
   maxItemsPerOutput: number;
   /** node runs per execution (loop circuit breaker) */
   maxNodeRuns: number;
+  /** size of the JSON an agent keeps while its run waits for a tool */
+  maxCheckpointBytes?: number;
 }
 
 export interface ExecutionServices {
@@ -128,6 +130,8 @@ export interface ExecutionServices {
   resumeUrl?: string;
   /** used for the Wait node "on form submitted" resume and the Form node */
   resumeFormUrl?: string;
+  /** signs the key of a human review's links, so one review's link cannot be edited into another's */
+  signReviewKey?(key: string): string;
   nodeTypes: NodeTypeRegistry;
   credentialTypes: CredentialTypeRegistry;
   credentials: CredentialsProvider;

@@ -6,6 +6,7 @@ import type { DataTableAccess } from './data-tables';
 import type {
   BinaryData,
   ConnectionType,
+  CredentialAuthHelpers,
   CredentialType,
   DataObject,
   ExecutionMode,
@@ -408,7 +409,10 @@ export interface ListSearchResult {
 
 /** what a credential test may do: check hosts and connect through them, nothing that needs an execution */
 export interface CredentialTestContext {
-  helpers: Pick<NodeHelpers, 'resolveAllowedHost' | 'assertHostAllowed'>;
+  helpers: Pick<NodeHelpers, 'resolveAllowedHost' | 'assertHostAllowed'> & {
+    /** the guarded client and token helpers, with the credential's allowed domains and this test's signal */
+    auth?: CredentialAuthHelpers;
+  };
   logger: Logger;
   signal: AbortSignal;
   getTenantId(): string;

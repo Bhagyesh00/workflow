@@ -63,7 +63,10 @@ export function toOpenAiMessages(messages: AiChatMessage[]): DataObject[] {
             if (p.type === 'file') {
               return { type: 'file', file: { filename: p.fileName ?? 'file', file_data: dataUrl } };
             }
-            return { type: 'image_url', image_url: { url: dataUrl } };
+            return {
+              type: 'image_url',
+              image_url: { url: dataUrl, ...(p.detail && p.detail !== 'auto' ? { detail: p.detail } : {}) },
+            };
           }),
         };
       case 'assistant': {

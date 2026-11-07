@@ -148,6 +148,18 @@ describe('getPrompt', () => {
     ).toThrow('No prompt specified');
   });
 
+  it('throws emptyText for an expression that gives nothing', () => {
+    for (const text of [undefined, null]) {
+      const ctx = {
+        ...fakeContext(undefined, { promptType: 'define' }),
+        getNodeParameter: (name: string) => (name === 'promptType' ? 'define' : text),
+      } as unknown as ExecuteContext;
+      expect(() => getPrompt(ctx, 0, noChatInput, { emptyText: 'No prompt specified' })).toThrow(
+        'No prompt specified',
+      );
+    }
+  });
+
   it('returns the prompt when there is one', () => {
     const item: Item = { json: { chatInput: 'hello' } };
     expect(getPrompt(fakeContext(undefined, { promptType: 'auto' }), 0, item)).toBe('hello');

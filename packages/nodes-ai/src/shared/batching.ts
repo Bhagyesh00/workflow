@@ -37,10 +37,11 @@ export function batchingOption(defaultBatchSize: number): NodeProperty {
  * Run `run(0)` to `run(count - 1)` in batches. One failed item does not stop the others: its entry is
  * `rejected`. Results are in input order. The delay falls between batches only, never after the last.
  * An abort before a batch or during a delay rejects the whole call; a batch under way runs to its end.
+ * With `stopOnFailure`, no batch starts after one with a rejected entry, and the results end with that batch.
  */
 export async function runInBatches<T>(
   count: number,
-  options: { batchSize: number; delayMs: number; signal?: AbortSignal },
+  options: { batchSize: number; delayMs: number; signal?: AbortSignal; stopOnFailure?: boolean },
   run: (index: number) => Promise<T>,
 ): Promise<PromiseSettledResult<T>[]> {
   const size = Number.isFinite(options.batchSize) ? Math.max(1, Math.floor(options.batchSize)) : 1;
@@ -53,7 +54,9 @@ export async function runInBatches<T>(
     for (let index = start; index < Math.min(start + size, count); index++) {
       batch.push((async () => run(index))());
     }
-    for (const result of await Promise.allSettled(batch)) results.push(result);
+    const settled = await Promise.allSettled(batch);
+    results.push(...settled);
+    if (options.stopOnFailure && settled.some((result) => result.status === 'rejected')) break;
   }
   return results;
 }

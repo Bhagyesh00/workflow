@@ -17,6 +17,8 @@ export interface AiImagePart {
   /** base64 without data: prefix */
   data: string;
   mimeType: string;
+  /** how closely an OpenAI model looks at the image; 'auto' sends nothing, other providers ignore it */
+  detail?: 'auto' | 'low' | 'high';
 }
 
 export interface AiFilePart {

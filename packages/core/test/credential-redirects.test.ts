@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { CredentialDomainError } from '@workflow/workflow';
 import { type RequestInit, Response } from 'undici';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { HttpClient } from '../src';
+import { HttpClient, requestOAuth2Token } from '../src';
 import { fetchWithCredentialDomains, type SendRequest } from '../src/http/credential-redirects';
 
 const redirect = (status: number, location?: string) =>
@@ -266,6 +266,9 @@ describe('HttpClient with allowedDomains against real servers', () => {
       if (to[req.url ?? '']) {
         res.writeHead(302, { location: to[req.url ?? ''] });
         res.end();
+      } else if (req.url === '/token-307') {
+        res.writeHead(307, { location: `http://127.0.0.3:${otherPort}/in` });
+        res.end();
       } else res.end('ORIGIN');
     });
     originPort = await listen(origin, '127.0.0.1');
@@ -349,6 +352,34 @@ describe('HttpClient with allowedDomains against real servers', () => {
       })) as { statusCode: number };
       expect(res.statusCode).toBe(302);
       expect(hits.other).toBe(0);
+    } finally {
+      await c.close();
+    }
+  });
+
+  it('sends the refresh token and the secret to no other host when a token URL answers 307', async () => {
+    const c = client();
+    try {
+      for (const domains of [
+        {},
+        { allowedHttpRequestDomains: 'domains', allowedDomains: '127.0.0.1,127.0.0.3' },
+      ]) {
+        reset();
+        await expect(
+          requestOAuth2Token(
+            c,
+            {
+              accessTokenUrl: `http://127.0.0.1:${originPort}/token-307`,
+              clientId: 'id',
+              clientSecret: 'secret',
+              authentication: 'body',
+              ...domains,
+            },
+            { type: 'refresh_token', refreshToken: 'REFRESH' },
+          ),
+        ).rejects.toThrow('did not contain an access_token');
+        expect(hits.other).toBe(0);
+      }
     } finally {
       await c.close();
     }
