@@ -52,12 +52,16 @@ describe('Basic LLM Chain', () => {
   it('uses an output parser', async () => {
     scriptModel('Model', ['- red\n- green\n- blue']);
     const r = await chain(
-      node('Chain', 'ai.chainLlm', { promptType: 'define', text: 'List three colours' }),
+      node('Chain', 'ai.chainLlm', {
+        promptType: 'define',
+        text: 'List three colours',
+        hasOutputParser: true,
+      }),
       [{}],
       [node('List', 'ai.outputParserItemList', { options: { numberOfItems: 2 } })],
       [['List', 'Chain', 'ai_outputParser']],
     );
-    expect(r.output('Chain')).toEqual([{ output: ['red', 'green'] }]);
+    expect(r.output('Chain')).toEqual([{ data: ['red', 'green'] }]);
     const system = modelRequests.get('Model')![0].messages[0];
     expect(system.role).toBe('system');
     expect(system.content).toContain('at most 2 items');

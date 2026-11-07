@@ -4,6 +4,7 @@
  */
 import {
   type AiChatMessage,
+  type AiImagePart,
   type DataObject,
   deepCopy,
   type ExecuteContext,
@@ -14,11 +15,13 @@ import {
 } from '@workflow/workflow';
 import {
   getChatModel,
+  getFallbackModel,
   getOutputParser,
   getPrompt,
   promptTextProperty,
   promptTypeProperty,
 } from '../../shared/ai-inputs';
+import { batchingOption, runInBatches } from '../../shared/batching';
 import { schemaFromParameters } from '../../shared/json-schema';
 import { completeWithParser, withFormatInstructions } from '../../shared/structured';
 import { collectionList, errorMessage, fillTemplate } from '../../shared/utils';
@@ -31,7 +34,25 @@ const MODEL_INPUT = {
   maxConnections: 1,
 };
 
-/** Per-item loop with continue-on-fail handling shared by the chains. */
+/** Items per batch when the Batch Processing option is not set. */
+const DEFAULT_BATCH_SIZE = 5;
+
+/** The Batch Processing option of the node's `options` collection (read once, from item 0). */
+export function batchSettings(ctx: ExecuteContext): { batchSize: number; delayMs: number } {
+  const options = ctx.getNodeParameter('options', 0, {}) as DataObject;
+  const batching = (options.batching ?? {}) as DataObject;
+  const size = Number(batching.batchSize ?? DEFAULT_BATCH_SIZE);
+  const delay = Number(batching.delayBetweenBatches ?? 0);
+  return {
+    batchSize: Number.isFinite(size) && size >= 1 ? Math.floor(size) : DEFAULT_BATCH_SIZE,
+    delayMs: Number.isFinite(delay) && delay > 0 ? delay : 0,
+  };
+}
+
+/**
+ * Per-item loop with continue-on-fail handling shared by the chains. Items run in batches (the Batch
+ * Processing option, 5 at a time by default); results keep the order of the input items.
+ */
 async function eachItem(
   ctx: ExecuteContext,
   outputs: number,
@@ -39,21 +60,27 @@ async function eachItem(
 ): Promise<Item[][]> {
   const items = ctx.getInputData();
   const out: Item[][] = Array.from({ length: Math.max(1, outputs) }, () => []);
+  const { batchSize, delayMs } = batchSettings(ctx);
+  const settled = await runInBatches(items.length, { batchSize, delayMs, signal: ctx.signal }, (i) =>
+    run(items[i], i),
+  );
   for (let i = 0; i < items.length; i++) {
-    try {
-      for (const r of await run(items[i], i)) out[r.output].push(r.item);
-    } catch (error) {
-      if (ctx.continueOnFail()) {
-        out[0].push({
-          json: { error: errorMessage(error) },
-          error: { message: errorMessage(error) },
-          pairedItem: { item: i },
-        });
-        continue;
-      }
-      if (error instanceof NodeOperationError) throw error;
-      throw new NodeOperationError(ctx.getNode(), errorMessage(error), { itemIndex: i, cause: error });
+    const result = settled[i];
+    if (result.status === 'fulfilled') {
+      for (const r of result.value) out[r.output].push(r.item);
+      continue;
     }
+    const error = result.reason;
+    if (ctx.continueOnFail()) {
+      out[0].push({
+        json: { error: errorMessage(error) },
+        error: { message: errorMessage(error) },
+        pairedItem: { item: i },
+      });
+      continue;
+    }
+    if (error instanceof NodeOperationError) throw error;
+    throw new NodeOperationError(ctx.getNode(), errorMessage(error), { itemIndex: i, cause: error });
   }
   return out;
 }
@@ -83,6 +110,169 @@ function passItem(item: Item, index: number, extra?: DataObject): Item {
 // Basic LLM Chain
 // ---------------------------------------------------------------------------------------------
 
+const FALLBACK_INPUT = {
+  type: 'ai_languageModel' as const,
+  displayName: 'Fallback Model',
+  required: true,
+  maxConnections: 1,
+};
+const PARSER_INPUT = {
+  type: 'ai_outputParser' as const,
+  displayName: 'Output Parser',
+  required: true,
+  maxConnections: 1,
+};
+
+/** The fallback model and output parser ports follow their toggles; the parser is read only when on. */
+const CHAIN_LLM_INPUTS = `={{ ['main', ${JSON.stringify(MODEL_INPUT)}, ...($parameter.needsFallback === true ? [${JSON.stringify(FALLBACK_INPUT)}] : []), ...($parameter.hasOutputParser === true ? [${JSON.stringify(PARSER_INPUT)}] : [])] }}`;
+
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+};
+
+function toBytes(body: unknown): Uint8Array | undefined {
+  if (body instanceof Uint8Array) return body;
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  return undefined;
+}
+
+function imageMessage(part: AiImagePart): AiChatMessage {
+  return { role: 'user', content: [part] };
+}
+
+function tooLarge(ctx: ExecuteContext, i: number, limit: number): NodeOperationError {
+  return new NodeOperationError(ctx.getNode(), `The image is larger than the limit of ${limit} bytes`, {
+    itemIndex: i,
+    description: 'The instance limit for image input is set by the administrator.',
+  });
+}
+
+/** An Image (Binary) message: the item's binary property, as base64. */
+async function binaryImageMessage(
+  ctx: ExecuteContext,
+  i: number,
+  item: Item,
+  key: string,
+): Promise<AiChatMessage> {
+  const binary = item.binary?.[key];
+  if (!binary) {
+    throw new NodeOperationError(ctx.getNode(), `The item has no binary property "${key}"`, {
+      itemIndex: i,
+      parameter: 'binaryImageDataKey',
+    });
+  }
+  if (!binary.mimeType?.startsWith('image/')) {
+    throw new NodeOperationError(ctx.getNode(), `The binary property "${key}" is not an image`, {
+      itemIndex: i,
+      parameter: 'binaryImageDataKey',
+    });
+  }
+  const limit = ctx.helpers.getInstanceLimits().maxImageInputBytes;
+  const data = await ctx.helpers.getBinaryDataBuffer(i, key);
+  if (data.byteLength > limit) throw tooLarge(ctx, i, limit);
+  return imageMessage({
+    type: 'image',
+    mimeType: binary.mimeType,
+    data: Buffer.from(data).toString('base64'),
+  });
+}
+
+/**
+ * An Image (URL) message. The image is fetched here, through the guarded HTTP helper, so every provider
+ * gets the same base64 part. The size is checked after the read (which the HTTP client bounds), and no
+ * model request goes out when it is over `maxImageInputBytes`.
+ */
+async function urlImageMessage(ctx: ExecuteContext, i: number, url: string): Promise<AiChatMessage> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new NodeOperationError(ctx.getNode(), 'The image URL is not a valid URL', {
+      itemIndex: i,
+      parameter: 'imageUrl',
+    });
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new NodeOperationError(ctx.getNode(), 'The image URL must start with http:// or https://', {
+      itemIndex: i,
+      parameter: 'imageUrl',
+    });
+  }
+  const limit = ctx.helpers.getInstanceLimits().maxImageInputBytes;
+  const response = (await ctx.helpers.httpRequest({
+    url,
+    method: 'GET',
+    responseType: 'arraybuffer',
+    returnFullResponse: true,
+  })) as { body: unknown; headers?: Record<string, string | string[] | undefined> };
+  const bytes = toBytes(response.body);
+  if (!bytes) {
+    throw new NodeOperationError(ctx.getNode(), 'The image URL did not return image data', { itemIndex: i });
+  }
+  if (bytes.byteLength > limit) throw tooLarge(ctx, i, limit);
+  const header = response.headers?.['content-type'];
+  const declared = String(Array.isArray(header) ? header[0] : (header ?? ''))
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  const mimeType = declared.startsWith('image/')
+    ? declared
+    : IMAGE_EXTENSIONS[parsed.pathname.split('.').pop()?.toLowerCase() ?? ''];
+  if (!mimeType) {
+    throw new NodeOperationError(ctx.getNode(), 'The image URL did not return an image', { itemIndex: i });
+  }
+  return imageMessage({ type: 'image', mimeType, data: Buffer.from(bytes).toString('base64') });
+}
+
+interface MessageValue {
+  type?: string;
+  messageType?: string;
+  message?: string;
+  binaryImageDataKey?: string;
+  imageUrl?: string;
+  imageDetail?: string;
+}
+
+/** The fixed messages: text, an image from a binary property, or an image from a URL. */
+async function fixedMessages(ctx: ExecuteContext, i: number, item: Item): Promise<AiChatMessage[]> {
+  const values = collectionList<MessageValue>(ctx.getNodeParameter('messages', i, {}), 'messageValues');
+  const messages: AiChatMessage[] = [];
+  for (const m of values) {
+    const messageType = m.messageType ?? 'text';
+    if (messageType === 'imageBinary') {
+      messages.push(await binaryImageMessage(ctx, i, item, String(m.binaryImageDataKey || 'data')));
+    } else if (messageType === 'imageUrl') {
+      const url = String(m.imageUrl ?? '').trim();
+      if (!url) {
+        throw new NodeOperationError(ctx.getNode(), 'The image URL is empty', {
+          itemIndex: i,
+          parameter: 'imageUrl',
+        });
+      }
+      messages.push(await urlImageMessage(ctx, i, url));
+    } else if (m.message) {
+      messages.push({
+        role: (['system', 'user', 'assistant'].includes(String(m.type))
+          ? m.type
+          : 'user') as AiChatMessage['role'],
+        content: String(m.message),
+      });
+    }
+  }
+  return messages;
+}
+
+/** A text answer is trimmed `{ text }`; a list is `{ data }`; any other parsed value is `{ output }`. */
+function chainOutput(value: unknown): DataObject {
+  if (typeof value === 'string') return { text: value.trim() };
+  if (Array.isArray(value)) return { data: value as DataObject[string] };
+  return { output: value as DataObject[string] };
+}
+
 export const ChainLlmNode: NodeType = {
   description: {
     name: 'ai.chainLlm',
@@ -92,11 +282,7 @@ export const ChainLlmNode: NodeType = {
     group: ['transform'],
     version: 1,
     defaults: { name: 'Basic LLM Chain' },
-    inputs: [
-      'main',
-      MODEL_INPUT,
-      { type: 'ai_outputParser', displayName: 'Output Parser', maxConnections: 1 },
-    ],
+    inputs: CHAIN_LLM_INPUTS,
     outputs: ['main'],
     categories: ['AI', 'Chains'],
     alias: ['prompt', 'llm', 'completion', 'generate'],
@@ -104,13 +290,29 @@ export const ChainLlmNode: NodeType = {
       promptTypeProperty,
       promptTextProperty,
       {
+        displayName: 'Require Specific Output Format',
+        name: 'hasOutputParser',
+        type: 'boolean',
+        default: false,
+        noDataExpression: true,
+        description: 'Whether to add an Output Parser input and parse the answer with it',
+      },
+      {
+        displayName: 'Enable Fallback Model',
+        name: 'needsFallback',
+        type: 'boolean',
+        default: false,
+        noDataExpression: true,
+        description: 'Whether to add a Fallback Model input that answers when the main model fails',
+      },
+      {
         displayName: 'Chat Messages',
         name: 'messages',
         type: 'fixedCollection',
         default: {},
         typeOptions: { multipleValues: true, sortable: true },
         placeholder: 'Add message',
-        description: 'Messages placed before the prompt (instructions, examples)',
+        description: 'Messages placed before the prompt (instructions, examples, images)',
         options: [
           {
             displayName: 'Message',
@@ -126,6 +328,22 @@ export const ChainLlmNode: NodeType = {
                   { name: 'User', value: 'user' },
                   { name: 'AI', value: 'assistant' },
                 ],
+                displayOptions: { show: { messageType: ['text'] } },
+              },
+              {
+                displayName: 'Message Type',
+                name: 'messageType',
+                type: 'options',
+                default: 'text',
+                options: [
+                  { name: 'Text', value: 'text', description: 'Simple text message' },
+                  {
+                    name: 'Image (Binary)',
+                    value: 'imageBinary',
+                    description: 'An image from a binary property of the input item',
+                  },
+                  { name: 'Image (URL)', value: 'imageUrl', description: 'An image fetched from a URL' },
+                ],
               },
               {
                 displayName: 'Message',
@@ -133,10 +351,47 @@ export const ChainLlmNode: NodeType = {
                 type: 'string',
                 default: '',
                 typeOptions: { rows: 3 },
+                displayOptions: { show: { messageType: ['text'] } },
+              },
+              {
+                displayName: 'Image Data Field Name',
+                name: 'binaryImageDataKey',
+                type: 'string',
+                default: 'data',
+                description: 'The name of the binary property that holds the image',
+                displayOptions: { show: { messageType: ['imageBinary'] } },
+              },
+              {
+                displayName: 'Image URL',
+                name: 'imageUrl',
+                type: 'string',
+                default: '',
+                placeholder: 'https://example.com/image.png',
+                displayOptions: { show: { messageType: ['imageUrl'] } },
+              },
+              {
+                displayName: 'Image Resolution',
+                name: 'imageDetail',
+                type: 'options',
+                default: 'auto',
+                options: [
+                  { name: 'Auto', value: 'auto' },
+                  { name: 'Low', value: 'low' },
+                  { name: 'High', value: 'high' },
+                ],
+                displayOptions: { show: { messageType: ['imageBinary', 'imageUrl'] } },
               },
             ],
           },
         ],
+      },
+      {
+        displayName: 'Options',
+        name: 'options',
+        type: 'collection',
+        default: {},
+        placeholder: 'Add option',
+        options: [batchingOption(DEFAULT_BATCH_SIZE)],
       },
     ],
   },
@@ -144,29 +399,25 @@ export const ChainLlmNode: NodeType = {
     return eachItem(ctx, 1, async (item, i) => {
       const prompt = getPrompt(ctx, i, item);
       const model = await getChatModel(ctx, i);
-      const parser = await getOutputParser(ctx, i);
-      const fixed: AiChatMessage[] = collectionList<{ type: string; message: string }>(
-        ctx.getNodeParameter('messages', i, {}),
-        'messageValues',
-      )
-        .filter((m) => m.message)
-        .map((m) => ({
-          role: (['system', 'user', 'assistant'].includes(m.type) ? m.type : 'user') as AiChatMessage['role'],
-          content: String(m.message),
-        }));
+      const fallback = ctx.getNodeParameter('needsFallback', i, false)
+        ? await getFallbackModel(ctx, i)
+        : undefined;
+      // the parser is read only when its toggle is on: a connection left over from before is ignored
+      const parser = ctx.getNodeParameter('hasOutputParser', i, false)
+        ? await getOutputParser(ctx, i, true)
+        : undefined;
+      const fixed = await fixedMessages(ctx, i, item);
       const messages = withFormatInstructions([...fixed, { role: 'user', content: prompt }], parser);
       const result = await completeWithParser(model, messages, parser, {
         node: ctx.getNode(),
         itemIndex: i,
         signal: ctx.signal,
+        fallback,
       });
       return [
         {
           output: 0,
-          item: {
-            json: parser ? { output: result.output as DataObject[string] } : { text: result.text },
-            pairedItem: { item: i },
-          },
+          item: { json: chainOutput(parser ? result.output : result.text), pairedItem: { item: i } },
         },
       ];
     });
@@ -302,6 +553,7 @@ export const InformationExtractorNode: NodeType = {
             default: EXTRACTOR_PROMPT,
             typeOptions: { rows: 4 },
           },
+          batchingOption(DEFAULT_BATCH_SIZE),
         ],
       },
     ],
@@ -445,6 +697,22 @@ export const TextClassifierNode: NodeType = {
             typeOptions: { rows: 4 },
             description: 'Uses {categories} and {multiple}',
           },
+          {
+            displayName: 'Include Confidence Scores',
+            name: 'includeConfidenceScores',
+            type: 'boolean',
+            default: false,
+            description:
+              'Whether to add the confidence of each category to the item, under "classification". The scores are estimates from the model, not measured probabilities. Rename a category called "confidence".',
+          },
+          {
+            displayName: 'Auto-Fix Format',
+            name: 'enableAutoFixing',
+            type: 'boolean',
+            default: true,
+            description: 'Whether to ask the model once more when its answer does not fit the format',
+          },
+          batchingOption(DEFAULT_BATCH_SIZE),
         ],
       },
     ],
@@ -457,19 +725,47 @@ export const TextClassifierNode: NodeType = {
     if (!categories.length) throw new NodeOperationError(ctx.getNode(), 'Add at least one category');
     const options0 = ctx.getNodeParameter('options', 0, {}) as DataObject;
     const hasOther = options0.fallback === 'other';
+    if (
+      options0.includeConfidenceScores === true &&
+      categories.some((c) => c.category.trim().toLowerCase() === 'confidence')
+    ) {
+      throw new NodeOperationError(
+        ctx.getNode(),
+        'The category name "confidence" is reserved when confidence scores are on',
+        {
+          description:
+            'The node reports the scores under that name. Rename the category, or turn off Include Confidence Scores.',
+        },
+      );
+    }
     return eachItem(ctx, categories.length + (hasOther ? 1 : 0), async (item, i) => {
       const text = inputText(ctx, 'inputText', i);
       const options = ctx.getNodeParameter('options', i, {}) as DataObject;
       const multi = Boolean(options.multiClass);
+      const scores = options.includeConfidenceScores === true;
+      const describe = (c: Category) =>
+        `Whether the text belongs to "${c.category}"${c.description ? `: ${c.description}` : ''}`;
       const schema: JsonSchema = {
         type: 'object',
         properties: Object.fromEntries(
           categories.map((c) => [
             c.category,
-            {
-              type: 'boolean',
-              description: `Whether the text belongs to "${c.category}"${c.description ? `: ${c.description}` : ''}`,
-            },
+            scores
+              ? {
+                  type: 'object',
+                  description: describe(c),
+                  properties: {
+                    match: { type: 'boolean', description: describe(c) },
+                    confidence: {
+                      type: 'number',
+                      minimum: 0,
+                      maximum: 1,
+                      description: 'How sure you are, from 0 (not at all) to 1 (certain)',
+                    },
+                  },
+                  required: ['match', 'confidence'],
+                }
+              : { type: 'boolean', description: describe(c) },
           ]),
         ),
         required: categories.map((c) => c.category),
@@ -479,6 +775,14 @@ export const TextClassifierNode: NodeType = {
         categories: categories.map((c) => c.category).join(', '),
         multiple: multi ? 'one or more' : 'exactly one',
       });
+      const rules = [
+        multi
+          ? 'Categories are not mutually exclusive, and multiple can be true.'
+          : 'Categories are mutually exclusive, and only one can be true.',
+        hasOther
+          ? 'If no categories apply, set every category to false.'
+          : 'If there is not a very fitting category, select none of the categories.',
+      ].join(' ');
       const descriptions = categories
         .filter((c) => c.description)
         .map((c) => `- ${c.category}: ${c.description}`)
@@ -488,21 +792,54 @@ export const TextClassifierNode: NodeType = {
         model,
         withFormatInstructions(
           [
-            { role: 'system', content: descriptions ? `${system}\n\nCategories:\n${descriptions}` : system },
+            {
+              role: 'system',
+              content: `${system}\n${rules}${descriptions ? `\n\nCategories:\n${descriptions}` : ''}`,
+            },
             { role: 'user', content: text },
           ],
           parser,
         ),
         parser,
-        { node: ctx.getNode(), itemIndex: i, signal: ctx.signal },
+        {
+          node: ctx.getNode(),
+          itemIndex: i,
+          signal: ctx.signal,
+          autoFix: options.enableAutoFixing !== false,
+        },
       );
-      const flags = result.output as Record<string, boolean>;
-      let matched = categories
-        .map((c, index) => (flags[c.category] === true ? index : -1))
-        .filter((x) => x >= 0);
+      const answer = result.output as Record<string, boolean | { match: boolean; confidence: number }>;
+      const flagOf = (name: string) => {
+        const value = answer[name];
+        return typeof value === 'object' ? value.match === true : value === true;
+      };
+      const confidenceOf = (name: string): number | null => {
+        const value = answer[name];
+        return typeof value === 'object' ? value.confidence : null;
+      };
+      const allScores = (): DataObject =>
+        Object.fromEntries(categories.map((c) => [c.category, confidenceOf(c.category)]));
+      let matched = categories.map((c, index) => (flagOf(c.category) ? index : -1)).filter((x) => x >= 0);
       if (!multi) matched = matched.slice(0, 1);
-      if (!matched.length) return hasOther ? [{ output: categories.length, item: passItem(item, i) }] : [];
-      return matched.map((output) => ({ output, item: passItem(item, i) }));
+      if (!matched.length) {
+        if (!hasOther) return [];
+        const other = scores
+          ? passItem(item, i, { classification: { category: 'Other', scores: allScores() } })
+          : passItem(item, i);
+        return [{ output: categories.length, item: other }];
+      }
+      return matched.map((output) => ({
+        output,
+        item: scores
+          ? passItem(item, i, {
+              classification: {
+                category: categories[output].category,
+                confidence: confidenceOf(categories[output].category),
+                scores: allScores(),
+              },
+            })
+          : passItem(item, i),
+      }));
     });
   },
 };
@@ -572,6 +909,14 @@ export const SentimentAnalysisNode: NodeType = {
             typeOptions: { rows: 4 },
             description: 'Uses {categories}',
           },
+          {
+            displayName: 'Auto-Fix Format',
+            name: 'enableAutoFixing',
+            type: 'boolean',
+            default: true,
+            description: 'Whether to ask the model once more when its answer does not fit the format',
+          },
+          batchingOption(DEFAULT_BATCH_SIZE),
         ],
       },
     ],
@@ -623,7 +968,12 @@ export const SentimentAnalysisNode: NodeType = {
           parser,
         ),
         parser,
-        { node: ctx.getNode(), itemIndex: i, signal: ctx.signal },
+        {
+          node: ctx.getNode(),
+          itemIndex: i,
+          signal: ctx.signal,
+          autoFix: options.enableAutoFixing !== false,
+        },
       );
       const parsed = result.output as { sentiment: string; strength?: number; confidence?: number };
       const output = categories.indexOf(parsed.sentiment);

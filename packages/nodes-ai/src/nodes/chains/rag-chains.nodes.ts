@@ -18,6 +18,7 @@ import {
   promptTextProperty,
   promptTypeProperty,
 } from '../../shared/ai-inputs';
+import { batchingOption, runInBatches } from '../../shared/batching';
 import { splitRecursively } from '../../shared/text-splitting';
 import { errorMessage, fillTemplate, mapLimit, messageText } from '../../shared/utils';
 
@@ -298,15 +299,24 @@ export const ChainRetrievalQaNode: NodeType = {
             type: 'boolean',
             default: false,
           },
+          batchingOption(5),
         ],
       },
     ],
   },
   async execute(ctx) {
     const items = ctx.getInputData();
-    const out: Item[] = [];
-    for (let i = 0; i < items.length; i++) {
-      try {
+    const batching = ((ctx.getNodeParameter('options', 0, {}) as DataObject).batching ?? {}) as DataObject;
+    const size = Number(batching.batchSize ?? 5);
+    const delay = Number(batching.delayBetweenBatches ?? 0);
+    const settled = await runInBatches(
+      items.length,
+      {
+        batchSize: Number.isFinite(size) && size >= 1 ? Math.floor(size) : 5,
+        delayMs: Number.isFinite(delay) && delay > 0 ? delay : 0,
+        signal: ctx.signal,
+      },
+      async (i): Promise<Item> => {
         const question = getPrompt(ctx, i, items[i]);
         const options = ctx.getNodeParameter('options', i, {}) as DataObject;
         const retriever = await getRetriever(ctx, i);
@@ -336,15 +346,22 @@ export const ChainRetrievalQaNode: NodeType = {
         if (options.returnSourceDocuments) {
           json.sourceDocuments = documents.map((d) => ({ pageContent: d.pageContent, metadata: d.metadata }));
         }
-        out.push({ json, pairedItem: { item: i } });
-      } catch (error) {
-        if (!ctx.continueOnFail()) throw error;
-        out.push({
-          json: { error: errorMessage(error) },
-          error: { message: errorMessage(error) },
-          pairedItem: { item: i },
-        });
+        return { json, pairedItem: { item: i } };
+      },
+    );
+    const out: Item[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const result = settled[i];
+      if (result.status === 'fulfilled') {
+        out.push(result.value);
+        continue;
       }
+      if (!ctx.continueOnFail()) throw result.reason;
+      out.push({
+        json: { error: errorMessage(result.reason) },
+        error: { message: errorMessage(result.reason) },
+        pairedItem: { item: i },
+      });
     }
     return [out];
   },
