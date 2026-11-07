@@ -10,6 +10,7 @@ import {
   fromAiTypeOf,
   parseFromAiOverride,
   reconcileFromAiKeys,
+  reconcileFromAiKeysAt,
 } from '../src/lib/from-ai-override';
 import { signedIn } from './backend';
 import { renderParameters } from './utils';
@@ -46,10 +47,18 @@ describe('canUseFromAiOverride', () => {
     expect(canUseFromAiOverride(tool('x.tool', { outputs: ['main'] }), prop('string'), ['url'])).toBe(false);
   });
 
-  it.each(['ai.toolCode', 'ai.toolHttpRequest', 'ai.mcpClientTool', 'ai.vectorStoreQdrant'])(
+  it.each(['ai.toolCode', 'ai.toolHttpRequest', 'ai.mcpClientTool', 'ai.vectorStoreQdrant', 'ai.toolVectorStore'])(
     'refuses %s',
     (name) => expect(canUseFromAiOverride(tool(name), prop('string'), ['url'])).toBe(false),
   );
+
+  it('offers the Call Workflow Tool only the mapped inputs, the part its schema is built from', () => {
+    const workflowTool = tool('ai.toolWorkflow');
+    expect(canUseFromAiOverride(workflowTool, prop('resourceLocator'), ['workflowId'])).toBe(false);
+    expect(canUseFromAiOverride(workflowTool, prop('string'), ['responsePropertyName'])).toBe(false);
+    expect(canUseFromAiOverride(workflowTool, prop('json'), ['workflowJson'])).toBe(false);
+    expect(canUseFromAiOverride(workflowTool, prop('string'), ['workflowInputs', 'value', 'city'])).toBe(true);
+  });
 
   it.each([['toolName'], ['description'], ['toolDescription']])('refuses the path %s', (name) => {
     expect(canUseFromAiOverride(httpTool, prop('string'), [name])).toBe(false);
@@ -170,6 +179,91 @@ describe('reconcileFromAiKeys', () => {
   it('follows a resource locator', () => {
     const next = reconcileFromAiKeys({ rows: [{ id: { __rl: true, mode: 'id', value: at('old') } }] });
     expect(next).toEqual({ rows: [{ id: { __rl: true, mode: 'id', value: at('rows_0_id') } }] });
+  });
+});
+
+describe('reconcileFromAiKeysAt', () => {
+  const at = (key: string) => buildFromAiOverride({ key, description: 'd', type: 'string' });
+  const rows = [{ value: at('headers_values_1_value') }];
+
+  it('moves the keys of a list for a tool node and leaves any other node alone', () => {
+    expect(reconcileFromAiKeysAt(httpTool, rows, ['headers', 'values'])).toEqual([
+      { value: at('headers_values_0_value') },
+    ]);
+    expect(reconcileFromAiKeysAt(httpNode, rows, ['headers', 'values'])).toBe(rows);
+    expect(reconcileFromAiKeysAt(undefined, rows, ['headers', 'values'])).toBe(rows);
+    expect(reconcileFromAiKeysAt(httpTool, undefined, ['headers', 'values'])).toBeUndefined();
+  });
+});
+
+describe('list rows and their $fromAI keys', () => {
+  beforeEach(() => signedIn());
+  const listTool = tool('core.listTool', {
+    properties: [
+      ...httpTool.properties,
+      {
+        displayName: 'Headers',
+        name: 'headers',
+        type: 'fixedCollection',
+        default: {},
+        typeOptions: { multipleValues: true, sortable: true },
+        placeholder: 'Add header',
+        options: [
+          {
+            displayName: 'Header',
+            name: 'values',
+            values: [
+              { displayName: 'Name', name: 'name', type: 'string', default: '' },
+              { displayName: 'Value', name: 'value', type: 'string', default: '' },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const ov = (key: string, description = '') => buildFromAiOverride({ key, description, type: 'string' });
+  const rowsOf = (node: { current: { parameters: Record<string, unknown> } }) =>
+    (node.current.parameters.headers as { values: Array<Record<string, string>> }).values;
+
+  it('a removed row hands its index to the rows after it, so a new override never repeats a key', async () => {
+    const user = userEvent.setup();
+    const { node } = renderParameters(listTool, {
+      parameters: {
+        headers: {
+          values: [
+            { name: 'a', value: ov('headers_values_0_value', 'first') },
+            { name: 'b', value: ov('headers_values_1_value', 'second') },
+          ],
+        },
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Remove Header 1' }));
+    expect(rowsOf(node)).toEqual([{ name: 'b', value: ov('headers_values_0_value', 'second') }]);
+
+    await user.click(screen.getByRole('button', { name: 'Add header' }));
+    const entries = screen.getAllByTestId('fixed-collection-entry-values');
+    await user.click(within(entries[1]).getAllByRole('button', { name: BUTTON })[1]);
+    const keys = rowsOf(node).map((row) => parseFromAiOverride(row.value)?.key);
+    expect(keys).toEqual(['headers_values_0_value', 'headers_values_1_value']);
+  });
+
+  it('moving a row moves its key with it', async () => {
+    const user = userEvent.setup();
+    const { node } = renderParameters(listTool, {
+      parameters: {
+        headers: {
+          values: [
+            { name: 'a', value: ov('headers_values_0_value', 'first') },
+            { name: 'b', value: ov('headers_values_1_value', 'second') },
+          ],
+        },
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Move Header 2 up' }));
+    expect(rowsOf(node)).toEqual([
+      { name: 'b', value: ov('headers_values_0_value', 'second') },
+      { name: 'a', value: ov('headers_values_1_value', 'first') },
+    ]);
   });
 });
 

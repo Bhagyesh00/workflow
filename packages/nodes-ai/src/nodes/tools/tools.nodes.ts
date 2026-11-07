@@ -853,7 +853,7 @@ export const ToolWorkflowNode: NodeType = {
     }
     // a node saved before the picker holds a plain id; the picker stores a locator value
     const rawId = ctx.getNodeParameter('workflowId', itemIndex, '') as unknown;
-    const workflowId = String(isResourceLocatorValue(rawId) ? rawId.value : (rawId ?? '')).trim();
+    const workflowId = String((isResourceLocatorValue(rawId) ? rawId.value : rawId) ?? '').trim();
     if (source === 'database' && !workflowId)
       throw new NodeOperationError(ctx.getNode(), 'Select a workflow', { itemIndex });
     const field = String(ctx.getNodeParameter('responsePropertyName', itemIndex, 'response') ?? '');

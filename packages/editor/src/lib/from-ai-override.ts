@@ -20,7 +20,15 @@ export interface FromAiOverrideValue {
 }
 
 /** nodes whose parameters the model never defines */
-const DENIED_NODE_TYPES = new Set(['ai.toolCode', 'ai.toolHttpRequest', 'ai.mcpClientTool']);
+const DENIED_NODE_TYPES = new Set([
+  'ai.toolCode',
+  'ai.toolHttpRequest',
+  'ai.mcpClientTool',
+  'ai.toolVectorStore',
+]);
+/** the Call Workflow Tool schema comes from the mapped inputs only, so the model fills nothing else */
+const WORKFLOW_TOOL = 'ai.toolWorkflow';
+const WORKFLOW_TOOL_INPUTS = 'workflowInputs';
 /** top-level parameters that name or describe the tool itself */
 const DENIED_PATHS = new Set(['toolName', 'description', 'toolDescription']);
 /** parameter types an expression can hold and the model may fill (never `options` or `credentialsSelect`) */
@@ -48,6 +56,7 @@ export function canUseFromAiOverride(
   if (!categories.includes('AI') || !categories.includes('Tools')) return false;
   if (DENIED_NODE_TYPES.has(description.name) || description.name.startsWith('ai.vectorStore')) return false;
   if (path.length === 1 && DENIED_PATHS.has(String(path[0]))) return false;
+  if (description.name === WORKFLOW_TOOL && path[0] !== WORKFLOW_TOOL_INPUTS) return false;
   if (prop.noDataExpression || prop.type === 'credentialsSelect' || prop.type === 'options') return false;
   return ALLOWED_TYPES.has(prop.type);
 }
@@ -204,4 +213,17 @@ function reconcile(value: unknown, path: ParameterPath): unknown {
 /** after list rows move: every override's key follows its new path (the same object when nothing changed) */
 export function reconcileFromAiKeys(parameters: NodeParameters): NodeParameters {
   return reconcile(parameters, []) as NodeParameters;
+}
+
+/**
+ * After list rows move or go: the overrides inside `value`, the list at `path`, take the key of their
+ * new path. Only tool nodes hold overrides, so any other node gets `value` back unchanged.
+ */
+export function reconcileFromAiKeysAt(
+  description: NodeTypeDescription | undefined,
+  value: unknown,
+  path: ParameterPath,
+): unknown {
+  if (!description || !isToolNode(description)) return value;
+  return reconcile(value, path);
 }

@@ -34,7 +34,7 @@ function loadCtx(
   const n = node('Tool', 'ai.toolWorkflow');
   const nodeTypes = new NodeTypes([ToolWorkflowNode]);
   const base = createBaseContext({
-    workflow: new Workflow({ name: 'w', nodes: [n], connections: {} }, nodeTypes),
+    workflow: new Workflow({ id: 'self', name: 'w', nodes: [n], connections: {} }, nodeTypes),
     node: n,
     services: services({ nodeTypes }),
     evaluator: new ExpressionEvaluator(),
@@ -132,6 +132,15 @@ describe('Call Workflow Tool parity', () => {
     expect(result.status).not.toBe('success');
   });
 
+  it('refuses a workflow id the model was asked for instead of calling workflow "undefined"', async () => {
+    const { result, received } = await callTool(
+      { workflowId: { __rl: true, mode: 'id', value: "={{ $fromAI('wf') }}" } },
+      {},
+    );
+    expect(result.status).not.toBe('success');
+    expect(received).toEqual([]);
+  });
+
   it('the picker shows only what listWorkflows returns and passes the filter and page token', async () => {
     const queries: unknown[] = [];
     const ctx = loadCtx(
@@ -145,7 +154,8 @@ describe('Call Workflow Tool parity', () => {
     );
     const page = await ToolWorkflowNode.methods!.listSearch!.searchWorkflows(ctx, 'ord', 'p1');
     expect(page).toEqual({ results: [{ name: 'Orders', value: 'w1' }], paginationToken: 'next' });
-    expect(queries).toEqual([{ filter: 'ord', paginationToken: 'p1' }]);
+    // the open workflow is left out of the list, as Execute Workflow does
+    expect(queries).toEqual([{ filter: 'ord', paginationToken: 'p1', excludeId: 'self' }]);
     await expect(ToolWorkflowNode.methods!.listSearch!.searchWorkflows(loadCtx({}))).rejects.toThrow(
       'Workflows cannot be listed here',
     );

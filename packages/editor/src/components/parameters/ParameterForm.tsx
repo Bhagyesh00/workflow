@@ -12,6 +12,7 @@ import {
 import { ArrowDown, ArrowUp, Info, Plus, Trash2 } from 'lucide-react';
 import { type ReactNode, useId, useState } from 'react';
 import { applyCodeDefaults } from '../../lib/code-defaults';
+import { reconcileFromAiKeysAt } from '../../lib/from-ai-override';
 import { type ParameterPath, setIn } from '../../lib/workflow-ops';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
@@ -514,6 +515,11 @@ function FixedCollectionInput({
               <legend className="mb-1 text-xs font-semibold text-ink-2">{group.displayName}</legend>
             )}
             {entries.map((entry, index) => {
+              // rows that move or go change the path of every override below them: its key follows (P5-75)
+              const changeRows = (rows: NodeParameters[] | undefined) => {
+                const at = [...path, group.name];
+                ctx.onChange(at, reconcileFromAiKeysAt(ctx.description, rows, at));
+              };
               const entryPath = multiple ? [...path, group.name, index] : [...path, group.name];
               return (
                 <div
@@ -533,7 +539,7 @@ function FixedCollectionInput({
                         onClick={() => {
                           if (multiple) {
                             const next = entries.filter((_, i) => i !== index);
-                            ctx.onChange([...path, group.name], next.length ? next : undefined);
+                            changeRows(next.length ? next : undefined);
                           } else ctx.onChange([...path, group.name], undefined);
                         }}
                       >
@@ -548,7 +554,7 @@ function FixedCollectionInput({
                           onClick={() => {
                             const next = [...entries];
                             [next[index - 1], next[index]] = [next[index], next[index - 1]];
-                            ctx.onChange([...path, group.name], next);
+                            changeRows(next);
                           }}
                         >
                           <ArrowUp size={13} />
@@ -563,7 +569,7 @@ function FixedCollectionInput({
                           onClick={() => {
                             const next = [...entries];
                             [next[index + 1], next[index]] = [next[index], next[index + 1]];
-                            ctx.onChange([...path, group.name], next);
+                            changeRows(next);
                           }}
                         >
                           <ArrowDown size={13} />

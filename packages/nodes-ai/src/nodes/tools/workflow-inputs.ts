@@ -40,15 +40,17 @@ function plainId(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-/** Workflow picker: only what `listWorkflows` returns for the current tenant. */
+/** Workflow picker: only what `listWorkflows` returns for the current tenant, without the open workflow. */
 export async function searchWorkflows(
   ctx: LoadOptionsContext,
   filter?: string,
   paginationToken?: string,
 ): Promise<ListSearchResult> {
   if (!ctx.listWorkflows) throw new Error('Workflows cannot be listed here');
+  const selfId = ctx.getWorkflow().id;
   const page = await ctx.listWorkflows({
     ...(filter ? { filter } : {}),
+    ...(selfId ? { excludeId: selfId } : {}),
     ...(paginationToken ? { paginationToken } : {}),
   });
   return {
