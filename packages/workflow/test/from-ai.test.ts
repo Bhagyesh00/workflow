@@ -83,6 +83,13 @@ describe('extractFromAiArguments', () => {
     expect(found.map((a) => a.key)).toEqual(['outer', 'inner']);
   });
 
+  it('text inside a quoted argument is not a call', () => {
+    const found = scan(`$fromAI('k', 'use $fromAI(\\'zz\\') here', 'string') $fromAI('next')`);
+    expect(found.map((a) => a.key)).toEqual(['k', 'next']);
+    expect(found[0].description).toBe(`use $fromAI('zz') here`);
+    expect(scan(`$fromAI('k', 'text $fromAI(', 'string')`).map((a) => a.key)).toEqual(['k']);
+  });
+
   it('takes the type in any case', () => {
     expect(scan(`$fromAI('k', 'd', 'NUMBER')`)[0].type).toBe('number');
     expect(scan(`$fromAI('k', 'd', 'Json')`)[0].type).toBe('json');

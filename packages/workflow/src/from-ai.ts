@@ -122,18 +122,31 @@ function parseCall(args: string): FromAiArgument {
   };
 }
 
+/** the calls in `text`; inside a call only its arguments that are not quoted text can hold another call */
+function scanText(text: string, found: Map<string, FromAiArgument>): void {
+  let end = 0;
+  for (const match of text.matchAll(FROM_AI_CALL)) {
+    if (match.index < end) continue;
+    const start = match.index + match[0].length;
+    const args = callArguments(text, start);
+    end = start + args.length + 1;
+    const call = parseCall(args);
+    const earlier = found.get(call.key);
+    if (earlier && (earlier.description !== call.description || earlier.type !== call.type)) {
+      throw new FromAiError(`Duplicate key '${call.key}' found with different description or type`, {
+        description: 'Ensure all $fromAI() calls with the same key have consistent descriptions and types',
+      });
+    }
+    found.set(call.key, call);
+    for (const part of splitArguments(args)) {
+      if (!literalText(part).quoted) scanText(part, found);
+    }
+  }
+}
+
 function scanValue(value: unknown, found: Map<string, FromAiArgument>): void {
   if (typeof value === 'string') {
-    for (const match of value.matchAll(FROM_AI_CALL)) {
-      const call = parseCall(callArguments(value, match.index + match[0].length));
-      const earlier = found.get(call.key);
-      if (earlier && (earlier.description !== call.description || earlier.type !== call.type)) {
-        throw new FromAiError(`Duplicate key '${call.key}' found with different description or type`, {
-          description: 'Ensure all $fromAI() calls with the same key have consistent descriptions and types',
-        });
-      }
-      found.set(call.key, call);
-    }
+    scanText(value, found);
   } else if (value !== null && typeof value === 'object') {
     for (const child of Object.values(value)) scanValue(child, found);
   }
