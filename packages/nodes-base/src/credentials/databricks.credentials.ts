@@ -38,6 +38,7 @@ function hidden(name: string, value: string): NodeProperty {
 export const databricksOAuth2Api: CredentialType = {
   name: 'databricksOAuth2Api',
   displayName: 'Databricks OAuth2 API',
+  icon: 'simple:databricks',
   extends: ['oAuth2Api'],
   properties: [
     {
@@ -63,6 +64,8 @@ export const databricksOAuth2Api: CredentialType = {
     hidden('scope', 'all-apis offline_access'),
     hidden('authQueryParameters', ''),
     hidden('authentication', 'header'),
+    // the refresh path never reaches `authenticate`: this keeps its token call on https too
+    hidden('httpsOnlyTokenUrl', 'true'),
   ],
   // the request that proves the connection: workspace serving endpoints. An http host never gets a URL, so
   // neither the token call nor the stored token of a connected account goes anywhere.

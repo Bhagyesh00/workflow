@@ -177,4 +177,36 @@ describe('Databricks credential test', () => {
     expect(result.status).toBe('Error');
     expect(fake.requests).toEqual([]);
   });
+
+  it('user grant with an expired token on an http host: no refresh goes out', async () => {
+    const { client, tenant, credential } = await setup();
+    await server.ctx.credentials.saveData(tenant.id, credential.id, {
+      ...data(),
+      oauthTokenData: {
+        access_token: 'old-access',
+        refresh_token: 'stored-refresh',
+        expires_at: Date.now() - 60_000,
+      },
+    });
+    const withStored = (extra: Record<string, unknown>) =>
+      client.data(
+        client.post('/rest/credentials/test', {
+          id: credential.id,
+          type: 'databricksOAuth2Api',
+          data: data(extra),
+        }),
+      );
+    // on the https host the same stored token does refresh: this is the path the http host must not take
+    expect(await withStored({})).toMatchObject({ status: 'OK' });
+    expect(fake.requests[0]?.url).toBe(`${HOST}/oidc/v1/token`);
+    expect(fake.requests[0]?.body).toMatchObject({ refresh_token: 'stored-refresh' });
+
+    fake.requests.length = 0;
+    const refused = await withStored({ host: HTTP_HOST });
+    expect(refused.status).toBe('Error');
+    expect(refused.message).toContain('https');
+    const unflagged = await withStored({ host: HTTP_HOST, httpsOnlyTokenUrl: 'false' });
+    expect(unflagged.status).toBe('Error');
+    expect(fake.requests).toEqual([]);
+  });
 });

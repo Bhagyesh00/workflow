@@ -31,6 +31,14 @@ async function send(fake: FakeHttpClient, data: DataObject, url = `${HOST}/api/2
   return authed;
 }
 
+describe('databricksOAuth2Api type', () => {
+  it('shows a brand icon and fixes the token URL to https', () => {
+    expect(databricksOAuth2Api.icon).toBe('simple:databricks');
+    const flag = databricksOAuth2Api.properties.find((p) => p.name === 'httpsOnlyTokenUrl');
+    expect(flag).toMatchObject({ type: 'hidden', default: 'true' });
+  });
+});
+
 describe('databricksOAuth2Api client credentials', () => {
   it('gets a token with the client in the Basic header and sends it as a bearer', async () => {
     const fake = tokenHost();
