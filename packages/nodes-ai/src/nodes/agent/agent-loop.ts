@@ -15,7 +15,6 @@ import {
   type AiChatRequest,
   type AiChatResponse,
   type AiContentPart,
-  type AiImagePart,
   type AiOutputParser,
   type AiTool,
   type DataObject,
@@ -62,7 +61,12 @@ export interface AgentRunOptions {
   outputParser?: AiOutputParser;
   systemMessage: string;
   input: string;
-  images?: AiImagePart[];
+  /** images, PDFs and text files that go to the model after the prompt text */
+  attachments?: AiContentPart[];
+  /** answers the turn when `model` fails; same tools and messages */
+  fallbackModel?: AiChatModel;
+  /** the first model call of the run must call a tool */
+  forceToolCallOnFirstIteration?: boolean;
   maxIterations: number;
   /**
    * send answer text through `onChunk`: plain text deltas while the model generates them, or the
@@ -107,8 +111,8 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
 
   let system = options.systemMessage.trim();
   if (outputParser) system = `${system}\n\n${outputParser.getFormatInstructions()}`.trim();
-  const userContent: AiChatMessage['content'] = options.images?.length
-    ? ([{ type: 'text', text: options.input }, ...options.images] as AiContentPart[])
+  const userContent: AiChatMessage['content'] = options.attachments?.length
+    ? ([{ type: 'text', text: options.input }, ...options.attachments] as AiContentPart[])
     : options.input;
   const messages: AiChatMessage[] = [
     ...(system ? [{ role: 'system' as const, content: system }] : []),
@@ -116,23 +120,42 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     { role: 'user', content: userContent },
   ];
 
-  const caps = capabilitiesOf(model);
   const wantsSchema = Boolean(outputParser?.schema);
-  const nativeSchema = wantsSchema && (tools.length ? caps.structuredOutputWithTools : caps.structuredOutput);
-  const responseFormat: AiChatRequest['responseFormat'] = nativeSchema
-    ? { type: 'json', schema: outputParser!.schema }
-    : undefined;
+  /** the native response format, when this model can combine it with the agent's tools */
+  const responseFormatFor = (m: AiChatModel): AiChatRequest['responseFormat'] => {
+    const caps = capabilitiesOf(m);
+    const native = wantsSchema && (tools.length ? caps.structuredOutputWithTools : caps.structuredOutput);
+    return native ? { type: 'json', schema: outputParser!.schema } : undefined;
+  };
 
   const usage: AgentUsage = { inputTokens: 0, outputTokens: 0, modelCalls: 0, toolCalls: 0 };
   const steps: AgentStep[] = [];
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
-  const streaming = Boolean(options.streaming && model.stream && options.onChunk);
+  const wantsStream = Boolean(options.streaming && options.onChunk);
+  let streamed = false;
+
+  const invoke = (m: AiChatModel, request: AiChatRequest): Promise<AiChatResponse> => {
+    if (wantsStream && m.stream) {
+      streamed = true;
+      return m.stream(request, (delta) => options.onChunk!(delta));
+    }
+    return m.chat(request);
+  };
 
   const callModel = async (request: AiChatRequest): Promise<AiChatResponse> => {
     if (options.signal?.aborted) throw options.signal.reason;
-    const response = streaming
-      ? await model.stream!(request, (delta) => options.onChunk!(delta))
-      : await model.chat(request);
+    let response: AiChatResponse;
+    try {
+      response = await invoke(model, { ...request, responseFormat: responseFormatFor(model) });
+    } catch (error) {
+      // a cancelled run is not a model failure
+      if (!options.fallbackModel || options.signal?.aborted) throw error;
+      options.logger?.warn('Agent model call failed, using the fallback model');
+      response = await invoke(options.fallbackModel, {
+        ...request,
+        responseFormat: responseFormatFor(options.fallbackModel),
+      });
+    }
     usage.modelCalls++;
     usage.inputTokens += response.usage?.inputTokens ?? 0;
     usage.outputTokens += response.usage?.outputTokens ?? 0;
@@ -203,15 +226,17 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     : undefined;
   // the output-parser retry gets its own iteration budget
   let iterations = 0;
+  let forceTool = Boolean(options.forceToolCallOnFirstIteration && modelTools);
   const answer = async (): Promise<string> => {
     while (iterations < options.maxIterations) {
       iterations++;
       const response = await callModel({
         messages,
         tools: modelTools,
-        responseFormat,
+        ...(forceTool ? { toolChoice: 'any' as const } : {}),
         signal: options.signal,
       });
+      forceTool = false;
       messages.push(response.message);
       const calls = response.message.toolCalls ?? [];
       if (!calls.length) return messageText(response.message.content);
@@ -219,7 +244,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
       messages.push(...results);
     }
     throw fail(
-      `The agent stopped after ${options.maxIterations} iterations without a final answer`,
+      `Max iterations (${options.maxIterations}) reached. The agent could not complete the task within the allowed number of iterations.`,
       'AI_MAX_ITERATIONS',
       'Raise "Max Iterations" in the options, or make the tool descriptions clearer so the agent needs fewer steps.',
     );
@@ -249,7 +274,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
   }
 
   // a model that cannot stream still answers a streaming caller, in one chunk
-  if (options.streaming && !streaming) options.onChunk?.(finalText);
+  if (wantsStream && !streamed) options.onChunk?.(finalText);
 
   // memory is written only after the whole run succeeded (no half-finished exchanges)
   if (memory && sessionId) {

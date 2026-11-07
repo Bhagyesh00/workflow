@@ -129,7 +129,9 @@ describe('AI Agent', () => {
     const r = await run(wf.nodes, wf.connections, { triggerItems: chat('loop') });
     expect(r.status).toBe('error');
     expect(r.error?.code).toBe('AI_MAX_ITERATIONS');
-    expect(r.error?.message).toContain('3 iterations');
+    expect(r.error?.message).toContain(
+      'Max iterations (3) reached. The agent could not complete the task within the allowed number of iterations.',
+    );
     expect(modelRequests.get('Model')).toHaveLength(3);
   });
 
@@ -158,7 +160,7 @@ describe('AI Agent', () => {
     const r = await run(wf.nodes, wf.connections, { triggerItems: chat('What is my name?') });
     expect(r.output('Agent')).toEqual([{ output: 'Your name is Ada.' }]);
     expect(requests[0].messages.map((m) => [m.role, m.content])).toEqual([
-      ['system', 'You are a helpful assistant.'],
+      ['system', 'You are a helpful assistant'],
       ['user', 'My name is Ada'],
       ['assistant', 'Nice to meet you, Ada.'],
       ['user', 'What is my name?'],
@@ -196,7 +198,7 @@ describe('AI Agent', () => {
     const requests = scriptModel('Model', ['ok']);
     await run(wf.nodes, wf.connections, { triggerItems: chat('next') });
     expect(requests[0].messages.map((m) => m.content)).toEqual([
-      'You are a helpful assistant.',
+      'You are a helpful assistant',
       'my key is [redacted]',
       'Stored.',
       'next',
@@ -264,7 +266,7 @@ describe('AI Agent', () => {
     const auto = agentWorkflow();
     const failed = await run(auto.nodes, auto.connections, { triggerItems: [{ json: { body: 'abc' } }] });
     expect(failed.status).toBe('error');
-    expect(failed.error?.message).toContain('chatInput');
+    expect(failed.error?.message).toContain('No prompt specified');
   });
 
   it('requires a chat model', async () => {
