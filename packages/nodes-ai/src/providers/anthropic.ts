@@ -6,11 +6,14 @@
  * - Assistant turns produced in this run are replayed with their original content blocks
  *   (thinking blocks and signatures included), as the API requires inside a tool loop.
  * - Structured output uses `output_config.format` (`json_schema`).
- * - `temperature` is not sent: API version 2026-10-21 rejects it. `top_p` and `top_k` are sent only
- *   when the user sets them on the node. Depth is controlled with `output_config.effort`.
- * - Extended thinking (`thinking: { type: 'enabled', budget_tokens }` or `{ type: 'adaptive' }`) is
- *   sent only when switched on. The API refuses a forced tool choice and a `max_tokens` at or below
- *   the budget with thinking on, so the forced choice is left out and `max_tokens` is lifted above it.
+ * - `temperature` is not sent: API version 2026-10-21 rejects it. Depth is controlled with
+ *   `output_config.effort`.
+ * - `top_p` and `top_k` also give a 400 on that version, so a call that carries them goes out on
+ *   2023-06-01. See `anthropicSampling` for when they are sent.
+ * - Extended thinking (`thinking: { type: 'adaptive' }`, or `{ type: 'enabled', budget_tokens }` for
+ *   older models) is sent only when switched on. The API refuses a forced tool choice and a
+ *   `max_tokens` at or below the budget with thinking on, so the forced choice is left out and
+ *   `max_tokens` is lifted above it. A few models refuse a forced choice at all times.
  */
 import type {
   AiChatMessage,
@@ -46,6 +49,44 @@ const SERVER_FALLBACK_MODELS = new Set([
 ]);
 const SERVER_FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 
+/** models that answer a forced `tool_choice` with a 400, whatever the thinking setting */
+const NO_FORCED_TOOL_CHOICE = new Set([
+  'claude-fable-5-1',
+  'claude-mythos-5-1',
+  'claude-opus-5-5',
+  'claude-sonnet-5-5',
+]);
+
+/** the last API version that takes `top_p` and `top_k`; used only for the calls that send them */
+const ANTHROPIC_SAMPLING_API_VERSION = '2023-06-01';
+
+/** Gateway ids that are no Claude name pass; Claude models from Opus 4.7 on refuse sampling values. */
+function modelAcceptsSampling(model: string): boolean {
+  if (!model.startsWith('claude-')) return true;
+  if (/^claude-(2|instant|3|sonnet-4|haiku-4)/.test(model)) return true;
+  return /^claude-opus-4(-[0-6])?(-\d{8})?$/.test(model);
+}
+
+/**
+ * The `top_p` and `top_k` fields of a call and the API version it goes out on. They are sent only when
+ * the user set them, thinking is off and the model takes them; everywhere else they are left out with
+ * no error and the call stays on the current version.
+ */
+export function anthropicSampling(config: Pick<AnthropicChatConfig, 'model' | 'thinking' | 'topK' | 'topP'>): {
+  fields: DataObject;
+  version: string;
+} {
+  const fields: DataObject = {};
+  if (config.thinking !== true && modelAcceptsSampling(config.model)) {
+    if (config.topP !== undefined) fields.top_p = config.topP;
+    if (config.topK !== undefined && config.topK >= 0) fields.top_k = Math.floor(config.topK);
+  }
+  return {
+    fields,
+    version: Object.keys(fields).length ? ANTHROPIC_SAMPLING_API_VERSION : ANTHROPIC_API_VERSION,
+  };
+}
+
 /** HTTP status a stream `error` event stands for (the status line is already 200 by then) */
 const ANTHROPIC_STREAM_STATUS: Record<string, number> = {
   overloaded_error: 529,
@@ -59,7 +100,7 @@ export interface AnthropicChatConfig {
   model: string;
   maxTokens: number;
   effort?: string;
-  /** extended thinking on; 'adaptive' lets the model size it, 'budget' uses `thinkingBudget` */
+  /** extended thinking on; 'adaptive' (the default) lets the model size it, 'budget' uses `thinkingBudget` */
   thinking?: boolean;
   thinkingMode?: 'budget' | 'adaptive';
   thinkingBudget?: number;
@@ -151,7 +192,7 @@ export function anthropicRequestBody(
     .join('\n\n');
   const thinkingOn = config.thinking === true;
   const budget = Math.max(1024, Math.floor(config.thinkingBudget ?? 1024));
-  const adaptive = thinkingOn && config.thinkingMode === 'adaptive';
+  const adaptive = thinkingOn && config.thinkingMode !== 'budget';
   let maxTokens = request.maxTokens ?? config.maxTokens;
   if (thinkingOn && !adaptive && maxTokens <= budget) maxTokens = budget + 1024;
   const body: DataObject = {
@@ -159,7 +200,8 @@ export function anthropicRequestBody(
     max_tokens: maxTokens,
     messages: toAnthropicMessages(request.messages, cache),
   };
-  const headers: Record<string, string> = { 'anthropic-version': ANTHROPIC_API_VERSION };
+  const sampling = anthropicSampling(config);
+  const headers: Record<string, string> = { 'anthropic-version': sampling.version };
   if (system) body.system = system;
   if (request.tools?.length) {
     body.tools = request.tools.map((t) => ({
@@ -167,11 +209,12 @@ export function anthropicRequestBody(
       description: t.description,
       input_schema: { type: 'object', ...t.parameters },
     }));
-    if (request.toolChoice === 'any' && !thinkingOn) body.tool_choice = { type: 'any' };
+    if (request.toolChoice === 'any' && !thinkingOn && !NO_FORCED_TOOL_CHOICE.has(config.model)) {
+      body.tool_choice = { type: 'any' };
+    }
   }
   if (thinkingOn) body.thinking = adaptive ? { type: 'adaptive' } : { type: 'enabled', budget_tokens: budget };
-  if (config.topP !== undefined) body.top_p = config.topP;
-  if (config.topK !== undefined && config.topK >= 0) body.top_k = Math.floor(config.topK);
+  Object.assign(body, sampling.fields);
   const outputConfig: DataObject = {};
   if (request.responseFormat?.type === 'json' && request.responseFormat.schema) {
     const schema = toAnthropicSchema(request.responseFormat.schema);

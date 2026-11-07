@@ -50,17 +50,19 @@ export const LmChatAnthropicNode: NodeType = {
             name: 'thinking',
             type: 'boolean',
             default: false,
-            description: 'Whether the model reasons before it answers. A forced tool call is not sent while this is on.',
+            description:
+              'Whether the model reasons before it answers. A forced tool call is not sent while this is on.',
           },
           {
             displayName: 'Thinking Mode',
             name: 'thinkingMode',
             type: 'options',
-            default: 'budget',
+            default: 'adaptive',
             displayOptions: { show: { thinking: [true] } },
+            description: 'Adaptive lets the model size its thinking. Fixed Budget is for older models, such as Haiku 4.5.',
             options: [
-              { name: 'Fixed Budget', value: 'budget' },
               { name: 'Adaptive', value: 'adaptive' },
+              { name: 'Fixed Budget', value: 'budget' },
             ],
           },
           {
@@ -109,7 +111,7 @@ export const LmChatAnthropicNode: NodeType = {
       },
       {
         displayName:
-          'Temperature is fixed by the current Anthropic API version; use Effort to trade depth for speed.',
+          'Temperature is fixed by the current Anthropic API version; use Effort to trade depth for speed. Top K and Top P are sent only to older models that still take them (Opus 4.6, Sonnet 4 and Haiku 4 families and before) with Extended Thinking off; otherwise they are left out.',
         name: 'samplingNotice',
         type: 'notice',
         default: '',
@@ -126,7 +128,7 @@ export const LmChatAnthropicNode: NodeType = {
       maxTokens: common.maxTokens ?? 16_000,
       effort: options.effort as string | undefined,
       thinking: options.thinking === true,
-      thinkingMode: options.thinkingMode === 'adaptive' ? 'adaptive' : 'budget',
+      thinkingMode: options.thinkingMode === 'budget' ? 'budget' : 'adaptive',
       thinkingBudget: options.thinkingBudget as number | undefined,
       topK: options.topK as number | undefined,
       topP: options.topP as number | undefined,
