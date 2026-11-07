@@ -1,4 +1,4 @@
-/** Model pickers of vendor nodes. L1 fills it; the signature is final. */
+/** Model pickers of vendor nodes. */
 import type { ListSearchResult, LoadOptionsContext } from '@workflow/workflow';
 
 /**
@@ -6,8 +6,22 @@ import type { ListSearchResult, LoadOptionsContext } from '@workflow/workflow';
  * as results named by `name` (else the id) with the id as value.
  */
 export function modelListSearch(
-  _list: (ctx: LoadOptionsContext) => Promise<Array<{ id: string; name?: string }>>,
-  _keep?: (id: string) => boolean,
+  list: (ctx: LoadOptionsContext) => Promise<Array<{ id: string; name?: string }>>,
+  keep?: (id: string) => boolean,
 ): (ctx: LoadOptionsContext, filter?: string) => Promise<ListSearchResult> {
-  throw new Error('not implemented (L1)');
+  return async (ctx, filter) => {
+    const needle = filter?.trim().toLowerCase() ?? '';
+    const seen = new Set<string>();
+    const results: ListSearchResult['results'] = [];
+    for (const model of await list(ctx)) {
+      if (seen.has(model.id) || (keep && !keep(model.id))) continue;
+      const name = model.name || model.id;
+      if (needle && !name.toLowerCase().includes(needle) && !model.id.toLowerCase().includes(needle)) {
+        continue;
+      }
+      seen.add(model.id);
+      results.push({ name, value: model.id });
+    }
+    return { results };
+  };
 }
