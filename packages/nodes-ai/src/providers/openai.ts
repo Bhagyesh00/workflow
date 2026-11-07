@@ -38,6 +38,14 @@ export interface OpenAiChatConfig {
   presencePenalty?: number;
   reasoningEffort?: string;
   extraHeaders?: Record<string, string>;
+  /** path after `baseUrl`, default `/chat/completions` (Azure classic has its own) */
+  chatPath?: string;
+  /** query string of the chat call, such as Azure's `api-version`; never put a secret here */
+  query?: Record<string, string>;
+  /** ask for usage on a stream with `stream_options`, default true (Mistral may reject the field) */
+  streamUsage?: boolean;
+  /** extra body fields, merged last: they win on a collision */
+  extraBody?: DataObject;
 }
 
 export function toOpenAiMessages(messages: AiChatMessage[]): DataObject[] {
@@ -49,11 +57,14 @@ export function toOpenAiMessages(messages: AiChatMessage[]): DataObject[] {
         if (typeof m.content === 'string') return { role: 'user', content: m.content };
         return {
           role: 'user',
-          content: m.content.map((p) =>
-            p.type === 'text'
-              ? { type: 'text', text: p.text }
-              : { type: 'image_url', image_url: { url: `data:${p.mimeType};base64,${p.data}` } },
-          ),
+          content: m.content.map((p) => {
+            if (p.type === 'text') return { type: 'text', text: p.text };
+            const dataUrl = `data:${p.mimeType};base64,${p.data}`;
+            if (p.type === 'file') {
+              return { type: 'file', file: { filename: p.fileName ?? 'file', file_data: dataUrl } };
+            }
+            return { type: 'image_url', image_url: { url: dataUrl } };
+          }),
         };
       case 'assistant': {
         const text = messageText(m.content);
@@ -93,6 +104,7 @@ export function openAiChatBody(
       type: 'function',
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }));
+    if (request.toolChoice === 'any') body.tool_choice = 'required';
   }
   const format = request.responseFormat;
   if (format?.type === 'json' && config.responseFormatMode !== 'none') {
@@ -115,9 +127,19 @@ export function openAiChatBody(
   if (config.reasoningEffort) body.reasoning_effort = config.reasoningEffort;
   if (stream) {
     body.stream = true;
-    body.stream_options = { include_usage: true };
+    if (config.streamUsage !== false) body.stream_options = { include_usage: true };
   }
-  return body;
+  return config.extraBody ? { ...body, ...config.extraBody } : body;
+}
+
+/** The answer in `content`: a string, or an array where only `text` blocks count (Magistral thinking does not). */
+function contentText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text as string)
+    .join('');
 }
 
 function parseArguments(raw: unknown): DataObject {
@@ -143,10 +165,11 @@ export function parseOpenAiResponse(body: unknown): AiChatResponse {
   const choice = b.choices?.[0];
   if (!choice)
     throw new Error(`The model returned no choices${b.error?.message ? `: ${b.error.message}` : ''}`);
-  if (choice.finish_reason === 'content_filter' && !choice.message?.content) {
+  const message = choice.message ?? {};
+  const text = contentText(message.content);
+  if (choice.finish_reason === 'content_filter' && !text) {
     throw new ModelRefusalError('The model provider blocked the response (content filter)');
   }
-  const message = choice.message ?? {};
   if (message.refusal) throw new ModelRefusalError(`The model declined to answer: ${message.refusal}`);
   const toolCalls: AiToolCall[] = (message.tool_calls ?? [])
     .filter((c: any) => c?.function?.name)
@@ -158,7 +181,7 @@ export function parseOpenAiResponse(body: unknown): AiChatResponse {
   return {
     message: {
       role: 'assistant',
-      content: typeof message.content === 'string' ? message.content : '',
+      content: text,
       ...(toolCalls.length ? { toolCalls } : {}),
     },
     usage: b.usage
@@ -207,9 +230,10 @@ export function openAiStreamParser(onDelta: (text: string) => void): ChatStreamP
       const choice = json.choices?.[0];
       if (!choice) return;
       const delta = choice.delta ?? {};
-      if (typeof delta.content === 'string' && delta.content) {
-        content += delta.content;
-        onDelta(delta.content);
+      const text = contentText(delta.content);
+      if (text) {
+        content += text;
+        onDelta(text);
       }
       if (typeof delta.refusal === 'string') refusal += delta.refusal;
       for (const tc of delta.tool_calls ?? []) {
@@ -258,9 +282,10 @@ export function openAiAdapter(config: OpenAiChatConfig): ChatAdapter {
     credentialType: config.credentialType,
     capabilities,
     buildRequest: (request, stream) => ({
-      url: `${trimSlash(config.baseUrl)}/chat/completions`,
+      url: `${trimSlash(config.baseUrl)}/${(config.chatPath ?? 'chat/completions').replace(/^\/+/, '')}`,
       method: 'POST',
       headers: { accept: stream ? 'text/event-stream' : 'application/json', ...(config.extraHeaders ?? {}) },
+      ...(config.query ? { qs: config.query } : {}),
       body: openAiChatBody(request, config, stream),
     }),
     parseResponse: parseOpenAiResponse,

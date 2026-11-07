@@ -2,10 +2,13 @@
  * Credential types for AI providers. Test requests list models; URLs and header values in
  * `test.request` are templates over `$credentials`, resolved like generic authentication.
  */
-import type { CredentialType, DataObject, HttpRequestOptions } from '@workflow/workflow';
+import type { CredentialType, DataObject, HttpRequestOptions, NodeProperty } from '@workflow/workflow';
 import { ANTHROPIC_API_VERSION, ANTHROPIC_DEFAULT_BASE_URL } from '../providers/anthropic';
 import { GEMINI_DEFAULT_HOST } from '../providers/gemini';
 import { OLLAMA_DEFAULT_BASE_URL } from '../providers/ollama';
+import { azureEntraCognitiveServicesOAuth2Api, azureOpenAiApi } from './azure.credentials';
+import { googleVertexAiApi } from './google-vertex.credentials';
+import { modelCredentials } from './models.credentials';
 
 const apiKey = (required = true) => ({
   displayName: 'API Key',
@@ -25,6 +28,39 @@ const optionalBearer = async (credentials: DataObject, request: HttpRequestOptio
   credentials.apiKey
     ? withHeaders(request, { authorization: `Bearer ${String(credentials.apiKey)}` })
     : request;
+
+/** "Add Custom Header": sent on every request of the credential, and wins over its other headers */
+const customHeaderProperties: NodeProperty[] = [
+  {
+    displayName: 'Add Custom Header',
+    name: 'header',
+    type: 'boolean',
+    default: false,
+    description: 'Whether to send one more header on every request, for a proxy or gateway',
+  },
+  {
+    displayName: 'Header Name',
+    name: 'headerName',
+    type: 'string',
+    default: '',
+    displayOptions: { show: { header: [true] } },
+  },
+  {
+    displayName: 'Header Value',
+    name: 'headerValue',
+    type: 'string',
+    default: '',
+    typeOptions: { password: true },
+    displayOptions: { show: { header: [true] } },
+  },
+];
+
+function customHeader(credentials: DataObject): Record<string, string> {
+  const name = String(credentials.headerName ?? '')
+    .trim()
+    .toLowerCase();
+  return credentials.header === true && name ? { [name]: String(credentials.headerValue ?? '') } : {};
+}
 
 export const openAiApi: CredentialType = {
   name: 'openAiApi',
@@ -47,11 +83,13 @@ export const openAiApi: CredentialType = {
       default: 'https://api.openai.com/v1',
       description: 'Change only for a proxy or an Azure / gateway endpoint that speaks the OpenAI API',
     },
+    ...customHeaderProperties,
   ],
   authenticate: async (credentials, request) =>
     withHeaders(request, {
       authorization: `Bearer ${String(credentials.apiKey ?? '')}`,
       ...(credentials.organization ? { 'openai-organization': String(credentials.organization) } : {}),
+      ...customHeader(credentials),
     }),
   test: { request: { url: '={{$credentials.baseUrl}}/models' } },
 };
@@ -70,8 +108,10 @@ export const anthropicApi: CredentialType = {
       default: ANTHROPIC_DEFAULT_BASE_URL,
       description: 'Change only for a proxy or gateway in front of the Claude API',
     },
+    ...customHeaderProperties,
   ],
-  authenticate: { type: 'generic', properties: { headers: { 'x-api-key': '={{$credentials.apiKey}}' } } },
+  authenticate: async (credentials, request) =>
+    withHeaders(request, { 'x-api-key': String(credentials.apiKey ?? ''), ...customHeader(credentials) }),
   test: {
     request: {
       url: '={{$credentials.baseUrl}}/v1/models',
@@ -170,4 +210,8 @@ export const aiCredentials: CredentialType[] = [
   ollamaApi,
   openAiCompatibleApi,
   qdrantApi,
+  ...modelCredentials,
+  azureOpenAiApi,
+  azureEntraCognitiveServicesOAuth2Api,
+  googleVertexAiApi,
 ];

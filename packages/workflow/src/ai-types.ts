@@ -19,7 +19,15 @@ export interface AiImagePart {
   mimeType: string;
 }
 
-export type AiContentPart = AiTextPart | AiImagePart;
+export interface AiFilePart {
+  type: 'file';
+  /** base64 without data: prefix */
+  data: string;
+  mimeType: string;
+  fileName?: string;
+}
+
+export type AiContentPart = AiTextPart | AiImagePart | AiFilePart;
 
 export interface AiToolCall {
   id: string;
@@ -53,6 +61,8 @@ export interface AiUsage {
 export interface AiChatRequest {
   messages: AiChatMessage[];
   tools?: AiToolDefinition[];
+  /** 'any': the model must call one of `tools` */
+  toolChoice?: 'any';
   /** force JSON output (structured output parsers) */
   responseFormat?: { type: 'text' } | { type: 'json'; schema?: JsonSchema };
   temperature?: number;
@@ -72,6 +82,10 @@ export interface AiChatModel {
   readonly kind: 'chatModel';
   readonly provider: string;
   readonly model: string;
+  /** a completion-only model: it takes a prompt and has no chat or tool calls */
+  completion?: boolean;
+  /** name of the sub-node that supplied this model */
+  nodeName?: string;
   chat(request: AiChatRequest): Promise<AiChatResponse>;
   /** optional token streaming; yields text deltas and resolves with the final response */
   stream?(request: AiChatRequest, onDelta: (text: string) => void): Promise<AiChatResponse>;
@@ -79,7 +93,9 @@ export interface AiChatModel {
 
 export interface AiTool extends AiToolDefinition {
   readonly kind: 'tool';
-  invoke(args: DataObject, options?: { signal?: AbortSignal }): Promise<unknown>;
+  /** the tool can stop the run to wait (it may throw `ToolSuspension`) */
+  canWait?: boolean;
+  invoke(args: DataObject, options?: { signal?: AbortSignal; toolCallId?: string }): Promise<unknown>;
 }
 
 export interface AiMemory {

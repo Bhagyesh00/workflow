@@ -10,8 +10,11 @@ import {
   smtp,
   telegramApi,
 } from './credentials/apps.credentials';
+import { aws, awsAssumeRole } from './credentials/aws.credentials';
+import { databricksOAuth2Api } from './credentials/databricks.credentials';
 import { httpDigestAuth } from './credentials/digest.credentials';
 import { ftp, sftp } from './credentials/ftp.credentials';
+import { googleApi } from './credentials/google.credentials';
 import {
   httpBasicAuth,
   httpBearerAuth,
@@ -214,6 +217,10 @@ export const credentials: CredentialType[] = [
   rabbitmq,
   mqtt,
   amqp,
+  aws,
+  awsAssumeRole,
+  googleApi,
+  databricksOAuth2Api,
 ];
 
 export const nodesBasePackage: NodePackage = { name: '@workflow/nodes-base', nodes, credentials };

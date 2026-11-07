@@ -5,6 +5,7 @@
  */
 import { DateTime } from 'luxon';
 import { ExpressionError } from '../errors';
+import { fromAiValue } from '../from-ai';
 import type {
   DataObject,
   ExecuteData,
@@ -228,6 +229,10 @@ export function createDataProxy(ctx: ExpressionDataContext): Record<string, unkn
     }),
   });
 
+  // outside a tool it reads the current item; a tool context's `extra` binds it to the call's arguments
+  const $fromAI = (key: unknown, description?: unknown, type?: unknown, defaultValue?: unknown) =>
+    fromAiValue(item?.json, key, description, type, defaultValue);
+
   return {
     $json: item?.json,
     $binary: item?.binary,
@@ -250,6 +255,9 @@ export function createDataProxy(ctx: ExpressionDataContext): Record<string, unkn
     $vars: vars,
     $execution,
     $workflow: Object.freeze({ id: ctx.workflow.id, name: ctx.workflow.name, active: ctx.workflow.active }),
+    $fromAI,
+    $fromAi: $fromAI,
+    $fromai: $fromAI,
     ...(ctx.extra ?? {}),
   };
 }

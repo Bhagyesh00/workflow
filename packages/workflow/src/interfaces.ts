@@ -5,6 +5,7 @@
  * The workflow JSON shape (nodes keyed by name in `connections`) is intentionally close to the
  * de-facto format used by node-graph automation tools so that imported workflows map cleanly.
  */
+import type { ToolSuspensionState } from './tool-suspension';
 
 // ---------------------------------------------------------------------------------------------
 // Generic data
@@ -211,7 +212,8 @@ export type NodePropertyType =
   | 'filter'
   | 'assignmentCollection'
   | 'code'
-  | 'button';
+  | 'button'
+  | 'resourceMapper';
 
 export interface DisplayOptions {
   /** parameter name -> allowed values. `@version` matches node typeVersion. `/name` = root-level param */
@@ -271,6 +273,46 @@ export interface NodePropertyTypeOptions {
   loadOptionsMethod?: string;
   loadOptionsDependsOn?: string[];
   alwaysOpenEditWindow?: boolean;
+  /** for `resourceMapper`; `resourceMapperMethod` names a `methods.resourceMapping` entry */
+  resourceMapper?: {
+    resourceMapperMethod: string;
+    mode: 'add' | 'update' | 'upsert' | 'map';
+    valuesLabel?: string;
+    fieldWords?: { singular: string; plural: string };
+    addAllFields?: boolean;
+    multiKeyMatch?: boolean;
+    supportAutoMap?: boolean;
+    noFieldsError?: string;
+  };
+}
+
+/** one column or field a `resourceMapper` parameter can map */
+export interface ResourceMapperField {
+  id: string;
+  displayName: string;
+  required: boolean;
+  defaultMatch: boolean;
+  display: boolean;
+  type?: 'string' | 'number' | 'boolean' | 'dateTime' | 'array' | 'object' | 'options';
+  canBeUsedToMatch?: boolean;
+  removed?: boolean;
+  readOnly?: boolean;
+  options?: NodePropertyOption[];
+}
+
+export interface ResourceMapperFields {
+  fields: ResourceMapperField[];
+  emptyFieldsNotice?: string;
+}
+
+/** the stored value of a `resourceMapper` parameter */
+export interface ResourceMapperValue {
+  mappingMode: 'defineBelow' | 'autoMapInputData';
+  value: DataObject | null;
+  matchingColumns: string[];
+  schema: ResourceMapperField[];
+  attemptToConvertTypes: boolean;
+  convertFieldsToString: boolean;
 }
 
 export interface NodeProperty {
@@ -298,6 +340,8 @@ export interface NodeInputConfig {
   displayName?: string;
   required?: boolean;
   maxConnections?: number;
+  /** which node types may connect here */
+  filter?: { excludedNodes?: string[]; nodes?: string[] };
 }
 
 export interface NodeOutputConfig {
@@ -305,6 +349,8 @@ export interface NodeOutputConfig {
   displayName?: string;
   /** visual category, e.g. error output */
   category?: 'error';
+  /** which node types may connect here */
+  filter?: { nodes: string[] };
 }
 
 export interface NodeCredentialDescription {
@@ -432,8 +478,8 @@ export interface NodeTypeDescription {
   hidden?: boolean;
   /** max instances per workflow */
   maxNodes?: number;
-  /** may be attached to an AI agent as a tool */
-  usableAsTool?: boolean;
+  /** may be attached to an AI agent as a tool; `replacements` overrides parts of the tool variant's description */
+  usableAsTool?: boolean | { replacements: Partial<NodeTypeDescription> };
   documentationUrl?: string;
   /** shown on the trigger panel while waiting for a test event */
   eventTriggerDescription?: string;
@@ -460,6 +506,59 @@ export interface CredentialTestRequest {
   rules?: Array<{ type: 'responseCode'; value: number; message: string }>;
 }
 
+export interface AwsSignInput {
+  method: string;
+  url: string;
+  /** signed as given, besides host and x-amz-date */
+  headers?: Record<string, string>;
+  body?: string | Uint8Array;
+  region: string;
+  service: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+  /** default: now */
+  date?: Date;
+}
+
+export interface AwsSignResult {
+  /** the given headers plus x-amz-date, authorization and, with a session token, x-amz-security-token */
+  headers: Record<string, string>;
+}
+
+export interface JwtBearerInput {
+  email: string;
+  privateKey: string;
+  scopes: string[];
+  tokenUrl?: string;
+  subject?: string;
+}
+
+export interface ClientCredentialsInput {
+  tokenUrl: string;
+  clientId: string;
+  clientSecret: string;
+  scope?: string;
+  resource?: string;
+  authentication?: 'header' | 'body';
+}
+
+export interface AccessToken {
+  token: string;
+  expiresInSeconds: number;
+}
+
+/** third argument of a function `authenticate`; built in core so credential types need no run-time core */
+export interface CredentialAuthHelpers {
+  /** the guarded client, with the credential's allowed domains on every call */
+  http<T = unknown>(request: HttpRequestOptions): Promise<T>;
+  signAwsV4(input: AwsSignInput): AwsSignResult;
+  jwtBearerToken(input: JwtBearerInput): Promise<AccessToken>;
+  clientCredentialsToken(input: ClientCredentialsInput): Promise<AccessToken>;
+  /** the token for `scope`, fetched once per secret and scope until it nears expiry */
+  cachedToken(secret: string, scope: string, fetch: () => Promise<AccessToken>): Promise<string>;
+}
+
 export interface CredentialType {
   name: string;
   displayName: string;
@@ -471,7 +570,11 @@ export interface CredentialType {
   /** values in headers/qs may use `={{$credentials.apiKey}}` */
   authenticate?:
     | GenericAuthentication
-    | ((credentials: DataObject, request: HttpRequestOptions) => Promise<HttpRequestOptions>);
+    | ((
+        credentials: DataObject,
+        request: HttpRequestOptions,
+        helpers?: CredentialAuthHelpers,
+      ) => Promise<HttpRequestOptions>);
   test?: CredentialTestRequest;
   /** e.g. exchange a key for a short-lived session token before requests */
   preAuthentication?: (credentials: DataObject) => Promise<DataObject>;
@@ -659,6 +762,8 @@ export interface ExecutionState {
     contextData: Record<string, DataObject>;
     /** inputs of the node that stopped the execution; enables "retry from failed node" */
     failedExecuteData?: ExecuteData;
+    /** the agent run stopped by a waiting tool */
+    suspended?: ToolSuspensionState;
   };
   /** ISO date when a waiting execution should resume */
   waitTill?: string;

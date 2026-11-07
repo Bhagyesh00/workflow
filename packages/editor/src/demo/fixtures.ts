@@ -7,6 +7,8 @@ import type {
   CredentialTypeDescription,
   NodeProperty,
   NodeTypeDescription,
+  ResourceMapperField,
+  ResourceMapperFields,
   WorkflowDefinition,
 } from '@workflow/workflow';
 
@@ -889,14 +891,11 @@ const agent: NodeTypeDescription = {
   description: 'Answers with a language model that can use tools and memory',
   icon: 'lucide:bot',
   group: ['transform'],
-  version: 1,
+  version: [1, 2],
   defaults: { name: 'AI Agent' },
-  inputs: [
-    'main',
-    { type: 'ai_languageModel', displayName: 'Chat Model', required: true, maxConnections: 1 },
-    { type: 'ai_memory', displayName: 'Memory', maxConnections: 1 },
-    { type: 'ai_tool', displayName: 'Tool' },
-  ],
+  // both options exist on version 2 only, so a demo Agent of version 1 keeps the four ports it always had
+  inputs:
+    "={{ ['main', { type: 'ai_languageModel', displayName: 'Chat Model', required: true, maxConnections: 1 }, ...($parameter.needsFallback === true ? [{ type: 'ai_languageModel', displayName: 'Fallback Model', required: true, maxConnections: 1 }] : []), { type: 'ai_memory', displayName: 'Memory', maxConnections: 1 }, { type: 'ai_tool', displayName: 'Tool' }, ...($parameter.hasOutputParser === true ? [{ type: 'ai_outputParser', displayName: 'Output Parser', maxConnections: 1 }] : [])] }}",
   outputs: ['main'],
   categories: ['AI', 'Agents'],
   properties: [
@@ -906,6 +905,20 @@ const agent: NodeTypeDescription = {
       type: 'string',
       default: '={{ $json.question }}',
       typeOptions: { rows: 3 },
+    },
+    {
+      displayName: 'Require Specific Output Format',
+      name: 'hasOutputParser',
+      type: 'boolean',
+      default: false,
+      displayOptions: { show: { '@version': [2] } },
+    },
+    {
+      displayName: 'Enable Fallback Model',
+      name: 'needsFallback',
+      type: 'boolean',
+      default: false,
+      displayOptions: { show: { '@version': [2] } },
     },
     {
       displayName: 'System message',
@@ -983,6 +996,124 @@ const calculator: NodeTypeDescription = {
   outputs: ['ai_tool'],
   categories: ['AI', 'Tools'],
   properties: [],
+};
+
+/** P5-10: what the tool variant of `core.httpRequest` looks like after `withToolVariants` on a real server. */
+const httpRequestTool: NodeTypeDescription = {
+  ...httpRequest,
+  name: 'core.httpRequestTool',
+  displayName: 'HTTP Request Tool',
+  inputs: [],
+  outputs: ['ai_tool'],
+  categories: ['AI', 'Tools', 'Other Tools'],
+  properties: [
+    {
+      displayName: 'Description',
+      name: 'toolDescription',
+      type: 'string',
+      required: true,
+      default: httpRequest.description,
+      typeOptions: { rows: 2 },
+      description:
+        'Explain to the LLM what this tool does, a good, specific description would allow LLMs to produce expected results much more often',
+    },
+    ...httpRequest.properties,
+  ],
+};
+
+/**
+ * P5-77: the Human review variant of a Slack node, by n8n's rule (webhooks plus a `sendAndWait` operation).
+ * The demo has no Slack credential type, so this one lists no credentials.
+ */
+const slackHitlTool: NodeTypeDescription = {
+  name: 'app.slackHitlTool',
+  displayName: 'Slack',
+  description: 'Request human approval for tools',
+  icon: 'simple:slack',
+  group: ['output'],
+  version: 1,
+  defaults: { name: 'Slack' },
+  subtitle: 'Send and wait',
+  inputs: [{ type: 'ai_tool', displayName: 'Tool', required: true }],
+  outputs: [
+    { type: 'ai_tool', displayName: 'Human review', filter: { nodes: ['ai.agent', 'ai.agentTool'] } },
+  ],
+  categories: ['AI', 'Tools', 'Human in the Loop'],
+  webhooks: (['GET', 'POST'] as const).map((httpMethod) => ({
+    name: 'default',
+    httpMethod,
+    path: 'answer',
+    isFullPath: false,
+    restartWebhook: true,
+    responseMode: 'onReceived',
+  })),
+  properties: [
+    { displayName: 'Resource', name: 'resource', type: 'hidden', default: 'message' },
+    { displayName: 'Operation', name: 'operation', type: 'hidden', default: 'sendAndWait' },
+    { displayName: 'Response Type', name: 'responseType', type: 'hidden', default: 'approval' },
+    { displayName: 'Channel', name: 'channel', type: 'string', required: true, default: '' },
+    {
+      displayName: 'Message',
+      name: 'message',
+      type: 'string',
+      required: true,
+      default: '=The agent wants to run this tool: {{ $tool.name }}\n\nInput:\n{{ $tool.parameters }}',
+      typeOptions: { rows: 4 },
+    },
+  ],
+};
+
+/** P5-80: the resource mapper control's demo. `demoResourceMapping` answers its method. */
+const resourceMapperDemo: NodeTypeDescription = {
+  name: 'demo.resourceMapper',
+  displayName: 'Resource Mapper Demo',
+  description: 'Maps input values to the columns of a demo table',
+  icon: 'lucide:columns-3',
+  group: ['transform'],
+  version: 1,
+  defaults: { name: 'Resource Mapper Demo' },
+  inputs: ['main'],
+  outputs: ['main'],
+  categories: ['Demo'],
+  properties: [
+    {
+      displayName: 'Table',
+      name: 'table',
+      type: 'options',
+      default: 'contacts',
+      options: [
+        { name: 'Contacts', value: 'contacts' },
+        { name: 'Deals', value: 'deals' },
+        { name: 'Empty table', value: 'empty' },
+      ],
+    },
+    {
+      displayName: 'Columns',
+      name: 'columns',
+      type: 'resourceMapper',
+      default: {
+        mappingMode: 'defineBelow',
+        value: null,
+        matchingColumns: [],
+        schema: [],
+        attemptToConvertTypes: false,
+        convertFieldsToString: false,
+      },
+      typeOptions: {
+        loadOptionsDependsOn: ['table'],
+        resourceMapper: {
+          resourceMapperMethod: 'getMappingFields',
+          mode: 'upsert',
+          valuesLabel: 'Values to send',
+          fieldWords: { singular: 'column', plural: 'columns' },
+          addAllFields: true,
+          multiKeyMatch: true,
+          supportAutoMap: true,
+          noFieldsError: 'This table has no columns',
+        },
+      },
+    },
+  ],
 };
 
 /** A test-only node that exercises every parameter type. Hidden from the node creator. */
@@ -1154,6 +1285,9 @@ export const demoNodeTypes: NodeTypeDescription[] = [
   chatModel,
   memory,
   calculator,
+  httpRequestTool,
+  slackHitlTool,
+  resourceMapperDemo,
   kitchenSink,
 ];
 
@@ -1298,6 +1432,58 @@ export const demoLoadOptions: Record<
           { name: 'Qualified', value: 'qualified' },
           { name: 'Won', value: 'won' },
         ],
+};
+
+type ResourceMappingLoader = (params: Record<string, unknown>) => ResourceMapperFields;
+
+const mapperField = (
+  id: string,
+  displayName: string,
+  type: ResourceMapperField['type'],
+  extra: Partial<ResourceMapperField> = {},
+): ResourceMapperField => ({
+  id,
+  displayName,
+  type,
+  required: false,
+  defaultMatch: false,
+  display: true,
+  ...extra,
+});
+
+/** POST /node-types/options, kind `resourceMapping`: the fields follow the node's `table` */
+export const demoResourceMapping: Record<string, ResourceMappingLoader> = {
+  getMappingFields: (params) => {
+    if (params.table === 'empty') return { fields: [], emptyFieldsNotice: 'This table has no columns yet' };
+    if (params.table === 'deals') {
+      return {
+        fields: [
+          mapperField('id', 'ID', 'number', { defaultMatch: true, canBeUsedToMatch: true, readOnly: true }),
+          mapperField('title', 'Title', 'string', { required: true }),
+          mapperField('stage', 'Stage', 'options', {
+            options: [
+              { name: 'Lead', value: 'lead' },
+              { name: 'Won', value: 'won' },
+            ],
+          }),
+          mapperField('closesAt', 'Closes at', 'dateTime'),
+        ],
+      };
+    }
+    return {
+      fields: [
+        mapperField('email', 'Email', 'string', {
+          required: true,
+          defaultMatch: true,
+          canBeUsedToMatch: true,
+        }),
+        mapperField('name', 'Name', 'string'),
+        mapperField('age', 'Age', 'number'),
+        mapperField('active', 'Active', 'boolean'),
+        mapperField('notes', 'Notes', 'string', { display: false }),
+      ],
+    };
+  },
 };
 
 export const demoContacts = Array.from({ length: 34 }, (_, i) => ({

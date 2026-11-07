@@ -119,6 +119,8 @@ const envSchema = z.object({
   NODE_IMAGE_MAX_INPUT_MB: int(25, 1),
   NODE_SHEET_MAX_CELLS: int(1_000_000, 1),
   NODE_REMOTE_FILE_MAX_MB: int(100, 1),
+  /** P5-78: the largest file the Agent passes on to its model, in bytes */
+  AI_AGENT_MAX_PASSTHROUGH_BINARY_SIZE_BYTES: int(52_428_800, 1),
   /** seconds a schedule slot may be late before it counts as missed (a node setting >= 1 replaces it) */
   SCHEDULE_MISFIRE_GRACE_S: int(60, 0),
   /** P3-17: turns the editor's autosave off (GET /settings autosaveEnabled) */
@@ -329,6 +331,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       maxImageInputBytes: e.NODE_IMAGE_MAX_INPUT_MB * MB,
       maxSpreadsheetCells: e.NODE_SHEET_MAX_CELLS,
       maxRemoteFileBytes: e.NODE_REMOTE_FILE_MAX_MB * MB,
+      maxPassthroughBinaryBytes: e.AI_AGENT_MAX_PASSTHROUGH_BINARY_SIZE_BYTES,
     },
     scheduleMisfireGraceS: e.SCHEDULE_MISFIRE_GRACE_S,
     autosaveDisabled: e.WORKFLOWS_AUTOSAVE_DISABLED,

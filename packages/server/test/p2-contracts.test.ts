@@ -39,6 +39,7 @@ describe('Phase 2 config', () => {
       maxImageInputBytes: 25 * MB,
       maxSpreadsheetCells: 1_000_000,
       maxRemoteFileBytes: 100 * MB,
+      maxPassthroughBinaryBytes: 52_428_800,
     });
     expect(config.scheduleMisfireGraceS).toBe(60);
   });
@@ -52,6 +53,7 @@ describe('Phase 2 config', () => {
       NODE_IMAGE_MAX_INPUT_MB: '2',
       NODE_SHEET_MAX_CELLS: '1000',
       NODE_REMOTE_FILE_MAX_MB: '7',
+      AI_AGENT_MAX_PASSTHROUGH_BINARY_SIZE_BYTES: '1024',
       SCHEDULE_MISFIRE_GRACE_S: '0',
     });
     expect(config.nodeLimits).toEqual({
@@ -61,6 +63,7 @@ describe('Phase 2 config', () => {
       maxImageInputBytes: 2 * MB,
       maxSpreadsheetCells: 1000,
       maxRemoteFileBytes: 7 * MB,
+      maxPassthroughBinaryBytes: 1024,
     });
     expect(config.scheduleMisfireGraceS).toBe(0);
   });

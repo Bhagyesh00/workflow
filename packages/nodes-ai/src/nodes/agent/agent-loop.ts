@@ -161,7 +161,10 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
       if (errors.length)
         throw new Error(`Invalid arguments for "${call.name}": ${formatSchemaErrors(errors)}`);
       const signal = withTimeout(options.signal, options.toolTimeoutMs);
-      const result = await raceSignal(tool.invoke(call.arguments ?? {}, { signal }), signal);
+      const result = await raceSignal(
+        tool.invoke(call.arguments ?? {}, { signal, toolCallId: call.id }),
+        signal,
+      );
       observation = truncate(stringifyResult(result), MAX_OBSERVATION_CHARS);
     } catch (error) {
       if (options.signal?.aborted) throw options.signal.reason;

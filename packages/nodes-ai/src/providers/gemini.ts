@@ -63,7 +63,8 @@ export function toGeminiContents(messages: AiChatMessage[], cache?: RawContentCa
       const parts: Part[] =
         typeof m.content === 'string'
           ? [{ text: m.content }]
-          : m.content.map((p) =>
+          : // images and files both travel as inlineData
+            m.content.map((p) =>
               p.type === 'text' ? { text: p.text } : { inlineData: { mimeType: p.mimeType, data: p.data } },
             );
       push('user', parts);
@@ -133,6 +134,7 @@ export function geminiRequestBody(
         })),
       },
     ];
+    if (request.toolChoice === 'any') body.toolConfig = { functionCallingConfig: { mode: 'ANY' } };
   }
   const generationConfig: DataObject = {};
   const temperature = request.temperature ?? config.temperature;

@@ -16,6 +16,7 @@ import type {
   DataTableSortDirection,
   ListSearchResult,
   NodePropertyOption,
+  ResourceMapperFields,
   WorkflowNode,
 } from '@workflow/workflow';
 import { ApiError, api, buildUrl, getCurrentTenant, request } from './client';
@@ -113,7 +114,7 @@ export const settingsApi = {
 export interface LoadOptionsBody {
   nodeType: string;
   method: string;
-  kind: 'loadOptions' | 'listSearch';
+  kind: 'loadOptions' | 'listSearch' | 'resourceMapping';
   node: WorkflowNode;
   filter?: string;
   paginationToken?: string;
@@ -128,6 +129,9 @@ export const nodeTypesApi = {
     api.post<NodePropertyOption[]>('/node-types/options', body),
   listSearch: (body: LoadOptionsBody & { kind: 'listSearch' }) =>
     api.post<ListSearchResult>('/node-types/options', body),
+  /** P5-80: `method` names an entry of the node's `methods.resourceMapping` */
+  resourceMapping: (body: LoadOptionsBody & { kind: 'resourceMapping' }) =>
+    api.post<ResourceMapperFields>('/node-types/options', body),
 };
 
 export interface WorkflowListQuery {

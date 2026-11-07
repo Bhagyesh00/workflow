@@ -5,6 +5,7 @@
  */
 import {
   type Connections,
+  type DataObject,
   diffWorkflows,
   type ExecutionState,
   type Item,
@@ -13,6 +14,7 @@ import {
   resolveNodeParameters,
   type StickyNote,
   splitTemplate,
+  type TaskData,
   type WorkflowNode,
   type WorkflowNodeGroup,
   type WorkflowSettings,
@@ -35,7 +37,14 @@ import type {
 } from '../api/types';
 import { REDACTED } from '../api/types';
 import { newId } from '../lib/ids';
-import { demoContacts, demoCredentialTypes, demoLoadOptions, demoNodeTypes } from './fixtures';
+import { getAncestors, getMainParents, listConnections } from '../lib/workflow-ops';
+import {
+  demoContacts,
+  demoCredentialTypes,
+  demoLoadOptions,
+  demoNodeTypes,
+  demoResourceMapping,
+} from './fixtures';
 import { filterExecutionList, registerAnnotationRoutes } from './mock-annotations';
 import { registerDataTableRoutes, searchDataTables } from './mock-data-tables';
 import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
@@ -45,7 +54,29 @@ import { registerPublishRoutes } from './mock-publish';
 import { registerReviewRoutes } from './mock-reviews';
 import { registerSecretRoutes } from './mock-secrets';
 import { registerTriggerListenRoutes } from './mock-triggers';
-import { type SimulationResult, simulateExecution } from './simulator';
+import { type SimulationInput, type SimulationResult, simulateExecution } from './simulator';
+
+/** body field `agentRequest` of POST /workflows/:id/run (P5-76 Test a tool) */
+interface AgentRequest {
+  query: DataObject;
+  toolName: string;
+}
+
+/** The node a tool hangs under: non-main connections up to the first node without one. */
+function toolRootName(connections: Connections, toolNode: string): string {
+  const references = listConnections(connections);
+  const seen = new Set([toolNode]);
+  const parentOf = (name: string) =>
+    references.find((c) => c.source === name && c.sourceType !== 'main' && !seen.has(c.target))?.target;
+  let current = toolNode;
+  let parent = parentOf(current);
+  while (parent) {
+    seen.add(parent);
+    current = parent;
+    parent = parentOf(current);
+  }
+  return current;
+}
 
 interface StoredUser {
   id: string;
@@ -454,6 +485,8 @@ export class MockBackend {
       dirtyNodeNames?: string[];
       /** P3-10: the saved version the run used (null for unsaved editor data) */
       workflowVersionId?: string | null;
+      /** P5-76: test the tool `destinationNode` names */
+      agentRequest?: AgentRequest;
     },
   ): string {
     const executionId = newId();
@@ -474,7 +507,13 @@ export class MockBackend {
       annotation: null,
       workflowData: copy({ id: wf.id, ...data }),
       state: {
-        startData: { destinationNode: options.destinationNode },
+        // a tool test runs up to the tool's root, as on the engine
+        startData: {
+          destinationNode:
+            options.agentRequest && data.nodes.some((n) => n.name === options.destinationNode)
+              ? toolRootName(data.connections, options.destinationNode as string)
+              : options.destinationNode,
+        },
         resultData: { runData: {} },
         executionData: {
           nodeExecutionStack: [],
@@ -491,7 +530,7 @@ export class MockBackend {
     );
     // start asynchronously so the HTTP response (with the id) can win or lose the race, like on a real server
     setTimeout(() => {
-      void this.simulate({
+      const input: SimulationInput = {
         executionId,
         workflow: {
           id: wf.id,
@@ -517,9 +556,87 @@ export class MockBackend {
         },
         stepDelayMs: this.options.stepDelayMs ?? 0,
         signal: cancel,
-      }).then((result: SimulationResult) => this.finishExecution(execution, result));
+      };
+      void (
+        options.agentRequest ? this.simulateToolTest(input, options.agentRequest) : this.simulate(input)
+      ).then((result: SimulationResult) => this.finishExecution(execution, result));
     }, 0);
     return executionId;
+  }
+
+  /**
+   * P5-76 Test a tool, as the engine runs it: the root's parents run as usual, the root only hands
+   * their items on and leaves no run, and the tool node gets the one run. The query is data: it goes
+   * into the run as it came and is never evaluated.
+   */
+  private async simulateToolTest(input: SimulationInput, request: AgentRequest): Promise<SimulationResult> {
+    const { workflow, executionId, emit } = input;
+    const workflowId = workflow.id ?? '';
+    const refuse = (message: string): SimulationResult => {
+      const error = { name: 'WorkflowOperationError', message };
+      emit({ type: 'executionStarted', data: { executionId, workflowId, mode: input.mode } });
+      emit({ type: 'executionFinished', data: { executionId, workflowId, status: 'error', error } });
+      return { status: 'error', runData: {}, error };
+    };
+    const toolName = input.destinationNode;
+    if (!toolName) return refuse('A tool test needs a destination node');
+    if (!workflow.nodes.some((n) => n.name === toolName))
+      return refuse(`Destination node "${toolName}" does not exist`);
+
+    const root = toolRootName(workflow.connections, toolName);
+    const ancestors = getAncestors(workflow.connections, root);
+    const heads = workflow.nodes.filter(
+      (n) => ancestors.includes(n.name) && getMainParents(workflow.connections, n.name).length === 0,
+    );
+    const held: PushEvent[] = [];
+    const upstream = await this.simulate({
+      ...input,
+      workflow: {
+        ...workflow,
+        // a pass-through in the root's place: no parameter of it is evaluated, no sub-node logs a run
+        nodes: workflow.nodes.map((n) =>
+          n.name === root ? { ...n, type: 'core.noOp', parameters: {}, disabled: false } : n,
+        ),
+      },
+      destinationNode: root,
+      startNode:
+        input.startNode ?? (heads.find((n) => /trigger|webhook/i.test(n.type)) ?? heads[0])?.name ?? root,
+      emit: (event) => {
+        if (event.type === 'executionFinished') held.push(event);
+        else if (
+          (event.type !== 'nodeExecuteBefore' && event.type !== 'nodeExecuteAfter') ||
+          event.data.nodeName !== root
+        )
+          emit(event);
+      },
+    });
+    const runData: RunData = Object.fromEntries(
+      Object.entries(upstream.runData).filter(([name]) => name !== root),
+    );
+    if (upstream.status !== 'success') {
+      for (const event of held) emit(event);
+      return { ...upstream, runData };
+    }
+
+    emit({ type: 'nodeExecuteBefore', data: { executionId, nodeName: toolName } });
+    const delayMs = input.stepDelayMs;
+    if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const task: TaskData = {
+      startTime: Date.now(),
+      executionTime: delayMs ? 120 : 0,
+      executionStatus: 'success',
+      inputOverride: { ai_tool: [[{ json: copy(request.query ?? {}) }]] },
+      data: { ai_tool: [[{ json: { response: 'demo response', toolName: request.toolName } }]] },
+      source: root === toolName ? [] : [{ previousNode: root }],
+    };
+    const runs = (runData[toolName] ??= []);
+    runs.push(task);
+    emit({
+      type: 'nodeExecuteAfter',
+      data: { executionId, nodeName: toolName, runIndex: runs.length - 1, taskData: task },
+    });
+    for (const event of held) emit(event);
+    return { status: 'success', runData, lastNodeExecuted: toolName };
   }
 
   private finishExecution(execution: StoredExecution, result: SimulationResult) {
@@ -677,6 +794,13 @@ export class MockBackend {
         if (!fn) throw new HttpError(400, 'unknown_method', `Unknown method ${String(body.method)}`);
         return fn(node?.parameters ?? {});
       }
+      if (body.kind === 'resourceMapping') {
+        // P5-80, the role of the server's route
+        this.requireRole('editor');
+        const fn = demoResourceMapping[String(body.method)];
+        if (!fn) throw new HttpError(400, 'unknown_method', `Unknown method ${String(body.method)}`);
+        return fn(node?.parameters ?? {});
+      }
       // P4-05: the Data Table node's locator lists the demo's tables
       if (body.method === 'tableSearch') return searchDataTables(String(body.filter ?? ''));
       const filter = String(body.filter ?? '').toLowerCase();
@@ -806,6 +930,7 @@ export class MockBackend {
           runData: body.runData as RunData | undefined,
           dirtyNodeNames: body.dirtyNodeNames as string[] | undefined,
           workflowVersionId: body.workflowData ? null : wf.versionId,
+          agentRequest: body.agentRequest as AgentRequest | undefined,
         },
       );
       return { executionId };

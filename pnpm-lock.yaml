@@ -166,6 +166,9 @@ importers:
 
   packages/nodes-ai:
     dependencies:
+      '@workflow/nodes-base':
+        specifier: workspace:*
+        version: link:../nodes-base
       '@workflow/workflow':
         specifier: workspace:*
         version: link:../workflow

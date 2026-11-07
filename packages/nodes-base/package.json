@@ -5,7 +5,8 @@
   "description": "Built-in core nodes, app integrations and their credential types",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./utils/filter": "./src/utils/filter.ts"
   },
   "scripts": {
     "test": "vitest run",

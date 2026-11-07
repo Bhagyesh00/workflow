@@ -33,6 +33,16 @@ function isKind<T>(value: unknown, kind: string): value is T {
   return Boolean(value) && typeof value === 'object' && (value as { kind?: string }).kind === kind;
 }
 
+/**
+ * The value of one port. A parent with several ports of a type gets an array by slot, `undefined` for an
+ * empty slot; a parent with one port gets the value or a list, so only slot 0 can answer.
+ */
+function atSlot(raw: unknown, slot: number): unknown {
+  if (!Array.isArray(raw)) return slot === 0 ? raw : undefined;
+  const entry = raw[slot];
+  return Array.isArray(entry) ? entry[0] : entry;
+}
+
 async function single<T>(
   ctx: AnyContext,
   type: ConnectionType,
@@ -40,9 +50,10 @@ async function single<T>(
   itemIndex: number,
   label: string,
   required: boolean,
+  slot = 0,
 ): Promise<T | undefined> {
   const raw = await ctx.getInputConnectionData(type, itemIndex);
-  const value = Array.isArray(raw) ? raw[0] : raw;
+  const value = atSlot(raw, slot);
   if (value === undefined || value === null) {
     if (required)
       throw new NodeOperationError(ctx.getNode(), `Connect a ${label} to this node`, { itemIndex });
@@ -56,8 +67,57 @@ async function single<T>(
   return value;
 }
 
-export async function getChatModel(ctx: AnyContext, itemIndex: number): Promise<AiChatModel> {
-  return (await single<AiChatModel>(ctx, 'ai_languageModel', 'chatModel', itemIndex, 'chat model', true))!;
+/** Model nodes that take a prompt and have no chat or tool calls; `filter.excludedNodes` of chat-only ports. */
+export const COMPLETION_MODEL_NODES: string[] = [
+  'ai.lmCohere',
+  'ai.lmOllama',
+  'ai.lmLemonade',
+  'ai.lmOpenHuggingFaceInference',
+];
+
+export async function getChatModel(
+  ctx: AnyContext,
+  itemIndex: number,
+  options?: { chatOnly?: boolean; slot?: number },
+): Promise<AiChatModel> {
+  const model = (await single<AiChatModel>(
+    ctx,
+    'ai_languageModel',
+    'chatModel',
+    itemIndex,
+    'chat model',
+    true,
+    options?.slot,
+  ))!;
+  if (options?.chatOnly && model.completion) {
+    throw new NodeOperationError(
+      ctx.getNode(),
+      `${model.nodeName ?? 'The connected model'} is a text completion model; connect a chat model`,
+      { itemIndex },
+    );
+  }
+  return model;
+}
+
+/** The model on the second port, for nodes with the fallback option on. */
+export async function getFallbackModel(ctx: AnyContext, itemIndex: number): Promise<AiChatModel> {
+  const model = await single<AiChatModel>(
+    ctx,
+    'ai_languageModel',
+    'chatModel',
+    itemIndex,
+    'fallback model',
+    false,
+    1,
+  );
+  if (!model) {
+    throw new NodeOperationError(
+      ctx.getNode(),
+      'Please connect a model to the Fallback Model input or disable the fallback option',
+      { itemIndex },
+    );
+  }
+  return model;
 }
 
 export function getMemory(ctx: AnyContext, itemIndex: number): Promise<SessionMemory | undefined> {
@@ -143,23 +203,36 @@ export const promptTextProperty: NodeProperty = {
   displayOptions: { show: { promptType: ['define'] } },
 };
 
-export function getPrompt(ctx: ExecuteContext, itemIndex: number, item: Item): string {
+/** `options.emptyText` replaces the text of both empty cases; without it the chains keep today's texts. */
+export function getPrompt(
+  ctx: ExecuteContext,
+  itemIndex: number,
+  item: Item,
+  options?: { emptyText?: string },
+): string {
   const promptType = ctx.getNodeParameter('promptType', itemIndex, 'auto') as string;
   if (promptType === 'auto') {
     const chatInput = item.json.chatInput;
     if (typeof chatInput !== 'string' || !chatInput.trim()) {
-      throw new NodeOperationError(ctx.getNode(), 'No "chatInput" field in the input item', {
-        itemIndex,
-        description:
-          'Connect a Chat Trigger, or set "Source for Prompt" to "Define Below" and map the prompt from the input.',
-      });
+      throw new NodeOperationError(
+        ctx.getNode(),
+        options?.emptyText ?? 'No "chatInput" field in the input item',
+        {
+          itemIndex,
+          description:
+            'Connect a Chat Trigger, or set "Source for Prompt" to "Define Below" and map the prompt from the input.',
+        },
+      );
     }
     return chatInput;
   }
   const text = ctx.getNodeParameter('text', itemIndex, '');
   const prompt = typeof text === 'string' ? text : JSON.stringify(text);
   if (!prompt.trim()) {
-    throw new NodeOperationError(ctx.getNode(), 'The prompt is empty', { itemIndex, parameter: 'text' });
+    throw new NodeOperationError(ctx.getNode(), options?.emptyText ?? 'The prompt is empty', {
+      itemIndex,
+      parameter: 'text',
+    });
   }
   return prompt;
 }

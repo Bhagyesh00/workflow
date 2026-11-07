@@ -19,7 +19,14 @@ const EXTERNAL_CREDENTIALS = new Set([
   'httpBasicAuth',
   'httpHeaderAuth',
   'httpBearerAuth',
+  'aws',
+  'awsAssumeRole',
+  'googleApi',
+  'databricksOAuth2Api',
 ]);
+
+/** no `test` request, as n8n: Vertex is tested by its node, Azure has no test */
+const NO_TEST = new Set(['azureOpenAiApi', 'azureEntraCognitiveServicesOAuth2Api', 'googleVertexAiApi']);
 
 describe('package', () => {
   it('exports nodes and credentials', () => {
@@ -70,6 +77,22 @@ describe('package', () => {
         'openAiApi',
         'openAiCompatibleApi',
         'qdrantApi',
+        'mistralCloudApi',
+        'cohereApi',
+        'deepSeekApi',
+        'groqApi',
+        'xAiApi',
+        'openRouterApi',
+        'vercelAiGatewayApi',
+        'nvidiaApi',
+        'moonshotApi',
+        'minimaxApi',
+        'alibabaCloudApi',
+        'lemonadeApi',
+        'huggingFaceApi',
+        'azureOpenAiApi',
+        'azureEntraCognitiveServicesOAuth2Api',
+        'googleVertexAiApi',
       ].sort(),
     );
   });
@@ -90,10 +113,10 @@ describe('package', () => {
           true,
         );
       }
-      // sub-nodes supply data; root nodes execute (or are triggers)
+      // sub-nodes supply data, or execute as a tool; root nodes execute (or are triggers)
       const outputs = Array.isArray(d.outputs) ? d.outputs.map(portType) : [];
       if (outputs.length && outputs.every((o) => o !== 'main'))
-        expect(type.supplyData, d.name).toBeTypeOf('function');
+        expect(Boolean(type.supplyData || (type.execute && outputs.includes('ai_tool'))), d.name).toBe(true);
       else expect(Boolean(type.execute || type.webhook), d.name).toBe(true);
       // defaults resolve without throwing
       expect(() => resolveNodeParameters(d.properties, {})).not.toThrow();
@@ -121,8 +144,10 @@ describe('package', () => {
       authorization: 'Bearer k',
     });
     expect((await apply('qdrantApi', { apiKey: 'k' })).headers).toEqual({ a: '1', 'api-key': 'k' });
-    for (const c of credentials)
-      expect(c.test?.request.url, c.name).toMatch(/^=\{\{\$credentials\.\w+\}\}\//);
+    for (const c of credentials) {
+      if (NO_TEST.has(c.name)) continue;
+      expect(c.test?.request.url, c.name).toMatch(/^(=\{\{\$credentials\.\w+\}\}\/|https:\/\/)/);
+    }
   });
 });
 
@@ -257,6 +282,7 @@ describe('embeddings', () => {
       getInputConnectionData: async () => undefined,
       runCode: async () => [],
       executeWorkflow: async () => ({ executionId: '', data: null }),
+      getToolParameter: () => undefined,
       logSubNodeRun: (input: DataObject, output: DataObject) => void logs.push({ input, output }),
     };
     const { response } = await type.supplyData!(ctx, 0);
@@ -304,6 +330,7 @@ describe('embeddings', () => {
       getInputConnectionData: async () => undefined,
       runCode: async () => [],
       executeWorkflow: async () => ({ executionId: '', data: null }),
+      getToolParameter: () => undefined,
       logSubNodeRun: () => {},
     };
     const embeddings = (await type.supplyData!(ctx, 0)).response as {

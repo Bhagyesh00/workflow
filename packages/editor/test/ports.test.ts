@@ -1,4 +1,9 @@
-import type { NodeTypeDescription, WorkflowNode } from '@workflow/workflow';
+import type {
+  NodeInputConfig,
+  NodeOutputConfig,
+  NodeTypeDescription,
+  WorkflowNode,
+} from '@workflow/workflow';
 import { describe, expect, it } from 'vitest';
 import { buildFlowElements } from '../src/components/canvas/flow-elements';
 import { demoNodeTypes } from '../src/demo/fixtures';
@@ -183,6 +188,99 @@ describe('connection rules', () => {
         portsOf,
       ),
     ).toBe(false);
+  });
+});
+
+describe('connection filters', () => {
+  const described = (
+    name: string,
+    inputs: NodeInputConfig[],
+    outputs: NodeOutputConfig[],
+  ): NodeTypeDescription => ({ ...get('core.set'), name, inputs, outputs });
+  const filtered = new Map(
+    [
+      described('test.chatModel', [], [{ type: 'ai_languageModel' }]),
+      described('test.completionModel', [], [{ type: 'ai_languageModel' }]),
+      described('test.hitlTool', [], [{ type: 'ai_tool', filter: { nodes: ['test.agent'] } }]),
+      described('test.plainTool', [], [{ type: 'ai_tool', filter: { nodes: [] } }]),
+      described(
+        'test.agent',
+        [
+          { type: 'ai_languageModel', filter: { excludedNodes: ['test.completionModel'] } },
+          { type: 'ai_languageModel', filter: { nodes: ['test.chatModel'] } },
+          { type: 'ai_languageModel' },
+          { type: 'ai_languageModel', filter: { nodes: [], excludedNodes: [] } },
+          { type: 'ai_tool' },
+        ],
+        [],
+      ),
+      described('test.other', [{ type: 'ai_tool' }], []),
+    ].map((d) => [d.name, d]),
+  );
+  const portsOf = (name: string) => {
+    const description = filtered.get(name);
+    return description ? deriveNodePorts(node(name, name), description) : undefined;
+  };
+  const model = (source: string, slot: number) =>
+    canConnect(
+      {
+        source,
+        sourceHandle: 'out:ai_languageModel:0',
+        target: 'test.agent',
+        targetHandle: `in:ai_languageModel:${slot}`,
+      },
+      {},
+      portsOf,
+    );
+  const tool = (source: string, target: string) =>
+    canConnect({ source, sourceHandle: 'out:ai_tool:0', target, targetHandle: 'in:ai_tool:0' }, {}, portsOf);
+
+  it('refuses a source type in the input filter excludedNodes', () => {
+    expect(model('test.chatModel', 0)).toBe(true);
+    expect(model('test.completionModel', 0)).toBe(false);
+  });
+
+  it('refuses a source type not in the input filter nodes', () => {
+    expect(model('test.chatModel', 1)).toBe(true);
+    expect(model('test.completionModel', 1)).toBe(false);
+  });
+
+  it('refuses a target type not in the output filter nodes', () => {
+    expect(tool('test.hitlTool', 'test.agent')).toBe(true);
+    expect(tool('test.hitlTool', 'test.other')).toBe(false);
+  });
+
+  it('checks only the port being connected, and empty or missing lists restrict nothing', () => {
+    expect(model('test.completionModel', 2)).toBe(true);
+    expect(model('test.completionModel', 3)).toBe(true);
+    expect(tool('test.plainTool', 'test.other')).toBe(true);
+  });
+
+  it('refuses a real allow-list when the other side has no known type', () => {
+    const untyped = (name: string) => {
+      const ports = portsOf(name);
+      return ports && { ...ports, nodeType: undefined };
+    };
+    expect(
+      canConnect(
+        {
+          source: 'test.hitlTool',
+          sourceHandle: 'out:ai_tool:0',
+          target: 'test.agent',
+          targetHandle: 'in:ai_tool:0',
+        },
+        {},
+        untyped,
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps the filter on the port and the type on the node ports, also for an unknown type', () => {
+    const agent = portsOf('test.agent')!;
+    expect(agent.nodeType).toBe('test.agent');
+    expect(agent.inputs[0].filter).toEqual({ excludedNodes: ['test.completionModel'] });
+    expect(portsOf('test.hitlTool')!.outputs[0].filter).toEqual({ nodes: ['test.agent'] });
+    expect(deriveNodePorts(node('X', 'gone.node'), undefined).nodeType).toBe('gone.node');
   });
 });
 

@@ -7,6 +7,7 @@ import {
   ExpressionEvaluator,
   type LoadOptionsContext,
   Workflow,
+  type WorkflowDefinition,
   type WorkflowNode,
 } from '@workflow/workflow';
 import type { FastifyInstance } from 'fastify';
@@ -49,7 +50,7 @@ const settingsPatch = z.object({
 const optionsSchema = z.object({
   nodeType: z.string().min(1),
   method: z.string().min(1),
-  kind: z.enum(['loadOptions', 'listSearch']),
+  kind: z.enum(['loadOptions', 'listSearch', 'resourceMapping']),
   node: nodeSchema,
   filter: z.string().max(1000).optional(),
   paginationToken: z.string().max(2000).optional(),
@@ -198,10 +199,9 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
     const body = parse(optionsSchema, request.body);
     const type = registries.nodeTypes.get(body.nodeType);
     if (!type) throw ApiError.badRequest(`Unknown node type "${body.nodeType}"`);
-    const method =
-      body.kind === 'loadOptions'
-        ? type.methods?.loadOptions?.[body.method]
-        : type.methods?.listSearch?.[body.method];
+    // own entries only: `constructor` must not reach Object() with the context
+    const methods = type.methods?.[body.kind];
+    const method = methods && Object.hasOwn(methods, body.method) ? methods[body.method] : undefined;
     if (!method)
       throw ApiError.badRequest(`Node type "${body.nodeType}" has no ${body.kind} method "${body.method}"`);
     const node = { ...body.node, type: body.nodeType } as WorkflowNode;
@@ -247,16 +247,27 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
             visible.length > WORKFLOW_PAGE_SIZE && last ? encodeCursor(last.updatedAt, last.id) : undefined,
         };
       },
+      readWorkflow: async (id) => {
+        const row = await repos.workflows.get(auth.tenant.id, id);
+        if (!row) return undefined;
+        return {
+          id: row.id,
+          name: row.name,
+          nodes: row.nodes as WorkflowDefinition['nodes'],
+          connections: row.connections as WorkflowDefinition['connections'],
+          settings: row.settings as WorkflowDefinition['settings'],
+        };
+      },
     };
     try {
       const result =
-        body.kind === 'loadOptions'
-          ? await (method as (c: LoadOptionsContext) => Promise<unknown>)(loadCtx)
-          : await (method as (c: LoadOptionsContext, f?: string, t?: string) => Promise<unknown>)(
+        body.kind === 'listSearch'
+          ? await (method as (c: LoadOptionsContext, f?: string, t?: string) => Promise<unknown>)(
               loadCtx,
               body.filter,
               body.paginationToken,
-            );
+            )
+          : await (method as (c: LoadOptionsContext) => Promise<unknown>)(loadCtx);
       return { data: result };
     } catch (error) {
       throw new ApiError(400, 'options_error', (error as Error).message);

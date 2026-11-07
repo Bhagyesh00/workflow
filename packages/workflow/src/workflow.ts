@@ -138,6 +138,14 @@ export class Workflow {
       .filter((n): n is WorkflowNode => Boolean(n) && !n.disabled);
   }
 
+  /** nodes that feed `name` through `type`, one entry per connection index; an empty slot keeps its index */
+  getSubNodesBySlot(name: string, type: ConnectionType): WorkflowNode[][] {
+    const inputs = this.connectionsByDestination[name]?.[type] ?? [];
+    return inputs.map((slot) =>
+      slot.map((c) => this.nodes[c.node]).filter((n): n is WorkflowNode => Boolean(n) && !n.disabled),
+    );
+  }
+
   /** main-input sources of `name`, by input index */
   getMainInputs(name: string): Connection[][] {
     return this.connectionsByDestination[name]?.main ?? [];

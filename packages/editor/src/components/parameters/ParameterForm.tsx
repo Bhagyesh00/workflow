@@ -20,6 +20,7 @@ import { AssignmentInput } from './AssignmentInput';
 import { EXPRESSION_CAPABLE, FIELD_DRAG_TYPE, isExpressionValue, useParameterContext } from './context';
 import { ExpressionInput } from './ExpressionInput';
 import { FilterInput } from './FilterInput';
+import { FromAiOverride } from './FromAiOverride';
 import {
   BooleanInput,
   ButtonInput,
@@ -35,6 +36,7 @@ import {
   StringInput,
 } from './inputs';
 import { ResourceLocatorInput } from './ResourceLocatorInput';
+import { ResourceMapperInput } from './ResourceMapperInput';
 
 function cloneDefault(value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value;
@@ -300,6 +302,9 @@ export function ParameterField({
       case 'resourceLocator':
         input = <ResourceLocatorInput {...common} />;
         break;
+      case 'resourceMapper':
+        input = <ResourceMapperInput {...common} path={path} />;
+        break;
       case 'filter':
         input = <FilterInput {...common} />;
         break;
@@ -316,6 +321,16 @@ export function ParameterField({
         input = <p className="text-xs text-ink-3">Unsupported parameter type “{String(prop.type)}”</p>;
     }
   }
+
+  // P5-75: a value the model fills in is an expression, so only a field that can hold one gets the override
+  const withOverride = (child: ReactNode) =>
+    canExpress ? (
+      <FromAiOverride prop={prop} value={value} path={path} onChange={onChange}>
+        {child}
+      </FromAiOverride>
+    ) : (
+      child
+    );
 
   const acceptsDrop = canExpress && !ctx.readOnly && prop.type !== 'resourceLocator';
   return (
@@ -343,7 +358,7 @@ export function ParameterField({
     >
       {prop.type === 'boolean' && !isExpr ? (
         <div className="flex items-center gap-3">
-          <BooleanInput prop={prop} value={value} onChange={onChange} id={id} />
+          {withOverride(<BooleanInput prop={prop} value={value} onChange={onChange} id={id} />)}
           <label htmlFor={id} className="text-sm font-semibold text-ink">
             {prop.displayName}
           </label>
@@ -373,7 +388,7 @@ export function ParameterField({
               </span>
             }
           />
-          {input}
+          {withOverride(input)}
         </>
       )}
       {prop.hint && <p className="text-xs text-ink-3">{prop.hint}</p>}

@@ -5,6 +5,7 @@
 import type {
   Connections,
   CredentialTypeDescription,
+  DataObject,
   DataTableColumnInput,
   DataTableDryRunOption,
   ExecutionErrorShape,
@@ -191,6 +192,8 @@ export interface RunWorkflowBody {
   runData?: RunData;
   /** P3-06: nodes changed since the run data was produced (max 2000 names) */
   dirtyNodeNames?: string[];
+  /** P5-76 test a tool: `destinationNode` is the tool node, `query` its arguments, `toolName` its name for the model */
+  agentRequest?: { query: DataObject; toolName: string };
 }
 
 export interface ActivationErrorDetail {

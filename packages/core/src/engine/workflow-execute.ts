@@ -24,12 +24,15 @@ import {
   ExpressionEvaluator,
   evaluateSimple,
   type Item,
+  isHitlVariant,
+  isToolNode,
   type NodeExecutionHint,
   type NodeInputConfig,
   NodeOperationError,
   type NodeOutput,
   type NodeOutputConfig,
   type NodeType,
+  type NodeTypeDescription,
   normalizePairedItems,
   planPartialRun,
   portType,
@@ -46,6 +49,8 @@ import {
   type WorkflowNode,
   WorkflowOperationError,
 } from '@workflow/workflow';
+import { createHitlGate } from './hitl-gate';
+import { createNodeAsTool, type ToolRunHost } from './node-as-tool';
 import {
   assertValidOutput,
   type ContextDeps,
@@ -53,9 +58,11 @@ import {
   createCodeRunnerCall,
   createExecuteContext,
   createSubWorkflowCaller,
+  createToolParameterReader,
   getResolvedParameters,
 } from './node-context';
 import type { ExecutionServices } from './services';
+import { runToolExecutor, toolRootOf } from './tool-executor';
 
 export interface RunOptions {
   /** node to start from (defaults to the first trigger) */
@@ -77,6 +84,11 @@ export interface RunOptions {
   /** overrides workflow settings / tenant default */
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * test a tool (P5-76): `destinationNode` names the tool. Its root node becomes the destination and, instead of
+   * running, calls the tool with `query`.
+   */
+  agentRequest?: { query: DataObject; toolName: string };
 }
 
 export interface ResumeOptions {
@@ -87,6 +99,8 @@ export interface ResumeOptions {
 }
 
 type NodeOutcome = 'continue' | 'stop' | 'wait';
+
+type AgentRequestState = NonNullable<RunOptions['agentRequest']> & { rootNode: string; toolNode: string };
 
 /** wait before the next retry: fixed or exponential with ±20% jitter, honouring Retry-After (capped) */
 export function retryDelay(node: WorkflowNode, attempt: number, error: unknown): number {
@@ -132,6 +146,8 @@ export class WorkflowExecute {
   private startedAt = Date.now();
   private nodeRuns = 0;
   private runFilter?: Set<string>;
+  /** set by run() for a tool test: reaching `rootNode` calls the tool instead of running the root */
+  private agentRequest?: AgentRequestState;
 
   constructor(
     private readonly workflow: Workflow,
@@ -151,6 +167,7 @@ export class WorkflowExecute {
   }
 
   async run(options: RunOptions = {}): Promise<ExecutionResult> {
+    if (options.agentRequest) options = this.startAgentRequest(options.agentRequest, options);
     if (options.destinationNode && options.runData) {
       return this.runPartial({
         ...options,
@@ -191,6 +208,21 @@ export class WorkflowExecute {
       },
     );
     return this.process(options);
+  }
+
+  /** a tool test: the caller names the tool as the destination, the run really stops at the tool's root node */
+  private startAgentRequest(
+    request: NonNullable<RunOptions['agentRequest']>,
+    options: RunOptions,
+  ): RunOptions {
+    const toolNode = options.destinationNode;
+    if (!toolNode) throw new WorkflowOperationError('A tool test needs a destination node');
+    if (!this.workflow.nodes[toolNode]) {
+      throw new WorkflowOperationError(`Destination node "${toolNode}" does not exist`);
+    }
+    const rootNode = toolRootOf(this.workflow, toolNode).name;
+    this.agentRequest = { ...request, rootNode, toolNode };
+    return { ...options, destinationNode: rootNode };
   }
 
   /**
@@ -469,14 +501,42 @@ export class WorkflowExecute {
     return { node: pick, data, source };
   }
 
-  private regularOutputCount(node: WorkflowNode, type: NodeType): number {
-    const ports = resolvePorts(type.description.outputs, node, (expr, parameters) =>
-      evaluateSimple(expr, { $parameter: parameters }),
+  /** a node's ports; an expression sees the parameters with their defaults by version, as in the editor */
+  private resolvedPorts(
+    ports: NodeTypeDescription['inputs'] | NodeTypeDescription['outputs'],
+    node: WorkflowNode,
+  ) {
+    const parameters = getResolvedParameters(this.workflow, node);
+    return resolvePorts(ports, { ...node, parameters }, (expr, values) =>
+      evaluateSimple(expr, { $parameter: values }),
     );
+  }
+
+  private regularOutputCount(node: WorkflowNode, type: NodeType): number {
+    const ports = this.resolvedPorts(type.description.outputs, node);
     return Math.max(1, ports.filter((p) => portType(p) === 'main').length);
   }
 
+  /** the root of a tool test runs the tool and writes no task for itself, so the run data shows the tool only */
+  private async runAgentRequest(
+    request: AgentRequestState,
+    rootExec: ExecuteData,
+    signal: AbortSignal,
+  ): Promise<NodeOutcome> {
+    const closeFunctions: Array<() => Promise<void>> = [];
+    try {
+      await runToolExecutor(this.toolHost(), request, rootExec, signal, closeFunctions);
+    } finally {
+      this.state.resultData.lastNodeExecuted = request.toolNode;
+      await this.finishSubNodes(closeFunctions);
+    }
+    return 'continue';
+  }
+
   private async runNode(exec: ExecuteData, signal: AbortSignal): Promise<NodeOutcome> {
+    if (this.agentRequest && exec.node === this.agentRequest.rootNode) {
+      return this.runAgentRequest(this.agentRequest, exec, signal);
+    }
     const node = this.workflow.nodes[exec.node];
     if (!node) throw new WorkflowOperationError(`Node "${exec.node}" does not exist`);
     const runs = (this.state.resultData.runData[node.name] ??= []);
@@ -705,15 +765,41 @@ export class WorkflowExecute {
       setMetadata: (data) => {
         Object.assign(this.nodeMetadata, data);
       },
+      suspendForTool: () => {
+        throw new Error('not implemented (L5)');
+      },
+      getResumeData: () => {
+        throw new Error('not implemented (L5)');
+      },
     });
     try {
       return await nodeType.execute(ctx);
     } finally {
-      await this.subNodeHooks;
-      for (const close of closeFunctions) {
-        await close().catch((e) => this.services.logger.warn('Sub-node close failed', { error: String(e) }));
-      }
+      await this.finishSubNodes(closeFunctions);
     }
+  }
+
+  /** wait for the hooks of logged sub-node runs, then close what the sub-nodes opened */
+  private async finishSubNodes(closeFunctions: Array<() => Promise<void>>): Promise<void> {
+    await this.subNodeHooks;
+    for (const close of closeFunctions) {
+      await close().catch((e) => this.services.logger.warn('Sub-node close failed', { error: String(e) }));
+    }
+  }
+
+  /** what a node running as a tool needs from the engine; per-call state stays with the tool */
+  private toolHost(): ToolRunHost {
+    return {
+      workflow: this.workflow,
+      services: this.services,
+      evaluator: this.evaluator,
+      state: this.state,
+      contextDeps: (node, exec, runIndex, signal) => this.contextDeps(node, exec, runIndex, signal),
+      supplySubNodes: (parent, parentType, type, itemIndex, exec, signal, closeFunctions) =>
+        this.supplySubNodes(parent, parentType, type, itemIndex, exec, signal, closeFunctions),
+      logSubNodeRun: (sub, parent, type, input, output, error) =>
+        this.logSubNodeRun(sub, parent, type, input, output, error),
+    };
   }
 
   /** the metadata of a finished task: what the node set, plus the retry attempt that produced it */
@@ -733,10 +819,24 @@ export class WorkflowExecute {
     signal: AbortSignal,
     closeFunctions: Array<() => Promise<void>>,
   ): Promise<unknown> {
-    const inputs = resolvePorts(parentType.description.inputs, parent, (expr, parameters) =>
-      evaluateSimple(expr, { $parameter: parameters }),
-    );
-    const config = inputs.find((p) => portType(p) === type) as NodeInputConfig | ConnectionType | undefined;
+    const ports = this.resolvedPorts(parentType.description.inputs, parent).filter(
+      (p) => portType(p) === type,
+    ) as Array<NodeInputConfig | ConnectionType>;
+    const supply = (subNodes: WorkflowNode[], port: NodeInputConfig | ConnectionType | undefined) =>
+      this.supplyFrom(subNodes, port, parent, type, itemIndex, parentExec, signal, closeFunctions);
+
+    // several ports of one type (fallback model, Model Selector): one value per port, the parent checks its slots
+    if (ports.length > 1) {
+      const slots = this.workflow.getSubNodesBySlot(parent.name, type);
+      const results: unknown[] = [];
+      for (const [slot, port] of ports.entries()) {
+        const slotNodes = slots[slot] ?? [];
+        results.push(slotNodes.length ? await supply(slotNodes, port) : undefined);
+      }
+      return results;
+    }
+
+    const config = ports[0] as NodeInputConfig | ConnectionType | undefined;
     const maxConnections = typeof config === 'object' ? config.maxConnections : undefined;
     const required = typeof config === 'object' ? config.required : false;
     const subNodes = this.workflow.getSubNodes(parent.name, type);
@@ -750,19 +850,48 @@ export class WorkflowExecute {
       }
       return maxConnections === 1 ? undefined : [];
     }
+    return supply(subNodes, config);
+  }
 
+  /** what `subNodes` supply to one port: the first value when the port takes one connection, otherwise all */
+  private async supplyFrom(
+    subNodes: WorkflowNode[],
+    port: NodeInputConfig | ConnectionType | undefined,
+    parent: WorkflowNode,
+    type: ConnectionType,
+    itemIndex: number,
+    parentExec: ExecuteData,
+    signal: AbortSignal,
+    closeFunctions: Array<() => Promise<void>>,
+  ): Promise<unknown> {
     const results: unknown[] = [];
     for (const sub of subNodes) {
       const subType = this.workflow.getNodeType(sub);
-      if (!subType.supplyData) {
+      if (subType.supplyData) {
+        const ctx = this.createSupplyDataContext(sub, parent, parentExec, type, signal);
+        const supplied = await subType.supplyData(ctx, itemIndex);
+        if (supplied.closeFunction) closeFunctions.push(supplied.closeFunction);
+        results.push(supplied.response);
+      } else if (isHitlVariant(subType.description)) {
+        const host = this.toolHost();
+        const tools = await createHitlGate(
+          host,
+          sub,
+          subType,
+          parent,
+          parentExec,
+          itemIndex,
+          signal,
+          closeFunctions,
+        );
+        results.push(...tools);
+      } else if (subType.execute && isToolNode(subType.description)) {
+        results.push(createNodeAsTool(this.toolHost(), sub, subType, parent, parentExec, itemIndex, signal));
+      } else {
         throw new NodeOperationError(sub, `Node "${sub.name}" cannot be used as a ${type} sub-node`);
       }
-      const ctx = this.createSupplyDataContext(sub, parent, parentExec, type, signal);
-      const supplied = await subType.supplyData(ctx, itemIndex);
-      if (supplied.closeFunction) closeFunctions.push(supplied.closeFunction);
-      results.push(supplied.response);
     }
-    return maxConnections === 1 ? results[0] : results;
+    return typeof port === 'object' && port.maxConnections === 1 ? results[0] : results;
   }
 
   private createSupplyDataContext(
@@ -785,29 +914,41 @@ export class WorkflowExecute {
       getInputData: (inputIndex = 0) => (parentExec.data.main?.[inputIndex] ?? []) as Item[],
       getInputConnectionData: (subType2, itemIndex) =>
         this.supplySubNodes(sub, subType, subType2, itemIndex, exec, signal, closeFunctions),
-      logSubNodeRun: (input: DataObject, output: DataObject, error?: Error) => {
-        const runs = (this.state.resultData.runData[sub.name] ??= []);
-        const task: TaskData = {
-          startTime: Date.now(),
-          executionTime: 0,
-          executionStatus: error ? 'error' : 'success',
-          inputOverride: { [type]: [[{ json: input }]] },
-          data: { [type]: [[{ json: output }]] },
-          error: error ? serializeError(error, sub.name) : undefined,
-          source: [{ previousNode: parent.name }],
-        };
-        runs.push(deepFreeze(task));
-        const subRunIndex = runs.length - 1;
-        this.subNodeHooks = this.subNodeHooks
-          .then(() => this.services.hooks?.nodeExecuteAfter?.(sub.name, subRunIndex, task, this.state))
-          .catch((e) =>
-            this.services.logger.warn('nodeExecuteAfter failed for sub-node', {
-              node: sub.name,
-              error: String(e),
-            }),
-          );
-      },
+      getToolParameter: createToolParameterReader(deps),
+      logSubNodeRun: (input: DataObject, output: DataObject, error?: Error) =>
+        this.logSubNodeRun(sub, parent, type, input, output, error),
     };
+  }
+
+  /** record one call of a sub-node as a task of its own; the parent node waits for the hook */
+  private logSubNodeRun(
+    sub: WorkflowNode,
+    parent: WorkflowNode,
+    type: ConnectionType,
+    input: DataObject,
+    output: DataObject,
+    error?: unknown,
+  ): void {
+    const runs = (this.state.resultData.runData[sub.name] ??= []);
+    const task: TaskData = {
+      startTime: Date.now(),
+      executionTime: 0,
+      executionStatus: error ? 'error' : 'success',
+      inputOverride: { [type]: [[{ json: input }]] },
+      data: { [type]: [[{ json: output }]] },
+      error: error ? serializeError(error, sub.name) : undefined,
+      source: [{ previousNode: parent.name }],
+    };
+    runs.push(deepFreeze(task));
+    const subRunIndex = runs.length - 1;
+    this.subNodeHooks = this.subNodeHooks
+      .then(() => this.services.hooks?.nodeExecuteAfter?.(sub.name, subRunIndex, task, this.state))
+      .catch((e) =>
+        this.services.logger.warn('nodeExecuteAfter failed for sub-node', {
+          node: sub.name,
+          error: String(e),
+        }),
+      );
   }
 
   private scheduleChildren(node: WorkflowNode, output: Item[][], runIndex: number): void {

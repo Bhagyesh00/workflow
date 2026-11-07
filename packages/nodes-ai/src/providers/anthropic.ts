@@ -92,11 +92,12 @@ export function toAnthropicMessages(
       const blocks: Block[] =
         typeof m.content === 'string'
           ? [{ type: 'text', text: m.content }]
-          : m.content.map((p) =>
-              p.type === 'text'
-                ? { type: 'text', text: p.text }
-                : { type: 'image', source: { type: 'base64', media_type: p.mimeType, data: p.data } },
-            );
+          : m.content.map((p): Block => {
+              if (p.type === 'text') return { type: 'text', text: p.text };
+              const source = { type: 'base64', media_type: p.mimeType, data: p.data };
+              if (p.type === 'image') return { type: 'image', source };
+              return { type: 'document', source, ...(p.fileName ? { title: p.fileName } : {}) };
+            });
       push(
         'user',
         blocks.filter((b) => b.type !== 'text' || (b.text as string).length > 0),
@@ -152,6 +153,7 @@ export function anthropicRequestBody(
       description: t.description,
       input_schema: { type: 'object', ...t.parameters },
     }));
+    if (request.toolChoice === 'any') body.tool_choice = { type: 'any' };
   }
   const outputConfig: DataObject = {};
   if (request.responseFormat?.type === 'json' && request.responseFormat.schema) {

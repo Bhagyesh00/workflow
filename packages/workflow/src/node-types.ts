@@ -18,10 +18,12 @@ import type {
   NodePropertyOption,
   NodeTypeDescription,
   PairedItem,
+  ResourceMapperFields,
   SourceData,
   WorkflowDefinition,
   WorkflowNode,
 } from './interfaces';
+import type { ToolResumeData, ToolSuspension } from './tool-suspension';
 
 export interface Logger {
   debug(message: string, meta?: DataObject): void;
@@ -88,6 +90,8 @@ export interface InstanceLimits {
   maxSpreadsheetCells: number;
   /** bytes one remote file (FTP, SFTP, SSH) may have */
   maxRemoteFileBytes: number;
+  /** total bytes of input binary an Agent may pass to the model */
+  maxPassthroughBinaryBytes: number;
 }
 
 /**
@@ -206,6 +210,12 @@ export interface ExecuteContext extends BaseContext {
   getParentNodes(): ConnectedNode[];
   /** every node downstream of this one over main connections, nearest first */
   getChildNodes(): ConnectedNode[];
+  /** stop the run until a waiting tool answers; `checkpoint` comes back through `getResumeData` */
+  suspendForTool(suspension: ToolSuspension, checkpoint: DataObject): void;
+  /** set on the run after `suspendForTool`, undefined otherwise */
+  getResumeData(): ToolResumeData | undefined;
+  /** a parameter of this node, with `$fromAI` bound to `args` */
+  getToolParameter(name: string, itemIndex: number, args: DataObject): unknown;
 }
 
 /** a node reached through the workflow graph */
@@ -358,6 +368,8 @@ export interface SupplyDataContext extends BaseContext {
   ): Promise<{ executionId: string; data: Item[][] | null }>;
   /** record what the sub-node received/returned so the editor can show AI logs */
   logSubNodeRun(input: DataObject, output: DataObject, error?: Error): void;
+  /** a parameter of this node, with `$fromAI` bound to `args` */
+  getToolParameter(name: string, itemIndex: number, args: DataObject): unknown;
 }
 
 export interface SupplyData {
@@ -385,6 +397,8 @@ export interface LoadOptionsContext extends Omit<BaseContext, 'getNodeParameter'
   getCurrentNodeParameter(name: string): unknown;
   /** the current tenant's workflows, newest first (only where the host stores workflows) */
   listWorkflows?(query: WorkflowListQuery): Promise<WorkflowListPage>;
+  /** one of the current tenant's workflows, undefined when it has no such workflow */
+  readWorkflow?(id: string): Promise<WorkflowDefinition | undefined>;
 }
 
 export interface ListSearchResult {
@@ -419,6 +433,8 @@ export interface NodeType {
       string,
       (ctx: LoadOptionsContext, filter?: string, paginationToken?: string) => Promise<ListSearchResult>
     >;
+    /** named by `typeOptions.resourceMapper.resourceMapperMethod` */
+    resourceMapping?: Record<string, (ctx: LoadOptionsContext) => Promise<ResourceMapperFields>>;
     /** named by `testedBy` on the node's credential description; `credential.data` is decrypted */
     credentialTest?: Record<
       string,

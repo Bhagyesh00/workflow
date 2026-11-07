@@ -16,6 +16,8 @@ export {
   parseExpression,
 } from './expression/interpreter';
 export { createSafeRegExp } from './expression/regex';
+export * from './from-ai';
+export * from './highlighted-data';
 export * from './history-compaction';
 export * from './interfaces';
 export * from './node-grouping';
@@ -23,5 +25,7 @@ export * from './node-types';
 export * from './parameters';
 export * from './partial-run';
 export * from './subworkflow-extraction';
+export * from './tool-suspension';
+export * from './tool-variants';
 export * from './utils';
 export * from './workflow';

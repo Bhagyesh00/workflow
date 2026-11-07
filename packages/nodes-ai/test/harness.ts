@@ -13,6 +13,7 @@ import {
   silentLogger,
   WorkflowExecute,
 } from '@workflow/core';
+import { credentials as baseCredentials, nodes as baseNodes } from '@workflow/nodes-base';
 import {
   type AiChatRequest,
   type AiChatResponse,
@@ -25,6 +26,7 @@ import {
   type NodeType,
   Workflow,
   type WorkflowNode,
+  withToolVariants,
 } from '@workflow/workflow';
 import { credentials, nodes } from '../src';
 
@@ -258,6 +260,9 @@ const triggerNode: NodeType = {
 export const testNodes: NodeType[] = [triggerNode, fakeChatModelNode, fakeEmbeddingsNode];
 export const nodeTypes = new NodeTypes([...nodes, ...testNodes]);
 export const credentialTypes = new CredentialTypes(credentials);
+/** nodes-ai, nodes-base and the test nodes with their tool variants, as a server registers them */
+export const toolNodeTypes = new NodeTypes(withToolVariants([...nodes, ...baseNodes, ...testNodes]));
+export const toolCredentialTypes = new CredentialTypes([...credentials, ...baseCredentials]);
 
 // ---------------------------------------------------------------------------------------------
 // Workflow building and execution
@@ -300,7 +305,8 @@ export function services(
     tenantId?: string;
   } & Partial<ExecutionServices> = {},
 ): ExecutionServices {
-  const { creds = {}, http, tenantId, ...overrides } = options;
+  // a custom node registry can reach credential types of both packages
+  const { creds = {}, http, tenantId, nodeTypes: customNodeTypes, ...overrides } = options;
   return {
     tenantId: tenantId ?? 't1',
     executionId: 'e1',
@@ -308,8 +314,8 @@ export function services(
     timezone: 'UTC',
     variables: {},
     instanceBaseUrl: 'http://localhost:5678',
-    nodeTypes,
-    credentialTypes,
+    nodeTypes: customNodeTypes ?? nodeTypes,
+    credentialTypes: customNodeTypes ? toolCredentialTypes : credentialTypes,
     credentials: { get: async (_ref, type) => creds[type] ?? {}, update: async () => {} },
     binaryData: new InlineBinaryDataStore(),
     codeRunner: new IsolatedVmCodeRunner({ timeoutMs: 5000, memoryLimitMb: 64 }),
@@ -332,11 +338,20 @@ export interface RunResult {
 export async function run(
   workflowNodes: WorkflowNode[],
   connections: Connections,
-  options: { triggerItems?: Item[]; services?: ExecutionServices; startNode?: string } = {},
+  options: {
+    triggerItems?: Item[];
+    services?: ExecutionServices;
+    startNode?: string;
+    nodeTypes?: ExecutionServices['nodeTypes'];
+  } = {},
 ): Promise<RunResult> {
   const placed = workflowNodes.map((n, i) => ({ ...n, position: [i * 200, 0] as [number, number] }));
-  const workflow = new Workflow({ id: 'wf1', name: 'test', nodes: placed, connections }, nodeTypes);
-  const result = await new WorkflowExecute(workflow, options.services ?? services()).run({
+  const workflow = new Workflow(
+    { id: 'wf1', name: 'test', nodes: placed, connections },
+    options.nodeTypes ?? nodeTypes,
+  );
+  const svc = options.services ?? services(options.nodeTypes ? { nodeTypes: options.nodeTypes } : {});
+  const result = await new WorkflowExecute(workflow, svc).run({
     triggerItems: options.triggerItems,
     startNode: options.startNode ?? placed[0].name,
   });

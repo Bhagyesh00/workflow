@@ -28,6 +28,8 @@ export interface PortSpec {
   required?: boolean;
   maxConnections?: number;
   category?: 'error';
+  /** which node types may connect to this port, see `canConnect` */
+  filter?: { excludedNodes?: string[]; nodes?: string[] };
 }
 
 export interface NodePorts {
@@ -36,6 +38,8 @@ export interface NodePorts {
   /** only non-main outputs: rendered round, output on top */
   isSubNode: boolean;
   isTrigger: boolean;
+  /** the node's type, for port filters; `deriveNodePorts` always sets it */
+  nodeType?: string;
 }
 
 const CONNECTION_TYPE_VALUES = new Set<string>(Object.values(ConnectionTypes));
@@ -121,6 +125,7 @@ function toSpecs(raw: RawPort[], direction: PortDirection, outputNames?: string[
       required: (config as NodeInputConfig).required,
       maxConnections: (config as NodeInputConfig).maxConnections,
       category: (config as NodeOutputConfig).category,
+      filter: (config as NodeInputConfig).filter,
     };
   });
 }
@@ -145,6 +150,7 @@ export function deriveNodePorts(node: WorkflowNode, description: NodeTypeDescrip
       outputs: [{ id: handleId('out', 'main', 0), direction: 'out', type: 'main', index: 0 }],
       isSubNode: false,
       isTrigger: false,
+      nodeType: node.type,
     };
   }
   const cached = portCache.get(node)?.get(description);
@@ -174,6 +180,7 @@ export function deriveNodePorts(node: WorkflowNode, description: NodeTypeDescrip
     outputs,
     isSubNode: outputs.length > 0 && outputs.every((o) => o.type !== 'main'),
     isTrigger: isTriggerDescription(description),
+    nodeType: node.type,
   };
   let byDescription = portCache.get(node);
   if (!byDescription) {
@@ -228,9 +235,16 @@ export function connectionExists(
   );
 }
 
+/** an empty or missing list restricts nothing, as in n8n; a port with no known type fails a real list */
+function allowedBy(nodes: string[] | undefined, nodeType: string | undefined): boolean {
+  if (!nodes?.length) return true;
+  return nodeType !== undefined && nodes.includes(nodeType);
+}
+
 /**
  * Whether a cable may be plugged in: output → input, same connection type, no self-loop,
- * no duplicate and the input's `maxConnections` respected. `source`/`target` are node names.
+ * no duplicate, the input's `maxConnections` respected and both ports' node type filters passed.
+ * `source`/`target` are node names.
  */
 export function canConnect(
   attempt: ConnectionAttempt,
@@ -244,9 +258,14 @@ export function canConnect(
   if (from.type !== to.type) return false;
   const sourcePorts = portsOf(attempt.source);
   const targetPorts = portsOf(attempt.target);
-  if (!sourcePorts?.outputs.some((p) => p.id === attempt.sourceHandle)) return false;
+  const output = sourcePorts?.outputs.find((p) => p.id === attempt.sourceHandle);
+  if (!output) return false;
   const input = targetPorts?.inputs.find((p) => p.id === attempt.targetHandle);
   if (!input) return false;
+  const sourceType = sourcePorts?.nodeType;
+  if (sourceType !== undefined && input.filter?.excludedNodes?.includes(sourceType)) return false;
+  if (!allowedBy(input.filter?.nodes, sourceType)) return false;
+  if (!allowedBy(output.filter?.nodes, targetPorts?.nodeType)) return false;
   if (connectionExists(connections, attempt.source, from.type, from.index, attempt.target, to.index))
     return false;
   if (input.maxConnections !== undefined) {

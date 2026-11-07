@@ -1,10 +1,12 @@
 import type { CredentialType, NodePackage, NodeType } from '@workflow/workflow';
 import { aiCredentials } from './credentials/ai.credentials';
 import { AgentNode } from './nodes/agent/Agent.node';
+import { AgentToolNode } from './nodes/agent/AgentTool.node';
 import { llmChainNodes } from './nodes/chains/llm-chains.nodes';
 import { ragChainNodes } from './nodes/chains/rag-chains.nodes';
 import { DocumentDefaultDataLoaderNode } from './nodes/document-loaders/DocumentDefaultDataLoader.node';
 import { embeddingsNodes } from './nodes/embeddings/embeddings.nodes';
+import { GuardrailsNode } from './nodes/guardrails/Guardrails.node';
 import { memoryNodes } from './nodes/memory/memory.nodes';
 import { chatModelNodes } from './nodes/models/chat-models.nodes';
 import { outputParserNodes } from './nodes/output-parsers/output-parsers.nodes';
@@ -16,6 +18,8 @@ import { vectorStoreNodes } from './nodes/vector-stores/vector-stores.nodes';
 
 export const nodes: NodeType[] = [
   AgentNode,
+  AgentToolNode,
+  GuardrailsNode,
   ...llmChainNodes,
   ...ragChainNodes,
   ChatTriggerNode,
@@ -36,6 +40,9 @@ export const nodesAiPackage: NodePackage = { name: '@workflow/nodes-ai', nodes, 
 
 export { type AgentResult, type AgentRunOptions, runAgent } from './nodes/agent/agent-loop';
 export { ANTHROPIC_API_VERSION, ANTHROPIC_DEFAULT_MODEL } from './providers/anthropic';
+export { batchingOption, runInBatches } from './shared/batching';
 export { type ChatModelCapabilities, capabilitiesOf, HttpChatModel } from './shared/chat-model';
+export { databricksGatewayUrl } from './shared/databricks';
 export { validateJsonSchema } from './shared/json-schema';
 export { McpClient } from './shared/mcp-client';
+export { redactSecrets } from './shared/utils';

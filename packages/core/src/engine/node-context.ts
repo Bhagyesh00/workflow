@@ -16,6 +16,7 @@ import {
   type ExecutionState,
   type ExpressionDataContext,
   type ExpressionEvaluator,
+  fromAiVariables,
   type GetNodeParameterOptions,
   getByPath,
   getCredentialAllowedDomains,
@@ -36,6 +37,8 @@ import {
   type PollContext,
   resolveNodeParameters,
   type ScheduleSlotStore,
+  type ToolResumeData,
+  type ToolSuspension,
   type TriggerContext,
   toItems,
   type WebhookContext,
@@ -44,7 +47,12 @@ import {
   type WorkflowNode,
 } from '@workflow/workflow';
 import { Cron } from 'croner';
-import { applyAuthentication, type OAuth2Data, oauth2Request } from '../credentials/authentication';
+import {
+  applyAuthentication,
+  createCredentialHelpers,
+  type OAuth2Data,
+  oauth2Request,
+} from '../credentials/authentication';
 import { HttpError, SsrfBlockedError } from '../http/http-client';
 import type { ExecutionServices } from './services';
 
@@ -83,6 +91,7 @@ export const DEFAULT_INSTANCE_LIMITS: Readonly<InstanceLimits> = Object.freeze({
   maxImageInputBytes: 25 * MB,
   maxSpreadsheetCells: 1_000_000,
   maxRemoteFileBytes: 100 * MB,
+  maxPassthroughBinaryBytes: 52_428_800,
 });
 
 /** the defaults overlaid by the host's values; a missing, non-finite or non-positive value keeps the default */
@@ -325,7 +334,11 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
       assertCredentialUrlAllowed(options.url, allowedDomains);
       const request: HttpRequestOptions =
         allowedDomains === undefined ? options : { ...options, allowedDomains };
-      if (services.credentialTypes.isA(credentialType, 'oAuth2Api')) {
+      const type = services.credentialTypes.getResolved(credentialType);
+      // a client-credentials type with its own `authenticate` gets its token there, not from oauth2Request
+      const ownTokenFlow =
+        typeof type?.authenticate === 'function' && (data as OAuth2Data).grantType === 'clientCredentials';
+      if (services.credentialTypes.isA(credentialType, 'oAuth2Api') && !ownTokenFlow) {
         const response = await oauth2Request(
           services.http,
           data as OAuth2Data,
@@ -335,9 +348,9 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
         );
         return mapStreamErrors(node, options, response);
       }
-      const type = services.credentialTypes.getResolved(credentialType);
       if (!type) throw new NodeOperationError(node, `Unknown credential type "${credentialType}"`);
-      const authenticated = await applyAuthentication(type, data, request);
+      const authHelpers = createCredentialHelpers(services.http, allowedDomains, deps.signal);
+      const authenticated = await applyAuthentication(type, data, request, authHelpers);
       return mapStreamErrors(node, options, await services.http.request(authenticated, deps.signal));
     } catch (error) {
       throw toNodeApiError(node, error);
@@ -458,6 +471,21 @@ export interface ExecuteContextCallbacks {
   addExecutionHints(hints: NodeExecutionHint[]): void;
   /** receives what the node passes to setMetadata during this run */
   setMetadata?(data: DataObject): void;
+  /** receives a tool's wait and the agent's checkpoint */
+  suspendForTool?(suspension: ToolSuspension, checkpoint: DataObject): void;
+  /** the checkpoint and the answer when the run resumes after a tool's wait */
+  getResumeData?(): ToolResumeData | undefined;
+}
+
+/**
+ * Reads a tool node's parameter with `$fromAI` bound to the model's arguments. The arguments are data:
+ * a value that looks like an expression stays text.
+ */
+export function createToolParameterReader(
+  deps: ContextDeps,
+): (name: string, itemIndex: number, args: DataObject) => unknown {
+  return (name, itemIndex, args) =>
+    createBaseContext({ ...deps, extraVariables: fromAiVariables(args) }).getNodeParameter(name, itemIndex);
 }
 
 /** `executeWorkflow` shared by execute and supply-data contexts */
@@ -587,6 +615,14 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
     setMetadata: (data) => callbacks.setMetadata?.(data),
     getParentNodes: () => connectedNodes(deps.workflow, deps.workflow.getParentNodes(node.name)),
     getChildNodes: () => connectedNodes(deps.workflow, deps.workflow.getChildNodes(node.name)),
+    suspendForTool(suspension, checkpoint) {
+      if (!callbacks.suspendForTool) {
+        throw new NodeOperationError(node, 'This run cannot wait for a tool');
+      }
+      callbacks.suspendForTool(suspension, checkpoint);
+    },
+    getResumeData: () => callbacks.getResumeData?.(),
+    getToolParameter: createToolParameterReader(deps),
   };
 }
 

@@ -4,6 +4,7 @@
  */
 import {
   applyAuthentication,
+  createCredentialHelpers,
   type HttpClient,
   HttpError,
   type NodeTypes,
@@ -131,7 +132,10 @@ export async function testCredential(
 ): Promise<CredentialTestResult> {
   const resolvedType = credentials.resolvedType(type);
   const full = credentials.withDefaults(type, data);
-  const isOAuth2 = credentials.types.isA(type, 'oAuth2Api');
+  // a client-credentials type with its own `authenticate` gets its token there, as node-context.ts does
+  const ownTokenFlow =
+    typeof resolvedType.authenticate === 'function' && full.grantType === 'clientCredentials';
+  const isOAuth2 = credentials.types.isA(type, 'oAuth2Api') && !ownTokenFlow;
   const isOAuth1 = credentials.types.isA(type, 'oAuth1Api');
   // a node that names a test function for this credential type runs it instead of a request
   const nodeTest = opts ? findNodeTest(credentials, type, opts.nodeTypes) : undefined;
@@ -169,7 +173,7 @@ export async function testCredential(
       response = (await oauth2Request(http, full as OAuth2Data, base, async () => {})) as HttpFullResponse;
     } else {
       response = (await http.request(
-        await applyAuthentication(resolvedType, full, base),
+        await applyAuthentication(resolvedType, full, base, createCredentialHelpers(http, allowedDomains)),
       )) as HttpFullResponse;
     }
     for (const rule of resolvedType.test.rules ?? []) {

@@ -131,6 +131,12 @@ function walk(
       if (!(key in obj) || obj[key] === undefined)
         errors.push({ path: `${path}.${key}`, message: 'is required' });
     }
+    if (typeof s.minProperties === 'number') {
+      const count = Object.values(obj).filter((v) => v !== undefined).length;
+      if (count < s.minProperties) {
+        errors.push({ path, message: `must have at least ${s.minProperties} properties` });
+      }
+    }
     for (const [key, v] of Object.entries(obj)) {
       if (properties[key]) walk(v, properties[key], root, `${path}.${key}`, errors, depth + 1);
       else if (s.additionalProperties === false) {

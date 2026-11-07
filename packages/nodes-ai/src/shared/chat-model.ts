@@ -9,12 +9,14 @@ import {
   type AiChatModel,
   type AiChatRequest,
   type AiChatResponse,
+  type AiContentPart,
   type DataObject,
   type HttpRequestOptions,
   type HttpResponseStream,
   NodeOperationError,
   type SupplyDataContext,
 } from '@workflow/workflow';
+import { createEventStreamDecoder } from './event-stream';
 import { withRetries } from './retry';
 import { parseSse, type SseEvent, sseJson } from './sse';
 
@@ -34,6 +36,8 @@ export interface ChatAdapter {
   parseResponse(body: unknown): AiChatResponse;
   /** start rebuilding a `stream: true` response; the parser reports text deltas as their events arrive */
   streamParser?(onDelta: (text: string) => void): ChatStreamParser;
+  /** the provider streams binary event-stream frames instead of SSE; each frame's payload goes to the parser */
+  eventStream?: true;
 }
 
 /** Rebuilds a response from a provider's SSE stream, one event at a time. */
@@ -54,6 +58,8 @@ export interface HttpChatModelOptions {
   itemIndex: number;
   maxRetries: number;
   timeoutMs?: number;
+  /** a completion-only model: chat-only callers refuse it */
+  completion?: boolean;
 }
 
 /** Thrown when a provider declines to answer (safety refusal, blocked prompt). */
@@ -89,6 +95,8 @@ export class HttpChatModel implements AiChatModel {
   readonly model: string;
   readonly capabilities: ChatModelCapabilities;
   readonly stream?: AiChatModel['stream'];
+  completion?: boolean;
+  nodeName?: string;
 
   constructor(
     private readonly ctx: SupplyDataContext,
@@ -98,6 +106,8 @@ export class HttpChatModel implements AiChatModel {
     this.provider = adapter.provider;
     this.model = adapter.model;
     this.capabilities = adapter.capabilities;
+    this.completion = options.completion;
+    this.nodeName = ctx.getNode().name;
     if (adapter.streamParser) {
       this.stream = (request, onDelta) => this.call(request, onDelta);
     }
@@ -222,7 +232,8 @@ const SSE_START = /^(data|event|id|retry)?:/;
  * Read a streamed response, feeding SSE events to the adapter's parser as they arrive, so deltas reach
  * the caller while the model is still answering. A body an HTTP client already read (a string, or a
  * parsed object) takes the same path. Gateways and compatible servers sometimes ignore `stream: true`
- * and answer with plain JSON; that is parsed whole and reported as one delta.
+ * and answer with plain JSON; that is parsed whole and reported as one delta. An `eventStream` adapter
+ * reads binary frames from a live stream; a body already read as text takes the path above.
  */
 async function readStreamedBody(
   adapter: ChatAdapter,
@@ -232,6 +243,15 @@ async function readStreamedBody(
 ): Promise<AiChatResponse> {
   if (typeof body !== 'string' && !isResponseStream(body)) return wholeResponse(adapter, body, onDelta);
   const parser = adapter.streamParser!(onDelta);
+  if (adapter.eventStream && isResponseStream(body)) {
+    const decoder = createEventStreamDecoder();
+    for await (const bytes of body) {
+      signal?.throwIfAborted();
+      for (const { eventType, payload } of decoder.push(bytes)) parser.push(eventType, payload);
+    }
+    decoder.end();
+    return parser.finish();
+  }
   const events = new SseEventBuffer();
   const feed = (list: SseEvent[]) => {
     for (const e of list) {
@@ -282,11 +302,16 @@ export function capabilitiesOf(model: AiChatModel): ChatModelCapabilities {
   return caps ?? { structuredOutput: false, structuredOutputWithTools: false };
 }
 
+/** Text as it is; images and files by a label only, so their data stays out of the log. */
+function summarizePart(part: AiContentPart): string {
+  if (part.type === 'text') return part.text;
+  if (part.type === 'file') return `[file ${part.fileName ?? part.mimeType}]`;
+  return `[image ${part.mimeType}]`;
+}
+
 function summarizeMessage(message: AiChatMessage): DataObject {
   const content =
-    typeof message.content === 'string'
-      ? message.content
-      : message.content.map((p) => (p.type === 'text' ? p.text : `[image ${p.mimeType}]`)).join('\n');
+    typeof message.content === 'string' ? message.content : message.content.map(summarizePart).join('\n');
   return {
     role: message.role,
     content,

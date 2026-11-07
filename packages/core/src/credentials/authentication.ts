@@ -4,6 +4,7 @@
  */
 import {
   assertCredentialUrlAllowed,
+  type CredentialAuthHelpers,
   type CredentialType,
   type DataObject,
   evaluateSimple,
@@ -13,6 +14,10 @@ import {
 } from '@workflow/workflow';
 import type { HttpClient } from '../http/http-client';
 import { HttpError } from '../http/http-client';
+import { signAwsRequest } from './aws-sigv4';
+import { clientCredentialsRequest, parseAccessToken } from './azure-token';
+import { GOOGLE_TOKEN_URL, googleJwtAssertion, jwtBearerRequest } from './google-jwt';
+import { sharedTokenCache } from './token-cache';
 
 export interface OAuth2Data extends DataObject {
   grantType?: 'authorizationCode' | 'clientCredentials' | 'pkce';
@@ -36,6 +41,11 @@ function resolveTemplate(value: string, credentials: DataObject): string {
   return String(evaluateSimple(value, { $credentials: credentials }) ?? '');
 }
 
+/** a credential's URL field with `={{$credentials.host}}/path` resolved; plain text stays as it is */
+export function resolveCredentialUrl(value: string, data: DataObject): string {
+  return resolveTemplate(value, data);
+}
+
 function resolveRecord(record: Record<string, string> | undefined, credentials: DataObject) {
   if (!record) return undefined;
   return Object.fromEntries(
@@ -50,10 +60,11 @@ export async function applyAuthentication(
   type: CredentialType,
   credentials: DataObject,
   request: HttpRequestOptions,
+  helpers?: CredentialAuthHelpers,
 ): Promise<HttpRequestOptions> {
   const auth = type.authenticate;
   if (!auth) return request;
-  if (typeof auth === 'function') return auth(credentials, { ...request });
+  if (typeof auth === 'function') return auth(credentials, { ...request }, helpers);
   const p = auth.properties;
   const next: HttpRequestOptions = { ...request };
   if (p.headers) next.headers = { ...(request.headers ?? {}), ...resolveRecord(p.headers, credentials) };
@@ -73,6 +84,32 @@ export async function applyAuthentication(
   return next;
 }
 
+/**
+ * What a function `authenticate` may use. Every call goes through the guarded client with the credential's
+ * allowed domains: checked here before anything is sent, and by HttpClient on every redirect hop.
+ */
+export function createCredentialHelpers(
+  http: HttpClient,
+  allowedDomains: string[] | undefined,
+  signal?: AbortSignal,
+): CredentialAuthHelpers {
+  const call = async <T = unknown>(request: HttpRequestOptions): Promise<T> => {
+    assertCredentialUrlAllowed(request.url, allowedDomains);
+    const scoped = allowedDomains === undefined ? request : { ...request, allowedDomains };
+    return (await http.request<T>(scoped, signal)) as T;
+  };
+  return {
+    http: call,
+    signAwsV4: (input) => ({ headers: signAwsRequest(input).headers }),
+    jwtBearerToken: async (input) => {
+      const assertion = googleJwtAssertion(input);
+      return parseAccessToken(await call(jwtBearerRequest(assertion, input.tokenUrl ?? GOOGLE_TOKEN_URL)));
+    },
+    clientCredentialsToken: async (input) => parseAccessToken(await call(clientCredentialsRequest(input))),
+    cachedToken: (secret, scope, fetch) => sharedTokenCache.get(secret, scope, fetch),
+  };
+}
+
 /** Fetch a token with the client-credentials grant or refresh an existing token. */
 export async function requestOAuth2Token(
   http: HttpClient,
@@ -81,10 +118,12 @@ export async function requestOAuth2Token(
   signal?: AbortSignal,
 ): Promise<NonNullable<OAuth2Data['oauthTokenData']>> {
   if (!data.accessTokenUrl) throw new Error('OAuth2 credential has no access token URL');
+  const accessTokenUrl = resolveCredentialUrl(data.accessTokenUrl, data);
+  if (!accessTokenUrl) throw new Error('OAuth2 credential has no access token URL');
   // the credential's own token calls honour its allowed domains too (the token URL is not typed by the
   // user of a node, so the `none` mode does not apply): checked here and on every redirect hop
   const allowedDomains = getCredentialAllowedDomains(data, { userUrl: false });
-  assertCredentialUrlAllowed(data.accessTokenUrl, allowedDomains);
+  assertCredentialUrlAllowed(accessTokenUrl, allowedDomains);
   const body: Record<string, string> =
     grant.type === 'refresh_token'
       ? { grant_type: 'refresh_token', refresh_token: grant.refreshToken }
@@ -99,7 +138,7 @@ export async function requestOAuth2Token(
   }
   const token = (await http.request(
     {
-      url: data.accessTokenUrl,
+      url: accessTokenUrl,
       method: 'POST',
       body,
       bodyType: 'form-urlencoded',

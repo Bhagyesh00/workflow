@@ -3,6 +3,7 @@ import {
   type CredentialType,
   type NodePackage,
   type NodeType,
+  withToolVariants,
 } from '@workflow/workflow';
 import type { CredentialTypeRegistry, NodeTypeRegistry } from './engine/services';
 
@@ -99,7 +100,7 @@ export function registriesFromPackages(packages: NodePackage[]): {
   const nodeTypes = new NodeTypes();
   const credentialTypes = new CredentialTypes();
   for (const pkg of packages) {
-    for (const n of pkg.nodes) nodeTypes.register(n);
+    for (const n of withToolVariants(pkg.nodes)) nodeTypes.register(n);
     for (const c of pkg.credentials) credentialTypes.register(c);
   }
   return { nodeTypes, credentialTypes };

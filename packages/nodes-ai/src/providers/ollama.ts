@@ -30,6 +30,9 @@ export interface OllamaChatConfig {
 
 export function toOllamaMessages(messages: AiChatMessage[]): DataObject[] {
   return messages.map((m): DataObject => {
+    if (typeof m.content !== 'string' && m.content.some((p) => p.type === 'file')) {
+      throw new Error('Ollama cannot read files here');
+    }
     const images =
       typeof m.content === 'string' ? [] : m.content.filter((p) => p.type === 'image').map((p) => p.data);
     const base: DataObject = { role: m.role, content: messageText(m.content) };
@@ -45,6 +48,7 @@ export function toOllamaMessages(messages: AiChatMessage[]): DataObject[] {
 }
 
 export function ollamaRequestBody(request: AiChatRequest, config: OllamaChatConfig): DataObject {
+  if (request.toolChoice) throw new Error('This Ollama model cannot be forced to call a tool');
   const body: DataObject = {
     model: config.model,
     messages: toOllamaMessages(request.messages),

@@ -139,7 +139,7 @@ export const AgentNode: NodeType = {
       try {
         const options = ctx.getNodeParameter('options', i, {}) as DataObject;
         const input = getPrompt(ctx, i, items[i]);
-        const model = await getChatModel(ctx, i);
+        const model = await getChatModel(ctx, i, { chatOnly: true });
         const memory = await getMemory(ctx, i);
         const tools = await getTools(ctx, i);
         const outputParser = await getOutputParser(ctx, i);

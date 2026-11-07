@@ -79,6 +79,7 @@ describe('instance limits', () => {
       maxImageInputBytes: 25 * MB,
       maxSpreadsheetCells: 1_000_000,
       maxRemoteFileBytes: 100 * MB,
+      maxPassthroughBinaryBytes: 52_428_800,
     });
     expect(Object.isFrozen(DEFAULT_INSTANCE_LIMITS)).toBe(true);
   });
