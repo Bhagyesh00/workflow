@@ -13,89 +13,30 @@ import {
   type SupplyDataContext,
 } from '@workflow/workflow';
 import { getTextSplitter } from '../../shared/ai-inputs';
+import {
+  type FileTextOptions,
+  fileToSources,
+  flattenJson,
+  itemJsonToSources,
+  type LoaderKind,
+  parseCsv,
+} from '../../shared/file-text';
 import { splitRecursively } from '../../shared/text-splitting';
 import { collectionList } from '../../shared/utils';
 
-/** `a.b: value` lines for every leaf; keeps keys so retrieval has context. */
-export function flattenJson(value: unknown, prefix = '', depth = 0, lines: string[] = []): string[] {
-  if (depth > 32) return lines;
-  if (value === null || value === undefined) return lines;
-  if (Array.isArray(value)) {
-    for (const [i, v] of value.entries())
-      flattenJson(v, prefix ? `${prefix}[${i}]` : `[${i}]`, depth + 1, lines);
-  } else if (typeof value === 'object') {
-    for (const [k, v] of Object.entries(value as DataObject))
-      flattenJson(v, prefix ? `${prefix}.${k}` : k, depth + 1, lines);
-  } else {
-    lines.push(prefix ? `${prefix}: ${String(value)}` : String(value));
-  }
-  return lines;
-}
-
-/** RFC 4180 CSV parsing (quoted fields, escaped quotes, CRLF). */
-export function parseCsv(text: string, delimiter = ','): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (quoted) {
-      if (c === '"') {
-        if (text[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else quoted = false;
-      } else field += c;
-    } else if (c === '"' && field === '') quoted = true;
-    else if (c === delimiter) {
-      row.push(field);
-      field = '';
-    } else if (c === '\n' || c === '\r') {
-      if (c === '\r' && text[i + 1] === '\n') i++;
-      row.push(field);
-      if (row.some((f) => f !== '')) rows.push(row);
-      row = [];
-      field = '';
-    } else field += c;
-  }
-  row.push(field);
-  if (row.some((f) => f !== '')) rows.push(row);
-  return rows;
-}
+export { flattenJson, parseCsv };
 
 interface Source {
   text: string;
   metadata: DataObject;
 }
 
-function csvSources(text: string, delimiter: string, base: DataObject): Source[] {
-  const [header, ...rows] = parseCsv(text, delimiter);
-  if (!header) return [];
-  return rows.map((row, i) => ({
-    text: header.map((h, c) => `${h.trim()}: ${row[c] ?? ''}`).join('\n'),
-    metadata: { ...base, line: i + 2 },
-  }));
-}
-
-function jsonSources(text: string, base: DataObject): Source[] {
-  const parsed = JSON.parse(text);
-  if (Array.isArray(parsed)) {
-    return parsed.map((entry, i) => ({
-      text: flattenJson(entry).join('\n'),
-      metadata: { ...base, index: i },
-    }));
-  }
-  return [{ text: flattenJson(parsed).join('\n'), metadata: base }];
-}
-
-const TEXT_MIME = /^text\/|^application\/(xml|x-yaml|yaml|x-ndjson|markdown|javascript|x-sh|sql)/;
-
 export const DocumentDefaultDataLoaderNode: NodeType = {
   description: {
     name: 'ai.documentDefaultDataLoader',
     displayName: 'Default Data Loader',
-    description: 'Loads item JSON or text, JSON and CSV files as documents for a vector store',
+    description:
+      'Loads item JSON, or PDF, Docx, EPub, CSV, JSON and text files, as documents for a vector store',
     icon: 'lucide:file-text',
     group: ['transform'],
     version: 1,
@@ -114,7 +55,7 @@ export const DocumentDefaultDataLoaderNode: NodeType = {
         default: 'json',
         options: [
           { name: 'JSON', value: 'json', description: 'Text from the item JSON' },
-          { name: 'Binary', value: 'binary', description: 'Text, JSON or CSV files attached to the item' },
+          { name: 'Binary', value: 'binary', description: 'Files attached to the item' },
         ],
       },
       {
@@ -159,16 +100,19 @@ export const DocumentDefaultDataLoaderNode: NodeType = {
         displayOptions: { show: { dataType: ['binary'], binaryMode: ['specificField'] } },
       },
       {
-        displayName: 'File Type',
+        displayName: 'Data Format',
         name: 'loader',
         type: 'options',
         default: 'auto',
         displayOptions: { show: { dataType: ['binary'] } },
         options: [
           { name: 'Detect From MIME Type', value: 'auto' },
-          { name: 'Text', value: 'textLoader' },
-          { name: 'JSON', value: 'jsonLoader' },
           { name: 'CSV', value: 'csvLoader' },
+          { name: 'Docx', value: 'docxLoader' },
+          { name: 'EPub', value: 'epubLoader' },
+          { name: 'JSON', value: 'jsonLoader' },
+          { name: 'PDF', value: 'pdfLoader' },
+          { name: 'Text', value: 'textLoader' },
         ],
       },
       {
@@ -207,10 +151,36 @@ export const DocumentDefaultDataLoaderNode: NodeType = {
             ],
           },
           {
-            displayName: 'CSV Delimiter',
-            name: 'csvDelimiter',
+            displayName: 'CSV Separator',
+            name: 'separator',
             type: 'string',
             default: ',',
+            description: 'Character between the fields of a CSV row',
+            displayOptions: { show: { '/dataType': ['binary'], '/loader': ['auto', 'csvLoader'] } },
+          },
+          {
+            displayName: 'CSV Column',
+            name: 'column',
+            type: 'string',
+            default: '',
+            description: 'Read only this column as the document text; every column when empty',
+            displayOptions: { show: { '/dataType': ['binary'], '/loader': ['auto', 'csvLoader'] } },
+          },
+          {
+            displayName: 'JSON Pointers',
+            name: 'pointers',
+            type: 'string',
+            default: '',
+            placeholder: '/text, /items/0/title',
+            description: 'Comma-separated JSON pointers to read; the whole value when empty',
+          },
+          {
+            displayName: 'Split Pages in PDF',
+            name: 'splitPages',
+            type: 'boolean',
+            default: true,
+            description: 'Whether each PDF page is its own document',
+            displayOptions: { show: { '/dataType': ['binary'], '/loader': ['auto', 'pdfLoader'] } },
           },
         ],
       },
@@ -262,12 +232,14 @@ async function loadSources(ctx: SupplyDataContext, index: number, item: Item): P
   const dataType = ctx.getNodeParameter('dataType', index, 'json');
   if (dataType === 'json') {
     const base = { source: 'json', ...custom };
-    if (ctx.getNodeParameter('jsonMode', index, 'allInputData') === 'expressionData') {
-      const value = ctx.getNodeParameter('jsonData', index, '');
-      const text = typeof value === 'string' ? value : flattenJson(value).join('\n');
-      return [{ text, metadata: base }];
-    }
-    return [{ text: flattenJson(item.json).join('\n'), metadata: base }];
+    const value =
+      ctx.getNodeParameter('jsonMode', index, 'allInputData') === 'expressionData'
+        ? ctx.getNodeParameter('jsonData', index, '')
+        : item.json;
+    return itemJsonToSources(value, pointerList(options.pointers)).map((source) => ({
+      text: source.text,
+      metadata: { ...base, ...source.metadata },
+    }));
   }
 
   const binaries = item.binary ?? {};
@@ -275,7 +247,13 @@ async function loadSources(ctx: SupplyDataContext, index: number, item: Item): P
     ctx.getNodeParameter('binaryMode', index, 'allInputData') === 'specificField'
       ? [String(ctx.getNodeParameter('binaryDataKey', index, 'data'))]
       : Object.keys(binaries);
-  const loaderType = String(ctx.getNodeParameter('loader', index, 'auto'));
+  const fileOptions: FileTextOptions = {
+    loader: String(ctx.getNodeParameter('loader', index, 'auto')) as LoaderKind,
+    separator: typeof options.separator === 'string' ? options.separator : undefined,
+    column: typeof options.column === 'string' ? options.column : undefined,
+    pointers: pointerList(options.pointers),
+    splitPages: options.splitPages !== false,
+  };
   const sources: Source[] = [];
   for (const key of keys) {
     const binary = binaries[key];
@@ -287,45 +265,30 @@ async function loadSources(ctx: SupplyDataContext, index: number, item: Item): P
     const bytes = binary.id
       ? await ctx.helpers.getBinaryDataBuffer(index, key)
       : Buffer.from(binary.data ?? '', 'base64');
-    const text = new TextDecoder().decode(bytes);
     const base: DataObject = {
       source: 'blob',
       blobType: binary.mimeType,
       ...(binary.fileName ? { fileName: binary.fileName } : {}),
       ...custom,
     };
-    const mime = binary.mimeType ?? '';
-    const type =
-      loaderType !== 'auto'
-        ? loaderType
-        : /json/.test(mime)
-          ? 'jsonLoader'
-          : /csv/.test(mime)
-            ? 'csvLoader'
-            : TEXT_MIME.test(mime)
-              ? 'textLoader'
-              : undefined;
-    if (!type) {
-      throw new NodeOperationError(ctx.getNode(), `Files of type "${mime}" cannot be loaded as text`, {
-        itemIndex: index,
-        description:
-          'Convert the file to text first (for example with an extract-from-file step), or pick a File Type.',
-      });
-    }
-    try {
-      if (type === 'jsonLoader') sources.push(...jsonSources(text, base));
-      else if (type === 'csvLoader')
-        sources.push(...csvSources(text, String(options.csvDelimiter ?? ',') || ',', base));
-      else sources.push({ text, metadata: base });
-    } catch (error) {
-      throw new NodeOperationError(
-        ctx.getNode(),
-        `Could not read "${binary.fileName ?? key}": ${(error as Error).message}`,
-        {
-          itemIndex: index,
-        },
-      );
-    }
+    const found = await fileToSources(
+      ctx,
+      index,
+      { bytes, mimeType: binary.mimeType, fileName: binary.fileName },
+      fileOptions,
+    );
+    for (const source of found)
+      sources.push({ text: source.text, metadata: { ...base, ...source.metadata } });
   }
   return sources;
+}
+
+/** the pointers of the JSON Pointers option, a comma-separated list */
+function pointerList(value: unknown): string[] | undefined {
+  if (typeof value !== 'string') return undefined;
+  const list = value
+    .split(',')
+    .map((p) => p.trim())
+    .filter((p) => p !== '');
+  return list.length > 0 ? list : undefined;
 }

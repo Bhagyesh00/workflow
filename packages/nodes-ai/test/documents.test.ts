@@ -171,12 +171,31 @@ describe('Default Data Loader', () => {
     ]);
   });
 
-  it('refuses binary formats it cannot read', async () => {
+  it('refuses a file type it cannot read', async () => {
     const { r } = await loadDocs({ dataType: 'binary' }, [
-      { json: {}, binary: { data: file('%PDF-1.7', 'application/pdf', 'a.pdf') } },
+      { json: {}, binary: { data: file('GIF89a', 'image/gif', 'a.gif') } },
     ]);
     expect(r.status).toBe('error');
-    expect(r.error?.message).toContain('cannot be loaded as text');
+    expect(r.error?.message).toContain('Unsupported mime type: image/gif');
+  });
+
+  it('refuses a file that does not match the selected loader', async () => {
+    const { r } = await loadDocs({ dataType: 'binary', loader: 'jsonLoader' }, [
+      { json: {}, binary: { data: file('a,b\n1,2', 'text/csv', 'a.csv') } },
+    ]);
+    expect(r.status).toBe('error');
+    expect(r.error?.message).toContain(`Mime type doesn't match selected loader`);
+    expect(r.error?.message).toContain('"Loader Type": CSV');
+  });
+
+  it('reads CSV with the Separator and CSV Column options', async () => {
+    const { r, docs } = await loadDocs({ dataType: 'binary', options: { separator: ';', column: 'role' } }, [
+      { json: {}, binary: { data: file('name;role\nAda;math\n', 'text/csv', 'p.csv') } },
+    ]);
+    expect(r.status, JSON.stringify(r.error)).toBe('success');
+    expect(docs).toEqual([
+      { pageContent: 'math', metadata: { source: 'blob', blobType: 'text/csv', fileName: 'p.csv', line: 2 } },
+    ]);
   });
 
   it('parses CSV edge cases and flattens JSON', () => {
