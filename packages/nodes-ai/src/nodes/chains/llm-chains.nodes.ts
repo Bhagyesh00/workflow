@@ -61,8 +61,11 @@ async function eachItem(
   const items = ctx.getInputData();
   const out: Item[][] = Array.from({ length: Math.max(1, outputs) }, () => []);
   const { batchSize, delayMs } = batchSettings(ctx);
-  const settled = await runInBatches(items.length, { batchSize, delayMs, signal: ctx.signal }, (i) =>
-    run(items[i], i),
+  // without continue-on-fail, a failed item ends the node once its batch is done
+  const settled = await runInBatches(
+    items.length,
+    { batchSize, delayMs, signal: ctx.signal, stopOnFailure: !ctx.continueOnFail() },
+    (i) => run(items[i], i),
   );
   for (let i = 0; i < items.length; i++) {
     const result = settled[i];
@@ -140,8 +143,10 @@ function toBytes(body: unknown): Uint8Array | undefined {
   return undefined;
 }
 
-function imageMessage(part: AiImagePart): AiChatMessage {
-  return { role: 'user', content: [part] };
+/** The Image Resolution option on the part. Auto sends nothing, so it is left out here too. */
+function imageMessage(part: AiImagePart, imageDetail: unknown): AiChatMessage {
+  const detail = imageDetail === 'low' || imageDetail === 'high' ? imageDetail : undefined;
+  return { role: 'user', content: [detail ? { ...part, detail } : part] };
 }
 
 function tooLarge(ctx: ExecuteContext, i: number, limit: number): NodeOperationError {
@@ -157,6 +162,7 @@ async function binaryImageMessage(
   i: number,
   item: Item,
   key: string,
+  imageDetail: unknown,
 ): Promise<AiChatMessage> {
   const binary = item.binary?.[key];
   if (!binary) {
@@ -174,11 +180,14 @@ async function binaryImageMessage(
   const limit = ctx.helpers.getInstanceLimits().maxImageInputBytes;
   const data = await ctx.helpers.getBinaryDataBuffer(i, key);
   if (data.byteLength > limit) throw tooLarge(ctx, i, limit);
-  return imageMessage({
-    type: 'image',
-    mimeType: binary.mimeType,
-    data: Buffer.from(data).toString('base64'),
-  });
+  return imageMessage(
+    {
+      type: 'image',
+      mimeType: binary.mimeType,
+      data: Buffer.from(data).toString('base64'),
+    },
+    imageDetail,
+  );
 }
 
 /**
@@ -186,7 +195,12 @@ async function binaryImageMessage(
  * gets the same base64 part. The size is checked after the read (which the HTTP client bounds), and no
  * model request goes out when it is over `maxImageInputBytes`.
  */
-async function urlImageMessage(ctx: ExecuteContext, i: number, url: string): Promise<AiChatMessage> {
+async function urlImageMessage(
+  ctx: ExecuteContext,
+  i: number,
+  url: string,
+  imageDetail: unknown,
+): Promise<AiChatMessage> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -225,7 +239,7 @@ async function urlImageMessage(ctx: ExecuteContext, i: number, url: string): Pro
   if (!mimeType) {
     throw new NodeOperationError(ctx.getNode(), 'The image URL did not return an image', { itemIndex: i });
   }
-  return imageMessage({ type: 'image', mimeType, data: Buffer.from(bytes).toString('base64') });
+  return imageMessage({ type: 'image', mimeType, data: Buffer.from(bytes).toString('base64') }, imageDetail);
 }
 
 interface MessageValue {
@@ -244,7 +258,9 @@ async function fixedMessages(ctx: ExecuteContext, i: number, item: Item): Promis
   for (const m of values) {
     const messageType = m.messageType ?? 'text';
     if (messageType === 'imageBinary') {
-      messages.push(await binaryImageMessage(ctx, i, item, String(m.binaryImageDataKey || 'data')));
+      messages.push(
+        await binaryImageMessage(ctx, i, item, String(m.binaryImageDataKey || 'data'), m.imageDetail),
+      );
     } else if (messageType === 'imageUrl') {
       const url = String(m.imageUrl ?? '').trim();
       if (!url) {
@@ -253,7 +269,7 @@ async function fixedMessages(ctx: ExecuteContext, i: number, item: Item): Promis
           parameter: 'imageUrl',
         });
       }
-      messages.push(await urlImageMessage(ctx, i, url));
+      messages.push(await urlImageMessage(ctx, i, url, m.imageDetail));
     } else if (m.message) {
       messages.push({
         role: (['system', 'user', 'assistant'].includes(String(m.type))

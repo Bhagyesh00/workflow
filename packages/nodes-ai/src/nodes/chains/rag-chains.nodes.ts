@@ -315,6 +315,8 @@ export const ChainRetrievalQaNode: NodeType = {
         batchSize: Number.isFinite(size) && size >= 1 ? Math.floor(size) : 5,
         delayMs: Number.isFinite(delay) && delay > 0 ? delay : 0,
         signal: ctx.signal,
+        // without continue-on-fail, a failed item ends the node once its batch is done
+        stopOnFailure: !ctx.continueOnFail(),
       },
       async (i): Promise<Item> => {
         const question = getPrompt(ctx, i, items[i]);
