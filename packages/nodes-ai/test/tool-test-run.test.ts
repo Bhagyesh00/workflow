@@ -162,7 +162,7 @@ describe('test a tool under the real Agent', () => {
     expect(modelRequests.get('Model')).toEqual([]);
   });
 
-  it('a tool that needs a value it did not get says so', async () => {
+  it('an empty query reaches a tool that needs a value, and the tool reports its own error', async () => {
     const { error, runData } = await testTool(
       [node('Trigger', 'test.trigger'), agent(), node('Sum', 'ai.toolCalculator')],
       [
@@ -172,8 +172,62 @@ describe('test a tool under the real Agent', () => {
       'Sum',
       {},
     );
-    expect(error?.message).toBe('Error executing tool: Missing a value for "input"');
+    expect(error?.message).toMatch(/^Error executing tool: /);
+    expect(error?.message).not.toContain('Missing a value');
     expect(runData.Sum[0].executionStatus).toBe('error');
+  });
+
+  it('a partial query still needs every required value', async () => {
+    const { error } = await testTool(
+      [node('Trigger', 'test.trigger'), agent(), httpTool(CITY_TOOL)],
+      [
+        ['Trigger', 'Agent'],
+        ['Call API', 'Agent', 'ai_tool'],
+      ],
+      'Call API',
+      { city: 'Pune' },
+    );
+    expect(error?.message).toBe('Error executing tool: Missing a value for "days"');
+  });
+
+  it('a bare string under the tool name is the input of a Code tool', async () => {
+    const { result, runData } = await testTool(
+      [
+        node('Trigger', 'test.trigger'),
+        agent(),
+        node('Code', 'ai.toolCode', { jsCode: 'return query.toUpperCase();' }),
+      ],
+      [
+        ['Trigger', 'Agent'],
+        ['Code', 'Agent', 'ai_tool'],
+      ],
+      'Code',
+      { Code: 'hello' },
+    );
+    expect(result.status).toBe('success');
+    expect(runData.Code[0].data?.ai_tool?.[0]?.[0]?.json).toEqual({ response: 'HELLO' });
+  });
+
+  it('a key the tool declares stays an ordinary argument, even when it is named like the tool', async () => {
+    const { http } = await testTool(
+      [
+        node('Trigger', 'test.trigger'),
+        agent(),
+        httpTool(
+          {
+            url: `=https://api.test/{{ $fromAI('days', 'How many', 'number') }}/{{ $fromAI('city', 'The city') }}`,
+          },
+          'city',
+        ),
+      ],
+      [
+        ['Trigger', 'Agent'],
+        ['city', 'Agent', 'ai_tool'],
+      ],
+      'city',
+      { city: 'Pune', days: '3' },
+    );
+    expect(http.requests[0].url).toBe('https://api.test/3/Pune');
   });
 
   it('the other tools of the Agent are not called', async () => {

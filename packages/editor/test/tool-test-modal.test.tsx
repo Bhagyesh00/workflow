@@ -5,7 +5,7 @@
 import { act, configure, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Connections, DataObject, FromAiArgument, Item, WorkflowNode } from '@workflow/workflow';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { workflowsApi } from '../src/api/endpoints';
 import { NodeDetailsView } from '../src/components/ndv/NodeDetailsView';
 import { ToolTestModal } from '../src/components/ndv/ToolTestModal';
@@ -275,6 +275,103 @@ describe('Execute step on a tool node', () => {
     expect(runCalls()[0].body).toMatchObject({
       destinationNode: 'Request',
       agentRequest: { query: {}, toolName: 'Request' },
+    });
+  });
+
+  describe('tools with no $fromAI stored', () => {
+    const calculator = demoNodeTypes.find((d) => d.name === 'ai.toolCalculator');
+    if (!calculator) throw new Error('The demo types have no calculator');
+    const added = [
+      { ...calculator, name: 'ai.toolCode', displayName: 'Code Tool' },
+      {
+        ...calculator,
+        name: 'ai.agentTool',
+        displayName: 'AI Agent Tool',
+        properties: [
+          {
+            displayName: 'Prompt',
+            name: 'text',
+            type: 'string' as const,
+            default: "={{ $fromAI('input', 'The prompt') }}",
+          },
+        ],
+      },
+      {
+        ...calculator,
+        name: 'ai.toolWorkflow',
+        displayName: 'Call Workflow Tool',
+        properties: [
+          { displayName: 'Description', name: 'description', type: 'string' as const, default: '' },
+          { displayName: 'Inputs', name: 'workflowInputs', type: 'resourceMapper' as const, default: {} },
+        ],
+      },
+    ];
+    beforeAll(() => void demoNodeTypes.push(...added));
+    afterAll(() => void demoNodeTypes.splice(-added.length));
+
+    const toolGraph = (name: string, type: string, parameters: DataObject = {}) => ({
+      nodes: [...nodes().slice(0, 3), nodeOf(name, type, parameters)],
+      connections: { Start: connections.Start, Model: connections.Model, [name]: link('Agent', 'ai_tool') },
+    });
+
+    it('a Code tool asks for one input, and it goes out bare under the tool name', async () => {
+      const user = userEvent.setup();
+      await openNdv('My Code', toolGraph('My Code', 'ai.toolCode'));
+      await user.click(await executeStep());
+      await screen.findByRole('dialog', { name: 'Test My Code' });
+      await user.type(screen.getByLabelText(/^input/), 'hello');
+      const buttons = screen.getAllByRole('button', { name: 'Execute step' });
+      await user.click(buttons[buttons.length - 1]);
+      await waitFor(() => expect(runCalls()).toHaveLength(1));
+      expect(runCalls()[0].body).toMatchObject({
+        agentRequest: { query: { My_Code: 'hello' }, toolName: 'My_Code' },
+      });
+    });
+
+    it('a Calculator opens no modal and runs with an empty query', async () => {
+      const user = userEvent.setup();
+      await openNdv('Sum', toolGraph('Sum', 'ai.toolCalculator'));
+      await user.click(await executeStep());
+      await waitFor(() => expect(runCalls()).toHaveLength(1));
+      expect(screen.queryByRole('dialog', { name: 'Test Sum' })).toBeNull();
+      expect(runCalls()[0].body).toMatchObject({ agentRequest: { query: {}, toolName: 'Sum' } });
+    });
+
+    it('a Call Workflow Tool asks only for its mapped inputs, as its tool schema does', async () => {
+      const user = userEvent.setup();
+      const typed = "={{ $fromAI('typed', 'Typed by hand') }}";
+      await openNdv(
+        'Flow',
+        toolGraph('Flow', 'ai.toolWorkflow', {
+          description: typed,
+          workflowInputs: {
+            value: { city: "={{ $fromAI('city', 'The city') }}", old: "={{ $fromAI('old', 'Removed') }}" },
+            schema: [{ id: 'city' }, { id: 'old', removed: true }],
+          },
+        }),
+      );
+      await user.click(await executeStep());
+      await screen.findByRole('dialog', { name: 'Test Flow' });
+      expect(screen.getByLabelText(/^city/)).toBeTruthy();
+      expect(screen.queryByLabelText(/^typed/)).toBeNull();
+      expect(screen.queryByLabelText(/^old/)).toBeNull();
+    });
+
+    it('a Call Workflow Tool with no $fromAI in its inputs runs at once', async () => {
+      const user = userEvent.setup();
+      await openNdv('Flow', toolGraph('Flow', 'ai.toolWorkflow', { description: "={{ $fromAI('typed', 'Typed') }}" }));
+      await user.click(await executeStep());
+      await waitFor(() => expect(runCalls()).toHaveLength(1));
+      expect(screen.queryByRole('dialog', { name: 'Test Flow' })).toBeNull();
+    });
+
+    it('a $fromAI in a default opens the modal, as the node stores no parameters', async () => {
+      const user = userEvent.setup();
+      await openNdv('Researcher', toolGraph('Researcher', 'ai.agentTool'));
+      await user.click(await executeStep());
+      await screen.findByRole('dialog', { name: 'Test Researcher' });
+      expect(screen.getByLabelText(/^input/)).toBeTruthy();
+      expect(runCalls()).toHaveLength(0);
     });
   });
 

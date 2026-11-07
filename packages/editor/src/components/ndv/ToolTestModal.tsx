@@ -1,7 +1,7 @@
 /**
  * "Test a tool": asks for the values the model would pass to a tool node (P5-76). `args` holds the tool's `$fromAI`
- * scan; the caller opens no modal when the scan is empty. The values are data: they go out as typed here and nothing
- * reads them as expressions.
+ * scan or its one implicit field; the caller opens no modal when there is none. The values are data: they go out as
+ * typed here and nothing reads them as expressions.
  */
 import type { DataObject, FromAiArgument } from '@workflow/workflow';
 import { type FormEvent, type ReactElement, useEffect, useId, useState } from 'react';

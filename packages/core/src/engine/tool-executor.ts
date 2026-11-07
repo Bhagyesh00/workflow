@@ -142,6 +142,25 @@ function convertArguments(query: DataObject, schema: JsonSchema): DataObject {
   return args;
 }
 
+/**
+ * The value of a tool that takes one string: the editor sends it bare, under the tool's name, as n8n does. A key the
+ * tool itself declares is an ordinary argument.
+ */
+function bareInput({ query, toolName }: ToolExecutorRequest, schema: JsonSchema): DataObject | undefined {
+  const value = Object.hasOwn(query, toolName) ? query[toolName] : undefined;
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  if (typeof value !== 'string' || Object.hasOwn(properties, toolName)) return undefined;
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const key = [...required, ...Object.keys(properties)].find((name) => typeof name === 'string');
+  return typeof key === 'string' ? { [key]: value } : {};
+}
+
+/** an empty query is what a tool gets when nothing asked for values: it runs with none and reports what it misses */
+function requestArguments(request: ToolExecutorRequest, schema: JsonSchema): DataObject {
+  if (Object.keys(request.query).length === 0) return {};
+  return convertArguments(bareInput(request, schema) ?? request.query, schema);
+}
+
 /** what the engine gives a sub-node, for the one tool under test: its siblings are not supplied */
 function supplyContext(
   host: ToolRunHost,
@@ -224,7 +243,7 @@ export async function runToolExecutor(
         ? tools[0]
         : tools.find(({ name }) => !request.toolName || name === request.toolName);
     if (!chosen) throw new NodeOperationError(tool, NO_TOOL);
-    args = convertArguments(request.query, chosen.parameters);
+    args = requestArguments(request, chosen.parameters);
     const result = await chosen.invoke(args, { signal });
     if (taskCount() === before) {
       host.logSubNodeRun(tool, root, 'ai_tool', args, { response: result as DataObject[string] });

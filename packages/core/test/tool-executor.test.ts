@@ -453,7 +453,7 @@ describe('runToolExecutor', () => {
     [{ amount: 1, options: '[1]' }, '"options" must be a JSON object'],
     [{ amount: 1, options: 'nope' }, '"options" must be a JSON object'],
     [{ amount: 1, list: '{}' }, '"list" must be a JSON array'],
-    [{}, 'Missing a value for "amount"'],
+    [{ whole: 1 }, 'Missing a value for "amount"'],
   ])('refuses %j', async (query, message) => {
     const { nodes, connections } = graph(node('Tool', 'test.nativeTool'));
     const { result, error, runData } = await testTool(nodes, connections, 'Tool', query);
@@ -462,6 +462,13 @@ describe('runToolExecutor', () => {
     expect(calls.invokes).toEqual([]);
     expect(runData.Tool[0].executionStatus).toBe('error');
     expect(calls.closed).toBe(1);
+  });
+
+  it('an empty query reaches the tool as {}: the required check is for values someone typed', async () => {
+    const { nodes, connections } = graph(node('Tool', 'test.nativeTool'));
+    const { result } = await testTool(nodes, connections, 'Tool', {});
+    expect(result.status).toBe('success');
+    expect(calls.invokes).toEqual([{}]);
   });
 
   it('a tool with no $fromAI works with an empty query', async () => {

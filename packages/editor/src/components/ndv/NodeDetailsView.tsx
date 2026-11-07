@@ -7,7 +7,10 @@ import {
   extractFromAiArguments,
   type FromAiArgument,
   isHitlVariant,
+  type NodeParameters,
   type NodeProperty,
+  resolveNodeParameters,
+  toolNameOf,
 } from '@workflow/workflow';
 import { BookOpen, Copy, ExternalLink, Play, Radio, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -41,6 +44,30 @@ import { Tabs } from '../ui/Tabs';
 import { InputPane, OutputPane } from './DataPanes';
 import { NodeSettingsForm } from './NodeSettingsForm';
 import { ToolTestModal } from './ToolTestModal';
+
+/**
+ * Tools that take one string and have no `$fromAI` to scan, from n8n's list: only these among the tools with no scan
+ * ask for a value, and it goes out bare, under the tool's name. A Calculator or a Call Workflow Tool runs with none.
+ */
+const TOOL_TYPES_TAKING_INPUT: ReadonlySet<string> = new Set(['ai.toolCode']);
+const IMPLICIT_INPUT: FromAiArgument[] = [{ key: 'input', type: 'string' }];
+
+/**
+ * What a tool's model fills. The Call Workflow Tool's schema comes from its mapped inputs only, without the fields
+ * removed from the mapping, so a `$fromAI` typed anywhere else asks for nothing.
+ */
+function fromAiScanTarget(nodeType: string, parameters: NodeParameters): unknown {
+  if (nodeType !== 'ai.toolWorkflow') return parameters;
+  const mapping = parameters.workflowInputs as
+    | { value?: unknown; schema?: Array<{ id?: unknown; removed?: unknown }> }
+    | undefined;
+  const value = mapping?.value;
+  if (!value || typeof value !== 'object') return {};
+  const removed = new Set(
+    (Array.isArray(mapping.schema) ? mapping.schema : []).flatMap((field) => (field?.removed === true ? [field.id] : [])),
+  );
+  return Object.entries(value).flatMap(([key, entry]) => (removed.has(key) ? [] : [entry]));
+}
 
 export interface NodeDetailsViewProps {
   nodeName: string;
@@ -217,20 +244,28 @@ export function NodeDetailsView({
   /** Execute step: a tool asks for the values its model would pass, when it reads any */
   const executeStep = useCallback(() => {
     if (!node || !onExecuteNode) return;
-    if (!isTool) {
+    if (!isTool || !description) {
       onExecuteNode(node.name);
       return;
     }
     let args: FromAiArgument[];
     try {
-      args = extractFromAiArguments(node.parameters);
+      // the node stores only what a person changed, so a `$fromAI` can sit in a default
+      args = TOOL_TYPES_TAKING_INPUT.has(node.type)
+        ? IMPLICIT_INPUT
+        : extractFromAiArguments(
+            fromAiScanTarget(
+              node.type,
+              resolveNodeParameters(description.properties, node.parameters, { nodeVersion: node.typeVersion }),
+            ),
+          );
     } catch (error) {
       toast.error('Could not test this tool', errorMessage(error));
       return;
     }
     if (args.length) setToolTest({ args, parentName: toolParentName(connections, node.name) ?? '' });
     else runToolTest(node.name, {}, onExecuteNode);
-  }, [node, onExecuteNode, isTool, connections]);
+  }, [node, description, onExecuteNode, isTool, connections]);
 
   const graph = useMemo(
     () => ({ nodes, connections, pinData, stickyNotes, nodeGroups }),
@@ -506,7 +541,11 @@ export function NodeDetailsView({
             onCancel={() => setToolTest(null)}
             onExecute={(query) => {
               setToolTest(null);
-              runToolTest(node.name, query, onExecuteNode);
+              runToolTest(
+                node.name,
+                TOOL_TYPES_TAKING_INPUT.has(node.type) ? { [toolNameOf(node.name)]: query.input } : query,
+                onExecuteNode,
+              );
             }}
           />
         )}
