@@ -107,10 +107,13 @@ export function detectSecrets(text: string, level: SecretLevel): Span[] {
   const words: Array<{ word: string; start: number; end: number }> = [];
   for (const match of text.matchAll(/\S+/g)) {
     const raw = match[0];
-    const lead = raw.length - raw.replace(/^[*#]+/, '').length;
-    const word = raw.slice(lead).replace(/[*#]+$/, '');
-    if (!word) continue;
-    words.push({ word, start: match.index + lead, end: match.index + lead + word.length });
+    // plain loops: a regex anchored at the end retries a run of * at every start, which is quadratic
+    let first = 0;
+    let last = raw.length;
+    while (first < last && (raw[first] === '*' || raw[first] === '#')) first++;
+    while (last > first && (raw[last - 1] === '*' || raw[last - 1] === '#')) last--;
+    if (first === last) continue;
+    words.push({ word: raw.slice(first, last), start: match.index + first, end: match.index + last });
   }
   const spans: Span[] = [];
   words.forEach(({ word, start, end }, i) => {

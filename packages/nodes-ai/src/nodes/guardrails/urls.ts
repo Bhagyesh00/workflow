@@ -1,4 +1,8 @@
-/** Guardrails URL check (fixed bounded patterns, no user pattern here): finds URLs, bare domains and IPs, and blocks by scheme, userinfo and allow list. */
+/**
+ * Guardrails URL check (fixed bounded patterns, no user pattern here): finds URLs, bare domains and IPs,
+ * and blocks by scheme, userinfo and allow list. Hosts may be Unicode: `new URL` turns them into punycode,
+ * and it decides what the host of a candidate really is.
+ */
 import type { Span } from './pii';
 
 export interface UrlOptions {
@@ -65,12 +69,24 @@ const FILE_EXTENSIONS = new Set([
   'exe',
   'dll',
 ]);
-const TRAILING = /[.,;:!?)\]}'"]+$/;
+const TRAILING = new Set('.,;:!?)]}\'"');
 
-const SCHEME_URL = /\b[a-z][a-z0-9+.-]{1,15}:\/\/[^\s<>"'\x60]{1,2048}/gi;
-const SPECIAL_URL = /\b(?:data|javascript|vbscript|mailto):[^\s<>"'\x60]{1,2048}/gi;
-const BARE_URL =
-  /(?<![\w@.:/-])[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){1,8}(?::\d{1,5})?(?:\/[^\s<>"'\x60]{0,2048})?/gi;
+/** a top-level domain: letters of any script, or its punycode form */
+const TLD = /^(?:\p{L}[\p{L}\p{M}]{1,23}|xn--[a-z0-9-]{1,59})$/u;
+
+const LABEL = String.raw`[\p{L}\p{M}\p{N}-]{1,63}`;
+const HOST_AND_PATH = String.raw`${LABEL}(?:\.${LABEL}){1,126}(?::\d{1,5})?(?:\/[^\s<>"'\x60]{0,2048})?`;
+
+const SCHEME_URL = /(?<![a-z0-9])[a-z][a-z0-9+.-]{1,255}:\/\/[^\s<>"'\x60]{1,2048}/gi;
+const SPECIAL_URL = /(?<![a-z0-9])(?:data|javascript|vbscript|mailto):[^\s<>"'\x60]{1,2048}/gi;
+/** forms `new URL` reads like `://`: https:evil.com, https:/evil.com, FILE:/etc/passwd */
+const LOOSE_URL =
+  /(?<![a-z0-9])(?:https?|ftp|wss?|file):\/{0,2}[^\s<>"'\x60.,;:!?)\]}/][^\s<>"'\x60]{0,2048}/gi;
+const BARE_URL = new RegExp(String.raw`(?<![\p{L}\p{M}\p{N}_@.-])${HOST_AND_PATH}`, 'giu');
+/** what follows the @ of a URL that has userinfo and no scheme */
+const AFTER_USERINFO = new RegExp(HOST_AND_PATH, 'iuy');
+const TOKEN = /[^\s<>"'\x60]+/g;
+const BEFORE_AUTHORITY = new Set('([{,;=/\\');
 
 interface Candidate {
   value: string;
@@ -79,29 +95,66 @@ interface Candidate {
   kind: 'scheme' | 'special' | 'bare';
 }
 
+function withoutTrailing(value: string): string {
+  let end = value.length;
+  while (end > 0 && TRAILING.has(value[end - 1])) end--;
+  return value.slice(0, end);
+}
+
+function looksLikeHost(value: string): boolean {
+  const labels = value.split(/[:/]/, 1)[0].split('.');
+  const tld = labels[labels.length - 1].toLowerCase();
+  const isIp = labels.length === 4 && labels.every((l) => /^\d{1,3}$/.test(l));
+  return isIp || (TLD.test(tld) && !FILE_EXTENSIONS.has(tld));
+}
+
 function collect(text: string): Candidate[] {
   const found: Candidate[] = [];
-  const overlaps = (start: number, end: number) => found.some((c) => start < c.end && end > c.start);
+  const covered = new Uint8Array(text.length);
+  const add = (value: string, start: number, kind: Candidate['kind']) => {
+    const end = start + value.length;
+    for (let i = start; i < end; i++) if (covered[i]) return;
+    covered.fill(1, start, end);
+    found.push({ value, start, end, kind });
+  };
   const scan = (pattern: RegExp, kind: Candidate['kind']) => {
     pattern.lastIndex = 0;
     for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
-      const value = m[0].replace(TRAILING, '');
-      const start = m.index;
-      const end = start + value.length;
-      if (!value || overlaps(start, end)) continue;
+      const value = withoutTrailing(m[0]);
+      if (!value) continue;
       if (kind === 'bare') {
-        if (text[end] === '@') continue;
-        const host = value.split(/[:/]/, 1)[0];
-        const labels = host.split('.');
-        const tld = labels[labels.length - 1].toLowerCase();
-        const isIp = labels.length === 4 && labels.every((l) => /^\d{1,3}$/.test(l));
-        if (!isIp && (!/^[a-z]{2,24}$/.test(tld) || FILE_EXTENSIONS.has(tld))) continue;
+        if (text[m.index + value.length] === '@') continue;
+        // after one slash it is a file path; after two it is a host (//evil.com)
+        if (text[m.index - 1] === '/' && text[m.index - 2] !== '/') continue;
+        if (!looksLikeHost(value)) continue;
       }
-      found.push({ value, start, end, kind });
+      add(value, m.index, kind);
+    }
+  };
+  /** `user:pw@host` and `//user@host`: taken whole, so the password is masked and `new URL` finds the real host */
+  const scanUserinfo = () => {
+    TOKEN.lastIndex = 0;
+    for (let m = TOKEN.exec(text); m; m = TOKEN.exec(text)) {
+      const token = m[0];
+      const at = token.lastIndexOf('@');
+      if (at < 0) continue;
+      let from = 0;
+      while (from < at && BEFORE_AUTHORITY.has(token[from])) from++;
+      const authority = token.slice(from, at);
+      if (authority.includes('/')) continue; // the @ is in a path
+      // no colon and no leading slashes: an email address
+      if (!authority.includes(':') && !/[/\\]/.test(token.slice(0, from))) continue;
+      AFTER_USERINFO.lastIndex = at + 1;
+      const tail = AFTER_USERINFO.exec(token);
+      if (!tail) continue;
+      const value = withoutTrailing(token.slice(from, at + 1 + tail[0].length));
+      if (looksLikeHost(value.slice(at + 1 - from))) add(value, m.index + from, 'bare');
     }
   };
   scan(SCHEME_URL, 'scheme');
   scan(SPECIAL_URL, 'special');
+  scan(LOOSE_URL, 'scheme');
+  scanUserinfo();
   scan(BARE_URL, 'bare');
   return found.sort((a, b) => a.start - b.start);
 }
@@ -161,7 +214,12 @@ function onAllowList(entries: readonly string[], host: string, path: string, sub
       }
       continue;
     }
-    if (hostAllowed(entry, host, subdomains)) return true;
+    try {
+      // through the URL parser, so a Unicode entry compares as the punycode the host is in
+      if (hostAllowed(new URL(`https://${entry}`).hostname, host, subdomains)) return true;
+    } catch {
+      // an unreadable entry allows nothing
+    }
   }
   return false;
 }

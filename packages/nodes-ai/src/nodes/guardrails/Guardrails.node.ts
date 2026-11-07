@@ -251,7 +251,7 @@ const guardrailOptions: NodeProperty[] = [
         name: 'guardrail',
         values: [
           { displayName: 'Name', name: 'name', type: 'string', default: '' },
-          { ...thresholdProperty(), default: '' as unknown as number },
+          thresholdProperty(),
           {
             displayName: 'Prompt',
             name: 'prompt',
@@ -368,7 +368,7 @@ function readConfig(
 
 function resultItem(input: string, checks: CheckResult[], index: number): Item {
   return {
-    json: { guardrailsInput: input, checks: checks as unknown as DataObject[string] },
+    json: { guardrailsInput: input, checks },
     pairedItem: { item: index },
   };
 }
@@ -469,7 +469,7 @@ export const GuardrailsNode: NodeType = {
             try {
               return await getChatModel(ctx, i, { chatOnly: true });
             } catch (error) {
-              if (error instanceof NodeOperationError && /^Connect a /.test(error.message)) {
+              if (error instanceof NodeOperationError && /^(Connect a |A sub-node must be connected)/.test(error.message)) {
                 throw new NodeOperationError(ctx.getNode(), 'Chat Model is required', { itemIndex: i });
               }
               throw error;

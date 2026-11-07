@@ -64,27 +64,45 @@ function failure(name: string, error: unknown): CheckResult {
   };
 }
 
-/** Replaces spans by `<TOKEN>`; where spans overlap the longer one wins. */
+/**
+ * Replaces spans by `<TOKEN>`. Spans that overlap, even in part, are masked as one stretch named after
+ * the longest of them, so no part of a found value stays in the text.
+ */
 export function maskSpans(text: string, spans: Span[]): string {
-  const chosen: Span[] = [];
-  for (const span of [...spans].sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start)) {
-    if (!chosen.some((c) => span.start < c.end && span.end > c.start)) chosen.push(span);
+  const ordered = [...spans].sort((a, b) => a.start - b.start);
+  const parts: string[] = [];
+  let position = 0;
+  for (let i = 0; i < ordered.length; ) {
+    const start = ordered[i].start;
+    let longest = ordered[i];
+    let end = longest.end;
+    for (i++; i < ordered.length && ordered[i].start < end; i++) {
+      const span = ordered[i];
+      if (span.end - span.start > longest.end - longest.start) longest = span;
+      end = Math.max(end, span.end);
+    }
+    parts.push(text.slice(position, start), `<${longest.type}>`);
+    position = end;
   }
-  let out = text;
-  for (const span of chosen.sort((a, b) => b.start - a.start)) {
-    out = `${out.slice(0, span.start)}<${span.type}>${out.slice(span.end)}`;
-  }
-  return out;
+  parts.push(text.slice(position));
+  return parts.join('');
 }
 
-function preflight(text: string, config: GuardrailConfig): { checks: CheckResult[]; spans: Span[] } {
+async function preflight(
+  text: string,
+  config: GuardrailConfig,
+): Promise<{ checks: CheckResult[]; spans: Span[] }> {
   const checks: CheckResult[] = [];
   const spans: Span[] = [];
+  // one by one: a text at the cap can hold more spans than a spread call can take
+  const addSpans = (found: Span[]) => {
+    for (const span of found) spans.push(span);
+  };
 
   if (config.pii) {
     try {
       const found = detectPii(text, config.pii.entities);
-      spans.push(...found);
+      addSpans(found);
       checks.push({
         name: 'pii',
         triggered: found.length > 0,
@@ -98,8 +116,8 @@ function preflight(text: string, config: GuardrailConfig): { checks: CheckResult
   for (const entry of config.customRegex ?? []) {
     const name = entry.name || 'customRegex';
     try {
-      const found = findRegexMatches(text, entry.regex, name);
-      spans.push(...found);
+      const found = await findRegexMatches(text, entry.regex, name);
+      addSpans(found);
       checks.push({
         name,
         triggered: found.length > 0,
@@ -113,7 +131,7 @@ function preflight(text: string, config: GuardrailConfig): { checks: CheckResult
   if (config.secretKeys) {
     try {
       const found = detectSecrets(text, config.secretKeys.level);
-      spans.push(...found);
+      addSpans(found);
       checks.push({
         name: 'secretKeys',
         triggered: found.length > 0,
@@ -127,7 +145,7 @@ function preflight(text: string, config: GuardrailConfig): { checks: CheckResult
   if (config.urls) {
     try {
       const result = checkUrls(text, config.urls);
-      spans.push(...result.blocked);
+      addSpans(result.blocked);
       checks.push({
         name: 'urls',
         triggered: result.blocked.length > 0,
@@ -164,7 +182,7 @@ export async function runChecks(args: {
     });
   }
 
-  const early = preflight(text, config);
+  const early = await preflight(text, config);
   const maskedText = maskSpans(text, early.spans);
   if (operation === 'sanitize') {
     return { checks: early.checks, failing: early.checks.filter((c) => c.executionFailed), maskedText };

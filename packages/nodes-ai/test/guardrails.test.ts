@@ -1,8 +1,13 @@
 import type { DataObject } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { matchKeywords, parseKeywords } from '../src/nodes/guardrails/keywords';
+import {
+  findRegexMatches,
+  matchKeywords,
+  parseKeywords,
+  parseRegexSpec,
+} from '../src/nodes/guardrails/keywords';
 import { detectPii, PII_ENTITIES, PII_NAME_MAP } from '../src/nodes/guardrails/pii';
-import { maskSpans } from '../src/nodes/guardrails/run-checks';
+import { MAX_TEXT_LENGTH, maskSpans } from '../src/nodes/guardrails/run-checks';
 import { detectSecrets } from '../src/nodes/guardrails/secrets';
 import { checkUrls, type UrlOptions } from '../src/nodes/guardrails/urls';
 import { connect, type Link, modelRequests, node, reply, run, scriptModel } from './harness';
@@ -123,10 +128,72 @@ describe('PII entities', () => {
     expect(detectPii('jane@example.com', ['NOT_AN_ENTITY'])).toEqual([]);
   });
 
-  it('masks by longest value first when patterns overlap', () => {
+  it('masks values that do not overlap one by one', () => {
     const text = 'ssn 123-45-6789 and 4111 1111 1111 1111';
     const masked = maskSpans(text, detectPii(text, ['US_SSN', 'CREDIT_CARD', 'US_BANK_NUMBER']));
     expect(masked).toBe('ssn <US_SSN> and <CREDIT_CARD>');
+  });
+
+  it('masks partly overlapping values as one stretch named after the longest', () => {
+    const text = 'Email alice@example.com lives at Main Street';
+    const found = detectPii(text, ['EMAIL_ADDRESS', 'LOCATION']);
+    expect(found.map((s) => s.type).sort()).toEqual(['EMAIL_ADDRESS', 'LOCATION']);
+    expect(maskSpans(text, found)).toBe('Email <LOCATION>');
+    const key = 'Call 415 555 2671abcDEF9x$Q now';
+    const spans = [...detectPii(key, ['PHONE_NUMBER']), ...detectSecrets(key, 'balanced')];
+    expect(maskSpans(key, spans)).toBe('Call <SECRET> now');
+  });
+
+  it('nested and adjacent spans keep their own tokens', () => {
+    const nested = [
+      { type: 'A', start: 2, end: 8 },
+      { type: 'B', start: 3, end: 5 },
+    ];
+    expect(maskSpans('0123456789', nested)).toBe('01<A>89');
+    const adjacent = [
+      { type: 'B', start: 4, end: 6 },
+      { type: 'A', start: 2, end: 4 },
+    ];
+    expect(maskSpans('0123456789', adjacent)).toBe('01<A><B>6789');
+    const same = [
+      { type: 'A', start: 1, end: 3 },
+      { type: 'B', start: 1, end: 3 },
+    ];
+    expect(maskSpans('0123', same)).toBe('0<A>3');
+    expect(maskSpans('0123', [])).toBe('0123');
+  });
+
+  it('masks every value when one pattern matches more than 10,000 times', () => {
+    const text = Array.from({ length: 12_000 }, (_, i) => `u${i}@x.co`).join(' ');
+    expect(text.length).toBeLessThan(MAX_TEXT_LENGTH);
+    const found = detectPii(text, ['EMAIL_ADDRESS']);
+    expect(found).toHaveLength(12_000);
+    const masked = maskSpans(text, found);
+    expect(masked).not.toContain('@');
+    expect(masked.endsWith('<EMAIL_ADDRESS>')).toBe(true);
+  });
+
+  it.each([
+    ['nine digit numbers', '123456789 '],
+    ['eleven digit numbers', '12345678901 '],
+  ])('PII All at the 200,000 character cap stays near linear: %s', (_name, unit) => {
+    // the old span scans took 10 to 20 s here; the budget leaves room for a loaded machine
+    const text = unit.repeat(Math.floor(MAX_TEXT_LENGTH / unit.length));
+    const start = performance.now();
+    const found = detectPii(text, PII_ENTITIES);
+    const masked = maskSpans(text, found);
+    expect(performance.now() - start).toBeLessThan(6000);
+    expect(found.length).toBeGreaterThan(10_000);
+    expect(masked).not.toMatch(/\d/);
+  });
+
+  it('maskSpans on 50,000 spans at the cap stays linear', () => {
+    const text = 'abc '.repeat(50_000);
+    const spans = Array.from({ length: 50_000 }, (_, i) => ({ type: 'X', start: i * 4, end: i * 4 + 3 }));
+    const start = performance.now();
+    const masked = maskSpans(text, spans);
+    expect(performance.now() - start).toBeLessThan(1500);
+    expect(masked).toBe('<X> '.repeat(50_000));
   });
 
   it('LOCATION on 100 KB of text stays linear (under 2 s; about 200 ms alone)', () => {
@@ -187,6 +254,18 @@ describe('secret keys', () => {
 
   it('strips * and # around a word', () => {
     expect(word('**sk-abc123**', 'balanced')).toEqual(['sk-abc123']);
+    expect(word('#*sk-abc123#*# rest', 'balanced')).toEqual(['sk-abc123']);
+    expect(word('*** ###', 'strict')).toEqual([]);
+  });
+
+  it('a run of * or # inside a word at the 200,000 character cap stays linear', () => {
+    // the old trailing regex took about 2 minutes here; the budget leaves room for a loaded machine
+    for (const mark of ['*', '#']) {
+      const text = `a${mark.repeat(MAX_TEXT_LENGTH - 2)}b`;
+      const start = performance.now();
+      detectSecrets(text, 'balanced');
+      expect(performance.now() - start).toBeLessThan(3000);
+    }
   });
 });
 
@@ -255,6 +334,87 @@ describe('URL rules', () => {
   it('an empty allow list blocks every URL with a host', () => {
     expect(check('https://example.com', { allowedUrls: [] }).blocked).toHaveLength(1);
   });
+
+  it.each([
+    ['//evil.com/x', 'Not in the allow list'],
+    ['https:evil.com', 'Not in the allow list'],
+    ['https:/evil.com', 'Not in the allow list'],
+    ['HTTPS:evil.com', 'Not in the allow list'],
+    ['user:pw@evil.com', 'Contains user info'],
+    ['//user@evil.com/x', 'Contains user info'],
+    ['example.com:pw@evil.com', 'Contains user info'],
+    ['user:p@ss@evil.com', 'Contains user info'],
+    ['(user:pw@evil.com)', 'Contains user info'],
+    ['_https://evil.com', 'Not in the allow list'],
+    ['FILE:/etc/passwd', 'Scheme is not allowed'],
+    ['averyveryverylongschemename://evil.com', 'Scheme is not allowed'],
+    ['see:evil.com', 'Not in the allow list'],
+    ['a.b.c.d.e.f.g.h.i.j.k.evil.com', 'Not in the allow list'],
+  ])('finds the working URL form %s', (form, reason) => {
+    const r = check(`go ${form} now`);
+    expect(r.detected).toBe(1);
+    expect(r.blocked).toHaveLength(1);
+    expect(r.blockedReasons).toEqual([reason]);
+  });
+
+  it('judges a loose form by its real host and leaves the password out of a masked text', () => {
+    expect(check('go https:example.com/x now').blocked).toEqual([]);
+    expect(check('go //docs.example.com/x now').blocked).toEqual([]);
+    expect(check('user:pw@example.com', { blockUserinfo: false }).blocked).toEqual([]);
+    expect(check('example.com:pw@evil.com', { blockUserinfo: false }).blocked).toHaveLength(1);
+    const text = 'go user:pw@evil.com now';
+    expect(maskSpans(text, check(text).blocked)).toBe('go <URL> now');
+  });
+
+  it('does not take prose, paths or an @ in a path for a URL', () => {
+    const none = { allowedUrls: [] };
+    expect(check('note: http: and https: are schemes (file:)', none).detected).toBe(0);
+    expect(check('jane@corp.org, a@b.co,c@d.org', none).detected).toBe(0);
+    expect(check('open src/lib/foo.vue and /var/www/site.org', none).detected).toBe(0);
+    expect(check('see example.com/@jane.doe', { allowedUrls: ['example.com'] }).blocked).toEqual([]);
+  });
+
+  it('judges a whole Unicode host, not its ASCII tail', () => {
+    const lookalike = check('go evil\u0430example.com now');
+    expect(lookalike.detected).toBe(1);
+    expect(lookalike.blocked).toHaveLength(1);
+    expect(lookalike.blockedReasons).toEqual(['Not in the allow list']);
+    const text = 'go m\u00fcnchen.de now';
+    expect(maskSpans(text, check(text).blocked)).toBe('go <URL> now');
+    expect(check('go \u0928\u092e\u0938\u094d\u0924\u0947.\u092d\u093e\u0930\u0924 now').blocked).toHaveLength(1);
+  });
+
+  it('compares a Unicode allow-list entry as punycode', () => {
+    const over = { allowedUrls: ['m\u00fcnchen.de'] };
+    expect(check('https://m\u00fcnchen.de/x and m\u00fcnchen.de', over).blocked).toEqual([]);
+    expect(check('https://xn--mnchen-3ya.de/x', over).blocked).toEqual([]);
+    expect(check('https://sub.m\u00fcnchen.de', over).blocked).toEqual([]);
+    expect(check('m\u00fcnchen.de', { allowedUrls: ['xn--mnchen-3ya.de'] }).blocked).toEqual([]);
+    expect(check('https://munchen.de', over).blocked).toHaveLength(1);
+  });
+
+  it.each([
+    ['one short domain repeated', 'a.co '],
+    ['a long run of letters and dashes', 'a-'],
+    ['a long run of dots', 'a.'],
+    ['a long run of punctuation after a URL', 'https://a.co/!!!!!!!! '],
+    ['colons and slashes', 'a:/'],
+    ['at signs', 'a:b@'],
+  ])('a text at the 200,000 character cap stays near linear: %s', (_name, unit) => {
+    // the old overlap scan took about 9 s on the first one; the budget leaves room for a loaded machine
+    const text = unit.repeat(Math.floor(MAX_TEXT_LENGTH / unit.length));
+    const start = performance.now();
+    checkUrls(text, base);
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
+  it('many different domains at the cap stay near linear', () => {
+    const text = Array.from({ length: 22_000 }, (_, i) => `a${i}.co`).join(' ');
+    const start = performance.now();
+    const r = checkUrls(text, base);
+    expect(performance.now() - start).toBeLessThan(3000);
+    expect(r.detected).toBe(22_000);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -277,6 +437,90 @@ describe('keywords', () => {
     expect(matchKeywords('Das ist ÄRGER hier', ['ärger'])).toEqual(['ärger']);
     expect(matchKeywords('Ärgerlich', ['ärger'])).toEqual([]);
     expect(matchKeywords('これは 東京 です', ['東京'])).toEqual(['東京']);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Custom regex
+// ---------------------------------------------------------------------------------------------
+
+describe('custom regex', () => {
+  it('reads /pattern/flags only when the last part is made of valid flags', () => {
+    expect(parseRegexSpec('/order-\\d+/i')).toEqual({ source: 'order-\\d+', flags: 'gi' });
+    expect(parseRegexSpec('/a/b/')).toEqual({ source: 'a/b', flags: 'g' });
+    expect(parseRegexSpec('/api/users')).toEqual({ source: '/api/users', flags: 'g' });
+    expect(parseRegexSpec('/api/v1/users')).toEqual({ source: '/api/v1/users', flags: 'g' });
+    expect(parseRegexSpec('order-\\d+')).toEqual({ source: 'order-\\d+', flags: 'g' });
+  });
+
+  it('a bare pattern that starts with a slash matches the whole path', async () => {
+    const text = 'GET /api/users today, api alone not';
+    expect(await findRegexMatches(text, '/api/users', 'path')).toEqual([{ type: 'path', start: 4, end: 14 }]);
+  });
+
+  it('finds a normal pattern with the right offsets, also at the cap', async () => {
+    const short = await findRegexMatches('ab ORDER-1 cd order-22', '/order-\\d+/i', 'o');
+    expect(short).toEqual([
+      { type: 'o', start: 3, end: 10 },
+      { type: 'o', start: 14, end: 22 },
+    ]);
+    const long = `${'x'.repeat(MAX_TEXT_LENGTH - 8)}order-12`;
+    expect(await findRegexMatches(long, 'order-\\d+', 'o')).toEqual([
+      { type: 'o', start: MAX_TEXT_LENGTH - 8, end: MAX_TEXT_LENGTH },
+    ]);
+  });
+
+  it('skips empty matches and returns more than 10,000 matches', async () => {
+    expect(await findRegexMatches('abc', 'x*', 'e')).toEqual([]);
+    const text = 'ab '.repeat(12_000);
+    expect(await findRegexMatches(text, 'ab', 'e')).toHaveLength(12_000);
+  });
+
+  it('refuses a catastrophic pattern before any worker starts', async () => {
+    await expect(findRegexMatches('aaaa', '(a+)+$', 'bad')).rejects.toThrow();
+  });
+
+  it.each(['(a|b|c)*d', '[a-z]+@', 'a*b'])(
+    'a slow pattern at the cap, %s, fails closed fast while the event loop keeps turning',
+    async (regex) => {
+      const text = 'a'.repeat(MAX_TEXT_LENGTH);
+      let ticks = 0;
+      const ticker = setInterval(() => ticks++, 10);
+      const start = performance.now();
+      try {
+        const r = await guard({ guardrails: { customRegex: { regex: [{ name: 'slow', regex }] } } }, text, {
+          continueOnFail: true,
+        });
+        // the budget is 250 ms plus the worker's start; about a second, with room for a loaded machine
+        expect(performance.now() - start).toBeLessThan(4000);
+        expect(ticks).toBeGreaterThan(3);
+        expect(r.status).toBe('success');
+        expect(r.fail).toHaveLength(1);
+        expect(checksOf(r.fail[0])[0]).toMatchObject({ name: 'slow', triggered: false, executionFailed: true });
+        expect(JSON.stringify(checksOf(r.fail[0])[0].exception)).toMatch(/Couldn't run the custom regex/);
+        expect(JSON.stringify(checksOf(r.fail[0])[0].exception)).not.toContain('aaaa');
+      } finally {
+        clearInterval(ticker);
+      }
+    },
+  );
+
+  it('sanitize fails instead of passing a text it could not check in time', async () => {
+    const r = await guard(
+      { operation: 'sanitize', guardrails: { customRegex: { regex: [{ name: 'slow', regex: '[a-z]+@' }] } } },
+      'a'.repeat(MAX_TEXT_LENGTH),
+    );
+    expect(r.status).toBe('error');
+    expect(r.error?.message).toBe('Failed to sanitize text');
+  });
+
+  it('a pattern with a match on every character at the cap is masked in full', async () => {
+    const r = await guard(
+      { operation: 'sanitize', guardrails: { customRegex: { regex: [{ name: 'c', regex: 'a' }] } } },
+      'a'.repeat(MAX_TEXT_LENGTH),
+    );
+    expect(r.status).toBe('success');
+    expect(r.pass[0].guardrailsInput).toBe('<c>'.repeat(MAX_TEXT_LENGTH));
   });
 });
 
@@ -535,7 +779,7 @@ describe('Guardrails node, model checks', () => {
     expect(JSON.stringify(kept.output('Guard', 1))).not.toContain('abcdefghijklmnop1234');
   });
 
-  it('a model check with no model connected is refused by the engine', async () => {
+  it('a model check with no model connected fails with "Chat Model is required"', async () => {
     // the port is only there while a model check is on; run without wiring a model
     const r = await run(
       [
@@ -546,7 +790,7 @@ describe('Guardrails node, model checks', () => {
       { triggerItems: [{ json: {} }] },
     );
     expect(r.status).toBe('error');
-    expect(r.error?.message).toMatch(/languageModel/);
+    expect(r.error?.message).toBe('Chat Model is required');
   });
 
   it('preflight hit: Fail at once with zero model requests', async () => {

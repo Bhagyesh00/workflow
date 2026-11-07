@@ -162,8 +162,6 @@ export const PII_NAME_MAP: Record<string, string> = Object.fromEntries(
   Object.entries(ENTITIES).map(([key, def]) => [key, def.name]),
 );
 
-const MAX_MATCHES_PER_PATTERN = 10_000;
-
 /** compiled once; lastIndex is reset before every scan */
 const compiled = new Map<string, Array<{ pattern: RegExp; accept?: (value: string) => boolean }>>();
 
@@ -185,13 +183,7 @@ export function detectPii(text: string, entities: readonly string[]): Span[] {
   for (const entity of new Set(entities)) {
     for (const { pattern, accept } of patternsOf(entity)) {
       pattern.lastIndex = 0;
-      let count = 0;
-      for (
-        let match = pattern.exec(text);
-        match && count < MAX_MATCHES_PER_PATTERN;
-        match = pattern.exec(text)
-      ) {
-        count++;
+      for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
         if (match[0].length === 0) {
           pattern.lastIndex++;
           continue;
@@ -208,9 +200,12 @@ export function detectPii(text: string, entities: readonly string[]): Span[] {
 function withoutNested(spans: Span[]): Span[] {
   const ordered = [...spans].sort((a, b) => a.start - b.start || b.end - a.end);
   const kept: Span[] = [];
+  // every kept span starts at or before this one, so only the furthest end of each entity matters
+  const furthest = new Map<string, number>();
   for (const span of ordered) {
-    if (!kept.some((k) => k.type === span.type && k.start <= span.start && k.end >= span.end))
-      kept.push(span);
+    if ((furthest.get(span.type) ?? -1) >= span.end) continue;
+    furthest.set(span.type, span.end);
+    kept.push(span);
   }
   return kept;
 }
