@@ -97,7 +97,7 @@ describe('Phase 4 migrations', () => {
     ) as {
       entries: { idx: number; tag: string; when: number }[];
     };
-    expect(journal.entries.map((e) => `${e.idx}:${e.tag}`).slice(12)).toEqual([
+    expect(journal.entries.map((e) => `${e.idx}:${e.tag}`).slice(12, 14)).toEqual([
       '12:0012_data_tables',
       '13:0013_secret_connections',
     ]);

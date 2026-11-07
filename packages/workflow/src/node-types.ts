@@ -16,6 +16,7 @@ import type {
   Item,
   NodeExecutionHint,
   NodeOutput,
+  NodeParameters,
   NodePropertyOption,
   NodeTypeDescription,
   PairedItem,
@@ -194,8 +195,13 @@ export interface ExecuteContext extends BaseContext {
   putExecutionToWait(waitTill: Date): Promise<void>;
   /** send the HTTP response for the triggering webhook (Respond to Webhook node) */
   sendResponse(response: WebhookResponse): void;
-  /** stream a chunk to the caller (chat / streaming webhooks) */
-  sendChunk(chunk: unknown): void;
+  /**
+   * stream a chunk to the caller (chat / streaming webhooks); the engine adds the frame metadata
+   * (node, run index and `options.itemIndex`, default 0)
+   */
+  sendChunk(chunk: unknown, options?: ChatChunkOptions): void;
+  /** the Chat Trigger this run started from (or the first one upstream); null when there is none */
+  getChatTrigger(): ChatTriggerRef | null;
   /** forward console output to the editor during manual runs */
   sendMessageToUI(...args: unknown[]): void;
   /** notes about this run, stored on the node's task and shown in the output pane */
@@ -315,6 +321,25 @@ export interface WebhookContext extends BaseContext {
   verifyFormToken(token: string): DataObject | null;
   /** n8n user auth for forms; undefined where the host has none */
   getFormAuth(): FormAuthHelper | undefined;
+  /** resolves sub-nodes (memory, tools...) attached to the webhook node via `type`, as in `ExecuteContext` */
+  getInputConnectionData(type: ConnectionType, itemIndex: number): Promise<unknown>;
+  /** the Chat Trigger of this workflow (this node when it is one); null when there is none */
+  getChatTrigger(): ChatTriggerRef | null;
+  /** true when the host turns public chats off (env `DISABLE_PUBLIC_CHAT_TRIGGER`) */
+  isPublicChatDisabled(): boolean;
+}
+
+/** options of `ExecuteContext.sendChunk` */
+export interface ChatChunkOptions {
+  /** the item the chunk belongs to; default 0 */
+  itemIndex?: number;
+}
+
+/** the Chat Trigger node a chat run belongs to */
+export interface ChatTriggerRef {
+  name: string;
+  type: string;
+  parameters: NodeParameters;
 }
 
 /** the signed-in user a form hands to the workflow (n8n's four output fields) */
@@ -342,6 +367,8 @@ export interface WebhookResponseData {
   webhookResponse?: WebhookResponse;
   /** node handles the response itself later (Respond to Webhook) */
   noWebhookResponse?: boolean;
+  /** stored on the started execution as custom data (as `ExecuteContext.setCustomData`) */
+  customData?: Record<string, string>;
 }
 
 /** registration of webhooks with third-party services (e.g. Telegram setWebhook) */
@@ -433,6 +460,11 @@ export interface NodeType {
   webhook?(ctx: WebhookContext): Promise<WebhookResponseData>;
   webhookMethods?: Record<string, WebhookLifecycleMethods>;
   supplyData?(ctx: SupplyDataContext, itemIndex: number): Promise<SupplyData>;
+  /**
+   * operations a run can force with `forceOperation` instead of the node's normal `execute`
+   * (the evaluation runner fetches the dataset with `DATASET_GET_ROWS` of the Evaluation Trigger)
+   */
+  customOperations?: Record<string, (ctx: ExecuteContext) => Promise<NodeOutput>>;
   methods?: {
     loadOptions?: Record<string, (ctx: LoadOptionsContext) => Promise<NodePropertyOption[]>>;
     listSearch?: Record<

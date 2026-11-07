@@ -49,6 +49,13 @@ const DataTablesPage = lazy(() =>
 const DataTableDetailPage = lazy(() =>
   import('./pages/DataTableDetailPage').then((m) => ({ default: m.DataTableDetailPage })),
 );
+// P5-11
+const EvaluationsPage = lazy(() =>
+  import('./pages/EvaluationsPage').then((m) => ({ default: m.EvaluationsPage })),
+);
+const EvaluationRunPage = lazy(() =>
+  import('./pages/EvaluationRunPage').then((m) => ({ default: m.EvaluationRunPage })),
+);
 
 function Lazy({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<PageLoader />}>{children}</Suspense>;
@@ -74,6 +81,22 @@ export const routes: RouteObject[] = [
         element: (
           <Lazy>
             <WorkflowEditorPage />
+          </Lazy>
+        ),
+      },
+      {
+        path: 'workflow/:id/evaluations',
+        element: (
+          <Lazy>
+            <EvaluationsPage />
+          </Lazy>
+        ),
+      },
+      {
+        path: 'workflow/:id/evaluations/:runId',
+        element: (
+          <Lazy>
+            <EvaluationRunPage />
           </Lazy>
         ),
       },

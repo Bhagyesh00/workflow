@@ -1,5 +1,6 @@
 import { createBaseContext, type ExecutionServices } from '@workflow/core';
 import {
+  CHAT_TOOL_TYPE,
   type DataObject,
   ExpressionEvaluator,
   type LoadOptionsContext,
@@ -10,7 +11,8 @@ import {
 } from '@workflow/workflow';
 import { describe, expect, it } from 'vitest';
 import { credentials, nodes, nodesAiPackage } from '../src';
-import { FakeHttpClient, node, nodeTypes, services } from './harness';
+import { escapeForScript, renderChatPage } from '../src/nodes/trigger/chat-page';
+import { FakeHttpClient, node, nodeTypes, services, toolNodeTypes } from './harness';
 
 /** credential types used by AI nodes but owned by other packages (nodes-base) */
 const EXTERNAL_CREDENTIALS = new Set([
@@ -47,6 +49,8 @@ describe('package', () => {
       'chainSummarization',
       'chainRetrievalQa',
       'chatTrigger',
+      // S3: Respond to Chat
+      'chat',
       'vectorStoreInMemory',
       'vectorStorePGVector',
       'vectorStoreQdrant',
@@ -197,6 +201,33 @@ describe('package', () => {
         /^(=\{\{\$credentials\.\w+\}\}\/|=\{\{\$credentials\.databaseEndpoint\}\}:|https:\/\/)/,
       );
     }
+  });
+});
+
+describe('S3 chat contracts', () => {
+  it('registers Respond to Chat with the send-and-wait hooks, its reply hook and both tool copies', () => {
+    const chat = nodes.find((n) => n.description.name === 'ai.chat')!;
+    const d = chat.description;
+    expect(d.webhooks?.map((w) => [w.name, w.httpMethod, w.path, w.responseMode])).toEqual([
+      ['default', 'GET', 'answer', 'onReceived'],
+      ['default', 'POST', 'answer', 'onReceived'],
+      ['chatReply', 'POST', 'chat-reply', 'responseNodes'],
+    ]);
+    const reply = d.webhooks?.find((w) => w.name === 'chatReply');
+    expect(reply?.restartWebhook).toBe(true);
+    expect(reply?.isFullPath).toBeUndefined();
+    expect(typeof d.inputs).toBe('string');
+    expect(d.usableAsTool).toBe(true);
+    expect(
+      d.properties.find((p) => p.name === 'operation')?.options?.map((o) => (o as { value: unknown }).value),
+    ).toEqual(['send', 'sendAndWait']);
+    expect(toolNodeTypes.get(CHAT_TOOL_TYPE)?.description.outputs).toEqual(['ai_tool']);
+    expect(toolNodeTypes.get('ai.chatHitlTool')).toBeDefined();
+  });
+
+  it('exports the hosted page builder for lane L2', () => {
+    expect(typeof renderChatPage).toBe('function');
+    expect(typeof escapeForScript).toBe('function');
   });
 });
 

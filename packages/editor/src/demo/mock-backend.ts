@@ -4,6 +4,7 @@
  * real client code paths. It is a stand-in: no persistence, a single browser session.
  */
 import {
+  CHAT_TRIGGER_TYPE,
   type Connections,
   type DataObject,
   diffWorkflows,
@@ -46,7 +47,9 @@ import {
   demoResourceMapping,
 } from './fixtures';
 import { filterExecutionList, registerAnnotationRoutes } from './mock-annotations';
+import { registerChatRoutes } from './mock-chat';
 import { registerDataTableRoutes, searchDataTables } from './mock-data-tables';
+import { registerEvaluationRoutes } from './mock-evaluations';
 import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
 import { registerFormAuthRoutes } from './mock-form-auth';
 import { copy, HttpError, now, page } from './mock-http';
@@ -60,6 +63,15 @@ import { type SimulationInput, type SimulationResult, simulateExecution } from '
 interface AgentRequest {
   query: DataObject;
   toolName: string;
+}
+
+/**
+ * The webhook path of a trigger in the demo's URLs: a Webhook or Form Trigger's own path, else its
+ * webhook id; a Chat Trigger's hook path is `chat` under it (`<webhookId or id>/chat`, as on the server).
+ */
+function hookPath(node: WorkflowNode): string {
+  if (node.type === CHAT_TRIGGER_TYPE) return `${node.webhookId || node.id}/chat`;
+  return String(node.parameters.path || node.webhookId || node.id);
 }
 
 /** The node a tool hangs under: non-main connections up to the first node without one. */
@@ -127,6 +139,33 @@ interface StoredTenantSettings {
 
 export type MockHandler = Handler;
 
+/** a "Listen for test event" registration (POST /workflows/:id/listen-test-webhook), one per workflow */
+export interface TestListen {
+  nodeName: string;
+  expiresAt: number;
+  /** S3: the node a chat test run stops at (a step run downstream of a Chat Trigger) */
+  destinationNode?: string;
+  /** S3: a Chat Trigger's token, sent back by the chat panel in `x-chat-test-token` */
+  chatTestToken?: string;
+}
+
+/**
+ * S3 (P5-61): GET /executions `customDataKey` (the key, exact), `customDataValue` (a part of the value,
+ * case-sensitive as SQL LIKE, or the whole value with `customDataExact=true`). No key: no filter.
+ */
+export function matchesCustomData(
+  customData: Record<string, string> | null,
+  query: Record<string, string>,
+): boolean {
+  const key = query.customDataKey;
+  if (!key) return true;
+  if (!customData || !Object.hasOwn(customData, key)) return false;
+  const value = String(customData[key]);
+  const wanted = query.customDataValue;
+  if (wanted === undefined || wanted === '') return true;
+  return query.customDataExact === 'true' ? value === wanted : value.includes(wanted);
+}
+
 interface StoredCredential extends CredentialSummary {
   tenantId: string;
   data: Record<string, unknown>;
@@ -176,7 +215,7 @@ export class MockBackend {
   simulate: typeof simulateExecution = simulateExecution;
   private listeners = new Set<(event: PushEvent) => void>();
   private routes: Array<[string, RegExp, Handler]> = [];
-  private listening = new Map<string, { nodeName: string; expiresAt: number }>();
+  private listening = new Map<string, TestListen>();
 
   constructor(readonly options: MockBackendOptions = {}) {
     this.registerRoutes();
@@ -188,6 +227,8 @@ export class MockBackend {
     registerSecretRoutes(this);
     registerTriggerListenRoutes(this);
     registerFormAuthRoutes(this);
+    registerChatRoutes(this);
+    registerEvaluationRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -465,7 +506,8 @@ export class MockBackend {
     if (details.length) throw new HttpError(400, 'validation_failed', 'The workflow has problems', details);
   }
 
-  private startExecution(
+  /** start a simulated run; route modules use it (S3: mock-evaluations runs a case with mode `evaluation`) */
+  startExecution(
     wf: StoredWorkflow,
     data: {
       nodes: WorkflowNode[];
@@ -475,7 +517,7 @@ export class MockBackend {
       pinData?: Record<string, Item[]>;
     },
     options: {
-      mode: 'manual' | 'webhook' | 'retry';
+      mode: 'manual' | 'webhook' | 'retry' | 'evaluation';
       destinationNode?: string;
       startNode?: string;
       triggerItems?: Item[];
@@ -538,7 +580,7 @@ export class MockBackend {
           active: wf.active,
           nodes: data.nodes,
           connections: data.connections,
-          pinData: options.mode === 'manual' ? data.pinData : undefined,
+          pinData: options.mode === 'manual' || options.mode === 'evaluation' ? data.pinData : undefined,
         },
         mode: options.mode,
         destinationNode: options.destinationNode,
@@ -655,8 +697,11 @@ export class MockBackend {
     }
   }
 
-  /** Simulate the call to a test URL that "Listen for test event" registered. */
-  receiveTestWebhook(workflowId: string): string | null {
+  /**
+   * Simulate the call to a test URL that "Listen for test event" registered. S3: `triggerItems` is what the
+   * request brought (the chat item of a Chat Trigger); the run stops at the listen's `destinationNode`.
+   */
+  receiveTestWebhook(workflowId: string, triggerItems?: Item[]): string | null {
     const listen = this.listening.get(workflowId);
     if (!listen || listen.expiresAt < Date.now()) return null;
     this.listening.delete(workflowId);
@@ -665,10 +710,21 @@ export class MockBackend {
     const executionId = this.startExecution(wf, wf, {
       mode: 'webhook',
       startNode: listen.nodeName,
+      destinationNode: listen.destinationNode,
+      triggerItems,
       workflowVersionId: wf.versionId,
     });
     this.emit({ type: 'testWebhookReceived', data: { workflowId, executionId } });
     return executionId;
+  }
+
+  /** S3: the live chat test listen that issued `token` (null when unknown or expired) */
+  testListenByChatToken(token: string): { workflowId: string; listen: TestListen } | null {
+    if (!token) return null;
+    for (const [workflowId, listen] of this.listening) {
+      if (listen.chatTestToken === token && listen.expiresAt >= Date.now()) return { workflowId, listen };
+    }
+    return null;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -946,18 +1002,23 @@ export class MockBackend {
       const node = wf.nodes.find((n) => n.name === nodeName);
       if (!node) throw new HttpError(400, 'unknown_node', `Node "${nodeName}" is not in the saved workflow`);
       const expiresAt = Date.now() + 120_000;
-      this.listening.set(wf.id, { nodeName, expiresAt });
-      if (this.options.autoWebhookMs)
+      const isChat = node.type === CHAT_TRIGGER_TYPE;
+      // S3: a chat test run gets a token per registration (the server signs one, kind chat-test, 120 s)
+      const chatTestToken = isChat ? `demo-chat-test-${newId()}` : undefined;
+      const destinationNode = typeof body.destinationNode === 'string' ? body.destinationNode : undefined;
+      this.listening.set(wf.id, { nodeName, expiresAt, destinationNode, chatTestToken });
+      // a chat message comes from the chat panel, never from the demo timer
+      if (this.options.autoWebhookMs && !isChat)
         setTimeout(() => this.receiveTestWebhook(wf.id), this.options.autoWebhookMs);
       const { tenant } = this.auth();
       const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
-      const path = String(node.parameters.path || node.webhookId || node.id);
       const isForm = node.type === 'core.formTrigger';
-      const testUrl = `${origin}/${isForm ? 'form-test' : 'webhook-test'}/${tenant.slug}/${path}`;
+      const testUrl = `${origin}/${isForm ? 'form-test' : 'webhook-test'}/${tenant.slug}/${hookPath(node)}`;
       return {
         testUrl,
         expiresAt: new Date(expiresAt).toISOString(),
         formTestUrls: isForm ? [testUrl] : [],
+        ...(chatTestToken ? { chatTestToken } : {}),
       };
     });
     this.on('GET', '/workflows/:id/webhook-urls', ({ params }) => {
@@ -965,9 +1026,11 @@ export class MockBackend {
       const { tenant } = this.auth();
       const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
       return wf.nodes
-        .filter((n) => n.type === 'core.webhook' || n.type === 'core.formTrigger')
+        .filter(
+          (n) => n.type === 'core.webhook' || n.type === 'core.formTrigger' || n.type === CHAT_TRIGGER_TYPE,
+        )
         .map((n) => {
-          const path = String(n.parameters.path || n.webhookId || n.id);
+          const path = hookPath(n);
           const isForm = n.type === 'core.formTrigger';
           return {
             nodeName: n.name,
@@ -1041,6 +1104,7 @@ export class MockBackend {
         .filter((e) => !query.workflowId || e.workflowId === query.workflowId)
         .filter((e) => !query.status || e.status === query.status)
         .filter((e) => !query.workflowVersionId || e.workflowVersionId === query.workflowVersionId)
+        .filter((e) => matchesCustomData(e.customData, query))
         .map(summary);
       return { __list: true, ...page(list, query) };
     });

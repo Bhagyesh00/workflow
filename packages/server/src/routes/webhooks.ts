@@ -32,8 +32,8 @@ const DROPPED_HEADERS = new Set([
   'transfer-encoding',
   'connection',
 ]);
-/** the cookie of a form with User Auth (form/user-auth.ts); it can never name the session cookie */
-const FORM_AUTH_COOKIE = /^ncb-form-auth-(wf|ex)-[^=;\s]+=/;
+/** the cookie of a form or chat with User Auth (form/user-auth.ts); it can never name the session cookie */
+const FORM_AUTH_COOKIE = /^ncb-(form|chat)-auth-(wf|ex)-[^=;\s]+=/;
 
 function parseJson(text: string): unknown {
   if (!text.trim()) return {};

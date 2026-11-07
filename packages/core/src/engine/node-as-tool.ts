@@ -9,6 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   type AiTool,
+  CHAT_TOOL_TYPE,
   type ConnectionType,
   type DataObject,
   type ExecuteContext,
@@ -283,8 +284,9 @@ export function createNodeAsTool(
         httpRequestWithAuthentication: (type, options) =>
           reader.helpers.httpRequestWithAuthentication(type, options, itemIndex),
       },
-      // the run's response belongs to the agent the user talks to
-      sendChunk: () => {},
+      // the run's response belongs to the agent the user talks to; only the Chat tool posts its own message,
+      // with its own node in the chunk's meta
+      sendChunk: tool.type === CHAT_TOOL_TYPE ? base.sendChunk : () => {},
     };
 
     try {

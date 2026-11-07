@@ -5,6 +5,7 @@
  */
 import type {
   BinaryData,
+  ChatChunkMeta,
   CredentialType,
   DataObject,
   DataTableAccess,
@@ -94,7 +95,8 @@ export interface ExecutionHooks {
   ): Promise<void> | void;
   workflowExecuteAfter?(result: ExecutionResult): Promise<void> | void;
   sendResponse?(response: WebhookResponse): void;
-  sendChunk?(chunk: unknown): void;
+  /** a streamed chunk; `meta` names the node run and item that sent it (chat frames read it) */
+  sendChunk?(chunk: unknown, meta?: ChatChunkMeta): void;
   sendMessageToUI?(nodeName: string, args: unknown[]): void;
 }
 
@@ -155,4 +157,6 @@ export interface ExecutionServices {
     sign(payload: DataObject, ttlSeconds: number): string;
     verify(token: string): DataObject | null;
   };
+  /** `DISABLE_PUBLIC_CHAT_TRIGGER`: the Chat Trigger answers no public (production) chat */
+  disablePublicChatTrigger?: boolean;
 }

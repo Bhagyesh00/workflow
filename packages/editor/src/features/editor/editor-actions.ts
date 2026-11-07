@@ -7,6 +7,7 @@ import {
   type Connections,
   type DataObject,
   dirtyNodesFromDiff,
+  EVALUATION_TRIGGER_TYPE,
   type NodeTypeDescription,
   planPartialRun,
   type RunData,
@@ -153,6 +154,8 @@ const TRIGGERS_THAT_RUN_AT_ONCE = new Set([
   'core.manualTrigger',
   'core.errorTrigger',
   'core.executeWorkflowTrigger',
+  // P5-02: Execute runs the first dataset row at once (no outside event to wait for)
+  EVALUATION_TRIGGER_TYPE,
 ]);
 
 /**

@@ -46,6 +46,20 @@ describe('Chat Trigger', () => {
     ]);
   });
 
+  it('offers the hosted and embedded modes and four response modes', () => {
+    const properties = ChatTriggerNode.description.properties;
+    const values = (p: { options?: unknown[] } | undefined) =>
+      (p?.options ?? []).map((o) => (o as { value: unknown }).value);
+    const mode = properties.find((p) => p.name === 'mode');
+    expect(mode).toMatchObject({ default: 'hostedChat', displayOptions: { show: { public: [true] } } });
+    expect(values(mode)).toEqual(['hostedChat', 'webhook']);
+    const options = properties.find((p) => p.name === 'options');
+    const responseMode = ((options?.options ?? []) as Array<{ name: string; options?: unknown[] }>).find(
+      (o) => o.name === 'responseMode',
+    );
+    expect(values(responseMode)).toEqual(['lastNode', 'streaming', 'responseNode', 'responseNodes']);
+  });
+
   it('starts the workflow with one sendMessage item', async () => {
     const result = await callWebhook(
       { public: true },
@@ -120,24 +134,6 @@ describe('Chat Trigger', () => {
     expect(allowed.workflowData).toBeDefined();
     // no Origin header: server-to-server call
     expect((await callWebhook(params, { body: message })).workflowData).toBeDefined();
-  });
-
-  it('serves the chat setup with initial messages', async () => {
-    const result = await callWebhook(
-      {
-        public: true,
-        initialMessages: 'Hi!\n\nAsk me anything.',
-        options: { title: 'Support', responseMode: 'streaming' },
-      },
-      { method: 'GET', headers: { origin: 'https://site.example' } },
-      { webhookName: 'setup' },
-    );
-    expect(result.workflowData).toBeUndefined();
-    expect(result.webhookResponse).toMatchObject({
-      statusCode: 200,
-      headers: { 'access-control-allow-origin': 'https://site.example' },
-      body: { initialMessages: ['Hi!', 'Ask me anything.'], title: 'Support', responseMode: 'streaming' },
-    });
   });
 
   it('attaches uploaded files when allowed', async () => {

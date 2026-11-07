@@ -17,6 +17,7 @@ const RESERVED = [
   '/form',
   '/form-test',
   '/form-waiting',
+  '/chat-widget',
   '/healthz',
   '/metrics',
 ];

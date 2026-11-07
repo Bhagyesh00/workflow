@@ -1,9 +1,17 @@
-/** Bottom drawer: console output of Code nodes and a timeline of node runs. */
-import type { RunData } from '@workflow/workflow';
+/**
+ * Bottom drawer: the run's logs tree (P5-60), console output of Code nodes, a timeline of node runs,
+ * and the canvas chat (P5-59) when the workflow has a chat trigger. The open tab lives in the ui
+ * store (`logPanelTab`), so the editor can open the chat tab.
+ */
+import { CHAT_TRIGGER_TYPE, type RunData } from '@workflow/workflow';
 import { ChevronDown, Eraser, Terminal } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { formatDuration } from '../../lib/format';
 import type { LogEntry } from '../../stores/run-store';
+import { type LogPanelTab, useUiStore } from '../../stores/ui-store';
+import { useWorkflowStore } from '../../stores/workflow-store';
+import { ChatPanel } from '../chat/ChatPanel';
+import { LogsTab } from '../logs/LogsTab';
 import { IconButton } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { EmptyState } from '../ui/misc';
@@ -55,7 +63,13 @@ export function LogPanel({
   onClose: () => void;
   onFocusNode: (name: string) => void;
 }) {
-  const [tab, setTab] = useState<'console' | 'timeline'>('console');
+  const storedTab = useUiStore((s) => s.logPanelTab);
+  const setTab = useUiStore((s) => s.setLogPanelTab);
+  const hasChatTrigger = useWorkflowStore((s) =>
+    s.nodes.some((node) => node.type === CHAT_TRIGGER_TYPE && !node.disabled),
+  );
+  // the chat tab goes away with the chat trigger; the panel then shows the logs
+  const tab: LogPanelTab = storedTab === 'chat' && !hasChatTrigger ? 'logs' : storedTab;
   const endRef = useRef<HTMLDivElement>(null);
   const timeline = useMemo(() => buildTimeline(runData), [runData]);
   const t0 = timeline[0]?.start ?? 0;
@@ -75,12 +89,14 @@ export function LogPanel({
           value={tab}
           onChange={setTab}
           items={[
+            { value: 'logs', label: 'Logs' },
             {
               value: 'console',
               label: 'Console',
               badge: logs.length ? <span className="text-ink-3">{logs.length}</span> : undefined,
             },
             { value: 'timeline', label: 'Run timeline' },
+            ...(hasChatTrigger ? [{ value: 'chat' as const, label: 'Chat' }] : []),
           ]}
         />
         <span className="ml-auto flex items-center gap-1 pb-1">
@@ -95,7 +111,11 @@ export function LogPanel({
         </span>
       </div>
       <div className="wf-scroll min-h-0 flex-1 overflow-auto border-t border-line">
-        {tab === 'console' ? (
+        {tab === 'logs' ? (
+          <LogsTab runData={runData} onFocusNode={onFocusNode} />
+        ) : tab === 'chat' ? (
+          <ChatPanel />
+        ) : tab === 'console' ? (
           logs.length === 0 ? (
             <EmptyState
               title="Nothing logged yet"

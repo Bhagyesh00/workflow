@@ -44,6 +44,8 @@ export default defineConfig(({ mode }) => ({
       '/webhook': proxyTarget,
       '/webhook-test': proxyTarget,
       '/webhook-waiting': proxyTarget,
+      // the hosted chat page loads the widget (chat.js, chat.css) from the server
+      '/chat-widget': proxyTarget,
       // regex keys: a plain '/form' prefix would also send the SPA route /form-auth to the server
       '^/form/': proxyTarget,
       '^/form-test/': proxyTarget,

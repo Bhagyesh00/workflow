@@ -53,6 +53,7 @@ import type {
   InboxQuery,
   InboxSummary,
   ListenTestTriggerResult,
+  ListenTestWebhookOptions,
   ListenTestWebhookResult,
   Me,
   Member,
@@ -78,6 +79,12 @@ import type {
   Settings,
   SettingsPatchBody,
   Tag,
+  TestCaseDto,
+  TestCaseListQuery,
+  TestRunDto,
+  TestRunListQuery,
+  TestRunStartBody,
+  TestRunStartResult,
   Variable,
   VersionDiff,
   VersionPatchBody,
@@ -180,9 +187,11 @@ export const workflowsApi = {
   /** `runData` + `dirtyNodeNames`: a partial run (server runSchema) */
   run: (id: string, body: RunWorkflowBody) =>
     api.post<{ executionId: string }>(`/workflows/${enc(id)}/run`, body),
-  listenTestWebhook: (id: string, nodeName: string) =>
+  /** P5-59: `destinationNode` makes the run stop there; a chat trigger's reply has `chatTestToken` */
+  listenTestWebhook: (id: string, nodeName: string, options: ListenTestWebhookOptions = {}) =>
     api.post<ListenTestWebhookResult>(`/workflows/${enc(id)}/listen-test-webhook`, {
       nodeName,
+      ...(options.destinationNode ? { destinationNode: options.destinationNode } : {}),
     }),
   stopListeningTestWebhook: (id: string, nodeName: string) =>
     request<{ ok: true }>({
@@ -218,6 +227,11 @@ export interface ExecutionListQuery {
   vote?: AnnotationVote;
   /** P3-10 */
   workflowVersionId?: string;
+  /** P5-61: executions whose highlighted data (custom data) has this key */
+  customDataKey?: string;
+  /** P5-61: with `customDataKey`, the value; partial match unless `customDataExact` */
+  customDataValue?: string;
+  customDataExact?: boolean;
 }
 
 export const executionsApi = {
@@ -234,6 +248,31 @@ export const executionsApi = {
   /** P3-09: tags (annotation tag ids) and/or vote */
   annotate: (id: string, body: AnnotationPatchBody) =>
     api.patch<ExecutionAnnotation | null>(`/executions/${enc(id)}`, body),
+};
+
+/** P5-02, P5-11: test runs of one workflow; reads need viewer, the rest editor */
+const testRunsPath = (workflowId: string) => `/workflows/${enc(workflowId)}/test-runs`;
+
+export const evaluationsApi = {
+  /** newest first */
+  list: (workflowId: string, query: TestRunListQuery = {}) =>
+    api.get<TestRunDto[]>(testRunsPath(workflowId), { ...query }),
+  get: (workflowId: string, id: string) => api.get<TestRunDto>(`${testRunsPath(workflowId)}/${enc(id)}`),
+  /** cases by run index */
+  listCases: (workflowId: string, id: string, query: TestCaseListQuery = {}) =>
+    api.get<TestCaseDto[]>(`${testRunsPath(workflowId)}/${enc(id)}/test-cases`, { ...query }),
+  /** 202: the run goes on in the background */
+  start: (workflowId: string, body: TestRunStartBody = {}) =>
+    api.post<TestRunStartResult>(`${testRunsPath(workflowId)}/new`, body),
+  /** 202; 409 when the run is not new or running */
+  cancel: (workflowId: string, id: string) =>
+    api.post<{ ok: true }>(`${testRunsPath(workflowId)}/${enc(id)}/cancel`),
+  /** a pending case only, else 409 */
+  cancelCase: (workflowId: string, id: string, caseId: string) =>
+    api.post<{ ok: true }>(`${testRunsPath(workflowId)}/${enc(id)}/test-cases/${enc(caseId)}/cancel`),
+  /** refused (409) while the run is running */
+  remove: (workflowId: string, id: string) =>
+    api.delete<{ ok: true }>(`${testRunsPath(workflowId)}/${enc(id)}`),
 };
 
 /** binary data of a run, as the server stores it (`id`), or inline (base64 `data`) */

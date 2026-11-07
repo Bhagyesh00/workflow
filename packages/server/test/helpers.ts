@@ -345,6 +345,8 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'test_case_executions',
+  'test_runs',
   'data_table_rows',
   'data_table_columns',
   'data_tables',

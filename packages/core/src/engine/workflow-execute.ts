@@ -64,6 +64,7 @@ import {
   createSubWorkflowCaller,
   createToolParameterReader,
   getResolvedParameters,
+  setCustomData,
 } from './node-context';
 import type { ExecutionServices } from './services';
 import { runToolExecutor, toolRootOf } from './tool-executor';
@@ -93,6 +94,16 @@ export interface RunOptions {
    * running, calls the tool with `query`.
    */
   agentRequest?: { query: DataObject; toolName: string };
+  /**
+   * custom execution data the run starts with (a webhook response's `customData`); the caps of `setCustomData`
+   * hold, and a key past the tenth is dropped without failing the run
+   */
+  customData?: Record<string, string>;
+  /**
+   * runs `customOperations[forceOperation]` of the start node's type in place of its `execute` (the Evaluation
+   * Trigger's `dataset.getRows`); a type without that operation fails the node
+   */
+  forceOperation?: string;
 }
 
 export interface ResumeOptions {
@@ -157,6 +168,8 @@ export class WorkflowExecute {
   private toolWait?: { suspension: ToolSuspension; checkpoint: DataObject };
   /** the answer of a tool's wait, read by the run of the agent that waited for it */
   private toolResume?: { agentNode: string; data: ToolResumeData };
+  /** set by run() from `forceOperation`: the start node runs this custom operation */
+  private forcedOperation?: { node: string; operation: string };
 
   constructor(
     private readonly workflow: Workflow,
@@ -176,6 +189,11 @@ export class WorkflowExecute {
   }
 
   async run(options: RunOptions = {}): Promise<ExecutionResult> {
+    if (options.customData) this.seedCustomData(options.customData);
+    if (options.forceOperation) {
+      const forced = this.workflow.getStartNode(options.startNode);
+      if (forced) this.forcedOperation = { node: forced.name, operation: options.forceOperation };
+    }
     if (options.agentRequest) options = this.startAgentRequest(options.agentRequest, options);
     if (options.destinationNode && options.runData) {
       return this.runPartial({
@@ -217,6 +235,23 @@ export class WorkflowExecute {
       },
     );
     return this.process(options);
+  }
+
+  /** custom data the run starts with, through the caps of `setCustomData`; keys past the tenth are dropped */
+  private seedCustomData(customData: Record<string, string>): void {
+    let dropped = 0;
+    for (const [key, value] of Object.entries(customData)) {
+      try {
+        setCustomData(this.state, key, value);
+      } catch {
+        dropped++;
+      }
+    }
+    if (dropped) {
+      this.services.logger.warn('Custom execution data is limited to 10 keys; extra keys were dropped', {
+        dropped,
+      });
+    }
   }
 
   /** a tool test: the caller names the tool as the destination, the run really stops at the tool's root node */
@@ -831,7 +866,15 @@ export class WorkflowExecute {
     }
     const effectiveExec: ExecuteData = { ...exec, data };
 
-    if (!nodeType.execute) {
+    let execute = nodeType.execute;
+    if (this.forcedOperation?.node === node.name) {
+      const { operation } = this.forcedOperation;
+      execute = nodeType.customOperations?.[operation];
+      if (!execute) {
+        throw new NodeOperationError(node, `Node type "${node.type}" has no operation "${operation}"`);
+      }
+    }
+    if (!execute) {
       // triggers/webhooks/pollers "execute" by passing through the data they emitted
       if (nodeType.trigger || nodeType.webhook || nodeType.poll)
         return data.main?.[0] ? [data.main[0]] : [[]];
@@ -877,10 +920,33 @@ export class WorkflowExecute {
       },
     });
     try {
-      return await nodeType.execute(ctx);
+      return await execute.call(nodeType, ctx);
     } finally {
       await this.finishSubNodes(closeFunctions);
     }
+  }
+
+  /**
+   * The sub-nodes attached to a webhook node (a memory under the Chat Trigger), outside any run: the parent's
+   * one input item is `item`, so a memory's `={{ $json.sessionId }}` reads the request. Used by
+   * `createWebhookSubNodes`, on a throwaway engine whose state only its logged sub-node runs land in.
+   */
+  supplySubNodesForWebhook(
+    parent: WorkflowNode,
+    type: ConnectionType,
+    itemIndex: number,
+    item: Item,
+    signal: AbortSignal,
+    closeFunctions: Array<() => Promise<void>>,
+  ): Promise<unknown> {
+    const parentType = this.workflow.getNodeType(parent);
+    const exec: ExecuteData = { node: parent.name, data: { main: [[item]] }, source: null };
+    return this.supplySubNodes(parent, parentType, type, itemIndex, exec, signal, closeFunctions);
+  }
+
+  /** the end of `supplySubNodesForWebhook`'s sub-nodes: waits for their logged runs' hooks, then closes them */
+  finishSubNodesForWebhook(closeFunctions: Array<() => Promise<void>>): Promise<void> {
+    return this.finishSubNodes(closeFunctions);
   }
 
   /** wait for the hooks of logged sub-node runs, then close what the sub-nodes opened */

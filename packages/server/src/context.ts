@@ -16,6 +16,7 @@ import { AuthService } from './services/auth';
 import { MemoryBus, type MessageBus, PushService, RedisBus } from './services/bus';
 import { CredentialService } from './services/credentials';
 import { DataTableService } from './services/data-tables';
+import { EvaluationService } from './services/evaluations';
 import { ExecutionService } from './services/executions';
 import { FavoriteService } from './services/favorites';
 import { FolderService } from './services/folders';
@@ -91,6 +92,8 @@ export interface ServerContext {
   formAuth: FormAuthService;
   /** P4-01 (L1) */
   formTokens: FormTokenService;
+  /** P5-02 (L8): evaluation test runs; init and sweep in startMain, stopped in close */
+  evaluations: EvaluationService;
   /** start leader duties (triggers, wait tracker, pruning) on mains */
   startMain(): Promise<void>;
   /** consume the execution queue (queue mode workers) */
@@ -191,6 +194,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const secrets = new SecretsManager(serviceDeps, { secretProviderTypes: options.secretProviderTypes });
   const formAuth = new FormAuthService(serviceDeps);
   const formTokens = new FormTokenService(serviceDeps);
+  const evaluations = new EvaluationService(serviceDeps);
 
   const metrics = new Metrics({
     queueDepth: queue ? () => queue.depth() : undefined,
@@ -250,6 +254,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     favorites,
     publishHistory,
     reviews,
+    formTokens,
     context: serviceDeps.context,
   });
   const workflowArchive = new WorkflowArchiveService(serviceDeps);
@@ -295,6 +300,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     secrets,
     formAuth,
     formTokens,
+    evaluations,
 
     async startMain() {
       if (started) return;
@@ -302,12 +308,16 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       // triggers and resumed runs resolve credentials: the secrets must be loaded first
       await secrets.start();
       await executions.init();
+      await evaluations.init();
       await activeWorkflows.init();
       if (!queueMode) {
         // the service also pushes the status change and starts error workflows (R42)
         const crashed = await executions.markCrashed();
         if (crashed > 0) logger.warn({ crashed }, 'Marked executions of a previous run as crashed');
       }
+      // outside the regular-mode block: in queue mode it closes only runs no main touched for 5 minutes
+      const interrupted = await evaluations.sweepInterrupted();
+      if (interrupted > 0) logger.warn({ interrupted }, 'Marked test runs of a previous run as interrupted');
       await leadership.start(
         async () => {
           logger.info('This instance is the leader: starting triggers, wait tracker and pruning');
@@ -346,6 +356,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       await leadership.stop().catch(() => {});
       await activeWorkflows.close().catch(() => {});
       await queue?.close().catch(() => {});
+      await evaluations.close().catch(() => {});
       await executions.close().catch(() => {});
       await testWebhooks.close().catch(() => {});
       await secrets.stop().catch(() => {});

@@ -9,6 +9,7 @@ import {
   CloudOff,
   Copy,
   Download,
+  FlaskConical,
   History,
   Keyboard,
   Link2,
@@ -126,6 +127,28 @@ export function EditorTopBar({
         <div className="hidden min-w-0 sm:flex">
           <TagsEditor value={meta.tags} onChange={setTags} readOnly={readOnly} autoOpen={tagsRequested} />
         </div>
+        {/* P5-11: the workflow's test runs; an unsaved workflow has none */}
+        {meta.id ? (
+          <Link
+            to={`/workflow/${encodeURIComponent(meta.id)}/evaluations`}
+            aria-label="Evaluations"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-sm font-semibold text-ink-2 hover:bg-surface-3 hover:text-ink"
+          >
+            <FlaskConical size={15} />
+            <span className="hidden lg:inline">Evaluations</span>
+          </Link>
+        ) : (
+          <button
+            type="button"
+            disabled
+            aria-label="Evaluations"
+            title="Save the workflow to run evaluations"
+            className="inline-flex h-8 shrink-0 cursor-not-allowed items-center gap-1.5 rounded-lg px-2.5 text-sm font-semibold text-ink-3 opacity-60"
+          >
+            <FlaskConical size={15} />
+            <span className="hidden lg:inline">Evaluations</span>
+          </button>
+        )}
       </div>
       <span className={cx('hidden text-xs md:inline', dirty ? 'text-warn' : 'text-ink-3')} aria-live="polite">
         {saving ? 'Saving…' : dirty ? 'Unsaved changes' : meta.id ? 'Saved' : 'Not saved yet'}

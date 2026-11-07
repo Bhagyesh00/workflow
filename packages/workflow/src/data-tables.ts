@@ -218,6 +218,8 @@ export interface DataTableAccess {
   /** removes every row and keeps the columns */
   clearTable(id: string): Promise<{ deletedCount: number }>;
   listColumns(id: string): Promise<DataTableColumn[]>;
+  /** adds one column at the end (the Evaluation node writes outputs back into new columns) */
+  addColumn(id: string, column: DataTableColumnInput): Promise<DataTableColumn>;
   insertRows<T extends DataTableInsertReturnType>(
     id: string,
     rows: DataTableRowInput[],

@@ -3,6 +3,14 @@
  * repositories always filter by it. Migrations are generated from this file with drizzle-kit
  * (`pnpm db:generate`) into `packages/server/migrations`.
  */
+import type {
+  DataObject,
+  EvaluationMetrics,
+  TestCaseErrorCode,
+  TestCaseStatus,
+  TestRunErrorCode,
+  TestRunStatus,
+} from '@workflow/workflow';
 import { sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
@@ -732,6 +740,69 @@ export const secretConnections = pgTable(
   (t) => [unique('secret_connections_tenant_provider_key_unique').on(t.tenantId, t.providerKey)],
 );
 
+/**
+ * Evaluation test runs (P5-02). One row per run of a workflow's evaluation; `updated_at` is the
+ * heartbeat the sweep reads. `workflow_version_id` has no FK: versions can be pruned.
+ */
+export const testRuns = pgTable(
+  'test_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    workflowId: uuid('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    status: varchar('status', { length: 16 }).$type<TestRunStatus>().notNull().default('new'),
+    runAt: timestamp('run_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    metrics: jsonb('metrics').$type<EvaluationMetrics>(),
+    errorCode: varchar('error_code', { length: 64 }).$type<TestRunErrorCode>(),
+    errorDetails: jsonb('error_details').$type<DataObject>(),
+    runningInstanceId: text('running_instance_id'),
+    cancelRequested: boolean('cancel_requested').notNull().default(false),
+    workflowVersionId: uuid('workflow_version_id'),
+    concurrency: integer('concurrency').notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index('test_runs_tenant_workflow_idx').on(t.tenantId, t.workflowId, t.createdAt.desc().nullsFirst()),
+    // the sweep reads only unfinished runs
+    index('test_runs_active_status_idx').on(t.status).where(sql`${t.status} in ('new', 'running')`),
+  ],
+);
+
+/**
+ * One row per dataset row of a test run (P5-02); `run_index` is the dataset index. `execution_id` has
+ * no FK: pruning deletes executions and the case row stays.
+ */
+export const testCaseExecutions = pgTable(
+  'test_case_executions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    testRunId: uuid('test_run_id')
+      .notNull()
+      .references(() => testRuns.id, { onDelete: 'cascade' }),
+    executionId: uuid('execution_id'),
+    status: varchar('status', { length: 24 }).$type<TestCaseStatus>().notNull().default('new'),
+    runIndex: integer('run_index').notNull(),
+    runAt: timestamp('run_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    errorCode: varchar('error_code', { length: 64 }).$type<TestCaseErrorCode>(),
+    errorDetails: jsonb('error_details').$type<DataObject>(),
+    metrics: jsonb('metrics').$type<EvaluationMetrics>(),
+    inputs: jsonb('inputs').$type<DataObject>(),
+    outputs: jsonb('outputs').$type<DataObject>(),
+    createdAt: createdAt(),
+  },
+  (t) => [index('test_case_executions_run_idx').on(t.testRunId, t.runIndex)],
+);
+
 export type Role = 'owner' | 'admin' | 'editor' | 'viewer';
 
 export type TenantRow = typeof tenants.$inferSelect;
@@ -752,6 +823,8 @@ export type DataTableRow = typeof dataTables.$inferSelect;
 export type DataTableColumnRow = typeof dataTableColumns.$inferSelect;
 export type DataTableRowRow = typeof dataTableRows.$inferSelect;
 export type SecretConnectionRow = typeof secretConnections.$inferSelect;
+export type TestRunRow = typeof testRuns.$inferSelect;
+export type TestCaseExecutionRow = typeof testCaseExecutions.$inferSelect;
 export type AnnotationTagRow = typeof annotationTags.$inferSelect;
 export type ExecutionAnnotationRow = typeof executionAnnotations.$inferSelect;
 export type PublishHistoryRow = typeof workflowPublishHistory.$inferSelect;

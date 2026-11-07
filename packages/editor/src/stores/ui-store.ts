@@ -18,6 +18,9 @@ export interface CreatorContext {
 
 export type SidePanel = 'creator' | 'doctor' | 'versions' | null;
 
+/** tab of the bottom log panel; `chat` shows only when the workflow has a chat trigger (P5-59, P5-60) */
+export type LogPanelTab = 'logs' | 'console' | 'timeline' | 'chat';
+
 /** what a right-click (or a node's "More" button) opened the context menu on (P3-02) */
 export type ContextMenuTarget =
   | { type: 'node'; nodeName: string }
@@ -50,6 +53,8 @@ export interface UiState {
   creatorContext: CreatorContext;
   ndvNode: string | null;
   logPanelOpen: boolean;
+  /** P5-60: the log panel's open tab; default `logs` */
+  logPanelTab: LogPanelTab;
   settingsOpen: boolean;
   shortcutsOpen: boolean;
   /** PATCH answered 409: someone saved a newer version */
@@ -87,6 +92,8 @@ export interface UiState {
   setSidePanel(panel: SidePanel): void;
   openNdv(nodeName: string | null): void;
   setLogPanel(open: boolean): void;
+  /** switches the tab only; `setLogPanel(true)` opens the panel */
+  setLogPanelTab(tab: LogPanelTab): void;
   setSettingsOpen(open: boolean): void;
   setShortcutsOpen(open: boolean): void;
   setSaveConflict(open: boolean): void;
@@ -125,6 +132,7 @@ export const useUiStore = create<UiState>()((set) => {
     creatorContext: {},
     ndvNode: null,
     logPanelOpen: false,
+    logPanelTab: 'logs',
     settingsOpen: false,
     shortcutsOpen: false,
     saveConflict: false,
@@ -160,6 +168,9 @@ export const useUiStore = create<UiState>()((set) => {
     },
     setLogPanel(open) {
       set({ logPanelOpen: open });
+    },
+    setLogPanelTab(tab) {
+      set({ logPanelTab: tab });
     },
     setSettingsOpen(open) {
       set({ settingsOpen: open });

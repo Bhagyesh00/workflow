@@ -52,6 +52,11 @@ export const queryKeys = {
   secretConnections: ['secret-providers', 'connections'] as const,
   secretConnection: (providerKey: string) => ['secret-providers', 'connections', providerKey] as const,
   secretCompletions: ['secret-providers', 'completions'] as const,
+  /** P5-11: invalidating `testRuns` also refreshes every run and its cases (prefix match) */
+  testRuns: (workflowId: string) => ['workflow', workflowId, 'test-runs'] as const,
+  testRun: (workflowId: string, id: string) => ['workflow', workflowId, 'test-runs', id] as const,
+  testRunCases: (workflowId: string, id: string) =>
+    ['workflow', workflowId, 'test-runs', id, 'cases'] as const,
 };
 
 export function createQueryClient(): QueryClient {

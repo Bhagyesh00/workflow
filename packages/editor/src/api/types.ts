@@ -18,6 +18,7 @@ import type {
   RunData,
   StickyNote,
   TaskData,
+  TestRunStatus,
   WorkflowDiff,
   WorkflowNode,
   WorkflowNodeGroup,
@@ -578,6 +579,17 @@ export interface ListenTestWebhookResult {
   expiresAt: string;
   /** the `/form-test/...` URL of each form-trigger hook of the node; empty for other nodes */
   formTestUrls: string[];
+  /**
+   * P5-59: a chat trigger only. Signed token (kind `chat-test`) the canvas chat sends as
+   * `x-chat-test-token` on its POST to `testUrl`; bound to this registration, 120 s.
+   */
+  chatTestToken?: string;
+}
+
+/** options of POST /workflows/:id/listen-test-webhook */
+export interface ListenTestWebhookOptions {
+  /** P5-59: a step run from the chat tab stops at this node */
+  destinationNode?: string;
 }
 
 /** POST /workflows/:id/listen-test-trigger */
@@ -736,4 +748,36 @@ export type SecretCompletions = Record<string, string[]>;
 /** POST /form-auth/code: one-time code the form swaps for its token */
 export interface FormAuthCode {
   code: string;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evaluations (P5-02, P5-11): routes under /workflows/:workflowId/test-runs; DTOs are the engine's
+// ---------------------------------------------------------------------------------------------
+
+export type { TestCaseDto, TestCaseStatus, TestRunDto, TestRunStatus } from '@workflow/workflow';
+
+/** GET /workflows/:workflowId/test-runs (newest first) */
+export interface TestRunListQuery {
+  skip?: number;
+  limit?: number;
+  status?: TestRunStatus;
+}
+
+/** GET /workflows/:workflowId/test-runs/:id/test-cases (by run index) */
+export interface TestCaseListQuery {
+  skip?: number;
+  limit?: number;
+}
+
+/** POST /workflows/:workflowId/test-runs/new */
+export interface TestRunStartBody {
+  /** cases run at once, 1..10, clamped by the server to its limit; default 1 */
+  concurrency?: number;
+  /** only these dataset rows (0-based), for a rerun of some cases */
+  rowIndices?: number[];
+}
+
+/** answer of POST /workflows/:workflowId/test-runs/new (202) */
+export interface TestRunStartResult {
+  testRunId: string;
 }

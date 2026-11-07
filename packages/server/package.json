@@ -44,7 +44,9 @@
     "@types/node": "24.19.2",
     "@types/papaparse": "5.5.2",
     "@types/pg": "8.23.1",
+    "@workflow/chat-widget": "workspace:*",
     "drizzle-kit": "0.31.11",
+    "jsdom": "30.1.3",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
   }

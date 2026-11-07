@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MasterKey } from '@workflow/core';
-import type { InstanceLimits } from '@workflow/workflow';
+import { type InstanceLimits, MAX_EVALUATION_CONCURRENCY } from '@workflow/workflow';
 import { z } from 'zod';
 
 const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -153,6 +153,12 @@ const envSchema = z.object({
   EXTERNAL_SECRETS_CONNECT_TIMEOUT: int(20, 1),
   EXTERNAL_SECRETS_REFRESH_TIMEOUT: int(20, 1),
   EXTERNAL_SECRETS_PREFER_GET: bool(false),
+  /** P5-56: directory of the built chat widget (chat.js, chat.css) */
+  CHAT_WIDGET_DIST: z.string().optional(),
+  /** P5-56: when true, hosted and public chat trigger URLs answer 404 */
+  DISABLE_PUBLIC_CHAT_TRIGGER: bool(false),
+  /** P5-02: evaluation cases run at once per workspace; read as at most 10 */
+  CONCURRENCY_EVALUATION_LIMIT: int(5, 1),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -228,6 +234,12 @@ export interface Config {
     refreshTimeoutS: number;
     preferGet: boolean;
   };
+  /** P5-56: CHAT_WIDGET_DIST, the built widget served at /chat-widget */
+  chatWidgetDist: string;
+  /** P5-56: DISABLE_PUBLIC_CHAT_TRIGGER */
+  disablePublicChatTrigger: boolean;
+  /** P5-02: CONCURRENCY_EVALUATION_LIMIT, 1 to 10 (MAX_EVALUATION_CONCURRENCY) */
+  evaluationConcurrencyLimit: number;
 }
 
 export class ConfigError extends Error {
@@ -365,6 +377,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       refreshTimeoutS: e.EXTERNAL_SECRETS_REFRESH_TIMEOUT,
       preferGet: e.EXTERNAL_SECRETS_PREFER_GET,
     },
+    chatWidgetDist: path.resolve(e.CHAT_WIDGET_DIST ?? path.join(PACKAGE_DIR, '..', 'chat-widget', 'dist')),
+    disablePublicChatTrigger: e.DISABLE_PUBLIC_CHAT_TRIGGER,
+    evaluationConcurrencyLimit: Math.min(e.CONCURRENCY_EVALUATION_LIMIT, MAX_EVALUATION_CONCURRENCY),
   };
 }
 

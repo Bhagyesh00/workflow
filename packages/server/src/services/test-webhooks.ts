@@ -19,6 +19,10 @@ export interface TestWebhookRegistration {
   path: string;
   workflow: WorkflowDefinition;
   userId?: string;
+  /** P5-56: a chat trigger's registration id; the `chatTestToken` of the listen reply is bound to it */
+  listenId?: string;
+  /** P5-59: the test run stops at this node (the canvas chat runs up to the node it was opened from) */
+  destinationNode?: string;
   /** epoch ms */
   expiresAt: number;
 }

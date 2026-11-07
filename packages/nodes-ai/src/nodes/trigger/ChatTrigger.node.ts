@@ -14,13 +14,18 @@ import {
   isPlainObject,
   type NodeType,
   type WebhookContext,
-  type WebhookResponseData,
 } from '@workflow/workflow';
+import {
+  chatOriginAllowed,
+  DEFAULT_INITIAL_MESSAGES,
+  handleChatSetup,
+  MAX_CHAT_INPUT,
+  MAX_SESSION_ID,
+  readChatFiles,
+  chatResponse as respond,
+} from './chat-setup';
 
-const MAX_CHAT_INPUT = 100_000;
-const MAX_SESSION_ID = 200;
 const MAX_METADATA_BYTES = 16_384;
-const DEFAULT_INITIAL_MESSAGES = 'Hi there!\nHow can I help you today?';
 
 function safeEqual(a: string, b: string): boolean {
   // hash first so lengths match and the comparison time does not depend on the secret
@@ -30,30 +35,6 @@ function safeEqual(a: string, b: string): boolean {
 function headerValue(ctx: WebhookContext, name: string): string | undefined {
   const v = ctx.getHeaderData()[name];
   return Array.isArray(v) ? v[0] : v;
-}
-
-/** origins compare by scheme, host and port: case and trailing slashes do not matter (as on the server) */
-const normalizeOrigin = (origin: string) => origin.trim().replace(/\/+$/, '').toLowerCase();
-
-function allowedOrigin(allowed: string, origin: string | undefined): string | undefined | false {
-  const list = allowed.split(',').map(normalizeOrigin).filter(Boolean);
-  if (!list.length || list.includes('*')) return origin ?? '*';
-  if (!origin) return undefined; // server-to-server call without an Origin header
-  return list.includes(normalizeOrigin(origin)) ? origin : false;
-}
-
-function respond(statusCode: number, body: unknown, origin?: string): WebhookResponseData {
-  return {
-    webhookResponse: {
-      statusCode,
-      headers: {
-        'content-type': 'application/json; charset=utf-8',
-        ...(origin ? { 'access-control-allow-origin': origin, vary: 'Origin' } : {}),
-        ...(statusCode === 401 ? { 'www-authenticate': 'Basic realm="Chat"' } : {}),
-      },
-      body,
-    },
-  };
 }
 
 export const ChatTriggerNode: NodeType = {
@@ -96,6 +77,26 @@ export const ChatTriggerNode: NodeType = {
         default: false,
         description:
           'Whether the chat URL works outside the editor. When off, only test messages from the editor are accepted.',
+      },
+      {
+        displayName: 'Mode',
+        name: 'mode',
+        type: 'options',
+        default: 'hostedChat',
+        noDataExpression: true,
+        displayOptions: { show: { public: [true] } },
+        options: [
+          {
+            name: 'Hosted Chat',
+            value: 'hostedChat',
+            description: 'Chat on a page this app serves at the chat URL',
+          },
+          {
+            name: 'Embedded Chat',
+            value: 'webhook',
+            description: 'Chat through the widget or your own client on another site',
+          },
+        ],
       },
       {
         displayName: 'Authentication',
@@ -147,6 +148,17 @@ export const ChatTriggerNode: NodeType = {
                 value: 'streaming',
                 description: 'Stream the answer while it is generated (agents with streaming on)',
               },
+              {
+                name: 'Using Respond to Webhook Node',
+                value: 'responseNode',
+                description: 'Answer with what a Respond to Webhook node sends',
+              },
+              {
+                name: 'Using Response Nodes',
+                value: 'responseNodes',
+                description:
+                  'Answer with the messages of Respond to Chat nodes, which can also wait for a reply',
+              },
             ],
           },
           { displayName: 'Allow File Uploads', name: 'allowFileUploads', type: 'boolean', default: false },
@@ -179,7 +191,7 @@ export const ChatTriggerNode: NodeType = {
   async webhook(ctx) {
     const options = ctx.getNodeParameter('options', 0, {}) as DataObject;
     const isPublic = Boolean(ctx.getNodeParameter('public', 0, false));
-    const origin = allowedOrigin(String(options.allowedOrigins ?? '*'), headerValue(ctx, 'origin'));
+    const origin = chatOriginAllowed(ctx, String(options.allowedOrigins ?? '*'), headerValue(ctx, 'origin'));
     if (origin === false) return respond(403, { message: 'Origin not allowed' });
     const corsOrigin = origin ?? undefined;
     if (!isPublic && ctx.getMode() !== 'manual')
@@ -195,23 +207,7 @@ export const ChatTriggerNode: NodeType = {
       if (!userOk || !passOk) return respond(401, { message: 'Authorization is required' }, corsOrigin);
     }
 
-    if (ctx.getWebhookName() === 'setup') {
-      return respond(
-        200,
-        {
-          initialMessages: String(ctx.getNodeParameter('initialMessages', 0, DEFAULT_INITIAL_MESSAGES) ?? '')
-            .split('\n')
-            .map((m) => m.trim())
-            .filter(Boolean),
-          title: options.title ?? 'Hi there!',
-          subtitle: options.subtitle ?? '',
-          inputPlaceholder: options.inputPlaceholder ?? '',
-          allowFileUploads: Boolean(options.allowFileUploads),
-          responseMode: options.responseMode ?? 'lastNode',
-        },
-        corsOrigin,
-      );
-    }
+    if (ctx.getWebhookName() === 'setup') return handleChatSetup(ctx, { corsOrigin });
 
     const body = ctx.getRequestObject().body;
     if (!isPlainObject(body))
@@ -253,32 +249,9 @@ export const ChatTriggerNode: NodeType = {
         ...(metadata !== undefined ? { metadata: metadata as DataObject } : {}),
       },
     };
-    const files = ctx.getRequestObject().files ?? [];
-    if (files.length) {
-      if (!options.allowFileUploads)
-        return respond(400, { message: 'File uploads are not allowed' }, corsOrigin);
-      const allowed = String(options.allowedFilesMimeTypes ?? '*')
-        .split(',')
-        .map((t) => t.trim().toLowerCase())
-        .filter(Boolean);
-      const accepts = (mime: string) =>
-        !allowed.length ||
-        allowed.includes('*') ||
-        allowed.some((a) =>
-          a.endsWith('/*') ? mime.toLowerCase().startsWith(a.slice(0, -1)) : a === mime.toLowerCase(),
-        );
-      item.binary = {};
-      for (const [i, file] of files.entries()) {
-        if (!accepts(file.mimeType)) {
-          return respond(415, { message: `Files of type "${file.mimeType}" are not allowed` }, corsOrigin);
-        }
-        item.binary[`data${i}`] = await ctx.helpers.prepareBinaryData(
-          file.data,
-          file.fileName,
-          file.mimeType,
-        );
-      }
-    }
+    const uploads = await readChatFiles(ctx, options);
+    if ('status' in uploads) return respond(uploads.status, { message: uploads.message }, corsOrigin);
+    if (Object.keys(uploads.binary).length) item.binary = uploads.binary;
     return { workflowData: [[item]] };
   },
 };

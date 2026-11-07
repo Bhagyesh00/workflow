@@ -15,6 +15,7 @@ import { retrieverNodes } from './nodes/retrievers/retrievers.nodes';
 import { textSplitterNodes } from './nodes/text-splitters/text-splitters.nodes';
 import { McpClientToolNode } from './nodes/tools/McpClientTool.node';
 import { toolNodes } from './nodes/tools/tools.nodes';
+import { ChatNode } from './nodes/trigger/Chat.node';
 import { ChatTriggerNode } from './nodes/trigger/ChatTrigger.node';
 import { vectorStoreNodes } from './nodes/vector-stores/vector-stores.nodes';
 import { vendorNodes } from './nodes/vendors';
@@ -27,6 +28,7 @@ export const nodes: NodeType[] = [
   ...ragChainNodes,
   ...retrieverNodes,
   ChatTriggerNode,
+  ChatNode,
   ...chatModelNodes,
   ...memoryNodes,
   ...toolNodes,

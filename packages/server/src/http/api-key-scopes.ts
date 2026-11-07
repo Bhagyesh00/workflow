@@ -68,6 +68,11 @@ export const API_KEY_SCOPES = [
   'dataTableRow:update',
   'dataTableRow:upsert',
   'dataTableRow:delete',
+  // P5-12: the evaluation test runs of the public API
+  'testRun:list',
+  'testRun:create',
+  'testRun:read',
+  'testRun:cancel',
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

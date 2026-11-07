@@ -8,8 +8,10 @@ import { checkCsrf, checkTenant, loadSession, TENANT_HEADER } from './http/auth'
 import { handleError } from './http/errors';
 import { registerAnnotationTagRoutes } from './routes/annotation-tags';
 import { registerAuthRoutes } from './routes/auth';
+import { registerChatWidgetRoutes } from './routes/chat-widget';
 import { registerCredentialRoutes } from './routes/credentials';
 import { registerDataTableRoutes } from './routes/data-tables';
+import { registerEvaluationRoutes } from './routes/evaluations';
 import { registerExecutionRoutes } from './routes/executions';
 import { registerFavoriteRoutes } from './routes/favorites';
 import { registerFolderRoutes } from './routes/folders';
@@ -96,6 +98,8 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
   await app.register(webhookPlugin, { ctx });
 
   registerHealthRoutes(app, ctx);
+  // P5-56: the chat widget's script and styles, outside /rest (no session, no CSRF)
+  await registerChatWidgetRoutes(app, ctx);
 
   // editor API: session cookie + CSRF checks
   await app.register(
@@ -138,6 +142,8 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerDataTableRoutes(rest, ctx);
       registerSecretConnectionRoutes(rest, ctx);
       registerFormAuthRoutes(rest, ctx);
+      // Phase 5 (filled by L8)
+      registerEvaluationRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );

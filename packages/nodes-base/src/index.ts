@@ -76,6 +76,9 @@ import {
 } from './nodes/core/data.nodes';
 import { EditImageNode } from './nodes/core/EditImage.node';
 import { EmailReadImapNode } from './nodes/core/EmailReadImap.node';
+import { EvaluationNode } from './nodes/core/Evaluation.node';
+import { EvaluationTriggerNode } from './nodes/core/EvaluationTrigger.node';
+import { ExecutionDataNode } from './nodes/core/ExecutionData.node';
 import { FormNode } from './nodes/core/Form.node';
 import { FormTriggerNode } from './nodes/core/FormTrigger.node';
 import { FtpNode } from './nodes/core/Ftp.node';
@@ -157,6 +160,9 @@ export const coreNodes: NodeType[] = [
   SseTriggerNode,
   RssFeedReadTriggerNode,
   EmailReadImapNode,
+  EvaluationTriggerNode,
+  EvaluationNode,
+  ExecutionDataNode,
 ];
 
 export const appNodes: NodeType[] = [

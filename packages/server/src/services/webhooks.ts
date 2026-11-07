@@ -20,7 +20,9 @@
 import { randomUUID } from 'node:crypto';
 import { PassThrough, type Readable } from 'node:stream';
 import {
+  type ContextDeps,
   createWebhookContext,
+  createWebhookSubNodes,
   type ExecutionServices,
   getResolvedParameters,
   type NodeTypes,
@@ -285,6 +287,8 @@ interface RunInput {
   incoming: ReceivedWebhook;
   params: Record<string, string>;
   userId?: string;
+  /** P5-59 a test chat run from the canvas stops at this node (the registration's `destinationNode`) */
+  destinationNode?: string;
   onStarted?: (executionId: string) => void;
   /** takes the test registration once the node accepted the request; a reply means another request took it */
   claim?: () => Promise<WebhookReply | undefined>;
@@ -540,6 +544,7 @@ export class WebhookService {
       incoming: received,
       params: found.params,
       userId: registration.userId,
+      destinationNode: registration.destinationNode,
       onStarted: (executionId) =>
         push.send(tenant.id, 'testWebhookReceived', { workflowId: registration.workflowId, executionId }),
     });
@@ -650,28 +655,27 @@ export class WebhookService {
       const task = runs?.[runs.length - 1];
       // a tool that waits has no input of its own: it sees what its agent saw
       const suspended = state?.executionData.suspended;
-      const ctx = createWebhookContext(
-        {
-          workflow,
-          node: kind === 'form' ? withTriggerLogin(workflow, node) : node,
-          services,
-          evaluator: this.evaluator,
-          signal: AbortSignal.timeout(60_000),
-          state: state ?? undefined,
-          runIndex: runs ? runs.length - 1 : undefined,
-          executeData: suspended
-            ? { node: node.name, data: suspended.exec.data, source: suspended.exec.source }
-            : task
-              ? {
-                  node: node.name,
-                  data: { main: [task.data?.main?.[0] ?? []] },
-                  source: { main: task.source ?? [] },
-                }
-              : undefined,
-        },
-        request,
-        hook.webhookName,
-      );
+      const contextDeps: ContextDeps = {
+        workflow,
+        node: kind === 'form' ? withTriggerLogin(workflow, node) : node,
+        services,
+        evaluator: this.evaluator,
+        signal: AbortSignal.timeout(60_000),
+        state: state ?? undefined,
+        runIndex: runs ? runs.length - 1 : undefined,
+        executeData: suspended
+          ? { node: node.name, data: suspended.exec.data, source: suspended.exec.source }
+          : task
+            ? {
+                node: node.name,
+                data: { main: [task.data?.main?.[0] ?? []] },
+                source: { main: task.source ?? [] },
+              }
+            : undefined,
+      };
+      // sub-nodes (a chat's memory) read the request as their item: `$json.sessionId` is the body's
+      const subNodes = createWebhookSubNodes(contextDeps, requestItem(request));
+      const ctx = createWebhookContext(contextDeps, request, hook.webhookName, subNodes.callbacks);
       let result: WebhookResponseData;
       try {
         result = await type.webhook(ctx);
@@ -685,6 +689,8 @@ export class WebhookService {
             message,
           }),
         );
+      } finally {
+        await subNodes.close();
       }
       if (!result.workflowData)
         return cors(fromWebhookResponse(result.webhookResponse ?? { statusCode: 200 }));
@@ -801,27 +807,37 @@ export class WebhookService {
         mode: input.mode,
         workflowId: input.workflowId,
       });
-      const ctx = createWebhookContext(
-        { workflow, node, services, evaluator: this.evaluator, signal: AbortSignal.timeout(60_000) },
-        request,
-        hook.webhookName,
-      );
-      const result = type.webhook
-        ? await type.webhook(ctx)
-        : {
-            workflowData: [
-              [
-                {
-                  json: {
-                    headers: request.headers,
-                    params: request.params,
-                    query: request.query,
-                    body: request.body ?? {},
-                  } as DataObject,
-                },
+      const contextDeps: ContextDeps = {
+        workflow,
+        node,
+        services,
+        evaluator: this.evaluator,
+        signal: AbortSignal.timeout(60_000),
+      };
+      // sub-nodes (a chat's memory) read the request as their item: `$json.sessionId` is the body's
+      const subNodes = createWebhookSubNodes(contextDeps, requestItem(request));
+      const ctx = createWebhookContext(contextDeps, request, hook.webhookName, subNodes.callbacks);
+      let result: WebhookResponseData;
+      try {
+        result = type.webhook
+          ? await type.webhook(ctx)
+          : {
+              workflowData: [
+                [
+                  {
+                    json: {
+                      headers: request.headers,
+                      params: request.params,
+                      query: request.query,
+                      body: request.body ?? {},
+                    } as DataObject,
+                  },
+                ],
               ],
-            ],
-          };
+            };
+      } finally {
+        await subNodes.close();
+      }
 
       if (!result.workflowData) {
         reply = fromWebhookResponse(result.webhookResponse ?? { statusCode: 200, body: {} });
@@ -847,6 +863,9 @@ export class WebhookService {
             triggerItems: JSON.parse(JSON.stringify(result.workflowData[0] ?? [])),
             executionId,
             userId: input.userId,
+            destinationNode: input.destinationNode,
+            // P5-61: custom data the node set for this run (e.g. the chat's session id)
+            customData: result.customData,
             // test runs use pinned data like other manual runs (the webhook's own output excluded)
             pinData: input.mode === 'manual' ? manualPinData(definition, node.name) : undefined,
             wait: responseMode !== 'onReceived',
@@ -1203,6 +1222,11 @@ function finalAnswer(outcome: ExecutionOutcome): unknown {
   const first = items[0]?.json;
   if (!first) return undefined;
   return typeof first.output === 'string' ? first.output : first;
+}
+
+/** the item a webhook's sub-nodes see: the request body when it is an object (a chat's `sessionId`), else empty */
+function requestItem(request: WebhookRequest): Item {
+  return { json: isPlainObject(request.body) ? request.body : {} };
 }
 
 function manualPinData(definition: WorkflowDefinition, startNode: string) {

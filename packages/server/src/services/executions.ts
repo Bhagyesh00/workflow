@@ -24,6 +24,7 @@ import {
   WorkflowExecute,
 } from '@workflow/core';
 import {
+  type ChatChunkMeta,
   ExecutionCancelledError,
   type ExecutionErrorShape,
   type ExecutionMode,
@@ -87,6 +88,10 @@ export interface StoredRunOptions {
   errorChain?: boolean;
   /** the execution continues at the node that failed, from the state it was started with */
   retryFromFailure?: boolean;
+  /** P5-61: custom execution data the run starts with (a webhook response's `customData`) */
+  customData?: Record<string, string>;
+  /** P5-02: the start node runs `customOperations[forceOperation]` of its type in place of `execute` */
+  forceOperation?: string;
 }
 
 export interface ExecutionOutcome {
@@ -100,8 +105,10 @@ export interface ExecutionOutcome {
 export interface ExecutionObserver {
   /** `Respond to Webhook` node output (responseNode mode) */
   onResponse?(response: WebhookResponse): void;
-  /** `ctx.sendChunk()` output (streaming response mode) */
-  onChunk?(chunk: unknown): void;
+  /** `ctx.sendChunk()` output (streaming response mode); `meta` names the node run and item that sent it */
+  onChunk?(chunk: unknown, meta?: ChatChunkMeta): void;
+  /** P5-56: a node run that sent at least one chunk has ended (chat `end` frames); `meta` is its last chunk's */
+  onNodeRunEnd?(meta: ChatChunkMeta): void;
   onFinished?(outcome: ExecutionOutcome): void;
 }
 
@@ -123,6 +130,10 @@ export interface StartExecutionInput {
   agentRequest?: RunOptions['agentRequest'];
   /** P3-10: mode of the root execution (absent = this execution is the root) */
   rootMode?: ExecutionMode;
+  /** P5-61: custom execution data the run starts with (caps of `setCustomData`: 10 keys, 50, 255) */
+  customData?: Record<string, string>;
+  /** P5-02: the start node runs `customOperations[forceOperation]` of its type in place of `execute` */
+  forceOperation?: string;
   executionId?: string;
   retryOf?: string;
   /** retry only: the state of the failed execution; the run continues at its `failedExecuteData` */
@@ -290,8 +301,11 @@ export class ExecutionService {
     const { repos } = this.deps;
     const tenant = await repos.tenants.get(input.tenantId);
     if (!tenant) throw ApiError.notFound('Tenant');
-    // sub-workflows run inside a parent that already holds a slot; error workflows only skip the monthly quota
-    if (input.mode !== 'integrated') await this.checkLimits(tenant, input.mode);
+    // sub-workflows run inside a parent that already holds a slot; error workflows only skip the monthly quota.
+    // Evaluation cases skip the plan limits: the workspace's evaluation pool (CONCURRENCY_EVALUATION_LIMIT)
+    // bounds them and they are not billable, so a plan's concurrent limit never blocks a test run (P5-02)
+    if (input.mode !== 'integrated' && input.mode !== 'evaluation')
+      await this.checkLimits(tenant, input.mode);
 
     const executionId = input.executionId ?? randomUUID();
     const workflowData = cloneDefinition(input.workflow);
@@ -308,6 +322,8 @@ export class ExecutionService {
       userId: input.userId,
       errorChain: input.mode === 'error' || input.errorChain === true ? true : undefined,
       retryFromFailure: input.retryState ? true : undefined,
+      customData: input.customData,
+      forceOperation: input.forceOperation,
     };
     const workflowId = input.workflowId ?? input.workflow.id ?? null;
     try {
@@ -418,8 +434,12 @@ export class ExecutionService {
     this.waiters.delete(executionId);
   }
 
-  private deliverChunk(executionId: string, chunk: unknown): void {
-    for (const o of this.waiters.get(executionId)?.observers ?? []) o.onChunk?.(chunk);
+  private deliverChunk(executionId: string, chunk: unknown, meta?: ChatChunkMeta): void {
+    for (const o of this.waiters.get(executionId)?.observers ?? []) o.onChunk?.(chunk, meta);
+  }
+
+  private deliverNodeRunEnd(executionId: string, meta: ChatChunkMeta): void {
+    for (const o of this.waiters.get(executionId)?.observers ?? []) o.onNodeRunEnd?.(meta);
   }
 
   private deliverResponse(executionId: string, response: WebhookResponse): void {
@@ -438,7 +458,8 @@ export class ExecutionService {
     if (!message?.executionId || !this.waiters.has(message.executionId)) return;
     if (message.type === 'response')
       this.deliverResponse(message.executionId, decodeResponse(message.response));
-    else if (message.type === 'chunk') this.deliverChunk(message.executionId, message.chunk);
+    else if (message.type === 'chunk') this.deliverChunk(message.executionId, message.chunk, message.meta);
+    else if (message.type === 'nodeEnd') this.deliverNodeRunEnd(message.executionId, message.meta);
     else if (message.type === 'finished') this.deliverFinished(message.outcome);
   }
 
@@ -578,6 +599,8 @@ export class ExecutionService {
             pinData: options.pinData,
             dirtyNodeNames: options.dirtyNodeNames,
             agentRequest: options.agentRequest,
+            customData: options.customData,
+            forceOperation: options.forceOperation,
             timeoutMs,
             signal,
           });
@@ -688,11 +711,23 @@ export class ExecutionService {
     const { push, repos } = this.deps;
     const manual = row.mode === 'manual';
     const executionId = row.id;
+    // node runs that sent a chunk, by `<node>:<run>`, with the meta of their last chunk: their end is announced
+    const chunked = new Map<string, ChatChunkMeta>();
     return {
       nodeExecuteBefore: (nodeName) => {
         if (manual) push.send(tenantId, 'nodeExecuteBefore', { executionId, nodeName });
       },
       nodeExecuteAfter: async (nodeName, runIndex, taskData, state) => {
+        const ended = chunked.get(`${nodeName}:${runIndex}`);
+        if (ended) {
+          chunked.delete(`${nodeName}:${runIndex}`);
+          if (delivery === 'local') this.deliverNodeRunEnd(executionId, ended);
+          else if (delivery === 'bus') {
+            void this.deps.bus
+              .publish('exec-events', { type: 'nodeEnd', executionId, meta: ended })
+              .catch(() => {});
+          }
+        }
         if (manual) push.send(tenantId, 'nodeExecuteAfter', { executionId, nodeName, runIndex, taskData });
         if (definition.settings?.saveExecutionProgress) {
           // progress is best effort: a failed write must not fail the node that just ran
@@ -709,10 +744,13 @@ export class ExecutionService {
             .catch(() => {});
         }
       },
-      sendChunk: (chunk) => {
-        if (delivery === 'local') this.deliverChunk(executionId, chunk);
+      sendChunk: (chunk, meta) => {
+        if (meta) chunked.set(`${meta.nodeName}:${meta.runIndex}`, meta);
+        if (delivery === 'local') this.deliverChunk(executionId, chunk, meta);
         else if (delivery === 'bus') {
-          void this.deps.bus.publish('exec-events', { type: 'chunk', executionId, chunk }).catch(() => {});
+          void this.deps.bus
+            .publish('exec-events', { type: 'chunk', executionId, chunk, meta })
+            .catch(() => {});
         }
       },
       sendMessageToUI: (nodeName, args) => {
@@ -741,6 +779,8 @@ export class ExecutionService {
 
     let keep = true;
     if (status === 'waiting') keep = true;
+    // an evaluation case is always saved: its test case row links the execution (n8n does the same)
+    else if (row.mode === 'evaluation') keep = true;
     else if (row.mode === 'manual') keep = settings.saveManualExecutions !== false;
     else if (status === 'success') keep = settings.saveDataSuccessExecution !== 'none';
     else keep = settings.saveDataErrorExecution !== 'none';
@@ -913,6 +953,7 @@ export class ExecutionService {
       hooks: input.hooks,
       limits: { maxTries: 5 },
       nodeLimits: config.nodeLimits,
+      disablePublicChatTrigger: config.disablePublicChatTrigger,
       executeSubWorkflow: (request) =>
         this.executeSubWorkflow(
           request,
@@ -922,6 +963,48 @@ export class ExecutionService {
           input.rootMode ?? input.mode,
         ),
     };
+  }
+
+  /**
+   * P5-02: run one node's custom operation (`customOperations[operation]` of its type, e.g. the Evaluation
+   * Trigger's `dataset.getRows`) and return its first output. No execution row, no usage, no events: the
+   * caller (the evaluation runner) only needs the items. Runs as `manual` with the workflow's timeout, and
+   * throws the run's error.
+   */
+  async runNodeOperation(
+    tenantId: string,
+    definition: WorkflowDefinition,
+    nodeName: string,
+    operation: string,
+    signal?: AbortSignal,
+  ): Promise<Item[]> {
+    const { repos, nodeTypes } = this.deps;
+    const tenant = await repos.tenants.get(tenantId);
+    if (!tenant) throw ApiError.notFound('Tenant');
+    const limits = effectiveLimits(tenant.plan, tenant.settings as TenantSettings);
+    const timeoutMs = executionTimeoutMs(this.deps.config, limits, definition.settings?.executionTimeout);
+    const workflow = new Workflow(cloneDefinition(definition), nodeTypes);
+    const services = await this.buildServices({
+      tenant,
+      executionId: '',
+      mode: 'manual',
+      workflowId: definition.id ?? undefined,
+      signal,
+    });
+    const result = await new WorkflowExecute(workflow, services).run({
+      startNode: nodeName,
+      destinationNode: nodeName,
+      forceOperation: operation,
+      signal,
+      timeoutMs,
+    });
+    const error = result.state.resultData.error;
+    if (result.status !== 'success' || error) {
+      throw new WorkflowOperationError(error?.message ?? `Node "${nodeName}" did not finish`);
+    }
+    const runs = result.state.resultData.runData[nodeName] ?? [];
+    const output = runs[runs.length - 1]?.data?.main?.[0] ?? result.lastNodeOutput?.[0] ?? [];
+    return JSON.parse(JSON.stringify(output)) as Item[];
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1234,6 +1317,7 @@ export class ExecutionService {
       dirtyNodeNames: clone(runOptions.dirtyNodeNames),
       agentRequest: clone(runOptions.agentRequest),
       rootMode,
+      customData: clone(runOptions.customData),
     };
     // a node failed: the engine re-runs that node with its saved input and everything after it
     // not for a tool test: its request is not part of the state, so the root would run as a node
@@ -1324,8 +1408,16 @@ interface ExecEventChunk {
   type: 'chunk';
   executionId: string;
   chunk: unknown;
+  /** the node run and item that sent the chunk (absent when the host gave none) */
+  meta?: ChatChunkMeta;
 }
-type ExecEvent = ExecEventResponse | ExecEventChunk | ExecEventFinished;
+/** P5-56: a node run that sent chunks has ended */
+interface ExecEventNodeEnd {
+  type: 'nodeEnd';
+  executionId: string;
+  meta: ChatChunkMeta;
+}
+type ExecEvent = ExecEventResponse | ExecEventChunk | ExecEventNodeEnd | ExecEventFinished;
 
 type EncodedResponse = Omit<WebhookResponse, 'binary'> & {
   binary?: { data: string; mimeType: string; fileName?: string };

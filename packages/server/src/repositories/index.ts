@@ -30,6 +30,7 @@ import { ReviewRepository } from './reviews';
 import { ScheduleSlotRepository } from './schedule-slots';
 import { SecretConnectionRepository } from './secrets';
 import { StaticDataRepository } from './static-data';
+import { TestRunRepository } from './test-runs';
 import { TagRepository, WorkflowRepository, WorkflowVersionRepository } from './workflows';
 
 export interface Repositories {
@@ -64,6 +65,8 @@ export interface Repositories {
   dataTables: DataTableRepository;
   /** P4-07 (L9) */
   secrets: SecretConnectionRepository;
+  /** P5-02 (L8) */
+  testRuns: TestRunRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -93,6 +96,7 @@ export function createRepositories(db: DbOrTx): Repositories {
     reviews: new ReviewRepository(db),
     dataTables: new DataTableRepository(db),
     secrets: new SecretConnectionRepository(db),
+    testRuns: new TestRunRepository(db),
   };
 }
 
@@ -100,5 +104,12 @@ export type { AnnotationFilter, AnnotationVote, ExecutionAnnotationDTO } from '.
 export type { FavoriteResourceType } from './favorites';
 export type { PublishEvent, PublishTimelineEntry } from './publish-history';
 export type { AuditEntry } from './resources';
+export type {
+  TestCaseListOptions,
+  TestCasePatch,
+  TestRunInsert,
+  TestRunListOptions,
+  TestRunPatch,
+} from './test-runs';
 export { isUniqueViolation, isUuid, pgErrorCode } from './util';
 export type { TagRef, WorkflowContent, WorkflowListFilter } from './workflows';

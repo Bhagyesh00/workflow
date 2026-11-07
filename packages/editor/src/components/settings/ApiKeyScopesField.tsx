@@ -41,6 +41,8 @@ const GROUPS: Array<{ resource: string; label: string; scopes: string[] }> = [
     label: 'Data table rows',
     scopes: ['read', 'create', 'update', 'upsert', 'delete'],
   },
+  // P5-12: evaluations of the public API
+  { resource: 'testRun', label: 'Test runs', scopes: ['list', 'create', 'read', 'cancel'] },
   { resource: 'sourceControl', label: 'Source control', scopes: ['pull'] },
   { resource: 'securityAudit', label: 'Security audit', scopes: ['generate'] },
 ];

@@ -160,7 +160,12 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
     const auth = requireRole(request, 'editor');
     const { id } = parse(idParams, request.params);
     const body = parse(
-      z.object({ nodeName: z.string().min(1).max(256), workflowData: workflowDataSchema.optional() }),
+      z.object({
+        nodeName: z.string().min(1).max(256),
+        workflowData: workflowDataSchema.optional(),
+        // P5-59: the canvas chat runs up to the node it was opened from
+        destinationNode: z.string().min(1).max(256).optional(),
+      }),
       request.body,
     );
     return { data: await workflows.listenTestWebhook(auth.tenant, id, body, actor(request)) };

@@ -23,6 +23,7 @@ import { hasRole } from '../services/auth';
 import { createCredential, deleteCredential } from './credentials';
 import { deleteExecution, executionListQuery, getExecution, listExecutions } from './executions';
 import { PUBLIC_DATA_TABLE_ROUTES } from './public-data-tables';
+import { PUBLIC_EVALUATION_ROUTES } from './public-evaluations';
 import { publicFolderHandlers } from './public-folders';
 import { createTag, createVariable, renameTag, tagDTO, updateVariable, variableDTO } from './resources';
 
@@ -48,6 +49,8 @@ interface ApiRoute {
   /** component schema name of `data` in the response */
   response: string;
   list?: boolean;
+  /** the success status when it is not 200 (P5-12: a created test run answers 201) */
+  status?: 201 | 202;
   handler(ctx: ServerContext, input: PublicApiInput): Promise<unknown>;
 }
 
@@ -533,6 +536,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     handler: (ctx, input) => publicFolderHandlers.remove(ctx, input),
   },
   ...PUBLIC_DATA_TABLE_ROUTES,
+  ...PUBLIC_EVALUATION_ROUTES,
 ];
 
 /** JSON schema of credential data from the type's properties */
@@ -745,6 +749,58 @@ const COMPONENTS: Record<string, unknown> = {
   DataTableResult: {
     description: 'What a write answers: true, a count, ids or rows, as the request asked',
   },
+  /** P5-12: the fields of TestRunDto (workflow/src/evaluation.ts) */
+  TestRun: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      workflowId: { type: 'string', format: 'uuid' },
+      status: { enum: ['new', 'running', 'completed', 'error', 'cancelled'] },
+      runAt: { type: ['string', 'null'], format: 'date-time' },
+      completedAt: { type: ['string', 'null'], format: 'date-time' },
+      metrics: {
+        type: ['object', 'null'],
+        description: 'The mean of each metric over the successful cases',
+        additionalProperties: { type: 'number' },
+      },
+      errorCode: { type: ['string', 'null'] },
+      errorDetails: { type: ['object', 'null'] },
+      concurrency: { type: 'integer', minimum: 1, maximum: 10 },
+      finalResult: { enum: ['success', 'error', null] },
+      caseCounts: {
+        type: 'object',
+        description: 'The number of test cases per status, and their total',
+        properties: {
+          new: { type: 'integer' },
+          running: { type: 'integer' },
+          success: { type: 'integer' },
+          error: { type: 'integer' },
+          cancelled: { type: 'integer' },
+          total: { type: 'integer' },
+        },
+      },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+  /** P5-12: the fields of TestCaseDto (workflow/src/evaluation.ts) */
+  TestCase: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      testRunId: { type: 'string', format: 'uuid' },
+      executionId: { type: ['string', 'null'], format: 'uuid' },
+      status: { enum: ['new', 'running', 'success', 'error', 'cancelled'] },
+      runIndex: { type: 'integer', description: 'The index of the dataset row the case ran' },
+      runAt: { type: ['string', 'null'], format: 'date-time' },
+      completedAt: { type: ['string', 'null'], format: 'date-time' },
+      errorCode: { type: ['string', 'null'] },
+      errorDetails: { type: ['object', 'null'] },
+      metrics: { type: ['object', 'null'], additionalProperties: { type: 'number' } },
+      inputs: { type: ['object', 'null'] },
+      outputs: { type: ['object', 'null'] },
+    },
+  },
 };
 
 export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown> {
@@ -794,7 +850,10 @@ export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown
           }
         : {}),
       responses: {
-        200: { description: 'OK', content: { 'application/json': { schema: success } } },
+        [route.status ?? 200]: {
+          description: route.status === 201 ? 'Created' : route.status === 202 ? 'Accepted' : 'OK',
+          content: { 'application/json': { schema: success } },
+        },
         400: errorResponse('Invalid request'),
         401: errorResponse('Missing or invalid API key'),
         403: errorResponse(`Requires the ${route.role} role or higher`),
@@ -902,7 +961,7 @@ export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerC
             `api:${String(request.headers['x-api-key'] ?? request.ip).slice(0, 20)}`,
         },
       },
-      handler: async (request) => {
+      handler: async (request, reply) => {
         await loadApiKey(request, ctx.auth);
         const auth = request.auth!;
         if (!hasRole(auth.role, route.role)) throw ApiError.forbidden();
@@ -914,7 +973,9 @@ export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerC
           query: route.query ? parse(route.query, request.query) : {},
           body: route.body ? parse(route.body, request.body ?? {}) : undefined,
         };
-        return route.handler(ctx, input);
+        const result = await route.handler(ctx, input);
+        if (route.status) reply.status(route.status);
+        return result;
       },
     });
   }

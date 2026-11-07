@@ -1063,6 +1063,477 @@ const slackHitlTool: NodeTypeDescription = {
   ],
 };
 
+// ---------------------------------------------------------------------------------------------
+// Phase 5 S3: chat (P5-56..59) and evaluations (P5-02, P5-61). They mirror the shape of the real
+// nodes (nodes-base core.evaluationTrigger, core.evaluation, core.executionData; nodes-ai
+// ai.chatTrigger, ai.chat); simulator.ts gives them demo behaviour.
+// ---------------------------------------------------------------------------------------------
+
+/** the Data table picker of the evaluation nodes (the same list search as the Data Table node) */
+const evaluationTableLocator = (show: Record<string, unknown[]>): NodeProperty => ({
+  displayName: 'Data Table',
+  name: 'dataTableId',
+  type: 'resourceLocator',
+  default: { __rl: true, mode: 'list', value: '' },
+  required: true,
+  displayOptions: { show },
+  modes: [
+    {
+      displayName: 'From list',
+      name: 'list',
+      type: 'list',
+      typeOptions: { searchListMethod: 'tableSearch', searchable: true },
+    },
+    { displayName: 'By ID', name: 'id', type: 'string' },
+  ],
+});
+
+const evaluationSourceOptions = [
+  { name: 'Data Table', value: 'dataTable' },
+  { name: 'Google Sheets', value: 'googleSheets' },
+];
+
+const evaluationTrigger: NodeTypeDescription = {
+  name: 'core.evaluationTrigger',
+  displayName: 'Evaluation Trigger',
+  description: 'Runs the workflow once per row of a test dataset',
+  icon: 'lucide:flask-conical',
+  group: ['trigger'],
+  version: 1,
+  defaults: { name: 'When fetching a dataset row' },
+  inputs: [],
+  outputs: ['main'],
+  categories: ['Core', 'Triggers'],
+  alias: ['evaluation', 'eval', 'dataset', 'test cases'],
+  credentials: [
+    {
+      name: 'googleApi',
+      required: true,
+      displayOptions: { show: { source: ['googleSheets'], authentication: ['serviceAccount'] } },
+    },
+    {
+      name: 'googleSheetsOAuth2Api',
+      required: true,
+      displayOptions: { show: { source: ['googleSheets'], authentication: ['oAuth2'] } },
+    },
+  ],
+  properties: [
+    {
+      displayName:
+        'A manual run reads the first row. Run the whole dataset from the Evaluations tab of this workflow.',
+      name: 'notice',
+      type: 'notice',
+      default: '',
+    },
+    {
+      displayName: 'Source',
+      name: 'source',
+      type: 'options',
+      default: 'dataTable',
+      options: evaluationSourceOptions,
+    },
+    {
+      displayName: 'Authentication',
+      name: 'authentication',
+      type: 'options',
+      default: 'oAuth2',
+      displayOptions: { show: { source: ['googleSheets'] } },
+      options: [
+        { name: 'OAuth2 (recommended)', value: 'oAuth2' },
+        { name: 'Service Account', value: 'serviceAccount' },
+      ],
+    },
+    evaluationTableLocator({ source: ['dataTable'] }),
+    {
+      displayName: 'Document ID',
+      name: 'documentId',
+      type: 'string',
+      default: '',
+      required: true,
+      displayOptions: { show: { source: ['googleSheets'] } },
+    },
+    {
+      displayName: 'Sheet',
+      name: 'sheetName',
+      type: 'string',
+      default: '',
+      required: true,
+      displayOptions: { show: { source: ['googleSheets'] } },
+    },
+    { displayName: 'Limit Rows', name: 'limitRows', type: 'boolean', default: false },
+    {
+      displayName: 'Max Rows to Process',
+      name: 'maxRows',
+      type: 'number',
+      default: 10,
+      typeOptions: { minValue: 1, maxValue: 1000 },
+      displayOptions: { show: { limitRows: [true] } },
+    },
+    { displayName: 'Filter Rows', name: 'filterRows', type: 'boolean', default: false },
+    {
+      displayName: 'Conditions',
+      name: 'filters',
+      type: 'filter',
+      default: {},
+      displayOptions: { show: { filterRows: [true], source: ['dataTable'] } },
+    },
+  ],
+};
+
+const evaluation: NodeTypeDescription = {
+  name: 'core.evaluation',
+  displayName: 'Evaluation',
+  description: 'Records the inputs, outputs and metrics of an evaluation run',
+  icon: 'lucide:check-check',
+  group: ['transform'],
+  version: 1,
+  defaults: { name: 'Evaluation' },
+  // a model input only for the AI-based metrics, two outputs only for Check If Evaluating
+  inputs:
+    "={{ ['main', ...($parameter.operation === 'setMetrics' && ['correctness', 'helpfulness'].includes($parameter.metric) ? [{ type: 'ai_languageModel', displayName: 'Model', required: true, maxConnections: 1 }] : [])] }}",
+  outputs:
+    "={{ $parameter.operation === 'checkIfEvaluating' ? [{ type: 'main', displayName: 'Evaluation' }, { type: 'main', displayName: 'Normal' }] : ['main'] }}",
+  categories: ['Core', 'Evaluation'],
+  alias: ['eval', 'metrics', 'score', 'test'],
+  properties: [
+    {
+      displayName: 'Operation',
+      name: 'operation',
+      type: 'options',
+      default: 'setOutputs',
+      noDataExpression: true,
+      options: [
+        { name: 'Set Inputs', value: 'setInputs', action: 'Set inputs' },
+        { name: 'Set Outputs', value: 'setOutputs', action: 'Set outputs' },
+        { name: 'Set Metrics', value: 'setMetrics', action: 'Set metrics' },
+        { name: 'Check If Evaluating', value: 'checkIfEvaluating', action: 'Check if evaluating' },
+      ],
+    },
+    {
+      displayName: 'Source',
+      name: 'source',
+      type: 'options',
+      default: 'dataTable',
+      displayOptions: { show: { operation: ['setOutputs'] } },
+      options: evaluationSourceOptions,
+    },
+    evaluationTableLocator({ operation: ['setOutputs'], source: ['dataTable'] }),
+    ...(['inputs', 'outputs'] as const).map(
+      (name): NodeProperty => ({
+        displayName: name === 'inputs' ? 'Inputs' : 'Outputs',
+        name,
+        type: 'fixedCollection',
+        default: {},
+        typeOptions: {
+          multipleValues: true,
+          multipleValueButtonText: name === 'inputs' ? 'Add input' : 'Add output',
+        },
+        displayOptions: { show: { operation: [name === 'inputs' ? 'setInputs' : 'setOutputs'] } },
+        options: [
+          {
+            displayName: 'Value',
+            name: 'values',
+            values: [
+              { displayName: 'Name', name: 'name', type: 'string', default: '' },
+              { displayName: 'Value', name: 'value', type: 'string', default: '' },
+            ],
+          },
+        ],
+      }),
+    ),
+    {
+      displayName: 'Metric',
+      name: 'metric',
+      type: 'options',
+      default: 'customMetrics',
+      displayOptions: { show: { operation: ['setMetrics'] } },
+      options: [
+        { name: 'Custom Metrics', value: 'customMetrics' },
+        { name: 'Correctness (AI-based)', value: 'correctness' },
+        { name: 'Helpfulness (AI-based)', value: 'helpfulness' },
+        { name: 'String Similarity', value: 'stringSimilarity' },
+        { name: 'Categorization', value: 'categorization' },
+        { name: 'Tools Used', value: 'toolsUsed' },
+      ],
+    },
+    {
+      displayName: 'Metrics to Return',
+      name: 'metrics',
+      type: 'assignmentCollection',
+      default: { assignments: [] },
+      displayOptions: { show: { operation: ['setMetrics'], metric: ['customMetrics'] } },
+    },
+    {
+      displayName: 'Expected Answer',
+      name: 'expectedAnswer',
+      type: 'string',
+      default: '',
+      displayOptions: {
+        show: { operation: ['setMetrics'], metric: ['correctness', 'stringSimilarity', 'categorization'] },
+      },
+    },
+    {
+      displayName: 'Actual Answer',
+      name: 'actualAnswer',
+      type: 'string',
+      default: '',
+      displayOptions: {
+        show: {
+          operation: ['setMetrics'],
+          metric: ['correctness', 'helpfulness', 'stringSimilarity', 'categorization'],
+        },
+      },
+    },
+  ],
+};
+
+const executionData: NodeTypeDescription = {
+  name: 'core.executionData',
+  displayName: 'Execution Data',
+  description: 'Saves data on the execution, so you can filter executions by it',
+  icon: 'lucide:tag',
+  group: ['transform'],
+  version: 1,
+  defaults: { name: 'Execution Data' },
+  inputs: ['main'],
+  outputs: ['main'],
+  categories: ['Core', 'Helpers'],
+  alias: ['highlight', 'custom data', 'metadata', 'filter executions'],
+  properties: [
+    {
+      displayName: 'Operation',
+      name: 'operation',
+      type: 'options',
+      default: 'save',
+      noDataExpression: true,
+      options: [
+        { name: 'Save Highlighted Data (for Search/review)', value: 'save', action: 'Save highlighted data' },
+      ],
+    },
+    {
+      displayName: 'Data to Save',
+      name: 'dataToSave',
+      type: 'fixedCollection',
+      default: {},
+      typeOptions: { multipleValues: true, multipleValueButtonText: 'Add saved field' },
+      displayOptions: { show: { operation: ['save'] } },
+      options: [
+        {
+          displayName: 'Values',
+          name: 'values',
+          values: [
+            { displayName: 'Key', name: 'key', type: 'string', default: '', placeholder: 'e.g. myKey' },
+            { displayName: 'Value', name: 'value', type: 'string', default: '', placeholder: 'e.g. myValue' },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+const chatTrigger: NodeTypeDescription = {
+  name: 'ai.chatTrigger',
+  displayName: 'Chat Trigger',
+  description: 'Starts the workflow when a chat message is received',
+  icon: 'lucide:message-circle',
+  group: ['trigger'],
+  version: 1,
+  defaults: { name: 'When chat message received' },
+  inputs: [],
+  outputs: ['main'],
+  categories: ['AI', 'Triggers'],
+  alias: ['chat', 'chatbot', 'message', 'conversation'],
+  eventTriggerDescription: 'Waiting for you to send a chat message',
+  activationMessage: 'You can now send messages to the chat URL.',
+  credentials: [
+    {
+      name: 'httpBasicAuth',
+      required: true,
+      displayOptions: { show: { public: [true], authentication: ['basicAuth'] } },
+    },
+  ],
+  webhooks: [
+    {
+      name: 'default',
+      httpMethod: 'POST',
+      path: 'chat',
+      responseMode: "={{ $parameter.options?.responseMode ?? 'lastNode' }}",
+      responseData: 'firstEntryJson',
+    },
+    { name: 'setup', httpMethod: 'GET', path: 'chat', ndvHideUrl: true },
+  ],
+  properties: [
+    {
+      displayName: 'Make Chat Publicly Available',
+      name: 'public',
+      type: 'boolean',
+      default: false,
+      description:
+        'Whether the chat URL works outside the editor. When off, only test messages from the editor are accepted.',
+    },
+    {
+      displayName: 'Mode',
+      name: 'mode',
+      type: 'options',
+      default: 'hostedChat',
+      displayOptions: { show: { public: [true] } },
+      options: [
+        { name: 'Hosted Chat', value: 'hostedChat', description: 'Chat on a page this server hosts' },
+        { name: 'Embedded Chat', value: 'webhook', description: 'Chat through the widget on your own site' },
+      ],
+    },
+    {
+      displayName: 'Authentication',
+      name: 'authentication',
+      type: 'options',
+      default: 'none',
+      displayOptions: { show: { public: [true] } },
+      options: [
+        { name: 'None', value: 'none', description: 'Anyone with the URL can chat' },
+        { name: 'Basic Auth', value: 'basicAuth' },
+      ],
+    },
+    {
+      displayName: 'Initial Message(s)',
+      name: 'initialMessages',
+      type: 'string',
+      default: 'Hi there!\nHow can I help you today?',
+      typeOptions: { rows: 3 },
+      description: 'Shown when a chat opens; one message per line',
+      displayOptions: { show: { public: [true] } },
+    },
+    {
+      displayName: 'Options',
+      name: 'options',
+      type: 'collection',
+      default: {},
+      placeholder: 'Add option',
+      options: [
+        {
+          displayName: 'Allowed Origins (CORS)',
+          name: 'allowedOrigins',
+          type: 'string',
+          default: '*',
+          description: 'Comma-separated origins allowed to call the chat from a browser, or * for any',
+        },
+        {
+          displayName: 'Response Mode',
+          name: 'responseMode',
+          type: 'options',
+          default: 'lastNode',
+          options: [
+            { name: 'When Last Node Finishes', value: 'lastNode' },
+            { name: 'Streaming', value: 'streaming' },
+            { name: "Using 'Respond to Webhook' Node", value: 'responseNode' },
+            { name: 'Using Response Nodes', value: 'responseNodes' },
+          ],
+        },
+        { displayName: 'Allow File Uploads', name: 'allowFileUploads', type: 'boolean', default: false },
+        {
+          displayName: 'Allowed File MIME Types',
+          name: 'allowedFilesMimeTypes',
+          type: 'string',
+          default: '*',
+          placeholder: 'image/*, text/plain',
+        },
+        { displayName: 'Title', name: 'title', type: 'string', default: 'Hi there!' },
+        {
+          displayName: 'Subtitle',
+          name: 'subtitle',
+          type: 'string',
+          default: "Start a chat. We're here to help you 24/7.",
+        },
+        {
+          displayName: 'Input Placeholder',
+          name: 'inputPlaceholder',
+          type: 'string',
+          default: 'Type your question…',
+        },
+      ],
+    },
+  ],
+};
+
+const chat: NodeTypeDescription = {
+  name: 'ai.chat',
+  displayName: 'Respond to Chat',
+  description: 'Sends a message to the chat, and can wait for the reply',
+  icon: 'lucide:message-square-reply',
+  group: ['output'],
+  version: 1,
+  defaults: { name: 'Respond to Chat' },
+  inputs:
+    "={{ ['main', ...($parameter.options?.memoryConnection === true ? [{ type: 'ai_memory', displayName: 'Memory', maxConnections: 1 }] : [])] }}",
+  outputs: ['main'],
+  categories: ['AI', 'Human in the Loop'],
+  alias: ['reply', 'respond', 'chat message'],
+  usableAsTool: true,
+  webhooks: [
+    ...(['GET', 'POST'] as const).map((httpMethod) => ({
+      name: 'default',
+      httpMethod,
+      path: 'answer',
+      isFullPath: false,
+      restartWebhook: true,
+      responseMode: 'onReceived',
+    })),
+    {
+      name: 'chatReply',
+      httpMethod: 'POST',
+      path: 'chat-reply',
+      restartWebhook: true,
+      responseMode: 'responseNodes',
+    },
+  ],
+  properties: [
+    {
+      displayName: 'Operation',
+      name: 'operation',
+      type: 'options',
+      default: 'send',
+      noDataExpression: true,
+      options: [
+        { name: 'Send Message', value: 'send', action: 'Send a chat message' },
+        {
+          name: 'Send and Wait for Response',
+          value: 'sendAndWait',
+          action: 'Send a message and wait for the reply',
+        },
+      ],
+    },
+    {
+      displayName: 'Message',
+      name: 'message',
+      type: 'string',
+      required: true,
+      default: '',
+      typeOptions: { rows: 4 },
+    },
+    {
+      displayName: 'Options',
+      name: 'options',
+      type: 'collection',
+      default: {},
+      placeholder: 'Add option',
+      options: [
+        {
+          displayName: 'Add Memory Input Connection',
+          name: 'memoryConnection',
+          type: 'boolean',
+          default: false,
+        },
+      ],
+    },
+  ],
+};
+
+/** P5-02 demo dataset: the rows the Evaluation Trigger reads in the demo (a manual run gets the first) */
+export const demoEvaluationRows: Array<Record<string, string>> = [
+  { question: 'Where is my order 1042?', expected: 'Order 1042 shipped on Monday and arrives on Thursday.' },
+  { question: 'Can I change my delivery address?', expected: 'Yes, until the order ships.' },
+  { question: 'How do I return an item?', expected: 'Start a return from the orders page within 30 days.' },
+];
+
 /** The demo mapper starts with the required fields and lets the user add the rest (`addAllFields: false`). */
 const demoMapperOptions: NonNullable<NonNullable<NodeProperty['typeOptions']>['resourceMapper']> = {
   resourceMapperMethod: 'getMappingFields',
@@ -1291,6 +1762,11 @@ export const demoNodeTypes: NodeTypeDescription[] = [
   calculator,
   httpRequestTool,
   slackHitlTool,
+  evaluationTrigger,
+  evaluation,
+  executionData,
+  chatTrigger,
+  chat,
   resourceMapperDemo,
   kitchenSink,
 ];

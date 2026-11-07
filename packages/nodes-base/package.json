@@ -10,7 +10,9 @@
     "./utils/ssh-tunnel": "./src/utils/ssh-tunnel.ts",
     "./utils/archive": "./src/utils/archive.ts",
     "./extract/pdf": "./src/nodes/core/extract/pdf.ts",
-    "./utils/databricks-lakebase": "./src/utils/databricks-lakebase.ts"
+    "./utils/databricks-lakebase": "./src/utils/databricks-lakebase.ts",
+    "./utils/send-and-wait": "./src/utils/send-and-wait/index.ts",
+    "./utils/user-auth": "./src/utils/user-auth.ts"
   },
   "scripts": {
     "test": "vitest run",

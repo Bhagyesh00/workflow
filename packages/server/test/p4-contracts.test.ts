@@ -367,7 +367,10 @@ describe('API key scopes', () => {
 
   it("the existing public routes carry n8n's scopes", () => {
     const scopes = Object.fromEntries(
-      PUBLIC_ROUTES.filter((r) => r.tag !== 'DataTable').map((r) => [`${r.method} ${r.path}`, r.scope]),
+      PUBLIC_ROUTES.filter((r) => r.tag !== 'DataTable' && r.tag !== 'Evaluations').map((r) => [
+        `${r.method} ${r.path}`,
+        r.scope,
+      ]),
     );
     expect(scopes).toEqual({
       'GET /workflows': 'workflow:list',

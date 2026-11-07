@@ -22,13 +22,14 @@ import {
 import type { PushEvent } from '../api/types';
 import { buildExpressionContext, type PreviewWorkflow } from '../lib/expression-context';
 import { getAncestors, getMainParents, listConnections } from '../lib/workflow-ops';
-import { demoContacts } from './fixtures';
+import { demoContacts, demoEvaluationRows } from './fixtures';
 import { simulateDataTableNode } from './mock-data-tables';
 
 export interface SimulationInput {
   executionId: string;
   workflow: PreviewWorkflow & { pinData?: Record<string, Item[]> };
-  mode: 'manual' | 'webhook' | 'trigger' | 'retry';
+  /** S3: `evaluation` is a test run case (mock-evaluations); Check If Evaluating takes its first output */
+  mode: 'manual' | 'webhook' | 'trigger' | 'retry' | 'evaluation';
   destinationNode?: string;
   startNode?: string;
   triggerItems?: Item[];
@@ -342,6 +343,45 @@ export async function simulateExecution(input: SimulationInput): Promise<Simulat
         }
         return [out];
       }
+      // S3 chat: the item a chat message brings (the panel's message, or a demo one on a plain run)
+      case 'ai.chatTrigger':
+        return [
+          input.triggerItems ?? [
+            {
+              json: {
+                sessionId: 'demo-session',
+                action: 'sendMessage',
+                chatInput: 'Where is my order 1042?',
+              },
+            },
+          ],
+        ];
+      // S3 evaluations: a pinned row wins (the run loop); else the case's row, else the demo dataset's first
+      case 'core.evaluationTrigger':
+        return [
+          input.triggerItems ?? [
+            {
+              json: {
+                ...demoEvaluationRows[0],
+                row_number: 1,
+                row_id: 1,
+                _rowsLeft: demoEvaluationRows.length - 1,
+              },
+            },
+          ],
+        ];
+      case 'core.evaluation': {
+        const passed = items.map((item, i) => ({ json: item.json, pairedItem: { item: i } }));
+        const operation = String(p.operation ?? 'setOutputs');
+        if (operation === 'setMetrics')
+          return [items.map((_, i) => ({ json: { score: 1 }, pairedItem: { item: i } }))];
+        // outputs Evaluation and Normal
+        if (operation === 'checkIfEvaluating')
+          return input.mode === 'evaluation' ? [passed, []] : [[], passed];
+        return [passed];
+      }
+      case 'core.executionData':
+        return [items.map((item, i) => ({ json: item.json, binary: item.binary, pairedItem: { item: i } }))];
       default:
         return [items.map((item, i) => ({ json: item.json, binary: item.binary, pairedItem: { item: i } }))];
     }

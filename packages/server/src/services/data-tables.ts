@@ -352,6 +352,10 @@ class TenantDataTableAccess implements DataTableAccess {
   listColumns(id: string): Promise<DataTableColumn[]> {
     return this.service.columns.list(this.tenantId, id);
   }
+  /** P5-02: a new last column (the Evaluation node's outputs write-back); the REST rules and caps apply */
+  addColumn(id: string, column: DataTableColumnInput): Promise<DataTableColumn> {
+    return this.service.columns.add(this.tenantId, id, { name: column.name, type: column.type }, this.actor);
+  }
   insertRows<T extends DataTableInsertReturnType>(
     id: string,
     rows: DataTableRowInput[],

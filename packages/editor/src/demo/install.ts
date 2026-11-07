@@ -3,10 +3,12 @@
  * so the product can be reviewed in any browser without running the server. Data lives in the
  * page and resets on reload.
  */
+import { setChatFetch } from '../api/chat-transport';
 import { setTransport } from '../api/client';
 import { setPushConnector } from '../api/push';
 import { demoGroupedWorkflow } from './fixtures';
 import { MockBackend } from './mock-backend';
+import { demoChatFetch } from './mock-chat';
 
 export function seedDemo(backend: MockBackend): void {
   backend.createAccount({
@@ -249,6 +251,8 @@ export function installDemo(): MockBackend {
   });
   seedDemo(backend);
   setTransport((request) => backend.handle(request));
+  // S3: the canvas chat panel posts to test chat URLs through this fetch (no server in the demo)
+  setChatFetch(demoChatFetch(backend));
   setPushConnector((onEvent, onStatus) => {
     onStatus('open');
     const unsubscribe = backend.subscribe(onEvent);

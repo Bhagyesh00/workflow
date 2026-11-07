@@ -12,6 +12,9 @@ import {
   toolRootOf,
 } from '@workflow/core';
 import {
+  CHAT_TEST_TOKEN_TTL_S,
+  CHAT_TOKEN_KINDS,
+  CHAT_TRIGGER_TYPE,
   ExpressionEvaluator,
   type Item,
   planPartialRun,
@@ -43,6 +46,7 @@ import { createRepositories, type Repositories, type TagRef } from '../repositor
 import type { ActiveWorkflowManager, ValidationIssue } from './active-workflows';
 import type { ExecutionService } from './executions';
 import type { FavoriteService } from './favorites';
+import type { FormTokenService } from './form-tokens';
 import type { PublishHistoryService } from './publish-history';
 import { TEST_WEBHOOK_TTL_MS, type TestWebhookStore } from './test-webhooks';
 import { closeBounded } from './trigger-retry';
@@ -94,6 +98,8 @@ export interface WorkflowServiceDeps {
   favorites: FavoriteService;
   publishHistory: PublishHistoryService;
   reviews: WorkflowReviewService;
+  /** P5-56: signs a chat trigger's `chatTestToken`; absent = the context's (tests build the service without it) */
+  formTokens?: FormTokenService;
   context: () => ServerContext;
 }
 
@@ -751,7 +757,7 @@ export class WorkflowService {
   async listenTestWebhook(
     tenant: TenantRow,
     id: string,
-    input: { nodeName: string; workflowData?: WorkflowData },
+    input: { nodeName: string; workflowData?: WorkflowData; destinationNode?: string },
     actor: Actor,
   ) {
     const row = await this.get(tenant.id, id);
@@ -771,8 +777,15 @@ export class WorkflowService {
     if (row.active && type?.webhookMethods) {
       throw ApiError.badRequest('Deactivate the workflow to listen for test events on this trigger');
     }
+    if (input.destinationNode !== undefined && !workflow.nodes[input.destinationNode]) {
+      throw ApiError.badRequest(`Node "${input.destinationNode}" does not exist`);
+    }
     await this.deps.activeWorkflows.registerTestWebhooks(tenant, definition, node.name);
     const expiresAt = Date.now() + TEST_WEBHOOK_TTL_MS;
+    // a chat trigger's registration gets a fresh id, and its test token names it: a token from an earlier
+    // listen is refused once this one replaced it (L2's handleTest answers 403 before using the registration)
+    const chat = node.type === CHAT_TRIGGER_TYPE;
+    const listenId = chat ? randomUUID() : undefined;
     for (const hook of hooks) {
       await this.deps.testWebhooks.add({
         tenantId: tenant.id,
@@ -782,9 +795,24 @@ export class WorkflowService {
         path: hook.path,
         workflow: definition,
         userId: actor.userId,
+        listenId,
+        destinationNode: input.destinationNode,
         expiresAt,
       });
     }
+    const formTokens = this.deps.formTokens ?? this.deps.context().formTokens;
+    const chatTestToken = listenId
+      ? formTokens.sign(
+          {
+            kind: CHAT_TOKEN_KINDS.test,
+            tenantId: tenant.id,
+            workflowId: row.id,
+            node: node.name,
+            listenId,
+          },
+          CHAT_TEST_TOKEN_TTL_S,
+        )
+      : undefined;
     const base = this.deps.config.baseUrl;
     // a form's GET and POST hooks share one path, so one URL
     const formTestUrls = [
@@ -798,6 +826,7 @@ export class WorkflowService {
       testUrl: `${base}/${webhookUrlBase(hooks[0].description)}-test/${tenant.slug}/${hooks[0].path}`,
       expiresAt: new Date(expiresAt).toISOString(),
       formTestUrls,
+      ...(chatTestToken ? { chatTestToken } : {}),
     };
   }
 

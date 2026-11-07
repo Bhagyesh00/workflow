@@ -54,6 +54,8 @@ export interface Item {
   binary?: Record<string, BinaryData>;
   pairedItem?: PairedItem | PairedItem[] | number;
   error?: ItemError;
+  /** set by the Evaluation node (Set Inputs, Set Outputs, Set Metrics); the test runner reads it from the saved run data */
+  evaluationData?: DataObject;
 }
 
 /** Output of a node: one array of items per output index. `null` means "stop this branch". */
@@ -371,7 +373,7 @@ export interface WebhookDescription {
   httpMethod: string;
   /** fixed path or expression; relative paths are prefixed with the node's webhookId */
   path: string;
-  /** `onReceived` | `lastNode` | `responseNode` | `streaming` or expression */
+  /** `onReceived` | `lastNode` | `responseNode` | `responseNodes` | `streaming` or expression; `responseNodes` (chat) sends every Respond to Chat reply */
   responseMode?: string;
   /** `allEntries` | `firstEntryJson` | `firstEntryBinary` | `noData` or expression */
   responseData?: string;

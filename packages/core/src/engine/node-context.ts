@@ -7,6 +7,8 @@ import {
   assertCredentialUrlAllowed,
   type BaseContext,
   type BinaryData,
+  CHAT_TRIGGER_TYPE,
+  type ChatTriggerRef,
   type ConnectedNode,
   type ConnectionType,
   CredentialDomainError,
@@ -238,7 +240,8 @@ export function buildExpressionContext(deps: ContextDeps, itemIndex: number): Ex
   };
 }
 
-function setCustomData(state: ExecutionState, key: string, value: string) {
+/** sets one custom execution data value: at most 10 keys, keys cut to 50 characters, values to 255; throws past the tenth key */
+export function setCustomData(state: ExecutionState, key: string, value: string) {
   const data = (state.resultData.customData ??= {});
   if (!(key in data) && Object.keys(data).length >= 10) {
     throw new Error('Custom execution data is limited to 10 keys');
@@ -598,7 +601,13 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
       callbacks.putExecutionToWait(waitTill);
     },
     sendResponse: (response) => services.hooks?.sendResponse?.(response),
-    sendChunk: (chunk) => services.hooks?.sendChunk?.(chunk),
+    sendChunk: (chunk, options) =>
+      services.hooks?.sendChunk?.(chunk, {
+        nodeId: node.id,
+        nodeName: node.name,
+        runIndex: deps.runIndex ?? 0,
+        itemIndex: options?.itemIndex ?? 0,
+      }),
     sendMessageToUI: (...args) => {
       if (services.mode === 'manual') services.hooks?.sendMessageToUI?.(node.name, args);
     },
@@ -623,6 +632,24 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
     },
     getResumeData: () => callbacks.getResumeData?.(),
     getToolParameter: createToolParameterReader(deps),
+    getChatTrigger: () => findChatTrigger(deps.workflow),
+  };
+}
+
+/**
+ * The workflow's Chat Trigger, wherever the asking node sits (a main child, a tool under an Agent, a webhook):
+ * the first enabled `ai.chatTrigger` node, with its parameters resolved to their defaults (expressions stay as
+ * written). A copy, so the caller cannot change the cached parameters.
+ */
+function findChatTrigger(workflow: Workflow): ChatTriggerRef | null {
+  const trigger = Object.values(workflow.nodes).find(
+    (candidate) => candidate.type === CHAT_TRIGGER_TYPE && !candidate.disabled,
+  );
+  if (!trigger) return null;
+  return {
+    name: trigger.name,
+    type: trigger.type,
+    parameters: structuredClone(getResolvedParameters(workflow, trigger)),
   };
 }
 
@@ -684,10 +711,17 @@ export function createPollContext(
   return { ...createBaseContext(deps), getActivationMode: () => activationMode };
 }
 
+/** what a webhook context can reach beyond the request; `createWebhookSubNodes` builds it */
+export interface WebhookContextCallbacks {
+  /** the sub-nodes attached to the webhook node (a memory under the Chat Trigger) */
+  getInputConnectionData(type: ConnectionType, itemIndex: number): Promise<unknown>;
+}
+
 export function createWebhookContext(
   deps: ContextDeps,
   request: WebhookRequest,
   webhookName: string,
+  callbacks?: WebhookContextCallbacks,
 ): WebhookContext {
   const base = createBaseContext(deps);
   const { services, workflow, node } = deps;
@@ -711,6 +745,12 @@ export function createWebhookContext(
     },
     verifyFormToken: (token) => services.formTokens?.verify(token) ?? null,
     getFormAuth: () => services.formAuth,
+    async getInputConnectionData(type, itemIndex) {
+      if (!callbacks) throw new NodeOperationError(node, 'Sub-nodes are not available here');
+      return callbacks.getInputConnectionData(type, itemIndex);
+    },
+    getChatTrigger: () => findChatTrigger(workflow),
+    isPublicChatDisabled: () => services.disablePublicChatTrigger === true,
   };
 }
 
