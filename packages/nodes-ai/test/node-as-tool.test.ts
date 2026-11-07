@@ -139,6 +139,19 @@ const notToolNode: NodeType = {
   },
 };
 
+/** reads its credential as a node does, with no item index */
+const credentialNode: NodeType = {
+  description: {
+    ...echoNode.description,
+    name: 'test.credential',
+    displayName: 'Credential',
+    defaults: { name: 'Credential' },
+  },
+  async execute(ctx) {
+    return [[{ json: await ctx.getCredentials('httpHeaderAuth') }]];
+  },
+};
+
 const types = new NodeTypes(
   withToolVariants([
     ...nodes,
@@ -151,6 +164,7 @@ const types = new NodeTypes(
     emptyNode,
     twoItemsNode,
     notToolNode,
+    credentialNode,
   ]),
 );
 
@@ -366,6 +380,89 @@ describe('an agent calls a node as a tool', () => {
       .flatMap((r) => r.messages.filter((m) => m.role === 'tool'))
       .map((m) => JSON.parse(String(m.content))[0].value);
     expect(new Set(results)).toEqual(new Set(['first/a', 'second/b']));
+  });
+
+  it('$input in a tool parameter is one item, the arguments, and $itemIndex stays the agent\'s', async () => {
+    const value = `={{ $fromAI('k') && $input.all().length }}|{{ $input.first().json.k }}|{{ $input.last().json.k }}|{{ $input.item.json.k }}|{{ $input.first().json.who }}|{{ $('Set').item.json.who }}|{{ $itemIndex }}`;
+    const { requests } = await agentRun(
+      [node('Echo', 'test.echoTool', { value })],
+      [toolCalls(['Echo', { k: 'a' }]), reply('one'), toolCalls(['Echo', { k: 'b' }]), reply('two')],
+      {
+        items: [{ json: { who: 'first' } }, { json: { who: 'second' } }],
+        extraNodes: [node('Set', 'test.notTool')],
+        extraLinks: [
+          ['Trigger', 'Set'],
+          ['Set', 'Agent'],
+        ],
+      },
+    );
+    const results = requests
+      .flatMap((r) => r.messages.filter((m) => m.role === 'tool'))
+      .map((m) => JSON.parse(String(m.content))[0].value);
+    expect(new Set(results)).toEqual(new Set(['1|a|a|a||first|0', '1|b|b|b||second|1']));
+  });
+
+  it('a credential id that is an expression resolves at the agent\'s item, on every call', async () => {
+    const asked: string[] = [];
+    const http = new FakeHttpClient(() => ({ body: {}, headers: { 'content-type': 'application/json' } }));
+    const svc = toolServices({
+      http,
+      credentials: {
+        get: async (ref) => {
+          asked.push(String(ref.id));
+          return CREDENTIAL.httpHeaderAuth;
+        },
+        update: async () => {},
+      },
+    });
+    const tool = node(
+      'Call API',
+      'core.httpRequestTool',
+      {
+        authentication: 'genericCredentialType',
+        genericAuthType: 'httpHeaderAuth',
+        url: `=https://api.test/{{ $('Trigger').item.json.cred }}`,
+      },
+      { credentials: { httpHeaderAuth: { id: `={{ $('Trigger').item.json.cred }}`, name: 'c' } } },
+    );
+    const { result } = await agentRun(
+      [tool],
+      [toolCalls(['Call_API', {}]), reply('one'), toolCalls(['Call_API', {}]), reply('two')],
+      { services: svc, items: [{ json: { cred: 'CRED-A' } }, { json: { cred: 'CRED-B' } }] },
+    );
+    expect(result.status).toBe('success');
+    const urls = http.requests.map((r) => r.url);
+    expect(new Set(urls)).toEqual(new Set(['https://api.test/CRED-A', 'https://api.test/CRED-B']));
+    expect(new Set(asked)).toEqual(new Set(['CRED-A', 'CRED-B']));
+
+    // and a node that reads the credential itself
+    asked.length = 0;
+    await agentRun(
+      [
+        node(
+          'Credential',
+          'test.credentialTool',
+          {},
+          { credentials: { httpHeaderAuth: { id: `={{ $('Trigger').item.json.cred }}`, name: 'c' } } },
+        ),
+      ],
+      [toolCalls(['Credential', {}]), reply('one'), toolCalls(['Credential', {}]), reply('two')],
+      { services: svc, items: [{ json: { cred: 'CRED-A' } }, { json: { cred: 'CRED-B' } }] },
+    );
+    expect(new Set(asked)).toEqual(new Set(['CRED-A', 'CRED-B']));
+  });
+
+  it('a tool over limits.maxItemsPerOutput fails, is not retried, and stores no items', async () => {
+    const { requests, result } = await agentRun(
+      [node('Two', 'test.twoTool', {}, { retryOnFail: true, maxTries: 3, waitBetweenTries: 0 })],
+      [toolCalls(['Two', {}]), reply('done')],
+      { services: toolServices({ limits: { maxItemsPerOutput: 1 } as ExecutionServices['limits'] }) },
+    );
+    const message = requests[1].messages.find((m) => m.role === 'tool');
+    expect(String(message?.content)).toContain('Node "Two" returned more than 1 items in one output');
+    expect(result.runData.Two).toHaveLength(1);
+    expect(result.runData.Two[0].executionStatus).toBe('error');
+    expect(JSON.stringify(result.runData.Two[0].data)).not.toContain('"response"');
   });
 
   it('parallel calls keep their own hints and metadata, and none reach the agent', async () => {
