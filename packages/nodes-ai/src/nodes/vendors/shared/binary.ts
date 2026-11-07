@@ -37,6 +37,15 @@ function mimeFromName(fileName: string | undefined): string {
   return (ext && MIME_BY_EXT[ext]) || 'application/octet-stream';
 }
 
+/** a malformed percent sequence in a link keeps the raw text */
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 const megabytes = (bytes: number) => String(Number((bytes / MB).toFixed(1)));
 
 function tooBig(ctx: ExecuteContext, itemIndex: number, name: string, bytes: number, limit: number) {
@@ -106,7 +115,7 @@ export async function readInputFile(
     const url = input.url?.trim() ?? '';
     if (!url) throw new NodeOperationError(ctx.getNode(), 'Enter the URL of the file', { itemIndex });
     const { bytes, mimeType } = await downloadMedia(ctx, itemIndex, url, { maxBytes: limit });
-    const fileName = decodeURIComponent(new URL(url).pathname.split('/').pop() ?? '') || undefined;
+    const fileName = safeDecode(new URL(url).pathname.split('/').pop() ?? '') || undefined;
     return {
       bytes,
       mimeType: mimeType && mimeType !== 'application/octet-stream' ? mimeType : mimeFromName(fileName),

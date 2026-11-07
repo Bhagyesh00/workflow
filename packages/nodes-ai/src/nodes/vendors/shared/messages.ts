@@ -2,14 +2,15 @@
  * The parameters every vendor message operation shares (Messages, Simplify Output, Max Tool Calls
  * Iterations) and the per-item loop with continue-on-fail.
  */
-import type {
-  AiChatMessage,
-  AiContentPart,
-  DataObject,
-  ExecuteContext,
-  Item,
-  NodeOutput,
-  NodeProperty,
+import {
+  type AiChatMessage,
+  type AiContentPart,
+  type DataObject,
+  type ExecuteContext,
+  type Item,
+  NodeOperationError,
+  type NodeOutput,
+  type NodeProperty,
 } from '@workflow/workflow';
 import { errorMessage, redactSecrets } from '../../../shared/utils';
 import { readBinaryFields, readInputFile, type VendorFile } from './binary';
@@ -93,8 +94,24 @@ export const maxToolIterationsOption: NodeProperty = {
   description: 'Model calls allowed in one run when the model calls tools',
 };
 
-/** The item's Messages, with attachments read from their binary fields or URLs. */
+/**
+ * The item's Messages, with attachments read from their binary fields or URLs. All attachments of the item
+ * together stay under the instance limit for input binary data.
+ */
 export async function readVendorMessages(ctx: ExecuteContext, itemIndex: number): Promise<VendorMessage[]> {
+  const limit = ctx.helpers.getInstanceLimits().maxPassthroughBinaryBytes;
+  let total = 0;
+  const count = (files: VendorFile[]) => {
+    for (const file of files) total += file.bytes.byteLength;
+    if (total > limit) {
+      const mb = (bytes: number) => String(Number((bytes / (1024 * 1024)).toFixed(1)));
+      throw new NodeOperationError(
+        ctx.getNode(),
+        `The files total ${mb(total)} MB, which exceeds the ${mb(limit)} MB limit for sending files to the model`,
+        { itemIndex, description: 'Use fewer or smaller files.' },
+      );
+    }
+  };
   const collection = ctx.getNodeParameter('messages', itemIndex, {}) as {
     values?: Array<{ role?: string; content?: string; attachmentUrls?: string; attachmentFields?: string }>;
   };
@@ -105,9 +122,15 @@ export async function readVendorMessages(ctx: ExecuteContext, itemIndex: number)
       .split(/[,\n]/)
       .map((url) => url.trim())
       .filter(Boolean);
-    for (const url of urls) attachments.push(await readInputFile(ctx, itemIndex, { inputType: 'url', url }));
+    for (const url of urls) {
+      const file = await readInputFile(ctx, itemIndex, { inputType: 'url', url });
+      count([file]);
+      attachments.push(file);
+    }
     if ((entry.attachmentFields ?? '').trim()) {
-      attachments.push(...(await readBinaryFields(ctx, itemIndex, entry.attachmentFields!)));
+      const files = await readBinaryFields(ctx, itemIndex, entry.attachmentFields!);
+      count(files);
+      attachments.push(...files);
     }
     messages.push({
       role: entry.role ?? 'user',

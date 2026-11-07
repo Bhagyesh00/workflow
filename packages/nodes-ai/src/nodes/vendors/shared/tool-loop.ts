@@ -50,16 +50,25 @@ function callMemory(history: AiChatMessage[], sessionId: string): SessionMemory 
 /**
  * Send `messages` (and `system`) to the model, run the connected tools up to `maxIterations` model calls,
  * and return the final text, the vendor's raw last reply (undefined when `model` is given), usage and
- * steps. Refuses before the first call when a connected tool can wait.
+ * steps. Refuses before the first call when a connected tool can wait. With `useTools: false` the
+ * connected tools are not read at all: the engine still supplies a saved connection after the Tools input
+ * is hidden, so a caller whose Tools input is hidden (Hide Tools, or an operation with no Tools input)
+ * passes false. The default is true.
  */
 export async function runVendorChat(
   ctx: ExecuteContext,
   itemIndex: number,
   adapter: ChatAdapter,
-  options: { messages: AiChatMessage[]; system?: string; maxIterations: number; model?: AiChatModel },
+  options: {
+    messages: AiChatMessage[];
+    system?: string;
+    maxIterations: number;
+    model?: AiChatModel;
+    useTools?: boolean;
+  },
 ): Promise<{ text: string; raw: unknown; usage: AgentUsage; steps: AgentStep[] }> {
   const node = ctx.getNode();
-  const tools = await getTools(ctx, itemIndex);
+  const tools = options.useTools === false ? [] : await getTools(ctx, itemIndex);
   const waiting = tools.find((tool) => tool.canWait === true);
   if (waiting) {
     // a vendor node has no checkpoint to stop at: refuse before anything is sent
