@@ -560,7 +560,7 @@ describe('Text Classifier parity', () => {
       json({ text: 'x' }),
     );
     expect(r.status).toBe('error');
-    expect(r.error?.message).toContain('could not be parsed');
+    expect(r.error?.message).toContain("Model output doesn't fit required format");
     expect(requests).toHaveLength(1);
   });
 

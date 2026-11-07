@@ -357,7 +357,7 @@ describe('a plain waiting tool', () => {
     );
     const result = await resume(definition, await start(definition), APPROVED);
     expect(result.status).toBe('error');
-    expect(result.state.resultData.error?.message).toContain('The model output could not be parsed');
+    expect(result.state.resultData.error?.message).toContain("Model output doesn't fit required format");
     expect(requests).toHaveLength(3);
   });
 });

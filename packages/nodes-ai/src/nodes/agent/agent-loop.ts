@@ -33,6 +33,7 @@ import type { SessionMemory } from '../../shared/ai-inputs';
 import { capabilitiesOf } from '../../shared/chat-model';
 import { formatSchemaErrors, validateJsonSchema } from '../../shared/json-schema';
 import { hasRestoredRawContent, markToolError } from '../../shared/markers';
+import { PARSE_ERROR, PARSE_ERROR_HELP } from '../../shared/structured';
 import {
   errorMessage,
   messageText,
@@ -411,7 +412,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
       output = await outputParser.parse(finalText);
     } catch (firstError) {
       if (parseRetried) {
-        throw fail(`The model output could not be parsed: ${errorMessage(firstError)}`, 'AI_OUTPUT_PARSE');
+        throw fail(`${PARSE_ERROR}: ${errorMessage(firstError)}`, 'AI_OUTPUT_PARSE', PARSE_ERROR_HELP);
       }
       parseRetried = true;
       // one automatic retry: show the model its output and the parse error
@@ -425,7 +426,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
       try {
         output = await outputParser.parse(finalText);
       } catch (secondError) {
-        throw fail(`The model output could not be parsed: ${errorMessage(secondError)}`, 'AI_OUTPUT_PARSE');
+        throw fail(`${PARSE_ERROR}: ${errorMessage(secondError)}`, 'AI_OUTPUT_PARSE', PARSE_ERROR_HELP);
       }
     }
   }

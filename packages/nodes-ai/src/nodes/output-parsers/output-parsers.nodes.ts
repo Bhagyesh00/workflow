@@ -9,6 +9,7 @@ import {
   NodeOperationError,
   type NodeType,
   type NodeTypeDescription,
+  type SupplyDataContext,
 } from '@workflow/workflow';
 import { getChatModel, getOutputParser } from '../../shared/ai-inputs';
 import { formatSchemaErrors, schemaFromParameters, validateJsonSchema } from '../../shared/json-schema';
@@ -54,12 +55,73 @@ export function structuredParser(
   };
 }
 
+export const FIX_PROMPT = `Instructions:
+--------------
+{instructions}
+--------------
+Completion:
+--------------
+{completion}
+--------------
+
+Above, the completion did not satisfy the constraints given in the instructions.
+Error:
+--------------
+{error}
+--------------
+
+Please try again. Respond only with an answer that satisfies the constraints laid out in the instructions.`;
+
+const NO_ERROR_PLACEHOLDER = 'Auto-fixing parser prompt has to contain {error} placeholder';
+
+/** Refuses a retry prompt without the `{error}` placeholder. */
+function checkRetryPrompt(ctx: ExecCtx, itemIndex: number, template: string) {
+  if (!template.includes('{error}'))
+    throw new NodeOperationError(ctx.getNode(), NO_ERROR_PLACEHOLDER, { itemIndex });
+}
+
+type ExecCtx = Parameters<typeof getChatModel>[0];
+
+/** Wraps `inner` so that output it rejects goes once to `model` with the retry prompt. */
+function autofixing(
+  ctx: SupplyDataContext,
+  inner: AiOutputParser,
+  model: Awaited<ReturnType<typeof getChatModel>>,
+  template: string,
+): AiOutputParser {
+  return {
+    kind: 'outputParser',
+    schema: inner.schema,
+    getFormatInstructions: () => inner.getFormatInstructions(),
+    async parse(text) {
+      try {
+        return await inner.parse(text);
+      } catch (error) {
+        const prompt = fillTemplate(template, {
+          instructions: inner.getFormatInstructions(),
+          completion: text,
+          error: errorMessage(error),
+        });
+        const response = await model.chat({
+          messages: [{ role: 'user', content: prompt }],
+          responseFormat: inner.schema ? { type: 'json', schema: inner.schema } : undefined,
+          signal: ctx.signal,
+        });
+        const fixed = messageText(response.message.content);
+        ctx.logSubNodeRun({ text, error: errorMessage(error) }, { fixed });
+        return inner.parse(fixed);
+      }
+    },
+  };
+}
+
 export const OutputParserStructuredNode: NodeType = {
   description: parserDescription({
     name: 'ai.outputParserStructured',
     displayName: 'Structured Output Parser',
     description: 'Makes the model return JSON in a defined shape, validated against a schema',
     icon: 'lucide:braces',
+    inputs: `={{ $parameter.autoFix === true ? [{ type: 'ai_languageModel', displayName: 'Model', required: true, maxConnections: 1 }] : [] }}`,
     properties: [
       {
         displayName: 'Schema Type',
@@ -93,6 +155,31 @@ export const OutputParserStructuredNode: NodeType = {
         typeOptions: { rows: 12 },
         displayOptions: { show: { schemaType: ['manual'] } },
       },
+      {
+        displayName: 'Auto-Fix Format',
+        name: 'autoFix',
+        type: 'boolean',
+        default: false,
+        noDataExpression: true,
+        description: 'Whether to ask a model to repair output that does not fit the schema',
+      },
+      {
+        displayName: 'Customize Retry Prompt',
+        name: 'customizeRetryPrompt',
+        type: 'boolean',
+        default: false,
+        description: 'Whether to change the prompt that asks the model to repair its output',
+        displayOptions: { show: { autoFix: [true] } },
+      },
+      {
+        displayName: 'Custom Prompt',
+        name: 'prompt',
+        type: 'string',
+        default: FIX_PROMPT,
+        typeOptions: { rows: 10 },
+        description: 'Uses {instructions}, {completion} and {error}; it has to contain {error}',
+        displayOptions: { show: { autoFix: [true], customizeRetryPrompt: [true] } },
+      },
     ],
   }),
   async supplyData(ctx, itemIndex) {
@@ -106,8 +193,14 @@ export const OutputParserStructuredNode: NodeType = {
     } catch (error) {
       throw new NodeOperationError(ctx.getNode(), errorMessage(error), { itemIndex });
     }
+    const autoFix = ctx.getNodeParameter('autoFix', itemIndex, false) === true;
+    let template = FIX_PROMPT;
+    if (autoFix && ctx.getNodeParameter('customizeRetryPrompt', itemIndex, false) === true) {
+      template = String(ctx.getNodeParameter('prompt', itemIndex, FIX_PROMPT));
+      checkRetryPrompt(ctx, itemIndex, template);
+    }
     const parser = structuredParser(schema);
-    return {
+    const logged = {
       response: {
         ...parser,
         async parse(text: string) {
@@ -122,6 +215,9 @@ export const OutputParserStructuredNode: NodeType = {
         },
       } satisfies AiOutputParser,
     };
+    if (!autoFix) return logged;
+    const model = await getChatModel(ctx, itemIndex);
+    return { response: autofixing(ctx, logged.response, model, template) };
   },
 };
 
@@ -190,23 +286,6 @@ export const OutputParserItemListNode: NodeType = {
   },
 };
 
-const FIX_PROMPT = `Instructions:
---------------
-{instructions}
---------------
-Completion:
---------------
-{completion}
---------------
-
-Above, the completion did not satisfy the constraints given in the instructions.
-Error:
---------------
-{error}
---------------
-
-Please try again. Respond only with an answer that satisfies the constraints laid out in the instructions.`;
-
 export const OutputParserAutofixingNode: NodeType = {
   description: parserDescription({
     name: 'ai.outputParserAutofixing',
@@ -226,7 +305,7 @@ export const OutputParserAutofixingNode: NodeType = {
         placeholder: 'Add option',
         options: [
           {
-            displayName: 'Fixing Prompt',
+            displayName: 'Retry Prompt',
             name: 'prompt',
             type: 'string',
             default: FIX_PROMPT,
@@ -242,31 +321,8 @@ export const OutputParserAutofixingNode: NodeType = {
     const inner = (await getOutputParser(ctx, itemIndex, true))!;
     const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
     const template = String(options.prompt ?? FIX_PROMPT);
-    const parser: AiOutputParser = {
-      kind: 'outputParser',
-      schema: inner.schema,
-      getFormatInstructions: () => inner.getFormatInstructions(),
-      async parse(text) {
-        try {
-          return await inner.parse(text);
-        } catch (error) {
-          const prompt = fillTemplate(template, {
-            instructions: inner.getFormatInstructions(),
-            completion: text,
-            error: errorMessage(error),
-          });
-          const response = await model.chat({
-            messages: [{ role: 'user', content: prompt }],
-            responseFormat: inner.schema ? { type: 'json', schema: inner.schema } : undefined,
-            signal: ctx.signal,
-          });
-          const fixed = messageText(response.message.content);
-          ctx.logSubNodeRun({ text, error: errorMessage(error) }, { fixed });
-          return inner.parse(fixed);
-        }
-      },
-    };
-    return { response: parser };
+    checkRetryPrompt(ctx, itemIndex, template);
+    return { response: autofixing(ctx, inner, model, template) };
   },
 };
 

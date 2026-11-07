@@ -9,6 +9,10 @@ import {
 import { capabilitiesOf } from './chat-model';
 import { errorMessage, messageText } from './utils';
 
+export const PARSE_ERROR = "Model output doesn't fit required format";
+export const PARSE_ERROR_HELP =
+  "To continue the execution when this happens, change the 'On Error' parameter in the root node's settings";
+
 export interface CompletionResult {
   text: string;
   output: unknown;
@@ -59,9 +63,10 @@ export async function completeWithParser(
   let text = messageText(response.message.content);
   if (!parser) return { text, output: text };
   const failure = (error: unknown) =>
-    new NodeOperationError(context.node, `The model output could not be parsed: ${errorMessage(error)}`, {
+    new NodeOperationError(context.node, `${PARSE_ERROR}: ${errorMessage(error)}`, {
       itemIndex: context.itemIndex,
       code: 'AI_OUTPUT_PARSE',
+      description: PARSE_ERROR_HELP,
     });
   try {
     return { text, output: await parser.parse(text) };
