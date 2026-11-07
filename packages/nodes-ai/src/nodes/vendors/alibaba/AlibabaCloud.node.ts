@@ -1,9 +1,24 @@
 /**
  * Qwen Cloud (Alibaba Cloud DashScope): message a Qwen model, analyze and generate images, generate
- * videos. Stub with the final name, credential and resource and operation shell; L6 fills it (inputs gain
- * the Tools port through `vendorToolsInput`).
+ * videos, on the native DashScope API. Own REST calls on the guarded client; the Tools input shows for
+ * Text > Message a Model.
  */
-import type { NodeType } from '@workflow/workflow';
+import { type ExecuteContext, type Item, NodeOperationError, type NodeType } from '@workflow/workflow';
+import { eachVendorItem } from '../shared/messages';
+import { vendorToolsInput } from '../shared/tool-loop';
+import { imageAnalyze, imageGenerate, imageProperties } from './image';
+import { qwenListSearch, textMessage, textProperties } from './text';
+import { videoImageToVideo, videoProperties, videoTextToVideo } from './video';
+
+type Handler = (ctx: ExecuteContext, itemIndex: number) => Promise<Item | Item[]>;
+
+const HANDLERS: Record<string, Handler> = {
+  'text.message': textMessage,
+  'image.analyze': imageAnalyze,
+  'image.generate': imageGenerate,
+  'video.textToVideo': videoTextToVideo,
+  'video.imageToVideo': videoImageToVideo,
+};
 
 export const AlibabaCloudNode: NodeType = {
   description: {
@@ -14,7 +29,7 @@ export const AlibabaCloudNode: NodeType = {
     group: ['transform'],
     version: 1,
     defaults: { name: 'Qwen Cloud' },
-    inputs: ['main'],
+    inputs: vendorToolsInput(`$parameter.resource === 'text' && $parameter.operation === 'message'`),
     outputs: ['main'],
     credentials: [{ name: 'alibabaCloudApi', required: true }],
     categories: ['AI', 'Vendors'],
@@ -66,10 +81,25 @@ export const AlibabaCloudNode: NodeType = {
           { name: 'Image to Video', value: 'imageToVideo', action: 'Generate a video from an image' },
         ],
       },
+      ...textProperties,
+      ...imageProperties,
+      ...videoProperties,
     ],
   },
 
-  async execute() {
-    throw new Error('not implemented (L6)');
+  methods: { listSearch: qwenListSearch },
+
+  async execute(ctx) {
+    return eachVendorItem(ctx, async (itemIndex) => {
+      const resource = String(ctx.getNodeParameter('resource', itemIndex));
+      const operation = String(ctx.getNodeParameter('operation', itemIndex));
+      const handler = HANDLERS[`${resource}.${operation}`];
+      if (!handler) {
+        throw new NodeOperationError(ctx.getNode(), `The operation "${resource} > ${operation}" is not supported`, {
+          itemIndex,
+        });
+      }
+      return handler(ctx, itemIndex);
+    });
   },
 };
