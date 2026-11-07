@@ -95,9 +95,11 @@ function parseHttpUrl(ctx: ExecuteContext, itemIndex: number, value: string): UR
 }
 
 /**
- * Download a generated file. The credential goes only when `new URL(url).hostname === authHost`, on a hop
- * that never follows a redirect (a 3xx is fetched again with plain `httpRequest`); any other host gets a
- * plain guarded `httpRequest` with no credential. `maxBytes` caps the body.
+ * Download a generated file. The credential goes only when the link is `https:` and
+ * `new URL(url).hostname === authHost`, on a hop that never follows a redirect (a 3xx is fetched again
+ * with plain `httpRequest`); any other link gets a plain guarded `httpRequest` with no credential.
+ * `maxBytes` is checked after the body has been read: the client's own response cap (100 MB) is what
+ * bounds the download.
  */
 export async function downloadMedia(
   ctx: ExecuteContext,
@@ -116,7 +118,12 @@ export async function downloadMedia(
 
   let response: HttpFullResponse<unknown>;
   try {
-    if (options?.credentialType && options.authHost && target.hostname === options.authHost.toLowerCase()) {
+    if (
+      options?.credentialType &&
+      options.authHost &&
+      target.protocol === 'https:' &&
+      target.hostname === options.authHost.toLowerCase()
+    ) {
       // the credential's hop never follows a redirect: the next host must not see the key
       response = (await ctx.helpers.httpRequestWithAuthentication<unknown>(
         options.credentialType,

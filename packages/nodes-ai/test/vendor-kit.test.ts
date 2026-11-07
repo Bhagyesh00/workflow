@@ -95,6 +95,7 @@ const testVendorNode: NodeType = {
       { displayName: 'Arg', name: 'arg', type: 'string', default: '' },
       { displayName: 'Arg 2', name: 'arg2', type: 'string', default: '' },
       { displayName: 'Use Given Model', name: 'useGiven', type: 'boolean', default: false },
+      { displayName: 'Hide Tools', name: 'hideTools', type: 'string', default: 'show' },
       messagesProperty({ roles: ['user', 'assistant'], attachments: true }),
       simplifyProperty(),
       maxToolIterationsOption,
@@ -110,6 +111,7 @@ const testVendorNode: NodeType = {
             messages,
             system: 'be brief',
             maxIterations: Number(ctx.getNodeParameter('maxToolsIterations', i, 15)),
+            useTools: ctx.getNodeParameter('hideTools', i, 'show') === 'show',
             ...(ctx.getNodeParameter('useGiven', i, false) ? { model: given } : {}),
           });
           return {
@@ -348,6 +350,46 @@ describe('messages', () => {
     expect(JSON.stringify(download.headers ?? {})).not.toContain(KEY);
   });
 
+  it('caps all attachments of the item together, across URLs and messages', async () => {
+    const remote = {
+      handler: () => ({ body: Buffer.from('REMOTE'), headers: { 'content-type': 'image/png' } }),
+    };
+    // each file is under the 10 byte limit, two of them are not
+    const urls = await runVendor(
+      {
+        op: 'chat',
+        ...msg('look', 'user', { attachmentUrls: 'http://files.test/a.png, http://files.test/b.png' }),
+      },
+      { ...remote, limits: { maxPassthroughBinaryBytes: 10 } },
+    );
+    expect(urls.result.error?.message).toMatch(/The files total .* exceeds the .* MB limit/);
+    expect(urls.fake.requests.filter((r) => r.url.endsWith('/v1/chat'))).toHaveLength(0);
+
+    const items = [item({ data: { text: 'abcdef', mimeType: 'text/plain' } })];
+    const messages = await runVendor(
+      {
+        op: 'chat',
+        messages: {
+          values: [
+            { role: 'user', content: 'one', attachmentFields: 'data' },
+            { role: 'assistant', content: 'two', attachmentFields: 'data' },
+            { role: 'user', content: 'three' },
+          ],
+        },
+      },
+      { items, limits: { maxPassthroughBinaryBytes: 10 } },
+    );
+    expect(messages.result.error?.message).toMatch(/The files total .* exceeds the .* MB limit/);
+    expect(messages.fake.requests).toHaveLength(0);
+
+    // under the limit in total it still goes through
+    const fine = await runVendor(
+      { op: 'chat', ...msg('look', 'user', { attachmentUrls: 'http://files.test/a.png' }) },
+      { ...remote, limits: { maxPassthroughBinaryBytes: 10 } },
+    );
+    expect(fine.result.status).toBe('success');
+  });
+
   it('the Messages property lists the roles and the attachment fields', () => {
     const property = messagesProperty({ roles: ['user', 'model'], attachments: true }) as any;
     const values = property.options[0].values;
@@ -414,6 +456,13 @@ describe('binary fields', () => {
     expect(url.out[0]).toEqual({ mimeType: 'image/png', fileName: 'pic.png', text: 'REMOTE' });
     // a link has no credential
     expect(JSON.stringify(url.fake.requests[0].headers ?? {})).not.toContain(KEY);
+
+    // a malformed percent sequence in the name keeps the raw name instead of failing a finished download
+    const bad = await runVendor(
+      { op: 'input', arg: 'http://files.test/a%zz.pdf' },
+      { handler: () => ({ body: Buffer.from('PDF'), headers: { 'content-type': 'application/pdf' } }) },
+    );
+    expect(bad.out[0]).toEqual({ mimeType: 'application/pdf', fileName: 'a%zz.pdf', text: 'PDF' });
 
     const big = await runVendor(
       { op: 'input', arg: 'http://files.test/big.bin' },
@@ -526,7 +575,7 @@ describe('polling', () => {
 describe('downloadMedia', () => {
   it('sends the key only to the vendor host', async () => {
     const own = await runVendor(
-      { op: 'media', arg: 'http://files.vendor.test/out.png', arg2: 'files.vendor.test' },
+      { op: 'media', arg: 'https://files.vendor.test/out.png', arg2: 'files.vendor.test' },
       { handler: () => ({ status: 200, body: Buffer.from('A'), headers: { 'content-type': 'image/png' } }) },
     );
     expect(own.fake.requests).toHaveLength(1);
@@ -534,7 +583,7 @@ describe('downloadMedia', () => {
     expect(own.fake.requests[0].followRedirects).toBe(false);
 
     const other = await runVendor(
-      { op: 'media', arg: 'http://cdn.other.test/out.png', arg2: 'files.vendor.test' },
+      { op: 'media', arg: 'https://cdn.other.test/out.png', arg2: 'files.vendor.test' },
       { handler: () => ({ body: Buffer.from('B') }) },
     );
     expect(other.fake.requests).toHaveLength(1);
@@ -543,7 +592,7 @@ describe('downloadMedia', () => {
 
     // the same name in another case or as a sub-domain is not the vendor host
     const sub = await runVendor(
-      { op: 'media', arg: 'http://evil.files.vendor.test/x', arg2: 'files.vendor.test' },
+      { op: 'media', arg: 'https://evil.files.vendor.test/x', arg2: 'files.vendor.test' },
       { handler: () => ({ body: Buffer.from('C') }) },
     );
     expect(JSON.stringify(sub.fake.requests[0].headers ?? {})).not.toContain(KEY);
@@ -551,10 +600,10 @@ describe('downloadMedia', () => {
 
   it('follows a redirect from the vendor host with a plain request and no key', async () => {
     const { fake, out } = await runVendor(
-      { op: 'media', arg: 'http://files.vendor.test/out', arg2: 'files.vendor.test' },
+      { op: 'media', arg: 'https://files.vendor.test/out', arg2: 'files.vendor.test' },
       {
         handler: (req): ReturnType<FakeHandler> =>
-          req.url === 'http://files.vendor.test/out'
+          req.url === 'https://files.vendor.test/out'
             ? { status: 302, headers: { location: 'http://cdn.test/blob?sig=1' } }
             : { body: Buffer.from('BLOB'), headers: { 'content-type': 'video/mp4' } },
       },
@@ -563,6 +612,17 @@ describe('downloadMedia', () => {
     expect(fake.requests).toHaveLength(2);
     expect(fake.requests[0].headers?.['x-goog-api-key']).toBe(KEY);
     expect(JSON.stringify(fake.requests[1].headers ?? {})).not.toContain(KEY);
+  });
+
+  it('sends no key over plain http, even to the vendor host', async () => {
+    const { fake, out } = await runVendor(
+      { op: 'media', arg: 'http://files.vendor.test/out.png', arg2: 'files.vendor.test' },
+      { handler: () => ({ body: Buffer.from('A'), headers: { 'content-type': 'image/png' } }) },
+    );
+    expect(out[0]).toEqual({ size: 1, mimeType: 'image/png' });
+    expect(fake.requests).toHaveLength(1);
+    expect(JSON.stringify(fake.requests[0].headers ?? {})).not.toContain(KEY);
+    expect(fake.requests[0].followRedirects).not.toBe(false);
   });
 
   it('refuses a link that is not http(s)', async () => {
@@ -618,14 +678,14 @@ describe('downloadMedia', () => {
 
     const client = () => new HttpClient({ ssrf: { allow: ['127.0.0.1', '127.0.0.2'] } });
 
-    it('a key-carrying hop that redirects leaves the second host with no key', async () => {
+    it('a plain http link on the vendor host gets no key, and its redirect leaves the second host with none', async () => {
       const { out } = await runVendor(
         { op: 'media', arg: `${firstUrl}/media`, arg2: '127.0.0.1' },
         { client: client() },
       );
       expect(out[0]).toEqual({ size: 6, mimeType: 'image/png' });
       expect(hits.first).toHaveLength(1);
-      expect(hits.first[0].headers['x-goog-api-key']).toBe(KEY);
+      expect(hits.first[0].headers['x-goog-api-key']).toBeUndefined();
       expect(hits.second).toHaveLength(1);
       expect(hits.second[0].url).toBe('/landed');
       expect(hits.second[0].headers['x-goog-api-key']).toBeUndefined();
@@ -771,6 +831,26 @@ describe('tool loop', () => {
     expect(items.out).toEqual([{ error: refusal }]);
     expect(items.fake.requests).toHaveLength(0);
     expect(toolCalls).toHaveLength(0);
+  });
+
+  it('does not read or run a connected tool while the Tools input is hidden', async () => {
+    const { out, fake } = await runVendor(
+      { op: 'chat', hideTools: 'hide', ...msg('find x') },
+      { tool: 'test.lookupTool' },
+    );
+    // the model is offered no tool, so nothing runs
+    expect((fake.bodies[0] as any).tools).toBeUndefined();
+    expect(toolCalls).toHaveLength(0);
+    expect(out[0].text).toBe('ok');
+
+    // a saved waiting tool behind a hidden input neither refuses nor stops the run
+    const waiting = await runVendor(
+      { op: 'chat', hideTools: 'hide', ...msg('hi') },
+      { tool: 'test.waitTool' },
+    );
+    expect(waiting.result.status).toBe('success');
+    expect(waiting.fake.requests).toHaveLength(1);
+    expect((waiting.fake.bodies[0] as any).tools).toBeUndefined();
   });
 
   it('uses a given model, with no vendor request and no raw reply', async () => {
