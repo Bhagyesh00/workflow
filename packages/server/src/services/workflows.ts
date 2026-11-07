@@ -9,6 +9,7 @@ import {
   createPollContext,
   createTriggerContext,
   type NodeTypes,
+  toolRootOf,
 } from '@workflow/core';
 import {
   ExpressionEvaluator,
@@ -604,9 +605,15 @@ export class WorkflowService {
     if (input.startNode && !workflow.nodes[input.startNode]) {
       throw ApiError.badRequest(`Node "${input.startNode}" does not exist`);
     }
+    // a tool test stops at the root of the tool, so the root's parents decide where it starts
+    const toolRoot =
+      input.agentRequest && input.destinationNode
+        ? toolRootOf(workflow, input.destinationNode).name
+        : undefined;
     const start = input.startNode
       ? workflow.nodes[input.startNode]
-      : chooseManualStartNode(workflow, input.destinationNode);
+      : (chooseManualStartNode(workflow, toolRoot ?? input.destinationNode) ??
+        (toolRoot ? workflow.nodes[toolRoot] : undefined));
     if (!start) throw ApiError.badRequest('The workflow has no node to start from');
 
     const pinData = Object.fromEntries(
@@ -617,7 +624,7 @@ export class WorkflowService {
     // binary data of a trigger's sample items is stored under the id of the execution that uses it
     const executionId = randomUUID();
     let triggerItems = input.triggerItems as Item[] | undefined;
-    const reusesStart = this.reusesStartOutput(workflow, start, input, pinData);
+    const reusesStart = this.reusesStartOutput(workflow, start, input, pinData, toolRoot);
     try {
       if (!triggerItems && !pinData[start.name] && !reusesStart) {
         triggerItems = await this.manualTriggerItems(tenant, workflow, start, executionId);
@@ -634,6 +641,7 @@ export class WorkflowService {
         runData: input.runData as RunData | undefined,
         dirtyNodeNames: input.dirtyNodeNames,
         destinationNode: input.destinationNode,
+        agentRequest: input.agentRequest,
         pinData: Object.keys(pinData).length ? pinData : undefined,
         userId: actor.userId,
       });
@@ -654,12 +662,14 @@ export class WorkflowService {
     start: WorkflowNode,
     input: RunInput,
     pinData: Record<string, Item[]>,
+    toolRoot?: string,
   ): boolean {
-    if (!input.destinationNode || !input.runData) return false;
+    const destination = toolRoot ?? input.destinationNode;
+    if (!destination || !input.runData) return false;
     try {
       const plan = planPartialRun(workflow.definition, {
         root: start.name,
-        destination: input.destinationNode,
+        destination,
         runData: input.runData as RunData,
         pinData,
         dirtyNodeNames: input.dirtyNodeNames,

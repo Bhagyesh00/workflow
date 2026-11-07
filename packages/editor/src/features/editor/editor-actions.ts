@@ -4,16 +4,19 @@
  * so they can be used from buttons, keyboard shortcuts and the NDV alike.
  */
 import {
+  type Connections,
+  type DataObject,
   dirtyNodesFromDiff,
   type NodeTypeDescription,
   planPartialRun,
   type RunData,
   sortByPosition,
+  toolNameOf,
 } from '@workflow/workflow';
 import { errorMessage, isApiError } from '../../api/client';
 import { executionsApi, workflowsApi } from '../../api/endpoints';
 import type { ActivationErrorDetail, WorkflowDTO, WorkflowPatchBody } from '../../api/types';
-import { isTriggerDescription } from '../../lib/ports';
+import { deriveNodePorts, isTriggerDescription } from '../../lib/ports';
 import { getAncestors } from '../../lib/workflow-ops';
 import { type RanDefinition, useRunStore } from '../../stores/run-store';
 import { toast, useUiStore } from '../../stores/ui-store';
@@ -197,6 +200,54 @@ function stepRunRoot(deps: EditorDeps, def: RanDefinition, destination: string):
   return sortByPosition(manual.length ? manual : triggers)[0]?.name;
 }
 
+function toolConsumers(connections: Connections, name: string): string[] {
+  return Object.entries(connections[name] ?? {})
+    .filter(([type]) => type !== 'main')
+    .flatMap(([, outputs]) => outputs ?? [])
+    .flatMap((slot) => slot ?? [])
+    .map((connection) => connection.node);
+}
+
+/** the node that calls a tool directly, for the prompt of the tool test; undefined when nothing calls it */
+export function toolParentName(connections: Connections, tool: string): string | undefined {
+  return toolConsumers(connections, tool)[0];
+}
+
+/** P5-76: as the engine's toolRootOf: along the non-main connections to the first node that is not a sub-node */
+function toolRootName(deps: EditorDeps, def: RanDefinition, tool: string): string {
+  const seen = new Set([tool]);
+  const queue = [tool];
+  let last = tool;
+  for (const name of queue) {
+    const node = def.nodes.find((n) => n.name === name);
+    if (!node) continue;
+    if (!deriveNodePorts(node, deps.descriptions.get(node.type)).isSubNode) return name;
+    last = name;
+    for (const consumer of toolConsumers(def.connections, name)) {
+      if (seen.has(consumer)) continue;
+      seen.add(consumer);
+      queue.push(consumer);
+    }
+  }
+  return last;
+}
+
+/** the values of the tool test that `runToolTest` is starting */
+let startingToolTest: { nodeName: string; query: DataObject } | null = null;
+
+/**
+ * P5-76 Test a tool. `execute` is the caller's own "Execute step" for the node (it holds the editor's deps and names
+ * only the node), so the values wait here for the moment it takes to reach `runWorkflow`, which reads them at once.
+ */
+export function runToolTest(nodeName: string, query: DataObject, execute: (nodeName: string) => void): void {
+  startingToolTest = { nodeName, query };
+  try {
+    execute(nodeName);
+  } finally {
+    startingToolTest = null;
+  }
+}
+
 export const RUN_DATA_TOO_LARGE =
   'The data of the last run is too large to send. Execute the workflow to run every node again.';
 
@@ -204,6 +255,10 @@ export async function runWorkflow(
   deps: EditorDeps,
   options: { destinationNode?: string; startNode?: string } = {},
 ): Promise<void> {
+  const agentRequest =
+    options.destinationNode && startingToolTest?.nodeName === options.destinationNode
+      ? { query: startingToolTest.query, toolName: toolNameOf(options.destinationNode) }
+      : undefined;
   const run = useRunStore.getState();
   if (run.status === 'starting' || run.status === 'running') return;
   const destination = options.destinationNode
@@ -238,12 +293,17 @@ export async function runWorkflow(
   let runData: RunData | undefined;
   let dirtyNodeNames: string[] | undefined;
   let reuse: RunData | undefined;
-  if (options.destinationNode && lastRunData && last.ranDefinition) {
+  // a tool test stops at the tool's root: the tool itself is on no main path
+  const planDestination =
+    agentRequest && options.destinationNode
+      ? toolRootName(deps, ran, options.destinationNode)
+      : options.destinationNode;
+  if (planDestination && lastRunData && last.ranDefinition) {
     dirtyNodeNames = Object.keys(dirtyNodesFromDiff(last.ranDefinition, ran, lastRunData));
     try {
       const plan = planPartialRun(ran, {
-        root: stepRunRoot(deps, ran, options.destinationNode),
-        destination: options.destinationNode,
+        root: stepRunRoot(deps, ran, planDestination),
+        destination: planDestination,
         runData: lastRunData,
         pinData: s.pinData,
         dirtyNodeNames,
@@ -267,6 +327,7 @@ export async function runWorkflow(
       pinData: s.pinData,
       ...(runData ? { runData } : {}),
       ...(runData && dirtyNodeNames ? { dirtyNodeNames } : {}),
+      ...(agentRequest ? { agentRequest } : {}),
     });
     useRunStore.getState().adopt(executionId);
   } catch (error) {

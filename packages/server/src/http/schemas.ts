@@ -163,6 +163,8 @@ export const workflowDataSchema = z
   })
   .loose();
 
+const MAX_TOOL_TEST_VALUES = 100;
+
 export const runSchema = z.object({
   workflowData: workflowDataSchema.optional(),
   startNode: z.string().optional(),
@@ -173,6 +175,17 @@ export const runSchema = z.object({
   runData: runDataSchema.optional(),
   /** P3-06: nodes changed since runData was produced (they and their descendants run again) */
   dirtyNodeNames: z.array(z.string().max(256)).max(2000).optional(),
+  /** P5-76 test a tool: `destinationNode` is the tool, `query` its values (data, never evaluated) */
+  agentRequest: z
+    .object({
+      query: z
+        .record(z.string(), z.unknown())
+        .refine((query) => Object.keys(query).length <= MAX_TOOL_TEST_VALUES, {
+          error: `A tool test takes at most ${MAX_TOOL_TEST_VALUES} values`,
+        }),
+      toolName: z.string().max(256),
+    })
+    .optional(),
 });
 
 /** POST /workflows/:id/activate (publish, P3-10): all optional; an empty body publishes the current version */

@@ -19,6 +19,7 @@ import {
   type HttpClient,
   InlineBinaryDataStore,
   type NodeTypes,
+  type RunOptions,
   type SubWorkflowRequest,
   WorkflowExecute,
 } from '@workflow/core';
@@ -39,6 +40,7 @@ import {
   Workflow,
   type WorkflowDefinition,
   type WorkflowNode,
+  WorkflowOperationError,
 } from '@workflow/workflow';
 import type { Config } from '../config';
 import type { ExecutionRow, TenantRow } from '../db/schema';
@@ -61,6 +63,8 @@ export const ERROR_TRIGGER = 'core.errorTrigger';
 const MAX_SUB_WORKFLOW_DEPTH = 20;
 /** modes that consume the monthly execution quota */
 const BILLABLE_MODES = new Set<ExecutionMode>(['webhook', 'trigger', 'retry', 'internal', 'cli', 'chat']);
+const TOOL_TEST_AFTER_WAIT =
+  'A tool test cannot continue after a wait. Pin the output of the node that waits, then test the tool again';
 
 export interface StoredRunOptions {
   startNode?: string;
@@ -71,6 +75,8 @@ export interface StoredRunOptions {
   pinData?: Record<string, Item[]>;
   /** P3-06 partial run: nodes changed since `runData` was produced */
   dirtyNodeNames?: string[];
+  /** P5-76 test a tool: `destinationNode` is the tool, and its root does not run */
+  agentRequest?: RunOptions['agentRequest'];
   /** P3-10: mode of the root execution, carried through nested sub-workflow calls */
   rootMode?: ExecutionMode;
   /** output of the waiting node for the next resume (null = keep its own output) */
@@ -113,6 +119,8 @@ export interface StartExecutionInput {
   pinData?: Record<string, Item[]>;
   /** P3-06 partial run: nodes changed since `runData` was produced */
   dirtyNodeNames?: string[];
+  /** P5-76 test a tool: `destinationNode` is the tool, and its root does not run */
+  agentRequest?: RunOptions['agentRequest'];
   /** P3-10: mode of the root execution (absent = this execution is the root) */
   rootMode?: ExecutionMode;
   executionId?: string;
@@ -278,6 +286,7 @@ export class ExecutionService {
       destinationNode: input.destinationNode,
       pinData: input.pinData,
       dirtyNodeNames: input.dirtyNodeNames,
+      agentRequest: input.agentRequest,
       rootMode: input.rootMode,
       depth: input.depth ?? 0,
       userId: input.userId,
@@ -552,9 +561,13 @@ export class ExecutionService {
             destinationNode: options.destinationNode,
             pinData: options.pinData,
             dirtyNodeNames: options.dirtyNodeNames,
+            agentRequest: options.agentRequest,
             timeoutMs,
             signal,
           });
+        } else if (options.agentRequest) {
+          // the engine holds the request in the run that started it: resumed, the root would run as a node
+          throw new WorkflowOperationError(TOOL_TEST_AFTER_WAIT);
         } else {
           result = await engine.resume({ output: options.resumeOutput ?? undefined, timeoutMs, signal });
         }
@@ -1197,10 +1210,12 @@ export class ExecutionService {
       runData: clone(runOptions.runData),
       destinationNode: runOptions.destinationNode,
       dirtyNodeNames: clone(runOptions.dirtyNodeNames),
+      agentRequest: clone(runOptions.agentRequest),
       rootMode,
     };
     // a node failed: the engine re-runs that node with its saved input and everything after it
-    const failed = state?.executionData?.failedExecuteData;
+    // not for a tool test: its request is not part of the state, so the root would run as a node
+    const failed = runOptions.agentRequest ? undefined : state?.executionData?.failedExecuteData;
     if (state && failed) {
       if (!names.has(failed.node)) {
         throw ApiError.conflict(`Node "${failed.node}" no longer exists in the workflow`);

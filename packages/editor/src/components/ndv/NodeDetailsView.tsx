@@ -2,12 +2,19 @@
  * Node details view: input data | parameters & settings | output data. Opened by double-clicking
  * a node. Parameters edit the workflow store; previews use the run store's latest data.
  */
-import type { DirtyReason, NodeProperty } from '@workflow/workflow';
+import {
+  type DirtyReason,
+  extractFromAiArguments,
+  type FromAiArgument,
+  isHitlVariant,
+  type NodeProperty,
+} from '@workflow/workflow';
 import { BookOpen, Copy, ExternalLink, Play, Radio, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { errorMessage } from '../../api/client';
 import { useNodeTypes, useSettings, useVariables, useWebhookUrls } from '../../api/queries';
-import { isEventTrigger } from '../../features/editor/editor-actions';
+import { isEventTrigger, runToolTest, toolParentName } from '../../features/editor/editor-actions';
 import { openTestForm } from '../../features/editor/form-popup';
 import { flattenSchema, inferSchema } from '../../lib/data';
 import {
@@ -33,6 +40,7 @@ import { Callout, EmptyState } from '../ui/misc';
 import { Tabs } from '../ui/Tabs';
 import { InputPane, OutputPane } from './DataPanes';
 import { NodeSettingsForm } from './NodeSettingsForm';
+import { ToolTestModal } from './ToolTestModal';
 
 export interface NodeDetailsViewProps {
   nodeName: string;
@@ -183,6 +191,7 @@ export function NodeDetailsView({
   const openNdv = useUiStore((s) => s.openNdv);
   const [tab, setTab] = useState<'parameters' | 'settings'>('parameters');
   const [name, setName] = useState(nodeName);
+  const [toolTest, setToolTest] = useState<{ args: FromAiArgument[]; parentName: string } | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => setName(nodeName), [nodeName]);
@@ -201,6 +210,28 @@ export function NodeDetailsView({
 
   const description = node ? nodeTypes.get(node.type) : undefined;
   const ports = useMemo(() => (node ? deriveNodePorts(node, description) : null), [node, description]);
+  // a Human review node only waits for a person: the tool it guards is what can be tested
+  const isTool = Boolean(
+    description && ports?.outputs.some((p) => p.type === 'ai_tool') && !isHitlVariant(description),
+  );
+  /** Execute step: a tool asks for the values its model would pass, when it reads any */
+  const executeStep = useCallback(() => {
+    if (!node || !onExecuteNode) return;
+    if (!isTool) {
+      onExecuteNode(node.name);
+      return;
+    }
+    let args: FromAiArgument[];
+    try {
+      args = extractFromAiArguments(node.parameters);
+    } catch (error) {
+      toast.error('Could not test this tool', errorMessage(error));
+      return;
+    }
+    if (args.length) setToolTest({ args, parentName: toolParentName(connections, node.name) ?? '' });
+    else runToolTest(node.name, {}, onExecuteNode);
+  }, [node, onExecuteNode, isTool, connections]);
+
   const graph = useMemo(
     () => ({ nodes, connections, pinData, stickyNotes, nodeGroups }),
     [nodes, connections, pinData, stickyNotes, nodeGroups],
@@ -265,9 +296,9 @@ export function NodeDetailsView({
           ? previewExpression(expression, expressionContext)
           : { ok: false, error: 'No context', noInput: false },
       completions,
-      onButton: onExecuteNode ? (_prop: NodeProperty) => onExecuteNode(node.name) : undefined,
+      onButton: onExecuteNode ? (_prop: NodeProperty) => executeStep() : undefined,
     };
-  }, [node, description, readOnly, setParameter, expressionContext, completions, onExecuteNode]);
+  }, [node, description, readOnly, setParameter, expressionContext, completions, onExecuteNode, executeStep]);
 
   if (!node || !ports || !parameterContext) {
     return null;
@@ -289,6 +320,7 @@ export function NodeDetailsView({
   };
 
   const hasMainInput = ports.inputs.some((p) => p.type === 'main');
+  const canExecuteStep = !ports.isSubNode || isTool;
   const running = runningNodes.includes(node.name) || runStatus === 'starting';
   const docsUrl =
     description?.documentationUrl && /^https?:\/\//.test(description.documentationUrl)
@@ -348,13 +380,8 @@ export function NodeDetailsView({
               <BookOpen size={14} /> Docs
             </a>
           )}
-          {!readOnly && onExecuteNode && !ports.isSubNode && (
-            <Button
-              variant="primary"
-              icon={<Play size={14} />}
-              onClick={() => onExecuteNode(node.name)}
-              loading={running}
-            >
+          {!readOnly && onExecuteNode && canExecuteStep && (
+            <Button variant="primary" icon={<Play size={14} />} onClick={executeStep} loading={running}>
               Execute step
             </Button>
           )}
@@ -463,13 +490,26 @@ export function NodeDetailsView({
                   readOnly={readOnly}
                   running={running}
                   onPin={(items) => setPinData(node.name, items)}
-                  onExecute={onExecuteNode ? () => onExecuteNode(node.name) : undefined}
+                  onExecute={onExecuteNode && canExecuteStep ? executeStep : undefined}
                   dirty={dirtyNodes?.[node.name]}
                 />
               </div>
             </section>
           </div>
         </ParameterContext.Provider>
+        {toolTest && onExecuteNode && (
+          <ToolTestModal
+            open
+            nodeName={node.name}
+            parentName={toolTest.parentName}
+            args={toolTest.args}
+            onCancel={() => setToolTest(null)}
+            onExecute={(query) => {
+              setToolTest(null);
+              runToolTest(node.name, query, onExecuteNode);
+            }}
+          />
+        )}
       </div>
     </div>,
     document.body,
