@@ -93,6 +93,36 @@ describe('signature version 4 in core', () => {
   });
 });
 
+describe('signature version 4 hosts', () => {
+  const sign = (url: string) =>
+    signAwsRequest({ method: 'GET', url, region: 'us-east-1', service: 'service', date: DATE, ...KEY });
+
+  it.each([
+    'https://bedrock-runtime.us-east-1.amazonaws.com/',
+    'https://sts.amazonaws.com/',
+    'https://s3.dualstack.us-east-1.amazonaws.com/',
+    'https://vpce-0abc.bedrock-runtime.us-east-1.vpce.amazonaws.com/',
+    'https://sts.cn-north-1.amazonaws.com.cn/',
+  ])('signs for the AWS service host %s', (url) => {
+    expect(sign(url).headers.authorization).toContain('AWS4-HMAC-SHA256');
+  });
+
+  it.each([
+    'https://abc.execute-api.us-east-1.amazonaws.com/',
+    'https://x-123.us-east-1.elb.amazonaws.com/',
+    'https://ec2-1-2-3-4.compute-1.amazonaws.com/',
+    'https://b.s3.us-east-1.amazonaws.com/',
+    'https://x.y.us-east-1.rds.amazonaws.com/',
+    'https://secretsmanager.us-east-1.amazonaws.com.evil.test/',
+    'https://evilamazonaws.com/',
+    'http://sts.amazonaws.com/',
+    'https://user:pw@sts.amazonaws.com/',
+    'not a url',
+  ])('refuses to sign for %s, with a text that holds no URL', (url) => {
+    expect(() => sign(url)).toThrow('AWS credentials only sign https requests to amazonaws.com hosts');
+  });
+});
+
 describe('googleJwtAssertion', () => {
   const NOW = new Date('2026-01-02T03:04:05Z');
   const seconds = Math.floor(NOW.getTime() / 1000);

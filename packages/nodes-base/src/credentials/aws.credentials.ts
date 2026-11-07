@@ -1,9 +1,11 @@
 /**
- * AWS credentials, with the field names of n8n. A signature goes only to an https amazonaws.com host, since
- * it leaks the key id and can be replayed. "Use System Credentials" is left out on purpose: lending the
- * host's AWS identity to tenant workflows would break the tenant rule.
+ * AWS credentials, with the field names of n8n. A signature goes only to an https host of an AWS service
+ * (not a customer host under amazonaws.com), since it leaks the key id and can be replayed. "Use System
+ * Credentials" is left out on purpose: lending the host's AWS identity to tenant workflows would break the
+ * tenant rule.
  */
 import {
+  assertSignableAwsUrl,
   type CredentialAuthHelpers,
   type CredentialTestRequest,
   type CredentialType,
@@ -91,6 +93,7 @@ const customEndpoints: NodeProperty[] = [
   endpoint('Bedrock Runtime Endpoint', 'bedrockRuntimeEndpoint'),
 ];
 
+/** only reads service and region off a host; which hosts get a signature is assertSignableAwsUrl's call */
 const AWS_HOST = /(^|\.)amazonaws\.com(\.cn)?$/i;
 const REGION_NAME = /^[a-z]{2}(-[a-z]+)+-\d$/;
 const DEFAULT_SESSION_NAME = 'workflow-session';
@@ -111,12 +114,8 @@ function signingHelpers(helpers: CredentialAuthHelpers | undefined): CredentialA
   return helpers;
 }
 
-function assertSignableUrl(url: string): void {
-  const target = new URL(url);
-  if (target.protocol !== 'https:' || !AWS_HOST.test(target.hostname)) {
-    throw new Error('AWS credentials only sign https requests to amazonaws.com hosts');
-  }
-}
+/** one rule for every signer: see @workflow/workflow aws-host */
+const assertSignableUrl = assertSignableAwsUrl;
 
 function assertRegion(credentials: DataObject): string {
   const region = text(credentials.region);

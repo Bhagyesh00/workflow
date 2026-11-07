@@ -1,7 +1,8 @@
 /**
  * What the Bedrock nodes share: hosts, the region of an ARN, credential fields and the model lists.
  * Only this file builds a Bedrock URL. The `aws` and `awsAssumeRole` credentials decide whether a host may
- * receive a signature: they refuse anything but https on amazonaws.com or amazonaws.com.cn.
+ * receive a signature (assertSignableAwsUrl in @workflow/workflow): only https on the host of an AWS service
+ * under amazonaws.com or amazonaws.com.cn, so a custom endpoint like an API Gateway host is refused.
  */
 import type { DataObject, LoadOptionsContext, NodeProperty, NodePropertyOption } from '@workflow/workflow';
 import { sortOptions } from '../nodes/models/model-options';

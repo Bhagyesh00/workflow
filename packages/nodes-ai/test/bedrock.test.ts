@@ -641,6 +641,7 @@ describe('Bedrock hosts and model ids', () => {
     'https://evilamazonaws.com',
     'https://bedrock-runtime.us-east-1.amazonaws.com.evil.test',
     'http://bedrock-runtime.us-east-1.amazonaws.com',
+    'https://abc123.execute-api.us-east-1.amazonaws.com',
   ])('refuses the endpoint %s before anything is sent', async (endpoint) => {
     const http = new FakeHttpClient(sequence());
     const creds = {

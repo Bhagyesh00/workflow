@@ -1,4 +1,5 @@
 export * from './ai-types';
+export * from './aws-host';
 export * from './credential-domain-restrictions';
 export * from './data-tables';
 export * from './diff';

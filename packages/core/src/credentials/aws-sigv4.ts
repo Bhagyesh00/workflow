@@ -1,10 +1,10 @@
 /**
  * AWS Signature Version 4 on node:crypto, moved from the server (P4-08, P5-19). Checked against AWS's
- * published test vectors. It signs with the keys it is given and reads nothing from the host, so no host
- * AWS identity is ever lent out.
+ * published test vectors. It signs only for AWS service hosts (assertSignableAwsUrl), with the keys it is
+ * given, and reads nothing from the host, so no host AWS identity is ever lent out.
  */
 import { createHash, createHmac } from 'node:crypto';
-import type { AwsSignInput } from '@workflow/workflow';
+import { type AwsSignInput, assertSignableAwsUrl } from '@workflow/workflow';
 
 export type SigV4Input = AwsSignInput;
 
@@ -46,6 +46,8 @@ function compare(a: string, b: string): number {
 }
 
 export function signAwsRequest(input: SigV4Input): SigV4Result {
+  // the one place every signer passes: a signature never goes to a host outside the AWS service hosts
+  assertSignableAwsUrl(input.url);
   const url = new URL(input.url);
   const stamp = amzDate(input.date ?? new Date());
   const day = stamp.slice(0, 8);

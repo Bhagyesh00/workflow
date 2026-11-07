@@ -23,6 +23,42 @@ const BEDROCK = 'https://bedrock-runtime.us-east-1.amazonaws.com/model/m/convers
 const GOOGLE_TOKEN = 'https://oauth2.googleapis.com/token';
 const REFUSED_HOST = 'AWS credentials only sign https requests to amazonaws.com hosts';
 
+/** hosts under amazonaws.com that a customer runs: they must never get a signature */
+const CUSTOMER_HOSTS = [
+  'ec2-1-2-3-4.compute-1.amazonaws.com',
+  'ec2-1-2-3-4.us-west-2.compute.amazonaws.com',
+  'x-123.us-east-1.elb.amazonaws.com',
+  'abc.execute-api.us-east-1.amazonaws.com',
+  'abc.appsync-api.us-east-1.amazonaws.com',
+  'b.s3-website-us-east-1.amazonaws.com',
+  'b.s3-website.us-east-1.amazonaws.com',
+  'b.s3.amazonaws.com',
+  'b.s3.us-east-1.amazonaws.com',
+  'x.y.us-east-1.rds.amazonaws.com',
+  'gateway.bedrock-agentcore.us-east-1.amazonaws.com',
+  'abc.execute-api.cn-north-1.amazonaws.com.cn',
+];
+
+/** AWS service hosts: host, the service and the region the signature names */
+const SERVICE_HOSTS: Array<[string, string, string]> = [
+  ['bedrock-runtime.eu-west-1.amazonaws.com', 'bedrock', 'eu-west-1'],
+  ['bedrock.eu-west-1.amazonaws.com', 'bedrock', 'eu-west-1'],
+  ['bedrock-runtime-fips.us-east-1.amazonaws.com', 'bedrock', 'us-east-1'],
+  ['sts.amazonaws.com', 'sts', 'us-east-1'],
+  ['sts.eu-west-1.amazonaws.com', 'sts', 'eu-west-1'],
+  ['iam.amazonaws.com', 'iam', 'us-east-1'],
+  ['secretsmanager.us-west-2.amazonaws.com', 'secretsmanager', 'us-west-2'],
+  ['s3.eu-central-1.amazonaws.com', 's3', 'eu-central-1'],
+  ['s3.dualstack.us-east-1.amazonaws.com', 's3', 'us-east-1'],
+  ['email.us-east-1.amazonaws.com', 'ses', 'us-east-1'],
+  ['vpce-0abc123-xyz.bedrock-runtime.us-east-1.vpce.amazonaws.com', 'bedrock', 'us-east-1'],
+  ['vpce-0abc123-xyz-us-east-1a.bedrock-runtime.us-east-1.vpce.amazonaws.com', 'bedrock', 'us-east-1'],
+  ['bedrock-runtime.cn-north-1.amazonaws.com.cn', 'bedrock', 'cn-north-1'],
+  ['bedrock-runtime.cn-northwest-1.amazonaws.com.cn', 'bedrock', 'cn-northwest-1'],
+  ['sts.cn-north-1.amazonaws.com.cn', 'sts', 'cn-north-1'],
+  ['vpce-0abc123.bedrock-runtime.cn-north-1.vpce.amazonaws.com.cn', 'bedrock', 'cn-north-1'],
+];
+
 const { privateKey } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
@@ -262,6 +298,9 @@ describe('aws', () => {
     ['https://amazonaws.com@evil.test/x'],
     ['http://bedrock-runtime.us-east-1.amazonaws.com/x'],
     ['https://gateway.example.test/x'],
+    ['https://user:pw@bedrock-runtime.us-east-1.amazonaws.com/x'],
+    ['https://user@bedrock-runtime.us-east-1.amazonaws.com/x'],
+    ...CUSTOMER_HOSTS.map((host) => [`https://${host}/x`]),
   ])('refuses %s before any signing', async (url) => {
     const fake = fakeWith();
     let signed = 0;
@@ -282,7 +321,14 @@ describe('aws', () => {
     const message = await messageOf(
       send(fakeWith(), aws, awsKeys(), { url: 'https://amazonaws.com/', method: 'GET' }),
     );
-    expect(message).toContain('service');
+    expect(message).toBe(REFUSED_HOST);
+  });
+
+  it.each(SERVICE_HOSTS)('signs the service host %s for %s in %s', async (host, service, region) => {
+    const fake = new FakeHttpClient().on('*', /amazonaws/, () => ({ ok: 1 }));
+    const creds = awsKeys();
+    await send(fake, aws, creds, { url: `https://${host}/`, method: 'GET' });
+    expectSigned(fake.requests[0] as RecordedRequest, keysOf(creds), service, region);
   });
 
   it.each([['eu-west-1.evil.test/#'], ['not a region'], ['']])('refuses the region %j', async (region) => {
@@ -405,6 +451,13 @@ describe('awsAssumeRole', () => {
     await send(fake, awsAssumeRole, creds, { url: BEDROCK, method: 'GET' });
     await send(fake, awsAssumeRole, creds, { url: BEDROCK, method: 'GET' });
     expect(stsCalls(fake)).toHaveLength(2);
+  });
+
+  it.each(CUSTOMER_HOSTS)('refuses the customer host %s before any STS call', async (host) => {
+    const fake = stsFake();
+    const request: HttpRequestOptions = { url: `https://${host}/`, method: 'GET' };
+    expect(await messageOf(send(fake, awsAssumeRole, roleKeys(), request))).toBe(REFUSED_HOST);
+    expect(fake.requests).toHaveLength(0);
   });
 
   it('refuses the target host before any STS call', async () => {
