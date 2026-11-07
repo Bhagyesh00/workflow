@@ -33,8 +33,27 @@ function fakeCtx(answer: (req: HttpRequestOptions) => Answer, host = HOST, param
   return { ctx: ctx as unknown as LoadOptionsContext, calls };
 }
 
+const EP_HOST = 'ep-1.database.7.azuredatabricks.net';
+/** the endpoint list of a branch: a read-only endpoint first, then the read-write one the Data API URL uses */
+const endpointsAnswer = (
+  host: unknown = EP_HOST,
+  headers: Record<string, string> = { 'x-databricks-org-id': '42' },
+): Answer => ({
+  body: {
+    endpoints: [
+      {
+        status: {
+          endpoint_type: 'ENDPOINT_TYPE_READ_ONLY',
+          hosts: { host: 'ro.database.7.azuredatabricks.net' },
+        },
+      },
+      { status: { endpoint_type: 'ENDPOINT_TYPE_READ_WRITE', hosts: { host } } },
+    ],
+  },
+  headers,
+});
 const workspace = (req: HttpRequestOptions): Answer | undefined =>
-  req.url.endsWith('/current-metastore-assignment') ? { body: { workspace_id: 42 } } : undefined;
+  req.url.endsWith('/endpoints') ? endpointsAnswer() : undefined;
 
 describe('lakebaseHttpsHost', () => {
   it('keeps an https origin and refuses http, credentials, query and fragment', () => {
@@ -61,24 +80,105 @@ describe('lakebaseRequest', () => {
     await expect(lakebaseRequest(other.ctx, 0, { url: 'https://evil.example/x' })).rejects.toThrow(/host of the Databricks credential/);
     expect(other.calls).toHaveLength(0);
   });
+
+  it('lets a compute endpoint of the credential domain through and refuses other domains and ports', async () => {
+    const { ctx, calls } = fakeCtx(() => ({ body: { ok: true } }));
+    await lakebaseRequest(ctx, 0, {
+      url: `https://${EP_HOST}/api/2.0/workspace/42/rest/d/s/t`,
+      method: 'GET',
+    });
+    expect(calls).toHaveLength(1);
+    for (const url of [
+      'https://ep.azuredatabricks.net.evil.io/x',
+      'https://evil.databricks.com/x',
+      `https://${EP_HOST}:8443/x`,
+      `http://${EP_HOST}/x`,
+      `https://u:p@${EP_HOST}/x`,
+    ]) {
+      await expect(lakebaseRequest(ctx, 0, { url }), url).rejects.toThrow(
+        /host of the Databricks credential/,
+      );
+    }
+    expect(calls).toHaveLength(1);
+  });
 });
 
 describe('lakebaseTableUrl', () => {
-  it('builds the Data API URL from the workspace id', async () => {
+  it('builds the Data API URL on the read-write endpoint of the project and branch', async () => {
     const { ctx, calls } = fakeCtx((r) => workspace(r)!);
-    expect(await lakebaseTableUrl(ctx, 0, TARGET)).toBe(`${HOST}/api/2.0/workspace/42/rest/db1/public/chats`);
-    expect(calls[0].req.url).toBe(`${HOST}/api/2.1/unity-catalog/current-metastore-assignment`);
+    expect(await lakebaseTableUrl(ctx, 0, TARGET)).toBe(
+      `https://${EP_HOST}/api/2.0/workspace/42/rest/db1/public/chats`,
+    );
+    expect(calls[0].req.url).toBe(`${HOST}/api/2.0/postgres/projects/p/branches/b/endpoints`);
+    expect(calls[0].type).toBe('databricksOAuth2Api');
+  });
+
+  it('two branches with the same database name reach different Data APIs', async () => {
+    const { ctx, calls } = fakeCtx((r) => {
+      const branch = /branches\/([^/]+)\/endpoints/.exec(r.url)?.[1];
+      return endpointsAnswer(`ep-${branch}.database.7.azuredatabricks.net`);
+    });
+    const main = await lakebaseTableUrl(ctx, 0, { ...TARGET, branch: 'main' });
+    const dev = await lakebaseTableUrl(ctx, 0, { ...TARGET, branch: 'dev' });
+    expect(main).toBe(
+      'https://ep-main.database.7.azuredatabricks.net/api/2.0/workspace/42/rest/db1/public/chats',
+    );
+    expect(dev).toBe(
+      'https://ep-dev.database.7.azuredatabricks.net/api/2.0/workspace/42/rest/db1/public/chats',
+    );
+    expect(calls.map((c) => c.req.url)).toEqual([
+      `${HOST}/api/2.0/postgres/projects/p/branches/main/endpoints`,
+      `${HOST}/api/2.0/postgres/projects/p/branches/dev/endpoints`,
+    ]);
   });
 
   it('refuses a table or schema name that is not a plain name', async () => {
-    const { ctx } = fakeCtx((r) => workspace(r)!);
+    const { ctx, calls } = fakeCtx((r) => workspace(r)!);
     await expect(lakebaseTableUrl(ctx, 0, { ...TARGET, table: 'a/b' })).rejects.toThrow(/table name/);
     await expect(lakebaseTableUrl(ctx, 0, { ...TARGET, schema: 'a/../b' })).rejects.toThrow(/schema/);
+    expect(calls).toHaveLength(0);
   });
 
-  it('fails when the workspace id is missing', async () => {
-    const { ctx } = fakeCtx(() => ({ body: {} }));
-    await expect(lakebaseTableUrl(ctx, 0, TARGET)).rejects.toThrow(/workspace id/);
+  it('refuses a name made only of dots in the project, branch, database and schema', async () => {
+    const { ctx, calls } = fakeCtx((r) => workspace(r)!);
+    for (const field of ['project', 'branch', 'database', 'schema'] as const) {
+      for (const dots of ['.', '..', '...']) {
+        await expect(
+          lakebaseTableUrl(ctx, 0, { ...TARGET, [field]: dots }),
+          `${field} ${dots}`,
+        ).rejects.toThrow(/not a valid name/);
+      }
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it('fails when the branch has no read-write endpoint', async () => {
+    const { ctx } = fakeCtx(() => ({ body: { endpoints: [] }, headers: { 'x-databricks-org-id': '42' } }));
+    await expect(lakebaseTableUrl(ctx, 0, TARGET)).rejects.toThrow(/no read-write compute endpoint/);
+  });
+
+  it('fails when the workspace id header is missing or not a number', async () => {
+    const none = fakeCtx(() => endpointsAnswer(EP_HOST, {}));
+    await expect(lakebaseTableUrl(none.ctx, 0, TARGET)).rejects.toThrow(/workspace ID/);
+    const bad = fakeCtx(() => endpointsAnswer(EP_HOST, { 'x-databricks-org-id': '4/2' }));
+    await expect(lakebaseTableUrl(bad.ctx, 0, TARGET)).rejects.toThrow(/workspace ID/);
+  });
+
+  it('refuses an endpoint host that is not a plain host of the credential domain, so the token stays inside it', async () => {
+    for (const host of [
+      'evil.example.com',
+      'ep.azuredatabricks.net.evil.io',
+      'a@evil.azuredatabricks.net',
+      'ep.x.azuredatabricks.net/..',
+      '10.0.0.5',
+      'localhost',
+      null,
+      5,
+    ]) {
+      const { ctx, calls } = fakeCtx(() => endpointsAnswer(host));
+      await expect(lakebaseTableUrl(ctx, 0, TARGET), String(host)).rejects.toThrow(/endpoint/);
+      expect(calls).toHaveLength(1);
+    }
   });
 });
 

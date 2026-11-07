@@ -40,16 +40,33 @@ interface Row {
   message?: unknown;
 }
 
-/** the SQL that makes the table, shown when the table is missing or not readable */
+const ROLE_PLACEHOLDER =
+  'replace "your-role" with the Postgres role of the OAuth2 identity (user email or service principal application ID), then retry.';
+
+function grantSql(schema: string, table: string): string[] {
+  const quotedSchema = `"${schema.replace(/"/g, '""')}"`;
+  return [
+    `GRANT USAGE ON SCHEMA ${quotedSchema} TO "your-role";`,
+    `GRANT SELECT, INSERT, DELETE ON ${quotedSchema}."${table}" TO "your-role";`,
+    `GRANT USAGE ON SEQUENCE ${quotedSchema}."${table}_id_seq" TO "your-role";`,
+  ];
+}
+
+/** the SQL that makes the table, shown when the table is missing */
 function tableSql(schema: string, table: string): string {
   const name = `"${schema.replace(/"/g, '""')}"."${table}"`;
   return [
     `CREATE TABLE IF NOT EXISTS ${name} (id BIGSERIAL PRIMARY KEY, session_id TEXT NOT NULL, message JSONB NOT NULL);`,
     `CREATE INDEX IF NOT EXISTS "${table}_session_idx" ON ${name} (session_id, id);`,
-    `GRANT SELECT, INSERT, DELETE ON ${name} TO <your role>;`,
-    `GRANT USAGE ON SEQUENCE "${schema.replace(/"/g, '""')}"."${table}_id_seq" TO <your role>;`,
+    ...grantSql(schema, table),
   ].join('\n');
 }
+
+/** n8n's hints for the two codes that mean the identity may not use the Data API or the table */
+const CREDENTIAL_HINT =
+  "Reconnect the Databricks OAuth2 credential. If it is valid, the identity has no Postgres role on this branch: run `SELECT databricks_create_role('your-identity', 'SERVICE_PRINCIPAL')` in the Databricks SQL editor, using 'USER' for a user identity.";
+const ROLE_HINT =
+  'The Postgres role is not granted to the Data API. Run `GRANT "your-role" TO authenticator` as the role\'s creator. A project owner cannot use the Data API at all, so use a non-owner identity.';
 
 function locator(ctx: SupplyDataContext, itemIndex: number, name: string): string {
   const value = ctx.getNodeParameter(name, itemIndex, '', { extractValue: true });
@@ -75,34 +92,48 @@ function readTarget(ctx: SupplyDataContext, itemIndex: number): LakebaseTarget {
   return target;
 }
 
-/** the PostgREST error code or message of a failed call, whatever shape the body has */
-function remoteCode(error: unknown): { status: number; code: string } {
+/** the PostgREST error code and message of a failed call, whatever shape the body has */
+function remoteError(error: unknown): { status: number; code: string; message: string } {
   const e = error as { httpCode?: string; responseBody?: unknown };
-  const body = e?.responseBody as { code?: unknown } | string | undefined;
-  const code = typeof body === 'object' && body && typeof body.code === 'string' ? body.code : '';
-  return { status: Number(e?.httpCode ?? 0), code };
+  const body = e?.responseBody as { code?: unknown; message?: unknown } | string | undefined;
+  const object = typeof body === 'object' && body ? body : undefined;
+  return {
+    status: Number(e?.httpCode ?? 0),
+    code: typeof object?.code === 'string' ? object.code : '',
+    message: typeof object?.message === 'string' ? object.message : '',
+  };
 }
 
-/** n8n-style errors for a missing table and a missing grant, with the SQL as the hint; others pass through */
+/** n8n-style errors for a missing table, a missing grant and a refused identity, with the fix as the hint; others pass through */
 function explain(ctx: SupplyDataContext, itemIndex: number, target: LakebaseTarget, error: unknown): never {
   if (error instanceof NodeApiError) {
-    const { status, code } = remoteCode(error);
+    const { status, code, message } = remoteError(error);
     if (code === '42P01' || code === 'PGRST205' || status === 404) {
       throw new NodeOperationError(
         ctx.getNode(),
         `Table "${target.table}" doesn't exist in schema "${target.schema}"`,
-        { itemIndex, description: `Create the table first, for example:\n${tableSql(target.schema, target.table)}` },
-      );
-    }
-    if (code === '42501' || status === 401 || status === 403) {
-      throw new NodeOperationError(
-        ctx.getNode(),
-        `No permission to use table "${target.table}" in schema "${target.schema}"`,
         {
           itemIndex,
-          description: `Grant the role of the Databricks credential access to the table, for example:\n${tableSql(target.schema, target.table)}`,
+          description: `Create the table first, for example (${ROLE_PLACEHOLDER})\n${tableSql(target.schema, target.table)}`,
         },
       );
+    }
+    if (code === '42501' && /permission denied for (schema|table|sequence)/.test(message)) {
+      throw new NodeOperationError(
+        ctx.getNode(),
+        `The OAuth2 identity cannot use table ${target.schema}.${target.table}`,
+        {
+          itemIndex,
+          description: `The table exists but the OAuth2 identity has no rights on it. Run this in the Databricks SQL editor as the table owner, ${ROLE_PLACEHOLDER}\n${grantSql(target.schema, target.table).join('\n')}`,
+        },
+      );
+    }
+    const hint = code === 'PGRST301' ? CREDENTIAL_HINT : code === '42501' ? ROLE_HINT : undefined;
+    if (hint) {
+      throw new NodeOperationError(ctx.getNode(), message ? message.slice(0, 300) : error.message, {
+        itemIndex,
+        description: hint,
+      });
     }
   }
   throw error;

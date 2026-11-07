@@ -2,10 +2,13 @@
 import type { HttpRequestOptions } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { clearBufferMemory } from '../src/nodes/memory/memory.nodes';
-import { connect, FakeHttpClient, node, run, scriptModel, services, toolNodeTypes } from './harness';
+import { connect, FakeHttpClient, type FakeReply, node, run, scriptModel, services, toolNodeTypes } from './harness';
 
 const HOST = 'https://adb-1.7.azuredatabricks.net';
-const TABLE_URL = `${HOST}/api/2.0/workspace/42/rest/db1/public/ai_chat_histories`;
+/** the Data API is the read-write endpoint of the branch, not the workspace host */
+const endpointUrl = (branch: string) =>
+  `https://ep-${branch}.database.7.azuredatabricks.net/api/2.0/workspace/42/rest/db1/public/ai_chat_histories`;
+const TABLE_URL = endpointUrl('main');
 const creds = (host = HOST) => ({
   databricksOAuth2Api: { host, grantType: 'pkce', oauthTokenData: { access_token: 'dapi-test-token' } },
 });
@@ -20,9 +23,24 @@ interface Row {
 function fakeLakebase(fail?: { status: number; body: unknown }, pageTotal?: number) {
   const rows: Row[] = [];
   let n = 0;
-  const handler = (req: HttpRequestOptions) => {
+  const handler = (req: HttpRequestOptions): FakeReply => {
     const url = new URL(req.url);
-    if (url.pathname.endsWith('/current-metastore-assignment')) return { body: { workspace_id: 42 } };
+    const endpoints = /\/branches\/([^/]+)\/endpoints$/.exec(url.pathname);
+    if (endpoints) {
+      return {
+        body: {
+          endpoints: [
+            {
+              status: {
+                endpoint_type: 'ENDPOINT_TYPE_READ_WRITE',
+                hosts: { host: `ep-${endpoints[1]}.database.7.azuredatabricks.net` },
+              },
+            },
+          ],
+        },
+        headers: { 'x-databricks-org-id': '42' },
+      };
+    }
     if (fail) return { status: fail.status, body: fail.body };
     const filter = String(req.qs?.session_id ?? '');
     const want = filter.startsWith('eq.') ? filter.slice(3) : '';
@@ -74,7 +92,8 @@ async function converse(
   );
 }
 
-const tableCalls = (http: FakeHttpClient) => http.requests.filter((r) => r.url.startsWith(TABLE_URL));
+const tableCalls = (http: FakeHttpClient, url = TABLE_URL) =>
+  http.requests.filter((r) => r.url.startsWith(url));
 
 beforeEach(() => clearBufferMemory());
 
@@ -141,12 +160,56 @@ describe('P5-51 Lakebase memory', () => {
     expect((r.error as any).description).toContain('CREATE TABLE IF NOT EXISTS "public"."ai_chat_histories"');
   });
 
-  it('a missing grant says so and shows the GRANT', async () => {
-    const x = fakeLakebase({ status: 403, body: { code: '42501', message: 'permission denied' } });
+  it('a missing grant says so and shows the GRANT, in n8n words', async () => {
+    const x = fakeLakebase({
+      status: 403,
+      body: { code: '42501', message: 'permission denied for table ai_chat_histories' },
+    });
     const r = await converse(x.http);
     expect(r.status).toBe('error');
-    expect(r.error?.message).toContain('No permission to use table "ai_chat_histories"');
+    expect(r.error?.message).toBe('The OAuth2 identity cannot use table public.ai_chat_histories');
     expect((r.error as any).description).toContain('GRANT SELECT, INSERT, DELETE');
+    expect((r.error as any).description).toContain('"your-role"');
+  });
+
+  it('a 403 that is not a table grant keeps its own message and gets the role hint', async () => {
+    const x = fakeLakebase({
+      status: 403,
+      body: { code: '42501', message: 'permission denied to set role "me"' },
+    });
+    const r = await converse(x.http);
+    expect(r.status).toBe('error');
+    expect(r.error?.message).toBe('permission denied to set role "me"');
+    expect((r.error as any).description).toContain('GRANT "your-role" TO authenticator');
+  });
+
+  it('a PGRST301 answer says to reconnect the credential, and a plain 401 is not called a missing grant', async () => {
+    const x = fakeLakebase({
+      status: 403,
+      body: { code: 'PGRST301', message: 'No suitable key or wrong key type' },
+    });
+    const r = await converse(x.http);
+    expect(r.status).toBe('error');
+    expect(r.error?.message).toBe('No suitable key or wrong key type');
+    expect((r.error as any).description).toContain('Reconnect the Databricks OAuth2 credential');
+    const plain = await converse(fakeLakebase({ status: 401, body: { message: 'Unauthorized' } }).http);
+    expect(plain.status).toBe('error');
+    expect(plain.error?.message).not.toMatch(/doesn't exist|cannot use table|No permission/);
+  });
+
+  it('the branch picks the compute endpoint: two branches with one database name never share a URL', async () => {
+    const x = fakeLakebase();
+    await converse(x.http, { mem: memNode({ branch: loc('main') }) });
+    await converse(x.http, { mem: memNode({ branch: loc('dev') }) });
+    expect(tableCalls(x.http, endpointUrl('main')).length).toBeGreaterThan(0);
+    expect(tableCalls(x.http, endpointUrl('dev')).length).toBeGreaterThan(0);
+    const lookups = x.http.requests.filter((r) => r.url.endsWith('/endpoints')).map((r) => r.url);
+    expect(lookups).toEqual([
+      `${HOST}/api/2.0/postgres/projects/proj/branches/main/endpoints`,
+      `${HOST}/api/2.0/postgres/projects/proj/branches/dev/endpoints`,
+    ]);
+    // every table call went to one endpoint host; the bearer token stays on the Databricks domain
+    expect(x.http.requests.every((r) => new URL(r.url).hostname.endsWith('.azuredatabricks.net'))).toBe(true);
   });
 
   it('an unrelated server error passes through', async () => {

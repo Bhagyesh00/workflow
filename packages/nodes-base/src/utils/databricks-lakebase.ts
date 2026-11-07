@@ -3,10 +3,12 @@
  * table locators with their list searches, the table URL and the one request helper. Used by nodes-ai's
  * Lakebase Chat Memory (P5-51) and by Phase 7's Databricks node through `@workflow/nodes-base/utils/databricks-lakebase`.
  *
- * Calls: https host only, every request on the credential's own host, `Prefer: count=exact` with `Content-Range`
- * paging up to LAKEBASE_PAGE_SIZE x LAKEBASE_MAX_PAGES rows. The control-plane paths of the list searches
- * (`/api/2.0/postgres/...`) and the workspace id lookup (`/api/2.1/unity-catalog/current-metastore-assignment`)
- * are written from Databricks' public API reference and are not confirmed against a live workspace.
+ * Calls: https host only. The control plane (list searches, the endpoint lookup) is the credential's own host. The
+ * Data API is the read-write compute endpoint of the chosen project and branch, as in n8n:
+ * `https://<endpoint host>/api/2.0/workspace/<workspace id>/rest/<database>/<schema>/<table>`, so two branches
+ * never share data. The endpoint host must be a Databricks host of the credential's own domain. `Prefer: count=exact`
+ * with `Content-Range` paging up to LAKEBASE_PAGE_SIZE x LAKEBASE_MAX_PAGES rows. The control-plane paths
+ * (`/api/2.0/postgres/...`) are written from Databricks' public API reference and are not confirmed against a live workspace.
  */
 import type {
   BaseContext,
@@ -102,8 +104,8 @@ export async function lakebaseRequest<T>(
   request: HttpRequestOptions,
 ): Promise<T> {
   const host = await credentialHost(ctx, itemIndex);
-  // the token goes to the credential's workspace only, never to a URL a caller built from other text
-  if (!String(request.url).startsWith(`${host}/`)) {
+  // the token goes to the credential's workspace or to a compute endpoint of its domain, never to a URL a caller built from other text
+  if (!String(request.url).startsWith(`${host}/`) && !onEndpointHost(host, String(request.url))) {
     throw new Error('A Lakebase request must go to the host of the Databricks credential');
   }
   return (await ctx.helpers.httpRequestWithAuthentication<T>(
@@ -113,28 +115,84 @@ export async function lakebaseRequest<T>(
   )) as T;
 }
 
+const HOSTNAME = /^[A-Za-z0-9.-]+$/;
+
+/** the last two labels of a host name, which is the Databricks domain (`cloud.databricks.com`, `azuredatabricks.net`) */
+function domainOf(hostname: string): string | undefined {
+  const labels = hostname.toLowerCase().split('.');
+  const last = labels.at(-1) ?? '';
+  // a plain name of at least three labels, not an IP address
+  if (labels.length < 3 || labels.some((l) => !l) || !HOSTNAME.test(hostname) || !/[a-z]/.test(last))
+    return undefined;
+  return labels.slice(-2).join('.');
+}
+
+/** true when `url` is an https URL on a host that shares the Databricks domain of the credential host (a compute endpoint) */
+function onEndpointHost(host: string, url: string): boolean {
+  try {
+    const own = new URL(host);
+    const target = new URL(url);
+    const domain = domainOf(own.hostname);
+    return (
+      target.protocol === 'https:' &&
+      !target.username &&
+      !target.password &&
+      target.port === own.port &&
+      domain !== undefined &&
+      domainOf(target.hostname) === domain
+    );
+  } catch {
+    return false;
+  }
+}
+
 const ID_PART = /^[A-Za-z0-9_.-]{1,128}$/;
 const TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
 
 function idPart(label: string, value: string): string {
-  if (!ID_PART.test(value)) throw new Error(`The Lakebase ${label} is not a valid name`);
+  // a name made only of dots would move the path (`..`)
+  if (!ID_PART.test(value) || /^\.+$/.test(value))
+    throw new Error(`The Lakebase ${label} is not a valid name`);
   return value;
 }
 
-/** the numeric id of the credential's workspace, which the Data API path holds */
-async function workspaceId(ctx: LakebaseContext, itemIndex: number, host: string): Promise<string> {
-  const res = await lakebaseRequest<{ workspace_id?: unknown }>(ctx, itemIndex, {
+/**
+ * The Data API base of one branch, `https://<read-write endpoint host>/api/2.0/workspace/<workspace id>/rest`: the
+ * endpoint host comes from the branch's compute endpoints, the workspace id from the `x-databricks-org-id` header.
+ */
+async function restBase(
+  ctx: LakebaseContext,
+  itemIndex: number,
+  host: string,
+  project: string,
+  branch: string,
+): Promise<string> {
+  const res = await lakebaseRequest<
+    HttpFullResponse<{
+      endpoints?: Array<{ status?: { endpoint_type?: string; hosts?: { host?: string } } }>;
+    }>
+  >(ctx, itemIndex, {
     method: 'GET',
-    url: `${host}/api/2.1/unity-catalog/current-metastore-assignment`,
+    url: `${host}/api/2.0/postgres/projects/${encodeURIComponent(project)}/branches/${encodeURIComponent(branch)}/endpoints`,
+    headers: { accept: 'application/json' },
+    returnFullResponse: true,
   });
-  const id = res?.workspace_id;
-  if ((typeof id !== 'number' && typeof id !== 'string') || !/^\d{1,20}$/.test(String(id))) {
-    throw new Error('Could not read the workspace id of the Databricks host');
+  const endpointHost = res?.body?.endpoints?.find(
+    (e) => e.status?.endpoint_type === 'ENDPOINT_TYPE_READ_WRITE',
+  )?.status?.hosts?.host;
+  if (!endpointHost) throw new Error('The branch has no read-write compute endpoint');
+  const base = `https://${endpointHost}`;
+  // the bearer token goes to this host, so it must be a plain host name of the credential's Databricks domain
+  if (typeof endpointHost !== 'string' || !HOSTNAME.test(endpointHost) || !onEndpointHost(host, `${base}/`)) {
+    throw new Error('Databricks returned an unexpected Lakebase endpoint host');
   }
-  return String(id);
+  const id = headerOf(res?.headers, 'x-databricks-org-id');
+  if (typeof id !== 'string' || !/^\d{1,20}$/.test(id))
+    throw new Error('Could not read the workspace ID from Databricks');
+  return `${base}/api/2.0/workspace/${id}/rest`;
 }
 
-/** the Data API URL of one table for the credential of item `itemIndex` */
+/** the Data API URL of one table: project and branch pick the compute endpoint, so branches never share data */
 export async function lakebaseTableUrl(
   ctx: LakebaseContext,
   itemIndex: number,
@@ -145,11 +203,13 @@ export async function lakebaseTableUrl(
       'The Lakebase table name may hold letters, digits and underscores, and may not start with a digit',
     );
   }
+  const project = idPart('project', target.project);
+  const branch = idPart('branch', target.branch);
   const database = encodeURIComponent(idPart('database', target.database));
   const schema = encodeURIComponent(idPart('schema', target.schema));
   const host = await credentialHost(ctx, itemIndex);
-  const id = await workspaceId(ctx, itemIndex, host);
-  return `${host}/api/2.0/workspace/${id}/rest/${database}/${schema}/${encodeURIComponent(target.table)}`;
+  const base = await restBase(ctx, itemIndex, host, project, branch);
+  return `${base}/${database}/${schema}/${encodeURIComponent(target.table)}`;
 }
 
 function headerOf(headers: Record<string, string> | undefined, name: string): string | undefined {
