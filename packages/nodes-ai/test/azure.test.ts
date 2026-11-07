@@ -239,8 +239,9 @@ describe('Microsoft Foundry chat', () => {
     expect(r.output('Agent')).toEqual([{ output: '42' }]);
     const [req] = http.requests;
     expect(req.url).toBe('https://res1.services.ai.azure.com/anthropic/v1/messages');
-    expect(req.headers?.['api-key']).toBe(KEY);
     expect(req.headers?.['x-api-key']).toBe(KEY);
+    expect(req.headers?.['api-key']).toBeUndefined();
+    expect(req.headers?.authorization).toBeUndefined();
     expect(req.headers?.['anthropic-version']).toBeTruthy();
     expect(req.body).toMatchObject({ model: 'claude-prod', max_tokens: 500 });
   });
@@ -364,6 +365,42 @@ describe('Entra ID', () => {
       CredentialDomainError,
     );
     expect(fake.requests).toHaveLength(0);
+  });
+});
+
+describe('API key request', () => {
+  const sign = (url: string, headers: Record<string, string> = {}) =>
+    applyAuthentication(azureOpenAiApi, FOUNDRY, { url, headers });
+
+  it('follows no redirect: a fetch would carry the key to the next host', async () => {
+    for (const url of [
+      'https://res1.services.ai.azure.com/openai/v1/chat/completions',
+      'https://res1.services.ai.azure.com/anthropic/v1/messages',
+    ]) {
+      expect((await sign(url)).followRedirects).toBe(false);
+    }
+  });
+
+  it('sends one token header: x-api-key for Claude, api-key for the rest', async () => {
+    const preset = { Authorization: 'Bearer other', 'API-KEY': 'other', 'X-Api-Key': 'other' };
+    const claude = await sign('https://res1.services.ai.azure.com/anthropic/v1/messages', preset);
+    expect(claude.headers).toEqual({ 'x-api-key': KEY });
+    const chat = await sign('https://res1.services.ai.azure.com/openai/v1/chat/completions', preset);
+    expect(chat.headers).toEqual({ 'api-key': KEY });
+  });
+
+  it('Entra ID sends only the bearer token', async () => {
+    const fake = new FakeHttpClient(() => ({ body: { access_token: 'tok-1', expires_in: 3600 } }));
+    const signed = await applyAuthentication(
+      azureEntraCognitiveServicesOAuth2Api,
+      entra(),
+      {
+        url: 'https://res1.services.ai.azure.com/anthropic/v1/messages',
+        headers: { 'x-api-key': 'other', 'api-key': 'other' },
+      },
+      createCredentialHelpers(fake, undefined),
+    );
+    expect(signed.headers).toEqual({ authorization: 'Bearer tok-1' });
   });
 });
 
@@ -557,10 +594,12 @@ describe('deployment list', () => {
   }
 
   const DEPLOYMENTS = [
-    { name: 'gpt-4o-prod', modelName: 'gpt-4o', modelPublisher: 'OpenAI' },
-    { name: 'embed-3', modelName: 'text-embedding-3-small', modelPublisher: 'OpenAI' },
-    { name: 'claude-prod', modelName: 'claude-sonnet-5-5', modelPublisher: 'Anthropic' },
-    { name: 'gpt-mini', modelName: 'gpt-4o-mini', modelPublisher: 'OpenAI' },
+    { name: 'gpt-4o-prod', modelName: 'gpt-4o', capabilities: { chat_completion: 'true' } },
+    { name: 'embed-3', modelName: 'text-embedding-3-small', capabilities: { embeddings: 'true' } },
+    { name: 'claude-prod', modelName: 'claude-sonnet-5-5', capabilities: { chat_completion: true } },
+    { name: 'gpt-mini', modelName: 'gpt-4o-mini', capabilities: { chatCompletion: 'True' } },
+    { name: 'audio-1', modelName: 'gpt-audio', capabilities: { chat_completion: 'false' } },
+    { name: 'no-caps', modelName: 'gpt-x' },
   ];
 
   it('lists the chat deployments of the project, filtered by name', async () => {
@@ -569,22 +608,25 @@ describe('deployment list', () => {
     const search = chat.methods!.listSearch!.searchDeployments;
     const ctx = listContext(chat, { azureOpenAiApi: FOUNDRY }, http);
     expect((await search(ctx)).results).toEqual([
-      { name: 'gpt-4o-prod', value: 'gpt-4o-prod' },
-      { name: 'gpt-mini', value: 'gpt-mini' },
+      { name: 'claude-prod (claude-sonnet-5-5)', value: 'claude-prod' },
+      { name: 'gpt-4o-prod (gpt-4o)', value: 'gpt-4o-prod' },
+      { name: 'gpt-mini (gpt-4o-mini)', value: 'gpt-mini' },
     ]);
-    expect((await search(ctx, 'MINI')).results).toEqual([{ name: 'gpt-mini', value: 'gpt-mini' }]);
+    expect((await search(ctx, 'MINI')).results).toEqual([
+      { name: 'gpt-mini (gpt-4o-mini)', value: 'gpt-mini' },
+    ]);
     expect(http.requests[0].url).toBe('https://res1.services.ai.azure.com/api/projects/proj1/deployments');
     expect(http.requests[0].qs).toEqual({ 'api-version': 'v1' });
     expect(http.requests[0].headers?.['api-key']).toBe(KEY);
   });
 
-  it('lists Claude deployments for the Anthropic family and embedding deployments for the embeddings node', async () => {
+  it('lists the same chat deployments for both families, and embedding deployments for the embeddings node', async () => {
     const http = new FakeHttpClient(() => ({ body: { value: DEPLOYMENTS } }));
     const chat = nodeTypes.get('ai.lmChatAzureOpenAi')!;
     const claude = await chat.methods!.listSearch!.searchDeployments(
       listContext(chat, { azureOpenAiApi: FOUNDRY }, http, { modelFamily: 'anthropic' }),
     );
-    expect(claude.results.map((r) => r.value)).toEqual(['claude-prod']);
+    expect(claude.results.map((r) => r.value)).toEqual(['claude-prod', 'gpt-4o-prod', 'gpt-mini']);
     const embeddings = nodeTypes.get('ai.embeddingsAzureOpenAi')!;
     const embed = await embeddings.methods!.listSearch!.searchDeployments(
       listContext(embeddings, { azureOpenAiApi: FOUNDRY }, http),

@@ -136,7 +136,9 @@ const endpointProperties = (): NodeProperty[] => [
   },
 ];
 
-/** the request without any authorization header, whatever its case */
+const TOKEN_HEADERS = ['authorization', 'api-key', 'x-api-key'];
+
+/** the request's headers without the named ones, whatever their case */
 function withoutHeaders(request: HttpRequestOptions, names: string[]): Record<string, string | string[]> {
   return Object.fromEntries(
     Object.entries(request.headers ?? {}).filter(([name]) => !names.includes(name.toLowerCase())),
@@ -177,14 +179,15 @@ export const azureOpenAiApi: CredentialType = {
     const key = text(credentials.apiKey);
     if (!key) throw new Error('The API key is empty');
     const url = assertOwnHost(target, request);
-    // Claude on Foundry reads `x-api-key`; every other path reads `api-key`
+    // Claude on Foundry reads `x-api-key`; every other path reads `api-key`. One token header goes, as n8n.
     const claude = url.pathname.startsWith('/anthropic/');
     return {
       ...request,
+      // a redirect to another host would carry the key: a fetch drops only `authorization` on the way
+      followRedirects: false,
       headers: {
-        ...withoutHeaders(request, ['api-key', 'x-api-key']),
-        'api-key': key,
-        ...(claude ? { 'x-api-key': key } : {}),
+        ...withoutHeaders(request, TOKEN_HEADERS),
+        ...(claude ? { 'x-api-key': key } : { 'api-key': key }),
       },
     };
   },
@@ -237,7 +240,7 @@ export const azureEntraCognitiveServicesOAuth2Api: CredentialType = {
     );
     return {
       ...request,
-      headers: { ...withoutHeaders(request, ['authorization']), authorization: `Bearer ${token}` },
+      headers: { ...withoutHeaders(request, TOKEN_HEADERS), authorization: `Bearer ${token}` },
     };
   },
 };

@@ -92,20 +92,20 @@ export function readAzureTarget(ctx: SupplyDataContext, credentials: DataObject)
 interface FoundryDeployment {
   name?: string;
   modelName?: string;
-  modelPublisher?: string;
   capabilities?: Record<string, unknown>;
 }
 
 /** what a deployment list should show */
-export type DeploymentKind = 'openai' | 'anthropic' | 'embeddings';
+export type DeploymentKind = 'chat' | 'embeddings';
 
+/** A capability is a string or a boolean. Azure reports no family, so the chat list holds every family, as n8n. */
 function matchesKind(d: FoundryDeployment, kind: DeploymentKind): boolean {
-  const model = `${d.modelName ?? ''} ${d.name ?? ''}`;
-  const claude = /anthropic/i.test(d.modelPublisher ?? '') || /claude/i.test(model);
-  const embeds = /embed/i.test(model) || String(d.capabilities?.embeddings) === 'true';
-  if (kind === 'anthropic') return claude;
-  if (kind === 'embeddings') return embeds;
-  return !claude && !embeds;
+  if (kind === 'embeddings') {
+    const model = `${d.modelName ?? ''} ${d.name ?? ''}`;
+    return /embed/i.test(model) || String(d.capabilities?.embeddings) === 'true';
+  }
+  const chat = d.capabilities?.chat_completion ?? d.capabilities?.chatCompletion;
+  return chat === true || (typeof chat === 'string' && chat.toLowerCase() === 'true');
 }
 
 /** the deployments of the Foundry project; only the credential's own host is ever called */
@@ -124,7 +124,7 @@ export async function listDeployments(
   }
   if (target.kind !== 'foundry' || !target.project) throw new Error(LIST_NEEDS_FOUNDRY);
   const first = `${target.origin}/api/projects/${encodeURIComponent(target.project)}/deployments`;
-  const names = new Set<string>();
+  const labels = new Map<string, string>();
   let url: string | undefined = first;
   for (let page = 0; url && page < MAX_DEPLOYMENT_PAGES; page++) {
     const response = (await ctx.helpers.httpRequestWithAuthentication(authentication, {
@@ -132,7 +132,10 @@ export async function listDeployments(
       ...(page === 0 ? { qs: { 'api-version': DEPLOYMENTS_API_VERSION } } : {}),
     })) as { value?: FoundryDeployment[]; nextLink?: string };
     for (const d of response.value ?? []) {
-      if (typeof d?.name === 'string' && d.name && matchesKind(d, kind)) names.add(d.name);
+      if (typeof d?.name === 'string' && d.name && matchesKind(d, kind)) {
+        const model = typeof d.modelName === 'string' ? d.modelName : '';
+        labels.set(d.name, model ? `${d.name} (${model})` : d.name);
+      }
     }
     // a next link is the server's word: follow it only on the same host
     url = undefined;
@@ -147,10 +150,10 @@ export async function listDeployments(
   }
   const needle = filter?.trim().toLowerCase();
   return {
-    results: [...names]
-      .filter((n) => !needle || n.toLowerCase().includes(needle))
-      .sort((a, b) => a.localeCompare(b))
-      .map((n) => ({ name: n, value: n })),
+    results: [...labels]
+      .filter(([value]) => !needle || value.toLowerCase().includes(needle))
+      .map(([value, name]) => ({ name, value }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
   };
 }
 
@@ -378,8 +381,7 @@ export const LmChatAzureOpenAiNode: NodeType = {
   methods: {
     listSearch: {
       async searchDeployments(ctx, filter) {
-        const family = ctx.getCurrentNodeParameter('modelFamily') === 'anthropic' ? 'anthropic' : 'openai';
-        return listDeployments(ctx, family, filter);
+        return listDeployments(ctx, 'chat', filter);
       },
     },
   },
