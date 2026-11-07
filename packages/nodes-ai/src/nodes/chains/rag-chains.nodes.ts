@@ -1,8 +1,10 @@
 /** Summarization (map-reduce / refine / stuff) and Retrieval Q&A; the retrievers are in nodes/retrievers. */
 import {
   type AiChatModel,
+  type AiDocumentLoader,
   type AiDocument,
   type DataObject,
+  type ExecuteContext,
   type Item,
   NodeOperationError,
   type NodeType,
@@ -10,6 +12,7 @@ import {
 import {
   documentsToContext,
   getChatModel,
+  getDocumentLoader,
   getPrompt,
   getRetriever,
   getTextSplitter,
@@ -18,6 +21,7 @@ import {
   promptTypeProperty,
 } from '../../shared/ai-inputs';
 import { batchingOption, runInBatches } from '../../shared/batching';
+import { fileToSources } from '../../shared/file-text';
 import { splitRecursively } from '../../shared/text-splitting';
 import { errorMessage, fillTemplate, mapLimit, messageText } from '../../shared/utils';
 
@@ -27,14 +31,19 @@ const MODEL_INPUT = {
   required: true,
   maxConnections: 1,
 };
+const DOCUMENT_INPUT = {
+  type: 'ai_document' as const,
+  displayName: 'Document',
+  required: true,
+  maxConnections: 1,
+};
+const SPLITTER_INPUT = { type: 'ai_textSplitter' as const, displayName: 'Text Splitter', maxConnections: 1 };
 
 // ---------------------------------------------------------------------------------------------
 // Summarization
 // ---------------------------------------------------------------------------------------------
 
 export const MAP_PROMPT = 'Write a concise summary of the following:\n\n"{text}"\n\nCONCISE SUMMARY:';
-export const COMBINE_PROMPT =
-  'The following are summaries of parts of one text. Combine them into one concise, coherent summary:\n\n"{text}"\n\nCONCISE SUMMARY:';
 export const REFINE_PROMPT =
   'Your job is to produce a final summary.\nWe have provided an existing summary up to a certain point: "{existing_answer}"\nWe have the opportunity to refine the existing summary (only if needed) with some more context below.\n------------\n"{text}"\n------------\nGiven the new context, refine the original summary. If the context is not useful, return the original summary.\n\nREFINED SUMMARY:';
 
@@ -109,6 +118,59 @@ export async function summarize(
   );
 }
 
+const SUMMARY_INPUTS = `={{ ['main', ${JSON.stringify(MODEL_INPUT)}, ...(($parameter.operationMode ?? 'nodeInputJson') === 'documentLoader' ? [${JSON.stringify(DOCUMENT_INPUT)}] : []), ...(($parameter.operationMode ?? 'nodeInputJson') !== 'documentLoader' && $parameter.chunkingMode === 'advanced' ? [${JSON.stringify(SPLITTER_INPUT)}] : [])] }}`;
+
+const NOT_DOCUMENT_LOADER = { operationMode: ['nodeInputJson', 'nodeInputBinary'] };
+
+/** the texts to summarize for one item, one per chunk */
+async function summaryChunks(
+  ctx: ExecuteContext,
+  items: Item[],
+  i: number,
+  mode: string,
+  chunking: { size: number; overlap: number },
+  options: DataObject,
+): Promise<string[]> {
+  if (mode === 'documentLoader') {
+    const loader = await getDocumentLoader(ctx, i);
+    const documents = await loader!.load([items[i] as Parameters<AiDocumentLoader['load']>[0][number]]);
+    return documents.map((d) => d.pageContent).filter((text) => text.trim() !== '');
+  }
+  let text: string;
+  if (mode === 'nodeInputBinary') {
+    const key = String(options.binaryDataKey ?? 'data') || 'data';
+    const binary = items[i].binary?.[key];
+    if (!binary) {
+      throw new NodeOperationError(ctx.getNode(), `The item has no binary property "${key}"`, {
+        itemIndex: i,
+      });
+    }
+    const bytes = binary.id
+      ? await ctx.helpers.getBinaryDataBuffer(i, key)
+      : Buffer.from(binary.data ?? '', 'base64');
+    const sources = await fileToSources(
+      ctx,
+      i,
+      { bytes, mimeType: binary.mimeType, fileName: binary.fileName },
+      { loader: 'auto', splitPages: false },
+    );
+    text = sources.map((source) => source.text).join('\n\n');
+  } else {
+    const value = ctx.getNodeParameter('text', i, '');
+    text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  }
+  if (!text.trim())
+    throw new NodeOperationError(ctx.getNode(), 'The text to summarize is empty', { itemIndex: i });
+  if (ctx.getNodeParameter('chunkingMode', i, 'simple') === 'advanced') {
+    const splitter = await getTextSplitter(ctx, i, true);
+    return splitter!.split(text);
+  }
+  return splitRecursively(text, {
+    chunkSize: chunking.size,
+    chunkOverlap: Math.min(chunking.overlap, chunking.size - 1),
+  });
+}
+
 export const ChainSummarizationNode: NodeType = {
   description: {
     name: 'ai.chainSummarization',
@@ -118,15 +180,35 @@ export const ChainSummarizationNode: NodeType = {
     group: ['transform'],
     version: 1,
     defaults: { name: 'Summarization Chain' },
-    inputs: [
-      'main',
-      MODEL_INPUT,
-      { type: 'ai_textSplitter', displayName: 'Text Splitter', maxConnections: 1 },
-    ],
+    inputs: SUMMARY_INPUTS,
     outputs: ['main'],
     categories: ['AI', 'Chains'],
     alias: ['summary', 'summarize', 'tl;dr', 'condense'],
     properties: [
+      {
+        displayName: 'Data to Summarize',
+        name: 'operationMode',
+        type: 'options',
+        default: 'nodeInputJson',
+        noDataExpression: true,
+        options: [
+          {
+            name: 'Use Node Input (JSON)',
+            value: 'nodeInputJson',
+            description: 'Summarize the text of the Text field',
+          },
+          {
+            name: 'Use Node Input (Binary)',
+            value: 'nodeInputBinary',
+            description: 'Summarize the text of a file in the item',
+          },
+          {
+            name: 'Use Document Loader',
+            value: 'documentLoader',
+            description: 'Summarize the documents of a connected document loader',
+          },
+        ],
+      },
       {
         displayName: 'Text',
         name: 'text',
@@ -134,21 +216,37 @@ export const ChainSummarizationNode: NodeType = {
         default: '={{ $json.text }}',
         typeOptions: { rows: 2 },
         description: 'Text to summarize',
+        displayOptions: { show: { operationMode: ['nodeInputJson'] } },
       },
       {
-        displayName: 'Summarization Method',
-        name: 'summarizationMethod',
+        displayName: 'Chunking Strategy',
+        name: 'chunkingMode',
         type: 'options',
-        default: 'mapReduce',
+        default: 'simple',
+        noDataExpression: true,
+        displayOptions: { show: NOT_DOCUMENT_LOADER },
         options: [
-          {
-            name: 'Map Reduce (Recommended)',
-            value: 'mapReduce',
-            description: 'Summarize chunks in parallel, then combine',
-          },
-          { name: 'Refine', value: 'refine', description: 'Improve a running summary chunk by chunk' },
-          { name: 'Stuff', value: 'stuff', description: 'One call with the whole text (short texts only)' },
+          { name: 'Simple (Define Below)', value: 'simple' },
+          { name: 'Advanced', value: 'advanced', description: 'Use a connected Text Splitter' },
         ],
+      },
+      {
+        displayName: 'Characters Per Chunk',
+        name: 'chunkSize',
+        type: 'number',
+        default: 1000,
+        typeOptions: { minValue: 1 },
+        description: 'Characters per chunk',
+        displayOptions: { show: { ...NOT_DOCUMENT_LOADER, chunkingMode: ['simple'] } },
+      },
+      {
+        displayName: 'Chunk Overlap (Characters)',
+        name: 'chunkOverlap',
+        type: 'number',
+        default: 200,
+        typeOptions: { minValue: 0 },
+        description: 'Characters shared between neighbouring chunks',
+        displayOptions: { show: { ...NOT_DOCUMENT_LOADER, chunkingMode: ['simple'] } },
       },
       {
         displayName: 'Options',
@@ -158,33 +256,87 @@ export const ChainSummarizationNode: NodeType = {
         placeholder: 'Add option',
         options: [
           {
-            displayName: 'Chunk Size',
-            name: 'chunkSize',
-            type: 'number',
-            default: 4000,
-            description: 'Characters per chunk when no text splitter is connected',
-          },
-          { displayName: 'Chunk Overlap', name: 'chunkOverlap', type: 'number', default: 200 },
-          {
-            displayName: 'Summary Prompt',
-            name: 'mapPrompt',
+            displayName: 'Input Data Field Name',
+            name: 'binaryDataKey',
             type: 'string',
-            default: MAP_PROMPT,
-            typeOptions: { rows: 4 },
+            default: 'data',
+            description: 'The name of the binary property that holds the file',
+            displayOptions: { show: { '/operationMode': ['nodeInputBinary'] } },
           },
           {
-            displayName: 'Combine Prompt',
-            name: 'combinePrompt',
-            type: 'string',
-            default: COMBINE_PROMPT,
-            typeOptions: { rows: 4 },
-          },
-          {
-            displayName: 'Refine Prompt',
-            name: 'refinePrompt',
-            type: 'string',
-            default: REFINE_PROMPT,
-            typeOptions: { rows: 6 },
+            displayName: 'Summarization Method and Prompts',
+            name: 'summarizationMethodAndPrompts',
+            type: 'fixedCollection',
+            default: { values: { summarizationMethod: 'mapReduce' } },
+            placeholder: 'Add Option',
+            options: [
+              {
+                displayName: 'Values',
+                name: 'values',
+                values: [
+                  {
+                    displayName: 'Summarization Method',
+                    name: 'summarizationMethod',
+                    type: 'options',
+                    default: 'mapReduce',
+                    options: [
+                      {
+                        name: 'Map Reduce (Recommended)',
+                        value: 'mapReduce',
+                        description: 'Summarize chunks in parallel, then combine',
+                      },
+                      {
+                        name: 'Refine',
+                        value: 'refine',
+                        description: 'Improve a running summary chunk by chunk',
+                      },
+                      {
+                        name: 'Stuff',
+                        value: 'stuff',
+                        description: 'One call with the whole text (short texts only)',
+                      },
+                    ],
+                  },
+                  {
+                    displayName: 'Individual Summary Prompt',
+                    name: 'combineMapPrompt',
+                    type: 'string',
+                    default: MAP_PROMPT,
+                    typeOptions: { rows: 4 },
+                    description: 'Prompt for the summary of one chunk. Uses {text}.',
+                    displayOptions: { show: { summarizationMethod: ['mapReduce'] } },
+                  },
+                  {
+                    displayName: 'Final Prompt to Combine',
+                    name: 'prompt',
+                    type: 'string',
+                    default: MAP_PROMPT,
+                    typeOptions: { rows: 4 },
+                    description:
+                      'Prompt that combines the summaries, or summarizes all text at once. Uses {text}.',
+                    displayOptions: { show: { summarizationMethod: ['mapReduce', 'stuff'] } },
+                  },
+                  {
+                    displayName: 'Initial Prompt',
+                    name: 'refineQuestionPrompt',
+                    type: 'string',
+                    default: MAP_PROMPT,
+                    typeOptions: { rows: 4 },
+                    description: 'Prompt for the first chunk. Uses {text}.',
+                    displayOptions: { show: { summarizationMethod: ['refine'] } },
+                  },
+                  {
+                    displayName: 'Subsequent (Refine) Prompt',
+                    name: 'refinePrompt',
+                    type: 'string',
+                    default: REFINE_PROMPT,
+                    typeOptions: { rows: 6 },
+                    description: 'Prompt for each later chunk. Uses {existing_answer} and {text}.',
+                    displayOptions: { show: { summarizationMethod: ['refine'] } },
+                  },
+                ],
+              },
+            ],
           },
           {
             displayName: 'Parallel Requests',
@@ -192,50 +344,78 @@ export const ChainSummarizationNode: NodeType = {
             type: 'number',
             default: 4,
             typeOptions: { minValue: 1, maxValue: 16 },
+            description: 'Chunk summaries asked at the same time (Map Reduce)',
           },
+          batchingOption(1),
         ],
       },
     ],
   },
   async execute(ctx) {
     const items = ctx.getInputData();
-    const out: Item[] = [];
-    for (let i = 0; i < items.length; i++) {
-      try {
-        const value = ctx.getNodeParameter('text', i, '');
-        const text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
-        if (!text.trim())
-          throw new NodeOperationError(ctx.getNode(), 'The text to summarize is empty', { itemIndex: i });
+    const options0 = ctx.getNodeParameter('options', 0, {}) as DataObject;
+    const batching = (options0.batching ?? {}) as DataObject;
+    const size = Number(batching.batchSize ?? 1);
+    const delay = Number(batching.delayBetweenBatches ?? 0);
+    const settled = await runInBatches(
+      items.length,
+      {
+        batchSize: Number.isFinite(size) && size >= 1 ? Math.floor(size) : 1,
+        delayMs: Number.isFinite(delay) && delay > 0 ? delay : 0,
+        signal: ctx.signal,
+        // without continue-on-fail, a failed item ends the node once its batch is done
+        stopOnFailure: !ctx.continueOnFail(),
+      },
+      async (i): Promise<Item> => {
         const options = ctx.getNodeParameter('options', i, {}) as DataObject;
-        const chunkSize = Number(options.chunkSize ?? 4000);
-        const splitter = await getTextSplitter(ctx, i);
-        const chunks = splitter
-          ? await splitter.split(text)
-          : splitRecursively(text, {
-              chunkSize,
-              chunkOverlap: Math.min(Number(options.chunkOverlap ?? 200), chunkSize - 1),
-            });
+        const mode = String(ctx.getNodeParameter('operationMode', i, 'nodeInputJson'));
+        const chunkSize = Math.max(1, Number(ctx.getNodeParameter('chunkSize', i, 1000)) || 1000);
+        const chunkOverlap = Math.max(0, Number(ctx.getNodeParameter('chunkOverlap', i, 200)) || 0);
+        const chunks = await summaryChunks(
+          ctx,
+          items,
+          i,
+          mode,
+          { size: chunkSize, overlap: chunkOverlap },
+          options,
+        );
+        const chosen = ((options.summarizationMethodAndPrompts as DataObject | undefined)?.values ??
+          {}) as DataObject;
+        const method = (chosen.summarizationMethod ?? 'mapReduce') as SummarizeOptions['method'];
+        const prompt = String(chosen.prompt ?? MAP_PROMPT);
         const model = await getChatModel(ctx, i);
         const summary = await summarize(model, chunks, {
-          method:
-            (ctx.getNodeParameter('summarizationMethod', i, 'mapReduce') as SummarizeOptions['method']) ??
-            'mapReduce',
+          method,
           chunkSize,
-          mapPrompt: String(options.mapPrompt ?? MAP_PROMPT),
-          combinePrompt: String(options.combinePrompt ?? COMBINE_PROMPT),
-          refinePrompt: String(options.refinePrompt ?? REFINE_PROMPT),
+          // the engine's first-call prompt: per chunk (map), the whole text (stuff), the first chunk (refine)
+          mapPrompt: String(
+            method === 'stuff'
+              ? prompt
+              : method === 'refine'
+                ? (chosen.refineQuestionPrompt ?? MAP_PROMPT)
+                : (chosen.combineMapPrompt ?? MAP_PROMPT),
+          ),
+          combinePrompt: prompt,
+          refinePrompt: String(chosen.refinePrompt ?? REFINE_PROMPT),
           concurrency: Number(options.concurrency ?? 4),
           signal: ctx.signal,
         });
-        out.push({ json: { text: summary, chunks: chunks.length }, pairedItem: { item: i } });
-      } catch (error) {
-        if (!ctx.continueOnFail()) throw error;
-        out.push({
-          json: { error: errorMessage(error) },
-          error: { message: errorMessage(error) },
-          pairedItem: { item: i },
-        });
+        return { json: { response: { output_text: summary } }, pairedItem: { item: i } };
+      },
+    );
+    const out: Item[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const result = settled[i];
+      if (result.status === 'fulfilled') {
+        out.push(result.value);
+        continue;
       }
+      if (!ctx.continueOnFail()) throw result.reason;
+      out.push({
+        json: { error: errorMessage(result.reason) },
+        error: { message: errorMessage(result.reason) },
+        pairedItem: { item: i },
+      });
     }
     return [out];
   },

@@ -239,11 +239,15 @@ describe('Summarization Chain', () => {
       return reply(prompt.startsWith('Write a concise summary') ? `S${requests.length}` : 'FINAL');
     });
     const r = await chain(
-      node('Sum', 'ai.chainSummarization', { options: { chunkSize: 300, chunkOverlap: 0 } }),
+      node('Sum', 'ai.chainSummarization', {
+        chunkSize: 300,
+        chunkOverlap: 0,
+        options: { summarizationMethodAndPrompts: { values: { prompt: 'Combine these: {text}' } } },
+      }),
       [{ text: long }],
     );
     expect(r.status).toBe('success');
-    expect(r.output('Sum')).toEqual([{ text: 'FINAL', chunks: 6 }]);
+    expect(r.output('Sum')).toEqual([{ response: { output_text: 'FINAL' } }]);
     expect(requests).toHaveLength(7); // 6 map calls + 1 combine
     expect(String(requests.at(-1)!.messages[0].content)).toContain('S1');
   });
@@ -252,24 +256,28 @@ describe('Summarization Chain', () => {
     const requests = scriptModel('Model', (_r, call) => reply(`v${call}`));
     const r = await chain(
       node('Sum', 'ai.chainSummarization', {
-        summarizationMethod: 'refine',
-        options: { chunkSize: 300, chunkOverlap: 0 },
+        chunkSize: 300,
+        chunkOverlap: 0,
+        options: { summarizationMethodAndPrompts: { values: { summarizationMethod: 'refine' } } },
       }),
       [{ text: long }],
     );
-    expect(r.output('Sum')).toEqual([{ text: 'v5', chunks: 6 }]);
+    expect(r.output('Sum')).toEqual([{ response: { output_text: 'v5' } }]);
     expect(String(requests[1].messages[0].content)).toContain('existing summary up to a certain point: "v0"');
   });
 
   it('uses a connected text splitter', async () => {
     scriptModel('Model', (_r, call) => reply(`p${call}`));
     const r = await chain(
-      node('Sum', 'ai.chainSummarization', { summarizationMethod: 'stuff' }),
+      node('Sum', 'ai.chainSummarization', {
+        chunkingMode: 'advanced',
+        options: { summarizationMethodAndPrompts: { values: { summarizationMethod: 'stuff' } } },
+      }),
       [{ text: 'a b c d e f' }],
       [node('Splitter', 'ai.textSplitterCharacter', { separator: ' ', chunkSize: 3, chunkOverlap: 0 })],
       [['Splitter', 'Sum', 'ai_textSplitter']],
     );
-    expect(r.output('Sum')).toEqual([{ text: 'p0', chunks: 3 }]);
+    expect(r.output('Sum')).toEqual([{ response: { output_text: 'p0' } }]);
   });
 });
 
