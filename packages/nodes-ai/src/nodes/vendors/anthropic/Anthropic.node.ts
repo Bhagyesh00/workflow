@@ -1,9 +1,20 @@
 /**
- * Anthropic: message, image and document analysis, files and prompt tools on the Anthropic API. Stub with
- * the final name, credential and resource and operation shell; L3 fills it (inputs gain the Tools port
- * through `vendorToolsInput`).
+ * Anthropic: message Claude, analyze images and documents, manage files and generate prompts on the
+ * Anthropic API. The Tools port is on for Message a Model once Hide Tools is set to Show.
  */
 import type { NodeType } from '@workflow/workflow';
+import { eachVendorItem } from '../shared/messages';
+import { vendorToolsInput } from '../shared/tool-loop';
+import { analyzeProperties, executeAnalyze } from './analyze';
+import { executeFile, fileProperties } from './file';
+import {
+  executeMessage,
+  messageProperties,
+  searchFiles,
+  searchModels,
+  TEXT_TOOLS_CONDITION,
+} from './message';
+import { executePrompt, promptProperties } from './prompt';
 
 export const AnthropicNode: NodeType = {
   description: {
@@ -14,7 +25,7 @@ export const AnthropicNode: NodeType = {
     group: ['transform'],
     version: 1,
     defaults: { name: 'Anthropic' },
-    inputs: ['main'],
+    inputs: vendorToolsInput(TEXT_TOOLS_CONDITION),
     outputs: ['main'],
     credentials: [{ name: 'anthropicApi', required: true }],
     categories: ['AI', 'Vendors'],
@@ -89,10 +100,36 @@ export const AnthropicNode: NodeType = {
           { name: 'Templatize Prompt', value: 'templatize', action: 'Templatize a prompt' },
         ],
       },
+      ...messageProperties,
+      ...analyzeProperties,
+      ...fileProperties,
+      ...promptProperties,
     ],
   },
+  methods: {
+    listSearch: {
+      modelSearch: searchModels,
+      fileSearch: searchFiles,
+    },
+  },
 
-  async execute() {
-    throw new Error('not implemented (L3)');
+  async execute(ctx) {
+    return eachVendorItem(ctx, async (itemIndex) => {
+      const resource = String(ctx.getNodeParameter('resource', itemIndex, 'text'));
+      const operation = String(ctx.getNodeParameter('operation', itemIndex, ''));
+      switch (resource) {
+        case 'text':
+          return executeMessage(ctx, itemIndex, operation);
+        case 'image':
+        case 'document':
+          return executeAnalyze(ctx, itemIndex, resource, operation);
+        case 'file':
+          return executeFile(ctx, itemIndex, operation);
+        case 'prompt':
+          return executePrompt(ctx, itemIndex, operation);
+        default:
+          throw new Error(`The resource "${resource}" is not known`);
+      }
+    });
   },
 };
