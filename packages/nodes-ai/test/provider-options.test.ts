@@ -5,6 +5,10 @@
  */
 import type { DataObject, WorkflowNode } from '@workflow/workflow';
 import { describe, expect, it } from 'vitest';
+import { LmChatAnthropicNode } from '../src/nodes/models/LmChatAnthropic.node';
+import { LmChatOllamaNode } from '../src/nodes/models/LmChatOllama.node';
+import { textCompletionNodes } from '../src/nodes/models/text-completion.nodes';
+import { anthropicSampling } from '../src/providers/anthropic';
 import { connect, FakeHttpClient, node, run, sequence, services } from './harness';
 
 const withCreds = (n: WorkflowNode, type: string): WorkflowNode => ({
@@ -38,15 +42,21 @@ const ANTHROPIC = { anthropicApi: { apiKey: 'ant-test-key', baseUrl: 'https://ap
 const anthropicReply = {
   body: { model: 'claude-sonnet-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: '42' }] },
 };
-const claude = (options: DataObject) =>
-  withCreds(node('Claude', 'ai.lmChatAnthropic', { options }), 'anthropicApi');
+const claude = (options: DataObject, model?: string) =>
+  withCreds(node('Claude', 'ai.lmChatAnthropic', { options, ...(model ? { model } : {}) }), 'anthropicApi');
 
-async function anthropicRequest(options: DataObject, agentOptions: DataObject = {}) {
+async function anthropicRequest(options: DataObject, agentOptions: DataObject = {}, model?: string) {
   const http = new FakeHttpClient(sequence(anthropicReply));
-  const r = await runAgent(claude(options), http, ANTHROPIC, agentOptions);
+  const r = await runAgent(claude(options, model), http, ANTHROPIC, agentOptions);
   expect(r.status).toBe('success');
   return { body: http.bodies[0] as Record<string, any>, request: http.requests[0] };
 }
+
+const claudeOptionList = () =>
+  (LmChatAnthropicNode.description.properties.find((p) => p.name === 'options')?.options ?? []) as Array<{
+    name: string;
+    default: unknown;
+  }>;
 
 describe('Anthropic options', () => {
   it('sends nothing for thinking, top K or top P by default', async () => {
@@ -72,26 +82,93 @@ describe('Anthropic options', () => {
     expect(body.thinking).toEqual({ type: 'adaptive' });
   });
 
+  it('thinking is adaptive when the mode is left alone, and the node shows that default', async () => {
+    const { body } = await anthropicRequest({ thinking: true });
+    expect(body.thinking).toEqual({ type: 'adaptive' });
+    const options = claudeOptionList();
+    expect(options.find((o) => o.name === 'thinkingMode')?.default).toBe('adaptive');
+  });
+
   it('floors the budget at 1024 and sends nothing when thinking is off', async () => {
-    expect((await anthropicRequest({ thinking: true, thinkingBudget: 10 })).body.thinking).toEqual({
+    expect(
+      (await anthropicRequest({ thinking: true, thinkingMode: 'budget', thinkingBudget: 10 })).body.thinking,
+    ).toEqual({
       type: 'enabled',
       budget_tokens: 1024,
     });
     expect((await anthropicRequest({ thinking: false, thinkingBudget: 4000 })).body.thinking).toBeUndefined();
   });
 
-  it('sends top K and top P, and leaves a top K of -1 out', async () => {
-    const { body } = await anthropicRequest({ topK: 20, topP: 0.9 });
+  it('leaves top K and top P out on the default model and keeps the current API version', async () => {
+    const { body, request } = await anthropicRequest({ topK: 20, topP: 0.9 });
+    expect(body.top_k).toBeUndefined();
+    expect(body.top_p).toBeUndefined();
+    expect(request.headers?.['anthropic-version']).toBe('2026-10-21');
+  });
+
+  it('sends top K and top P to a model that takes them, on the older API version', async () => {
+    const { body, request } = await anthropicRequest({ topK: 20, topP: 0.9 }, {}, 'claude-sonnet-4-6');
     expect(body.top_k).toBe(20);
     expect(body.top_p).toBe(0.9);
-    expect((await anthropicRequest({ topK: -1 })).body.top_k).toBeUndefined();
+    expect(request.headers?.['anthropic-version']).toBe('2023-06-01');
+  });
+
+  it('thinking on sends neither field and keeps the current API version', async () => {
+    const { body, request } = await anthropicRequest(
+      { topK: 20, topP: 0.9, thinking: true, thinkingMode: 'budget' },
+      {},
+      'claude-sonnet-4-6',
+    );
+    expect(body.top_k).toBeUndefined();
+    expect(body.top_p).toBeUndefined();
+    expect(request.headers?.['anthropic-version']).toBe('2026-10-21');
+  });
+
+  it('a top K of -1 alone sends nothing and keeps the current API version', async () => {
+    const { body, request } = await anthropicRequest({ topK: -1 }, {}, 'claude-sonnet-4-6');
+    expect(body.top_k).toBeUndefined();
+    expect(request.headers?.['anthropic-version']).toBe('2026-10-21');
+  });
+
+  it.each([
+    ['my-gateway-model', true],
+    ['claude', true],
+    ['claude-2.1', true],
+    ['claude-instant-1.2', true],
+    ['claude-3-5-sonnet-20241022', true],
+    ['claude-sonnet-4-6', true],
+    ['claude-haiku-4-5', true],
+    ['claude-opus-4', true],
+    ['claude-opus-4-20250514', true],
+    ['claude-opus-4-5-20251101', true],
+    ['claude-opus-4-6', true],
+    ['claude-opus-4-7', false],
+    ['claude-opus-4-8', false],
+    ['claude-opus-5-5', false],
+    ['claude-sonnet-5-5', false],
+    ['claude-sonnet-5', false],
+    ['claude-haiku-5-5', false],
+    ['claude-fable-5-1', false],
+  ])('sampling rule: %s takes top P: %s', (model, takes) => {
+    const { fields, version } = anthropicSampling({ model, topP: 0.5 });
+    expect(fields).toEqual(takes ? { top_p: 0.5 } : {});
+    expect(version).toBe(takes ? '2023-06-01' : '2026-10-21');
   });
 
   it('drops the forced tool choice while thinking is on', async () => {
     const forced = { forceToolCallOnFirstIteration: true };
-    expect((await anthropicRequest({}, forced)).body.tool_choice).toEqual({ type: 'any' });
-    expect((await anthropicRequest({ thinking: true }, forced)).body.tool_choice).toBeUndefined();
+    const model = 'claude-opus-4-8';
+    expect((await anthropicRequest({}, forced, model)).body.tool_choice).toEqual({ type: 'any' });
+    expect((await anthropicRequest({ thinking: true }, forced, model)).body.tool_choice).toBeUndefined();
   });
+
+  it.each(['claude-fable-5-1', 'claude-mythos-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5'])(
+    'never forces a tool call on %s, which refuses it',
+    async (model) => {
+      const forced = { forceToolCallOnFirstIteration: true };
+      expect((await anthropicRequest({}, forced, model)).body.tool_choice).toBeUndefined();
+    },
+  );
 
   it('sends the custom header of the credential and no n8n header', async () => {
     const http = new FakeHttpClient(sequence(anthropicReply));
@@ -147,7 +224,7 @@ describe('Ollama options', () => {
     const body = await ollamaBody({
       temperature: 0.3,
       topP: 0.8,
-      maxTokens: 300,
+      numPredict: 300,
       numCtx: 8192,
       keepAlive: '10m',
       topK: 30,
@@ -200,5 +277,45 @@ describe('Ollama options', () => {
 
   it('keeps the default output format out of the request', async () => {
     expect((await ollamaBody({ format: 'default' })).format).toBeUndefined();
+  });
+
+  it('sends a num_predict and a top K of -1 when they are added', async () => {
+    const body = await ollamaBody({ numPredict: -1, topK: -1 });
+    expect(body.options).toEqual({ num_predict: -1, top_k: -1 });
+  });
+
+  it('the chat and the text node show the same options, with the defaults people know', () => {
+    const list = (description: typeof LmChatOllamaNode.description) =>
+      Object.fromEntries(
+        (description.properties.find((p) => p.name === 'options')?.options ?? []).map((o) => {
+          const option = o as { name: string; default: unknown };
+          return [option.name, option.default];
+        }),
+      );
+    const expected = {
+      think: true,
+      temperature: 0.7,
+      topK: -1,
+      topP: 1,
+      frequencyPenalty: 0,
+      keepAlive: '5m',
+      lowVram: false,
+      mainGpu: 0,
+      numBatch: 512,
+      numCtx: 2048,
+      numGpu: -1,
+      numPredict: -1,
+      numThread: 0,
+      penalizeNewline: true,
+      presencePenalty: 0,
+      repeatPenalty: 1,
+      useMLock: false,
+      useMMap: true,
+      vocabOnly: false,
+      format: 'default',
+    };
+    expect(list(LmChatOllamaNode.description)).toEqual(expected);
+    const text = textCompletionNodes.find((n) => n.description.name === 'ai.lmOllama');
+    expect(list(text!.description)).toEqual(expected);
   });
 });

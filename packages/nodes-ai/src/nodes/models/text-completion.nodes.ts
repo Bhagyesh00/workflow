@@ -10,6 +10,7 @@ import { OLLAMA_DEFAULT_BASE_URL, OLLAMA_DEFAULT_MODEL, ollamaAdapter } from '..
 import { openAiAdapter } from '../../providers/openai';
 import { HttpChatModel, readCommonOptions, trimSlash } from '../../shared/chat-model';
 import { listCohereModels } from './LmChatCohere.node';
+import { ollamaOptions, ollamaOptionsConfig } from './LmChatOllama.node';
 import {
   listOpenAiModels,
   maxRetriesOption,
@@ -105,54 +106,7 @@ const LmOllamaNode: NodeType = {
     },
     [
       modelOptionsProperty('model', OLLAMA_DEFAULT_MODEL),
-      collection([
-        temperatureOption,
-        topPOption,
-        {
-          displayName: 'Top K',
-          name: 'topK',
-          type: 'number',
-          default: 40,
-          description: 'Sample from the K most likely next tokens',
-        },
-        maxTokensOption(2048),
-        {
-          displayName: 'Context Window (num_ctx)',
-          name: 'numCtx',
-          type: 'number',
-          default: 4096,
-          typeOptions: { minValue: 256 },
-        },
-        {
-          displayName: 'Keep Alive',
-          name: 'keepAlive',
-          type: 'string',
-          default: '5m',
-          description: 'How long the model stays loaded after the request',
-        },
-        penalty('Frequency Penalty', 'frequencyPenalty', 'Lower the chance of words that were already used often'),
-        penalty('Presence Penalty', 'presencePenalty', 'Lower the chance of words that were already used at all'),
-        {
-          displayName: 'Repeat Penalty',
-          name: 'repeatPenalty',
-          type: 'number',
-          default: 1.1,
-          description: 'How strongly repeated text is penalised',
-        },
-        {
-          displayName: 'Output Format',
-          name: 'format',
-          type: 'options',
-          default: 'default',
-          description: 'JSON makes the model answer with a JSON object',
-          options: [
-            { name: 'Default', value: 'default' },
-            { name: 'JSON', value: 'json' },
-          ],
-        },
-        timeoutOption,
-        maxRetriesOption,
-      ]),
+      collection(ollamaOptions),
     ],
   ),
   async supplyData(ctx, itemIndex) {
@@ -162,16 +116,7 @@ const LmOllamaNode: NodeType = {
     const adapter = ollamaAdapter({
       baseUrl: String(creds.baseUrl || OLLAMA_DEFAULT_BASE_URL),
       model: String(ctx.getNodeParameter('model', itemIndex, OLLAMA_DEFAULT_MODEL)),
-      temperature: common.temperature,
-      topP: common.topP,
-      maxTokens: limit(common.maxTokens),
-      numCtx: num(options.numCtx),
-      keepAlive: options.keepAlive as string | undefined,
-      topK: num(options.topK),
-      frequencyPenalty: num(options.frequencyPenalty),
-      presencePenalty: num(options.presencePenalty),
-      repeatPenalty: num(options.repeatPenalty),
-      format: options.format as string | undefined,
+      ...ollamaOptionsConfig(options),
     });
     return { response: new HttpChatModel(ctx, adapter, { itemIndex, ...common, completion: true }) };
   },
