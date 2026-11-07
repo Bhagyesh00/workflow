@@ -10,6 +10,7 @@ import { nodes } from '../src';
 import { pollTiming } from '../src/nodes/vendors/gemini/operations';
 import { geminiListSearch } from '../src/nodes/vendors/gemini/operations';
 import { GoogleGeminiNode } from '../src/nodes/vendors/gemini/GoogleGemini.node';
+import { replyImages, replyText } from '../src/nodes/vendors/gemini/media';
 import {
   connect,
   type FakeHandler,
@@ -23,7 +24,7 @@ import {
 } from './harness';
 
 const KEY = 'AIzaSyTESTKEY0123456789abcdefghijklmnop';
-const HOST = 'http://gemini.test';
+const HOST = 'https://gemini.test';
 const BASE = `${HOST}/v1beta`;
 
 const calls: DataObject[] = [];
@@ -109,6 +110,9 @@ async function gem(
   const items = (runs[runs.length - 1]?.data?.main?.[0] ?? []) as Item[];
   return { result, fake, out: result.output('Gemini'), items };
 }
+
+/** a candidate as the API gives it, which Simplify Output on returns as one item */
+const candidate = (text: string) => ({ content: { role: 'model', parts: [{ text }] }, finishReason: 'STOP' });
 
 const msg = (content: string, extra: DataObject = {}) => ({
   messages: { values: [{ role: 'user', content, ...extra }] },
@@ -219,7 +223,7 @@ describe('text.message', () => {
         candidateCount: 2,
       },
     });
-    expect(out[0]).toEqual({ output: 'ok' });
+    expect(out).toEqual([candidate('ok')]);
     expect(fake.requests).toHaveLength(1);
     const req = fake.requests[0]!;
     expect(req.url).toBe(`${BASE}/models/gemini-2.5-pro:generateContent`);
@@ -259,25 +263,58 @@ describe('text.message', () => {
     expect(body.generationConfig.responseMimeType).toBeUndefined();
   });
 
-  it('asks for JSON and gives the output as an object', async () => {
+  it('asks for JSON and leaves the answer in the candidate as n8n does', async () => {
     const { fake, out } = await gem(
       { resource: 'text', operation: 'message', ...msg('list'), jsonOutput: true },
-      { handler: () => reply('```json\n{"a":1,"b":[2]}\n```') },
+      { handler: () => reply('{"a":1,"b":[2]}') },
     );
     expect((fake.requests[0]!.body as any).generationConfig.responseMimeType).toBe('application/json');
-    expect(out[0]).toEqual({ output: { a: 1, b: [2] } });
+    expect(out).toEqual([candidate('{"a":1,"b":[2]}')]);
   });
 
-  it('fails clearly on an answer that is not JSON', async () => {
-    const { result } = await gem(
+  it('does not parse the answer, so text that is not JSON is not an error', async () => {
+    const { result, out } = await gem(
       { resource: 'text', operation: 'message', ...msg('list'), jsonOutput: true },
       { handler: () => reply('not json') },
     );
-    expect(result.status).toBe('error');
-    expect(JSON.stringify(result.error)).toContain('did not return valid JSON');
+    expect(result.status).toBe('success');
+    expect(out).toEqual([candidate('not json')]);
   });
 
-  it('returns the whole reply with the merged text when Simplify is off', async () => {
+  it('gives one item per candidate with Simplify on, the merged text inside each candidate', async () => {
+    const two = {
+      body: {
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text: 'a' }, { text: 'b' }] },
+            finishReason: 'STOP',
+            index: 0,
+          },
+          { content: { role: 'model', parts: [{ text: 'c' }] }, finishReason: 'STOP', index: 1 },
+        ],
+        usageMetadata: { promptTokenCount: 4 },
+      },
+    };
+    const plain = await gem(
+      { resource: 'text', operation: 'message', ...msg('hi'), options: { candidateCount: 2 } },
+      { handler: () => two },
+    );
+    expect(plain.out).toHaveLength(2);
+    expect(plain.out[0]).toEqual(two.body.candidates[0]);
+    expect((plain.out[0] as any).mergedResponse).toBeUndefined();
+    expect(plain.out[0]).not.toHaveProperty('usageMetadata');
+    const merged = await gem(
+      { resource: 'text', operation: 'message', ...msg('hi'), options: { includeMergedResponse: true } },
+      { handler: () => two },
+    );
+    expect(merged.out.map((o) => (o as any).mergedResponse)).toEqual(['ab', 'c']);
+    expect(merged.out[0]).toMatchObject({
+      finishReason: 'STOP',
+      content: { parts: [{ text: 'a' }, { text: 'b' }] },
+    });
+  });
+
+  it('returns the whole reply with the merged text inside each candidate when Simplify is off', async () => {
     const { out } = await gem(
       {
         resource: 'text',
@@ -288,8 +325,19 @@ describe('text.message', () => {
       },
       { handler: () => reply('hello') },
     );
-    expect(out[0]).toMatchObject({ mergedResponse: 'hello', usageMetadata: { promptTokenCount: 4 } });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ usageMetadata: { promptTokenCount: 4 } });
+    expect((out[0] as any).mergedResponse).toBeUndefined();
+    expect((out[0] as any).candidates[0].mergedResponse).toBe('hello');
     expect((out[0] as any).candidates[0].content.parts[0].text).toBe('hello');
+    const plain = await gem(
+      { resource: 'text', operation: 'message', ...msg('hi'), simplify: false },
+      { handler: () => reply('hello') },
+    );
+    expect(plain.out[0]).toEqual({
+      candidates: [candidate('hello')],
+      usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2 },
+    });
   });
 
   it('runs a connected tool and sends its result back', async () => {
@@ -315,7 +363,7 @@ describe('text.message', () => {
             : reply('it is found x'),
       },
     );
-    expect(out[0]).toEqual({ output: 'it is found x' });
+    expect(out).toEqual([candidate('it is found x')]);
     expect(calls).toEqual([{ q: 'x' }]);
     expect(fake.requests).toHaveLength(2);
     const first = fake.requests[0]!.body as any;
@@ -393,7 +441,47 @@ describe('text.message', () => {
   });
 });
 
+describe('reply helpers', () => {
+  it('read a reply of any shape without throwing', () => {
+    for (const body of [
+      null,
+      'x',
+      {},
+      { candidates: 'x' },
+      { candidates: [{ content: { parts: 'oops' } }] },
+    ]) {
+      expect(replyText(body)).toBe('');
+      expect(replyImages(body)).toEqual([]);
+    }
+    const body = {
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'hi ' }, { text: 'thought', thought: true }, { text: 'there' }],
+          },
+        },
+      ],
+    };
+    expect(replyText(body)).toBe('hi there');
+  });
+});
+
 describe('analyze operations', () => {
+  it('shows why when a prompt is blocked and no candidate comes back', async () => {
+    const blocked = { promptFeedback: { blockReason: 'SAFETY' }, usageMetadata: { promptTokenCount: 3 } };
+    const { out } = await gem(
+      {
+        resource: 'image',
+        operation: 'analyze',
+        prompt: 'p',
+        inputType: 'binary',
+        binaryPropertyName: 'data',
+      },
+      { items: [{ json: {}, binary: { data: bin('A', 'image/png') } }], handler: () => ({ body: blocked }) },
+    );
+    expect(out).toEqual([blocked]);
+  });
+
   it('image.analyze sends the images inline with the prompt and the 300 token default', async () => {
     const { fake, out } = await gem(
       {
@@ -410,7 +498,7 @@ describe('analyze operations', () => {
         handler: () => reply('a cat'),
       },
     );
-    expect(out[0]).toEqual({ text: 'a cat' });
+    expect(out[0]).toEqual(candidate('a cat'));
     const req = fake.requests[0]!;
     expect(req.url).toBe(`${BASE}/models/gemini-2.5-flash:generateContent`);
     const body = req.body as any;
@@ -472,7 +560,7 @@ describe('analyze operations', () => {
         handler: () => reply('hello there'),
       },
     );
-    expect(out[0]).toEqual({ text: 'hello there' });
+    expect(out[0]).toEqual(candidate('hello there'));
     const parts = (fake.requests[0]!.body as any).contents[0].parts;
     expect(parts[0].inlineData.mimeType).toBe('audio/mpeg');
     expect(parts[1].text).toContain('from 00:10 to 00:40');
@@ -489,7 +577,7 @@ describe('analyze operations', () => {
       },
       { items: [{ json: {}, binary: { data: bin('SND', 'audio/wav') } }], handler: () => reply('calm') },
     );
-    expect(audio.out[0]).toEqual({ text: 'calm' });
+    expect(audio.out[0]).toEqual(candidate('calm'));
     expect((audio.fake.requests[0]!.body as any).contents[0].parts[1].text).toBe('mood?');
     const doc = await gem(
       {
@@ -504,7 +592,7 @@ describe('analyze operations', () => {
         handler: () => reply('short'),
       },
     );
-    expect(doc.out[0]).toEqual({ text: 'short' });
+    expect(doc.out[0]).toEqual(candidate('short'));
     expect((doc.fake.requests[0]!.body as any).contents[0].parts[0].inlineData.mimeType).toBe(
       'application/pdf',
     );
@@ -521,7 +609,7 @@ describe('analyze operations', () => {
       },
       { handler: () => reply('a dance') },
     );
-    expect(out[0]).toEqual({ text: 'a dance' });
+    expect(out[0]).toEqual(candidate('a dance'));
     expect(fake.requests).toHaveLength(1);
     expect((fake.requests[0]!.body as any).contents[0].parts[0]).toEqual({
       fileData: { fileUri: 'https://www.youtube.com/watch?v=abc' },
@@ -580,7 +668,7 @@ describe('analyze operations', () => {
         },
       },
     );
-    expect(out[0]).toEqual({ text: 'a long film' });
+    expect(out[0]).toEqual(candidate('a long film'));
     const last = fake.requests[fake.requests.length - 1]!;
     expect((last.body as any).contents[0].parts[0]).toEqual({
       fileData: { mimeType: 'video/mp4', fileUri: `${HOST}/v1beta/files/f1` },
@@ -614,6 +702,9 @@ describe('image generate and edit', () => {
     expect(req.body).toEqual({ instances: [{ prompt: 'a lighthouse' }], parameters: { sampleCount: 2 } });
     expect(items).toHaveLength(2);
     expect(items[0]!.binary?.pic?.mimeType).toBe('image/png');
+    // n8n puts the details of the file in json, without the data
+    expect(items[0]!.json).toMatchObject({ mimeType: 'image/png', fileName: 'image.png' });
+    expect(items[0]!.json).not.toHaveProperty('data');
     expect(items[1]!.pairedItem).toEqual({ item: 0 });
   });
 
@@ -653,7 +744,9 @@ describe('image generate and edit', () => {
     ]);
     expect(body.generationConfig.responseModalities).toEqual(['TEXT', 'IMAGE']);
     expect(items[0]!.binary?.edited).toBeTruthy();
-    expect(items[0]!.json).toEqual({ text: 'done' });
+    // the details of the file, not the data, as n8n gives them
+    expect(items[0]!.json).toMatchObject({ mimeType: 'image/png', fileName: 'edited.png' });
+    expect(items[0]!.json).not.toHaveProperty('data');
   });
 });
 
@@ -700,6 +793,8 @@ describe('video generate and download', () => {
     expect(download.headers?.['x-goog-api-key']).toBe(KEY);
     expect(download.followRedirects).toBe(false);
     expect(items[0]!.binary?.data?.mimeType).toBe('video/mp4');
+    expect(items[0]!.json).toMatchObject({ mimeType: 'video/mp4' });
+    expect(items[0]!.json).not.toHaveProperty('data');
   });
 
   it('returns only the link when asked', async () => {
@@ -707,7 +802,7 @@ describe('video generate and download', () => {
       { resource: 'video', operation: 'generate', prompt: 'p', options: { returnAs: 'url' } },
       { handler: veo(`${BASE}/files/vid1:download?alt=media`) },
     );
-    expect(out[0]).toEqual({ uri: `${BASE}/files/vid1:download?alt=media` });
+    expect(out[0]).toEqual({ url: `${BASE}/files/vid1:download?alt=media` });
     expect(fake.requests.some((r) => r.url.includes(':download'))).toBe(false);
   });
 
@@ -845,6 +940,15 @@ describe('file upload (resumable)', () => {
     expect(JSON.stringify(finalize.headers ?? {})).not.toContain(KEY);
     expect(finalize.headers).toMatchObject({ 'X-Goog-Upload-Command': 'upload, finalize' });
     expect(finalize.followRedirects).toBe(false);
+  });
+
+  it('sends no key to a plain http upload address on the credential host', async () => {
+    const plain = `http://${new URL(HOST).host}/upload/session/abc`;
+    const { fake } = await gem(params, { items, handler: upload(plain) });
+    const finalize = fake.requests[1]!;
+    expect(finalize.url).toBe(plain);
+    expect(JSON.stringify(finalize.headers ?? {})).not.toContain(KEY);
+    expect(finalize.headers).toMatchObject({ 'X-Goog-Upload-Command': 'upload, finalize' });
   });
 
   it('treats a redirect on the start call as an error and sends no bytes', async () => {

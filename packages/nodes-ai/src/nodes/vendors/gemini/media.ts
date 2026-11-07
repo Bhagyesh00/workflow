@@ -20,6 +20,7 @@ import {
   modelPath,
   pollTiming,
   readModelId,
+  replyItems,
   waitForOperation,
 } from './operations';
 import { uploadFile, waitForFile } from './files';
@@ -36,10 +37,19 @@ type Part = DataObject;
 
 const asString = (value: unknown) => (typeof value === 'string' ? value : '');
 
+interface ReplyBody {
+  candidates?: Array<{ content?: { parts?: unknown } }>;
+}
+
+/** the parts of the first candidate of a generateContent reply; a reply of another shape has none */
+function firstParts(body: unknown): Part[] {
+  const parts = (body as ReplyBody | null | undefined)?.candidates?.[0]?.content?.parts;
+  return Array.isArray(parts) ? (parts as Part[]) : [];
+}
+
 /** the text of a generateContent reply (thought parts left out) */
 export function replyText(body: unknown): string {
-  const parts = ((body as any)?.candidates?.[0]?.content?.parts ?? []) as Part[];
-  return parts
+  return firstParts(body)
     .filter((p) => typeof p.text === 'string' && !p.thought)
     .map((p) => p.text as string)
     .join('');
@@ -47,10 +57,11 @@ export function replyText(body: unknown): string {
 
 /** the images in a generateContent reply */
 export function replyImages(body: unknown): Array<{ bytes: Uint8Array; mimeType: string }> {
-  const parts = ((body as any)?.candidates?.[0]?.content?.parts ?? []) as Array<Record<string, any>>;
   const images: Array<{ bytes: Uint8Array; mimeType: string }> = [];
-  for (const part of parts) {
-    const inline = part.inlineData ?? part.inline_data;
+  for (const part of firstParts(body)) {
+    const inline = (part.inlineData ?? part.inline_data) as
+      | { data?: unknown; mimeType?: unknown; mime_type?: unknown }
+      | undefined;
     if (inline?.data) {
       images.push({
         bytes: new Uint8Array(Buffer.from(String(inline.data), 'base64')),
@@ -59,6 +70,18 @@ export function replyImages(body: unknown): Array<{ bytes: Uint8Array; mimeType:
     }
   }
   return images;
+}
+
+/** a file item as n8n gives it: the file in the binary field and its details (without the data) as json */
+async function mediaItem(
+  ctx: ExecuteContext,
+  itemIndex: number,
+  file: VendorFile,
+  field: string,
+): Promise<Item> {
+  const item = await fileToItem(ctx, itemIndex, file, field);
+  const { data: _data, ...details } = Object.values(item.binary ?? {})[0] ?? {};
+  return { ...item, json: details };
 }
 
 /** `models/<id>:generateContent` */
@@ -130,7 +153,7 @@ async function analyze(
   kind: AnalyzeKind,
   prompt: string,
   defaultModel: string,
-): Promise<Item> {
+): Promise<Item[]> {
   const model = readModelId(ctx, itemIndex, defaultModel);
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
   const parts: Part[] = [];
@@ -165,11 +188,7 @@ async function analyze(
     contents: [{ role: 'user', parts }],
     ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
   });
-  const text = replyText(reply);
-  return {
-    json: ctx.getNodeParameter('simplify', itemIndex, true) === false ? reply : { text },
-    pairedItem: { item: itemIndex },
-  };
+  return replyItems(reply, itemIndex, ctx.getNodeParameter('simplify', itemIndex, true) !== false);
 }
 
 export const imageAnalyze = (ctx: ExecuteContext, i: number) =>
@@ -208,7 +227,7 @@ export const audioAnalyze = (ctx: ExecuteContext, i: number) =>
     DEFAULT_IMAGE_ANALYZE_MODEL,
   );
 
-export function audioTranscribe(ctx: ExecuteContext, i: number): Promise<Item> {
+export function audioTranscribe(ctx: ExecuteContext, i: number): Promise<Item[]> {
   const options = ctx.getNodeParameter('options', i, {}) as DataObject;
   const start = asString(options.startTime).trim();
   const end = asString(options.endTime).trim();
@@ -245,7 +264,7 @@ export async function imageGenerate(ctx: ExecuteContext, itemIndex: number): Pro
   for (const p of reply.predictions ?? []) {
     if (!p.bytesBase64Encoded) continue;
     items.push(
-      await fileToItem(
+      await mediaItem(
         ctx,
         itemIndex,
         {
@@ -294,9 +313,7 @@ export async function imageEdit(ctx: ExecuteContext, itemIndex: number): Promise
   const text = replyText(reply);
   const items: Item[] = [];
   for (const image of replyImages(reply)) {
-    items.push(
-      await fileToItem(ctx, itemIndex, { ...image, fileName: 'edited.png' }, field, text ? { text } : {}),
-    );
+    items.push(await mediaItem(ctx, itemIndex, { ...image, fileName: 'edited.png' }, field));
   }
   if (!items.length) {
     throw new NodeOperationError(ctx.getNode(), 'The model returned no image', {
@@ -347,7 +364,7 @@ export async function videoGenerate(ctx: ExecuteContext, itemIndex: number): Pro
     });
   }
   if (asString(options.returnAs) === 'url') {
-    return uris.map((uri) => ({ json: { uri }, pairedItem: { item: itemIndex } }));
+    return uris.map((uri) => ({ json: { url: uri }, pairedItem: { item: itemIndex } }));
   }
   const field = asString(options.binaryPropertyOutput).trim() || 'data';
   const items: Item[] = [];
@@ -361,7 +378,7 @@ async function fetchVideo(ctx: ExecuteContext, itemIndex: number, uri: string, f
     credentialType: GEMINI_CREDENTIAL,
     authHost: await geminiAuthHost(ctx, itemIndex),
   });
-  return fileToItem(
+  return mediaItem(
     ctx,
     itemIndex,
     {
@@ -442,7 +459,7 @@ const simplifyOutput = (resource: string, operations: string[]): NodeProperty =>
   name: 'simplify',
   type: 'boolean',
   default: true,
-  description: 'Whether to return only the text instead of the whole reply',
+  description: 'Whether to return a simplified version of the response instead of the raw data',
   displayOptions: { show: { resource: [resource], operation: operations } },
 });
 

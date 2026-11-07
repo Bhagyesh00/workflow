@@ -6,6 +6,7 @@ import {
   type DataObject,
   type ExecuteContext,
   type HttpRequestOptions,
+  type Item,
   isResourceLocatorValue,
   type ListSearchResult,
   type LoadOptionsContext,
@@ -187,4 +188,39 @@ export async function waitForOperation(
     );
   }
   return finished;
+}
+
+/** the candidates of a generateContent reply, as the API gives them */
+export function replyCandidates(reply: unknown): DataObject[] {
+  const list = (reply as { candidates?: unknown } | null | undefined)?.candidates;
+  return Array.isArray(list)
+    ? list.filter((c): c is DataObject => typeof c === 'object' && c !== null && !Array.isArray(c))
+    : [];
+}
+
+/** the answer text of one candidate: its text parts joined, thought parts left out */
+export function candidateText(candidate: DataObject): string {
+  const parts = (candidate.content as { parts?: unknown } | undefined)?.parts;
+  if (!Array.isArray(parts)) return '';
+  return parts
+    .filter((p): p is { text: string; thought?: unknown } => typeof p?.text === 'string' && !p.thought)
+    .map((p) => p.text)
+    .join('');
+}
+
+/**
+ * The output of a Gemini text or file analysis, as n8n gives it. Simplify on: one item per candidate, the
+ * candidate as the API returned it. Simplify off: one item, the whole reply. Include Merged Response adds
+ * `mergedResponse` (the text parts joined) to each candidate in both modes.
+ */
+export function replyItems(reply: unknown, itemIndex: number, simplify: boolean, merge = false): Item[] {
+  const paired = { item: itemIndex };
+  const raw = (reply && typeof reply === 'object' && !Array.isArray(reply) ? reply : {}) as DataObject;
+  const found = replyCandidates(raw);
+  const candidates = merge ? found.map((c) => ({ ...c, mergedResponse: candidateText(c) })) : found;
+  // a blocked prompt has no candidate: the whole reply shows why
+  if (!simplify || !candidates.length) {
+    return [{ json: Array.isArray(raw.candidates) ? { ...raw, candidates } : raw, pairedItem: paired }];
+  }
+  return candidates.map((candidate) => ({ json: candidate, pairedItem: paired }));
 }

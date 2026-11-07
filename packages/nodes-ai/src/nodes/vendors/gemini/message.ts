@@ -21,7 +21,7 @@ import {
 import { vendorError } from '../shared/api';
 import { runVendorChat, VENDOR_WAIT_TOOL } from '../shared/tool-loop';
 import { normalizeStoreName } from './file-search';
-import { geminiHost, modelProperty, readModelId } from './operations';
+import { geminiHost, modelProperty, readModelId, replyItems } from './operations';
 
 export const DEFAULT_TEXT_MODEL = 'gemini-2.5-flash';
 
@@ -91,7 +91,7 @@ export const messageProperties: NodeProperty[] = [
     name: 'jsonOutput',
     type: 'boolean',
     default: false,
-    description: 'Whether the model answers in JSON, which the output holds as an object',
+    description: 'Whether to ask the model for a JSON answer',
     displayOptions: only,
   },
   {
@@ -174,7 +174,7 @@ export const messageProperties: NodeProperty[] = [
         name: 'includeMergedResponse',
         type: 'boolean',
         default: false,
-        description: 'Whether to add the text of the answer to the whole reply (when Simplify Output is off)',
+        description: 'Whether to add one string with all text parts of the answer to each candidate',
       },
       {
         displayName: 'System Message',
@@ -210,8 +210,7 @@ export const messageProperties: NodeProperty[] = [
         type: 'number',
         default: 1,
         typeOptions: { minValue: 1, maxValue: 8 },
-        description:
-          'How many answers the model writes. The first is the output; the rest are under candidates.',
+        description: 'How many answers the model writes. Each is an output item when Simplify Output is on.',
       },
       {
         displayName: 'Temperature',
@@ -271,21 +270,8 @@ function readBuiltInTools(ctx: ExecuteContext, itemIndex: number) {
   };
 }
 
-/** the answer text as JSON; a model may wrap it in a code fence */
-export function parseJsonAnswer(text: string): unknown {
-  const body = text
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '');
-  try {
-    return JSON.parse(body);
-  } catch {
-    throw new Error('The model did not return valid JSON');
-  }
-}
-
 /** Text > Message a Model */
-export async function textMessage(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
+export async function textMessage(ctx: ExecuteContext, itemIndex: number): Promise<Item[]> {
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
   const model = readModelId(ctx, itemIndex, DEFAULT_TEXT_MODEL);
   const messages = toChatMessages(await readVendorMessages(ctx, itemIndex));
@@ -327,7 +313,7 @@ export async function textMessage(ctx: ExecuteContext, itemIndex: number): Promi
       if (presencePenalty !== undefined) generationConfig.presencePenalty = presencePenalty;
       if (candidateCount !== undefined && candidateCount > 1)
         generationConfig.candidateCount = candidateCount;
-      // JSON mode cannot be combined with tools on the API; the answer is still parsed as JSON
+      // JSON mode cannot be combined with tools on the API
       if (json && !body.tools) generationConfig.responseMimeType = 'application/json';
       if (Object.keys(generationConfig).length) body.generationConfig = generationConfig;
       return { ...built, body };
@@ -348,33 +334,10 @@ export async function textMessage(ctx: ExecuteContext, itemIndex: number): Promi
     throw vendorError(ctx, error, itemIndex);
   }
 
-  const paired = { item: itemIndex };
-  if (ctx.getNodeParameter('simplify', itemIndex, true) === false) {
-    const raw = (result.raw && typeof result.raw === 'object' ? result.raw : {}) as DataObject;
-    return {
-      json: options.includeMergedResponse === true ? { ...raw, mergedResponse: result.text } : raw,
-      pairedItem: paired,
-    };
-  }
-  let output: unknown = result.text;
-  if (json) {
-    try {
-      output = parseJsonAnswer(result.text);
-    } catch (error) {
-      throw new NodeOperationError(ctx.getNode(), (error as Error).message, { itemIndex });
-    }
-  }
-  const candidates = (
-    (result.raw as { candidates?: Array<{ content?: { parts?: DataObject[] } }> } | undefined)?.candidates ??
-    []
-  ).map((c) =>
-    (c.content?.parts ?? [])
-      .filter((p) => typeof p.text === 'string' && !p.thought)
-      .map((p) => p.text as string)
-      .join(''),
+  return replyItems(
+    result.raw,
+    itemIndex,
+    ctx.getNodeParameter('simplify', itemIndex, true) !== false,
+    options.includeMergedResponse === true,
   );
-  return {
-    json: { output: output as DataObject, ...(candidates.length > 1 ? { candidates } : {}) },
-    pairedItem: paired,
-  };
 }
