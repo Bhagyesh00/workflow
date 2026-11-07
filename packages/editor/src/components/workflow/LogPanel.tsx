@@ -4,15 +4,17 @@
  * store (`logPanelTab`), so the editor can open the chat tab.
  */
 import { CHAT_TRIGGER_TYPE, type RunData } from '@workflow/workflow';
-import { ChevronDown, Eraser, Terminal } from 'lucide-react';
+import { ChevronDown, Eraser, ExternalLink, PanelBottom, Terminal } from 'lucide-react';
 import { useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { formatDuration } from '../../lib/format';
+import { usePopOutWindow } from '../../lib/use-pop-out-window';
 import type { LogEntry } from '../../stores/run-store';
 import { type LogPanelTab, useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { ChatPanel } from '../chat/ChatPanel';
 import { LogsTab } from '../logs/LogsTab';
-import { IconButton } from '../ui/Button';
+import { Button, IconButton } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { EmptyState } from '../ui/misc';
 import { Tabs } from '../ui/Tabs';
@@ -71,6 +73,7 @@ export function LogPanel({
   // the chat tab goes away with the chat trigger; the panel then shows the logs
   const tab: LogPanelTab = storedTab === 'chat' && !hasChatTrigger ? 'logs' : storedTab;
   const endRef = useRef<HTMLDivElement>(null);
+  const popOut = usePopOutWindow('Logs');
   const timeline = useMemo(() => buildTimeline(runData), [runData]);
   const t0 = timeline[0]?.start ?? 0;
   const total = Math.max(1, ...timeline.map((e) => e.start + e.duration - t0));
@@ -79,8 +82,8 @@ export function LogPanel({
     if (tab === 'console' && logs.length) endRef.current?.scrollIntoView?.({ block: 'end' });
   }, [logs.length, tab]);
 
-  return (
-    <section className="flex h-64 flex-col border-t border-line bg-surface" aria-label="Logs">
+  const body = (
+    <>
       <div className="flex items-center gap-3 px-4 pt-2">
         <Terminal size={15} className="text-ink-3" />
         <Tabs
@@ -105,9 +108,20 @@ export function LogPanel({
               <Eraser size={14} />
             </IconButton>
           )}
-          <IconButton label="Close logs" size="sm" onClick={onClose}>
-            <ChevronDown size={15} />
-          </IconButton>
+          {popOut.isOpen ? (
+            <IconButton label="Bring logs back" size="sm" onClick={popOut.close}>
+              <PanelBottom size={14} />
+            </IconButton>
+          ) : (
+            <>
+              <IconButton label="Open logs in a new window" size="sm" onClick={popOut.open}>
+                <ExternalLink size={14} />
+              </IconButton>
+              <IconButton label="Close logs" size="sm" onClick={onClose}>
+                <ChevronDown size={15} />
+              </IconButton>
+            </>
+          )}
         </span>
       </div>
       <div className="wf-scroll min-h-0 flex-1 overflow-auto border-t border-line">
@@ -183,6 +197,30 @@ export function LogPanel({
           </ol>
         )}
       </div>
+    </>
+  );
+
+  if (popOut.container) {
+    return (
+      <section
+        className="flex items-center gap-3 border-t border-line bg-surface px-4 py-2 text-sm text-ink-2"
+        aria-label="Logs"
+      >
+        <Terminal size={15} className="text-ink-3" />
+        <span>The logs are open in another window.</span>
+        <Button size="sm" variant="secondary" onClick={popOut.close}>
+          Bring them back
+        </Button>
+        {createPortal(
+          <div className="flex h-screen flex-col bg-surface text-ink">{body}</div>,
+          popOut.container,
+        )}
+      </section>
+    );
+  }
+  return (
+    <section className="flex h-64 flex-col border-t border-line bg-surface" aria-label="Logs">
+      {body}
     </section>
   );
 }
