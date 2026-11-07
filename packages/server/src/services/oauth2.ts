@@ -5,7 +5,7 @@
  * nothing secret is visible in the browser.
  */
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { CredentialCipher, HttpClient } from '@workflow/core';
+import { type CredentialCipher, type HttpClient, resolveCredentialUrl } from '@workflow/core';
 import { assertCredentialUrlAllowed, type DataObject, getCredentialAllowedDomains } from '@workflow/workflow';
 import type { Config } from '../config';
 import { ApiError } from '../http/errors';
@@ -15,6 +15,9 @@ import type { CredentialService } from './credentials';
 import { credentialReadErrorText } from './secrets/resolver';
 
 const STATE_TTL_MS = 10 * 60_000;
+
+/** the credential type whose token calls carry the client secret to a host the user typed: https only */
+const HTTPS_ONLY_TYPE = 'databricksOAuth2Api';
 
 interface StatePayload {
   t: string; // tenant id
@@ -81,12 +84,44 @@ export class OAuth2Service {
     return { row, data };
   }
 
+  /** a URL of the flow, with `={{$credentials.host}}` templates resolved; the https-only type refuses any other scheme */
+  private flowUrl(type: string, data: DataObject, field: 'authUrl' | 'accessTokenUrl', label: string): string {
+    let resolved: string;
+    try {
+      resolved = resolveCredentialUrl(String(data[field] ?? ''), data);
+    } catch {
+      throw ApiError.badRequest(`Invalid ${label}`);
+    }
+    if (this.credentials.types.isA(type, HTTPS_ONLY_TYPE)) {
+      const isHttps = (value: string): boolean => {
+        try {
+          return new URL(value).protocol === 'https:';
+        } catch {
+          return false;
+        }
+      };
+      if (!isHttps(resolved) || !isHttps(String(data.host ?? ''))) {
+        throw ApiError.badRequest(`The ${label} must use https for this credential`);
+      }
+    }
+    return resolved;
+  }
+
   async authorizeUrl(tenantId: string, userId: string, credentialId: string): Promise<string> {
     const { row, data } = await this.loadOAuth2(tenantId, credentialId);
     if (!data.authUrl || !data.clientId) {
       throw ApiError.badRequest('The credential needs an authorization URL and a client ID');
     }
-    const url = new URL(String(data.authUrl));
+    if (this.credentials.types.isA(row.type, HTTPS_ONLY_TYPE) && data.grantType !== 'pkce') {
+      throw ApiError.badRequest('This grant type gets its token without Connect');
+    }
+    let url: URL;
+    try {
+      url = new URL(this.flowUrl(row.type, data, 'authUrl', 'authorization URL'));
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw ApiError.badRequest('Invalid authorization URL');
+    }
     if (url.protocol !== 'https:' && url.protocol !== 'http:')
       throw ApiError.badRequest('Invalid authorization URL');
     const payload: StatePayload = {
@@ -123,9 +158,11 @@ export class OAuth2Service {
     if (!data.accessTokenUrl) throw ApiError.badRequest('The credential has no access token URL');
     // the code exchange is a token call of the credential: its allowed domains apply (the `none` mode does
     // not: the token URL is not a URL a user typed), here and on every redirect hop
+    const accessTokenUrl = this.flowUrl(row.type, data, 'accessTokenUrl', 'access token URL');
+    if (!accessTokenUrl) throw ApiError.badRequest('The credential has no access token URL');
     const allowedDomains = getCredentialAllowedDomains(data, { userUrl: false });
     try {
-      assertCredentialUrlAllowed(String(data.accessTokenUrl), allowedDomains);
+      assertCredentialUrlAllowed(accessTokenUrl, allowedDomains);
     } catch (error) {
       throw ApiError.badRequest((error as Error).message);
     }
@@ -148,7 +185,7 @@ export class OAuth2Service {
       auth = { username: String(data.clientId ?? ''), password: String(data.clientSecret ?? '') };
     }
     const token = (await this.http.request({
-      url: String(data.accessTokenUrl),
+      url: accessTokenUrl,
       method: 'POST',
       body,
       bodyType: 'form-urlencoded',
