@@ -12,7 +12,7 @@ import { AnnotationFilters, type AnnotationFilterValue } from '../components/exe
 import { VersionFilter } from '../components/executions/VersionFilter';
 import { VersionLabel } from '../components/executions/VersionLabel';
 import { Button } from '../components/ui/Button';
-import { Select, Switch } from '../components/ui/Field';
+import { Select, Switch, TextInput } from '../components/ui/Field';
 import { Callout, EmptyState, PageLoader, StatusBadge } from '../components/ui/misc';
 import { formatDateTime, formatDuration, formatRelative } from '../lib/format';
 
@@ -48,13 +48,20 @@ export function ExecutionsPage() {
   const voteParam = params.get('vote');
   const vote: AnnotationVote | undefined = voteParam === 'up' || voteParam === 'down' ? voteParam : undefined;
   const workflowVersionId = params.get('workflowVersionId') ?? '';
+  // P5-61 highlighted data filter: the key, a part of the value (the whole value when exact)
+  const customDataKey = params.get('customDataKey') ?? '';
+  const customDataValue = params.get('customDataValue') ?? '';
+  const customDataExact = params.get('customDataExact') === 'true';
   const [autoRefresh, setAutoRefresh] = useState(true);
   const workflows = useQuery({
     queryKey: ['workflows', 'filter-options'],
     queryFn: () => workflowsApi.list({ limit: 200 }),
   });
   const query = useInfiniteQuery({
-    queryKey: ['executions', { workflowId, status, annotationTags, vote, workflowVersionId }],
+    queryKey: [
+      'executions',
+      { workflowId, status, annotationTags, vote, workflowVersionId, customDataKey, customDataValue, customDataExact },
+    ],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       executionsApi.list({
@@ -63,6 +70,9 @@ export function ExecutionsPage() {
         annotationTags: annotationTags.length ? annotationTags : undefined,
         vote,
         workflowVersionId: workflowVersionId || undefined,
+        customDataKey: customDataKey || undefined,
+        customDataValue: customDataKey && customDataValue ? customDataValue : undefined,
+        customDataExact: customDataKey && customDataValue && customDataExact ? true : undefined,
         limit: 50,
         cursor: pageParam,
       }),
@@ -145,6 +155,35 @@ export function ExecutionsPage() {
           />
         )}
         <AnnotationFilters value={{ tags: annotationTags, vote }} onChange={setAnnotationFilter} />
+        <div role="group" aria-label="Highlighted data" className="flex flex-wrap items-center gap-2">
+          <TextInput
+            aria-label="Highlighted data key"
+            className="w-36"
+            placeholder="Highlighted key"
+            maxLength={50}
+            value={customDataKey}
+            onChange={(e) => setFilter('customDataKey', e.target.value)}
+          />
+          <TextInput
+            aria-label="Highlighted data value"
+            className="w-36"
+            placeholder="Value"
+            maxLength={255}
+            disabled={!customDataKey}
+            value={customDataValue}
+            onChange={(e) => setFilter('customDataValue', e.target.value)}
+          />
+          <span className="flex items-center gap-2 text-sm text-ink-2">
+            <Switch
+              label="Exact match"
+              size="sm"
+              disabled={!customDataKey}
+              checked={customDataExact}
+              onChange={(on) => setFilter('customDataExact', on ? 'true' : '')}
+            />
+            <span aria-hidden="true">Exact</span>
+          </span>
+        </div>
       </div>
       <section
         className="overflow-hidden rounded-2xl border border-line bg-surface shadow-card"

@@ -36,6 +36,13 @@ export const executionListQuery = z.object({
   vote: z.enum(['up', 'down']).optional(),
   /** P3-10: executions of one workflow version */
   workflowVersionId: z.uuid().optional(),
+  /** P5-61: highlighted data (custom data) filter; the value is a part of it unless `customDataExact` */
+  customDataKey: z.string().min(1).max(50).optional(),
+  customDataValue: z.string().max(255).optional(),
+  customDataExact: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => v === 'true'),
   ...paginationQuery,
 });
 
@@ -71,6 +78,9 @@ export async function listExecutions(
     workflowVersionId: query.workflowVersionId,
     annotationTags: query.annotationTags,
     vote: query.vote,
+    customDataKey: query.customDataKey,
+    customDataValue: query.customDataValue,
+    customDataExact: query.customDataExact,
     limit: query.limit,
     cursor: decodeCursor(query.cursor),
   });

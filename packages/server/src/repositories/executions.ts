@@ -6,6 +6,11 @@ import type { Cursor } from '../http/pagination';
 import { type AnnotationVote, annotationConditions } from './annotations';
 import { isUuid, now } from './util';
 
+/** LIKE wildcards and the escape character matched literally */
+export function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
 export type ExecutionInsert = Omit<typeof executions.$inferInsert, 'tenantId'>;
 
 /** a JSON-escaped U+0000, unless its backslash is itself escaped (the text "\u0000" in the data) */
@@ -96,6 +101,11 @@ export class ExecutionRepository {
       /** P3-09: annotation tag ids (any) and vote */
       annotationTags?: string[];
       vote?: AnnotationVote;
+      /** P5-61: executions whose custom data has this key (with `customDataValue`: that value) */
+      customDataKey?: string;
+      customDataValue?: string;
+      /** the whole value; otherwise a part of it (case-sensitive) */
+      customDataExact?: boolean;
       limit: number;
       cursor?: Cursor;
     },
@@ -111,6 +121,18 @@ export class ExecutionRepository {
       conditions.push(eq(executions.workflowVersionId, filter.workflowVersionId));
     }
     conditions.push(...annotationConditions(tenantId, { tags: filter.annotationTags, vote: filter.vote }));
+    if (filter.customDataKey) {
+      const key = withoutNul(filter.customDataKey);
+      conditions.push(sql`jsonb_exists(${executions.customData}, ${key})`);
+      if (filter.customDataValue) {
+        const value = withoutNul(filter.customDataValue);
+        conditions.push(
+          filter.customDataExact
+            ? sql`(${executions.customData} ->> ${key}) = ${value}`
+            : sql`(${executions.customData} ->> ${key}) LIKE ${`%${escapeLike(value)}%`} ESCAPE '\\'`,
+        );
+      }
+    }
     if (filter.cursor) {
       if (!isUuid(filter.cursor.id)) return [];
       conditions.push(
