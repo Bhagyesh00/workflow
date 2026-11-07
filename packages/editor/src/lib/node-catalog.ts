@@ -4,7 +4,9 @@
  */
 import {
   type ConnectionType,
+  isHitlVariant,
   isOption,
+  isToolVariant,
   type NodeParameters,
   type NodeTypeDescription,
   type WorkflowNode,
@@ -163,8 +165,15 @@ function withContextActions(entry: CatalogEntry, filter: CatalogFilter): Catalog
   return entry.actions.every(fits) ? entry : { ...entry, actions: entry.actions.filter(fits) };
 }
 
+/** P5-75: the copy of a node made for agents (`<name>Tool`) and its human review copy (`<name>HitlTool`) */
+function variantOf(entry: CatalogEntry): 'tool' | 'hitl' | undefined {
+  if (isHitlVariant(entry.description)) return 'hitl';
+  return isToolVariant(entry.description) ? 'tool' : undefined;
+}
+
 export function filterCatalog(catalog: CatalogEntry[], filter: CatalogFilter): CatalogSection[] {
-  let entries = catalog;
+  // the variants belong to the tool picker only: everywhere else the node itself is listed
+  let entries = filter.outputType === 'ai_tool' ? catalog : catalog.filter((e) => !variantOf(e));
   if (filter.outputType) entries = entries.filter((e) => e.outputTypes.includes(filter.outputType!));
   else if (filter.needsMainInput)
     entries = entries.filter((e) => !e.isTrigger && e.inputTypes.includes('main'));
@@ -186,7 +195,8 @@ export function filterCatalog(catalog: CatalogEntry[], filter: CatalogFilter): C
   }
 
   const sections: CatalogSection[] = [];
-  const sorted = scored.map((s) => s.entry);
+  const toolPicker = filter.outputType === 'ai_tool';
+  const sorted = scored.map((s) => s.entry).filter((e) => !toolPicker || !variantOf(e));
   if (filter.noTriggerYet && !filter.needsMainInput && !filter.outputType) {
     const triggers = sorted.filter((e) => e.isTrigger);
     if (triggers.length) sections.push({ title: 'Start with a trigger', entries: triggers });
@@ -209,6 +219,13 @@ export function filterCatalog(catalog: CatalogEntry[], filter: CatalogFilter): C
     return a.localeCompare(b);
   });
   for (const name of names) sections.push({ title: name, entries: byCategory.get(name)! });
+  if (toolPicker) {
+    const variants = scored.map((s) => s.entry);
+    const other = variants.filter((e) => variantOf(e) === 'tool');
+    const hitl = variants.filter((e) => variantOf(e) === 'hitl');
+    if (other.length) sections.push({ title: 'Other Tools', entries: other });
+    if (hitl.length) sections.push({ title: 'Human in the Loop', entries: hitl });
+  }
   return sections;
 }
 
