@@ -8,7 +8,12 @@ import {
   VECTOR_STORE_INPUTS,
   VECTOR_STORE_OUTPUTS,
 } from '../src/nodes/vector-stores/vector-store-factory';
-import { clearMemoryVectorStores, MemoryVectorBackend } from '../src/nodes/vector-stores/vector-stores.nodes';
+import {
+  clearMemoryVectorStores,
+  MemoryVectorBackend,
+  VectorStoreInMemoryNode,
+  VectorStoreQdrantNode,
+} from '../src/nodes/vector-stores/vector-stores.nodes';
 import {
   connect,
   embeddingCalls,
@@ -133,16 +138,11 @@ describe('In-memory vector store', () => {
     expect((out[0].document as DataObject).pageContent).toBe('Cats and dogs are pets');
     expect(out[0].score as number).toBeGreaterThan(out[1].score as number);
 
-    const filtered = await load(
-      store('load', {
-        topK: 5,
-        options: { metadata: { metadataValues: [{ name: 'topic', value: 'food' }] } },
-      }),
-      'dog',
-    );
-    expect(filtered.output('Store').map((o) => (o.document as DataObject).metadata)).toEqual([
-      { source: 'json', topic: 'food' },
-    ]);
+    // the Simple store has no filter field (the metadata filter is tested on PGVector)
+    const optionNames = VectorStoreInMemoryNode.description.properties
+      .filter((p) => p.name === 'options')
+      .flatMap((p) => ((p.options ?? []) as Array<{ name: string }>).map((o) => o.name));
+    expect(optionNames).not.toContain('metadata');
   });
 
   it('serves chains in retrieve mode', async () => {
@@ -380,6 +380,253 @@ describe('Qdrant store', () => {
     expect(http.requests).toHaveLength(0);
   });
 });
+
+describe('PGVector options', () => {
+  const stamp = `${process.pid}_${Date.now()}`;
+  const tables: string[] = [];
+  const client = new pg.Client({ ...PG_CREDENTIALS });
+  const creds = { postgres: PG_CREDENTIALS };
+  const svc = () => services({ creds, http: new HttpClient({ ssrf: { allow: ['127.0.0.1'] } }) });
+  const tableFor = (label: string) => {
+    const table = `ai_vec_${label}_${stamp}`;
+    tables.push(table);
+    return table;
+  };
+  const store = (mode: string, table: string, options: DataObject = {}) =>
+    node(
+      'Store',
+      'ai.vectorStorePGVector',
+      { mode, tableName: table, options },
+      { credentials: { postgres: { id: 'pg', name: 'pg' } } },
+    );
+
+  beforeAll(() => client.connect());
+  afterAll(async () => {
+    for (const table of tables) await client.query(`DROP TABLE IF EXISTS "${table}"`);
+    await client.query(`DROP TABLE IF EXISTS "ai_vec_colls_${stamp}"`);
+    await client.end();
+  });
+
+  it('scores each distance strategy as higher for a closer document', async () => {
+    const table = tableFor('distance');
+    expect((await insert(store('insert', table), svc())).status).toBe('success');
+    // the query is the unit vector of "pizza"; the pizza document is (food, pizza, pasta)
+    const scores: Record<string, number> = {};
+    for (const distanceStrategy of ['cosine', 'innerProduct', 'euclidean']) {
+      const r = await load(store('load', table, { distanceStrategy, topK: 2 }), 'pizza please', svc());
+      expect(r.status, JSON.stringify(r.error)).toBe('success');
+      const out = r.output('Store');
+      expect(pageContent(out[0])).toBe('Pizza and pasta are food');
+      expect(out[0].score as number).toBeGreaterThan(out[1].score as number);
+      scores[distanceStrategy] = out[0].score as number;
+    }
+    expect(scores.cosine).toBeCloseTo(1 / Math.sqrt(3), 5);
+    expect(scores.innerProduct).toBeCloseTo(1, 5);
+    expect(scores.euclidean).toBeCloseTo(1 / (1 + Math.SQRT2), 5);
+  });
+
+  it('refuses an unknown distance strategy', async () => {
+    const table = tableFor('badstrategy');
+    const r = await load(store('load', table, { distanceStrategy: 'x <=> y; --' }), 'dog', svc());
+    expect(r.status).toBe('error');
+    expect(r.error?.message).toMatch(/Unknown distance strategy/);
+  });
+
+  it('uses the configured column names', async () => {
+    const table = tableFor('columns');
+    const columnNames = {
+      values: {
+        idColumnName: 'doc_id',
+        vectorColumnName: 'vec',
+        contentColumnName: 'body',
+        metadataColumnName: 'meta',
+      },
+    };
+    expect((await insert(store('insert', table, { columnNames }), svc())).status).toBe('success');
+    const columns = await client.query(
+      `SELECT attname FROM pg_attribute WHERE attrelid = $1::regclass AND attnum > 0 ORDER BY attnum`,
+      [table],
+    );
+    expect(columns.rows.map((r) => r.attname)).toEqual(['doc_id', 'body', 'meta', 'vec']);
+    const r = await load(store('load', table, { columnNames, topK: 1 }), 'moon', svc());
+    expect(pageContent(r.output('Store')[0])).toBe('The sun and the moon are in the sky');
+  });
+
+  it('refuses a column name that is not a plain identifier, before any query on the table', async () => {
+    const table = tableFor('injection');
+    for (const field of ['idColumnName', 'vectorColumnName', 'contentColumnName', 'metadataColumnName']) {
+      const columnNames = { values: { [field]: 'x"; DROP TABLE users; --' } };
+      const r = await insert(store('insert', table, { columnNames }), svc());
+      expect(r.status).toBe('error');
+      expect(r.error?.message).toMatch(/Invalid column name/);
+    }
+    const tableName = await insert(store('insert', 'users; DROP TABLE x', {}), svc());
+    expect(tableName.error?.message).toMatch(/Invalid table name/);
+    const exists = await client.query('SELECT to_regclass($1) AS t', [table]);
+    expect(exists.rows[0].t).toBeNull();
+  });
+
+  it('keeps several collections in one table', async () => {
+    const table = tableFor('collections');
+    const collection = (name: string) => ({
+      values: {
+        useCollection: true,
+        collectionName: name,
+        collectionTableName: `ai_vec_colls_${stamp}`,
+      },
+    });
+    const ins = await insert(store('insert', table, { collection: collection('pets') }), svc(), [DOCS[0]]);
+    expect(ins.status, JSON.stringify(ins.error)).toBe('success');
+    await insert(store('insert', table, { collection: collection('food') }), svc(), [DOCS[2]]);
+    const pets = await load(
+      store('load', table, { collection: collection('pets'), topK: 5 }),
+      'pizza',
+      svc(),
+    );
+    expect(pets.output('Store').map(pageContent)).toEqual(['Cats and dogs are pets']);
+    const food = await load(
+      store('load', table, { collection: collection('food'), topK: 5 }),
+      'pizza',
+      svc(),
+    );
+    expect(food.output('Store').map(pageContent)).toEqual(['Pizza and pasta are food']);
+    const none = await load(store('load', table, { collection: collection('nothing') }), 'pizza', svc());
+    expect(none.output('Store')).toEqual([]);
+    expect((await client.query(`SELECT count(*)::int AS n FROM "${table}"`)).rows[0].n).toBe(2);
+    // clearing one collection leaves the other
+    await insert(store('insert', table, { collection: collection('pets'), clearStore: true }), svc(), [
+      DOCS[1],
+    ]);
+    const all = await load(store('load', table, { topK: 5 }), 'pizza', svc());
+    expect(all.output('Store')).toHaveLength(2);
+    const petsNow = await load(
+      store('load', table, { collection: collection('pets'), topK: 5 }),
+      'car',
+      svc(),
+    );
+    expect(petsNow.output('Store').map(pageContent)).toEqual(['A car has an engine and drives on the road']);
+  });
+
+  it('leaves the table alone when initialization is skipped', async () => {
+    const table = tableFor('skip');
+    const skipped = await insert(store('insert', table, { skipInitialization: true }), svc());
+    expect(skipped.status).toBe('error');
+    const exists = await client.query('SELECT to_regclass($1) AS t', [table]);
+    expect(exists.rows[0].t).toBeNull();
+    await insert(store('insert', table), svc(), [DOCS[0]]);
+    const again = await insert(store('insert', table, { skipInitialization: true }), svc(), [DOCS[2]]);
+    expect(again.status, JSON.stringify(again.error)).toBe('success');
+    expect((await client.query(`SELECT count(*)::int AS n FROM "${table}"`)).rows[0].n).toBe(2);
+  });
+});
+
+describe('Qdrant options', () => {
+  const creds = { qdrantApi: { url: 'https://qdrant.example.com:6333', apiKey: 'q-key' } };
+  const store = (mode: string, extra: DataObject = {}) =>
+    node(
+      'Store',
+      'ai.vectorStoreQdrant',
+      { mode, qdrantCollection: { __rl: true, mode: 'list', value: 'docs' }, ...extra },
+      { credentials: { qdrantApi: { id: 'q', name: 'q' } } },
+    );
+  const fake = () =>
+    new FakeHttpClient((req) => {
+      if (req.method === undefined || req.method === 'GET') return { status: 404, body: {} };
+      if (req.url.endsWith('/points/search')) {
+        return { body: { result: [{ score: 0.5, payload: { body: 'Cats', meta: { topic: 'animals' } } }] } };
+      }
+      return { body: { result: true } };
+    });
+
+  it('writes and reads the configured payload keys, and sends the collection config on create', async () => {
+    const http = fake();
+    const options = {
+      contentPayloadKey: 'body',
+      metadataPayloadKey: 'meta',
+      collectionConfig: '{"on_disk_payload":true,"vectors":{"distance":"Dot","size":3}}',
+    };
+    const r = await insert(store('insert', { options }), services({ creds, http }), [DOCS[0]]);
+    expect(r.status, JSON.stringify(r.error)).toBe('success');
+    const [, create, upsert] = http.requests;
+    expect(create.body).toEqual({
+      on_disk_payload: true,
+      vectors: { distance: 'Dot', size: fakeVector('x').length },
+    });
+    const points = (upsert.body as { points: Array<{ payload: DataObject }> }).points;
+    expect(points[0].payload).toEqual({
+      body: 'Cats and dogs are pets',
+      meta: { source: 'json', topic: 'animals' },
+    });
+    const loaded = await load(
+      store('load', { options: { contentPayloadKey: 'body', metadataPayloadKey: 'meta' } }),
+      'dog',
+      services({ creds, http }),
+    );
+    expect(loaded.output('Store')).toEqual([
+      { document: { pageContent: 'Cats', metadata: { topic: 'animals' } }, score: 0.5 },
+    ]);
+  });
+
+  it('merges the search filter JSON into must next to the metadata filter', async () => {
+    const http = fake();
+    const options = {
+      metadataPayloadKey: 'meta',
+      metadata: { metadataValues: [{ name: 'topic', value: 'animals' }] },
+      searchFilterJson:
+        '{"must":[{"key":"lang","match":{"value":"en"}}],"must_not":[{"key":"x","match":{"value":1}}]}',
+    };
+    const r = await load(store('load', { options }), 'dog', services({ creds, http }));
+    expect(r.status, JSON.stringify(r.error)).toBe('success');
+    expect(http.requests.at(-1)!.body).toMatchObject({
+      filter: {
+        must: [
+          { key: 'meta.topic', match: { value: 'animals' } },
+          { key: 'lang', match: { value: 'en' } },
+        ],
+        must_not: [{ key: 'x', match: { value: 1 } }],
+      },
+    });
+  });
+
+  it('refuses bad payload keys and a filter that is not a JSON object, with no request', async () => {
+    const http = fake();
+    const bad = await load(
+      store('load', { options: { contentPayloadKey: 'a.b' } }),
+      'dog',
+      services({ creds, http }),
+    );
+    expect(bad.status).toBe('error');
+    const filter = await load(
+      store('load', { options: { searchFilterJson: '[1]' } }),
+      'dog',
+      services({ creds, http }),
+    );
+    expect(filter.error?.message).toMatch(/must be a JSON object/);
+    expect(http.requests).toHaveLength(0);
+  });
+
+  it('reads a plain collection name saved before the picker, and lists collections for it', async () => {
+    const http = fake();
+    await load(store('load', { qdrantCollection: 'plain' }), 'dog', services({ creds, http }));
+    expect(http.requests[0].url).toBe('https://qdrant.example.com:6333/collections/plain/points/search');
+    const list = VectorStoreQdrantNode.methods!.listSearch!.qdrantCollectionsSearch;
+    const requested: string[] = [];
+    const context = {
+      getCredentials: async () => creds.qdrantApi,
+      helpers: {
+        httpRequestWithAuthentication: async (_type: string, options: { url: string }) => {
+          requested.push(options.url);
+          return { result: { collections: [{ name: 'zeta' }, { name: 'Docs' }, { name: 'notes' }] } };
+        },
+      },
+    } as never;
+    expect((await list(context, 'DO')).results).toEqual([{ name: 'Docs', value: 'Docs' }]);
+    expect((await list(context)).results.map((r) => r.value)).toEqual(['Docs', 'notes', 'zeta']);
+    expect(requested[0]).toBe('https://qdrant.example.com:6333/collections');
+  });
+});
+
+const pageContent = (o: DataObject) => (o.document as DataObject).pageContent;
 
 // model scripts are per node name; make sure nothing leaks between files
 afterAll(() => modelRequests.clear());
