@@ -21,6 +21,7 @@ import {
 import { batchingOption, runInBatches } from '../../shared/batching';
 import { errorMessage } from '../../shared/utils';
 import { runAgent } from './agent-loop';
+import { AgentSuspended, createCheckpoint, readCheckpoint } from './checkpoint';
 import { binaryParts } from './passthrough';
 
 const DEFAULT_SYSTEM_MESSAGE = 'You are a helpful assistant';
@@ -212,6 +213,17 @@ export const agentProperties: NodeProperty[] = [
 const STREAMING_HINT =
   "Streaming is on for this agent, but the Chat Trigger does not use the Streaming response mode, so the answer is sent in one piece. Set the trigger's Response Mode to Streaming to stream it.";
 
+const WAITING_TOOL_HINT = 'A tool of this agent can wait, so its items run one at a time.';
+
+/** a wait stops the run, which only works with one item under way; tools that fail to load fail in the item */
+async function hasWaitingTool(ctx: ExecuteContext): Promise<boolean> {
+  try {
+    return (await getTools(ctx, 0)).some((tool) => tool.canWait === true);
+  } catch {
+    return false;
+  }
+}
+
 /** true when a Chat Trigger upstream answers in another mode than streaming */
 function chatTriggerNotStreaming(ctx: ExecuteContext): boolean {
   try {
@@ -251,6 +263,9 @@ class SkippedItem extends Error {}
 
 export async function executeAgent(ctx: ExecuteContext): Promise<Item[][]> {
   const items = ctx.getInputData();
+  const resume = ctx.getResumeData();
+  const checkpoint = resume ? readCheckpoint(ctx.getNode(), resume) : undefined;
+  const firstItem = checkpoint?.itemIndex ?? 0;
   const options0 = (ctx.getNodeParameter('options', 0, {}) ?? {}) as DataObject;
   const batching = (options0.batching ?? {}) as DataObject;
   const traced = tracingMetadata(options0);
@@ -310,6 +325,9 @@ export async function executeAgent(ctx: ExecuteContext): Promise<Item[][]> {
         redactMemory: options.redactMemory !== false,
         signal: ctx.signal,
         logger: ctx.logger,
+        ...(resume && checkpoint && i === firstItem
+          ? { resume: { state: checkpoint, answer: resume.answer } }
+          : {}),
       });
       const json: DataObject = { output: result.output as DataObject[string] };
       if (options.returnIntermediateSteps)
@@ -321,6 +339,7 @@ export async function executeAgent(ctx: ExecuteContext): Promise<Item[][]> {
       }
       return { json, pairedItem: { item: i } };
     } catch (error) {
+      if (error instanceof AgentSuspended) throw error;
       if (ctx.continueOnFail()) {
         return {
           json: { error: errorMessage(error) },
@@ -333,27 +352,58 @@ export async function executeAgent(ctx: ExecuteContext): Promise<Item[][]> {
     }
   };
 
+  let batchSize = Number(batching.batchSize ?? 1);
+  if (batchSize > 1 && items.length > 1 && (await hasWaitingTool(ctx))) {
+    batchSize = 1;
+    ctx.addExecutionHints({ message: WAITING_TOOL_HINT, level: 'info' });
+  }
+
+  // a wait ends the batches at once: a person may answer while the node would still sit through a delay
+  const halt = new AbortController();
+  const nodeSignal = ctx.signal instanceof AbortSignal ? ctx.signal : undefined;
+  const finished: Item[] = [...(checkpoint?.finishedItems ?? [])];
+  const stop: { suspended?: { error: AgentSuspended; itemIndex: number } } = {};
+
   // a failed item stops the ones after it, as the one-by-one loop did (with batches, the items of the
   // same batch have started already)
   let stopped = false;
-  const results = await runInBatches(
-    items.length,
-    {
-      batchSize: Number(batching.batchSize ?? 1),
-      delayMs: Number(batching.delayBetweenBatches ?? 0),
-      signal: ctx.signal instanceof AbortSignal ? ctx.signal : undefined,
-    },
-    async (i) => {
-      if (stopped) throw new SkippedItem();
-      try {
-        return await processItem(i);
-      } catch (error) {
-        stopped = true;
-        throw error;
-      }
-    },
-  );
-  const out: Item[] = [];
+  let results: PromiseSettledResult<Item>[] = [];
+  try {
+    results = await runInBatches(
+      items.length - firstItem,
+      {
+        batchSize,
+        delayMs: Number(batching.delayBetweenBatches ?? 0),
+        signal: nodeSignal ? AbortSignal.any([nodeSignal, halt.signal]) : halt.signal,
+      },
+      async (offset) => {
+        if (stopped) throw new SkippedItem();
+        const i = firstItem + offset;
+        try {
+          const item = await processItem(i);
+          // a tool that can wait makes items run in order, so this holds the items before a wait
+          finished.push(item);
+          return item;
+        } catch (error) {
+          stopped = true;
+          if (error instanceof AgentSuspended) {
+            stop.suspended = { error, itemIndex: i };
+            halt.abort();
+            throw new SkippedItem();
+          }
+          throw error;
+        }
+      },
+    );
+  } catch (error) {
+    if (!stop.suspended) throw error;
+  }
+  if (stop.suspended) {
+    const { error, itemIndex } = stop.suspended;
+    ctx.suspendForTool(error.suspension, createCheckpoint(error.state, itemIndex, finished));
+    return [[]];
+  }
+  const out: Item[] = [...(checkpoint?.finishedItems ?? [])];
   for (const result of results) {
     if (result.status === 'fulfilled') out.push(result.value);
     else if (!(result.reason instanceof SkippedItem)) throw result.reason;

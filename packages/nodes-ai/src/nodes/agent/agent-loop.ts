@@ -5,6 +5,10 @@
  *   (failures go back to the model as tool results) -> repeat until a final answer or
  *   `maxIterations` -> output parser (one automatic retry on parse failure) -> append to memory.
  *
+ * A tool can stop the run to wait (`ToolSuspension`). The other calls of the turn finish, further waiting calls
+ * stay queued, and the loop throws `AgentSuspended` with its state. The next run starts from that state with the
+ * answer the engine got: it never loads memory again and writes it only at the very end.
+ *
  * Additions beyond common agent runtimes: a token budget that stops runaway loops, per-tool
  * timeouts, a stop-on-tool-error policy, argument validation against the tool schema, usage
  * totals, and secret redaction before anything is persisted to memory.
@@ -18,8 +22,11 @@ import {
   type AiOutputParser,
   type AiTool,
   type DataObject,
+  isToolSuspension,
+  type Item,
   type Logger,
   NodeOperationError,
+  type ToolSuspension,
   type WorkflowNode,
 } from '@workflow/workflow';
 import type { SessionMemory } from '../../shared/ai-inputs';
@@ -35,6 +42,7 @@ import {
   truncate,
   withTimeout,
 } from '../../shared/utils';
+import { type AgentLoopState, AgentSuspended, restoreMessages, storableMessages } from './checkpoint';
 
 export interface AgentStep {
   action: { tool: string; toolInput: DataObject; toolCallId: string; log: string };
@@ -82,6 +90,8 @@ export interface AgentRunOptions {
   redactMemory?: boolean;
   signal?: AbortSignal;
   logger?: Logger;
+  /** continue a run that stopped for a tool, with the answer the tool got */
+  resume?: { state: AgentLoopState; answer: Item[][] | null };
 }
 
 export interface AgentResult {
@@ -94,8 +104,25 @@ export interface AgentResult {
 /** observations returned to the model are capped so one tool cannot flood the context */
 const MAX_OBSERVATION_CHARS = 100_000;
 
+const WAIT_ENDED = 'The tool finished waiting without a response.';
+
+type ToolCall = NonNullable<AiChatMessage['toolCalls']>[number];
+
+/** a human review gate's tool: only this loop's resume path reaches it, never what a model sends */
+type ReviewGate = AiTool & {
+  answerReview?(
+    args: DataObject,
+    answer: Item[][] | null,
+    options: { signal?: AbortSignal; toolCallId: string },
+  ): Promise<unknown>;
+};
+
+/** what the model reads from a plain tool's wait: the JSON of its first output */
+const waitResult = (answer: Item[][] | null): string =>
+  answer ? JSON.stringify((answer[0] ?? []).map((item) => item.json)) : WAIT_ENDED;
+
 export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
-  const { node, itemIndex, model, tools, memory, outputParser } = options;
+  const { node, itemIndex, model, tools, memory, outputParser, resume } = options;
   const fail = (message: string, code: string, description?: string) =>
     new NodeOperationError(node, message, { itemIndex, code, description });
 
@@ -107,18 +134,21 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
       'Map a session ID in the memory node, e.g. {{ $json.sessionId }}.',
     );
   }
-  const history = memory ? await memory.load(sessionId!) : [];
+  const history = memory && !resume ? await memory.load(sessionId!) : [];
 
   let system = options.systemMessage.trim();
   if (outputParser) system = `${system}\n\n${outputParser.getFormatInstructions()}`.trim();
   const userContent: AiChatMessage['content'] = options.attachments?.length
     ? ([{ type: 'text', text: options.input }, ...options.attachments] as AiContentPart[])
     : options.input;
-  const messages: AiChatMessage[] = [
-    ...(system ? [{ role: 'system' as const, content: system }] : []),
-    ...history,
-    { role: 'user', content: userContent },
-  ];
+  const messages: AiChatMessage[] = resume
+    ? restoreMessages(resume.state, options.attachments)
+    : [
+        ...(system ? [{ role: 'system' as const, content: system }] : []),
+        ...history,
+        { role: 'user', content: userContent },
+      ];
+  const promptIndex = resume ? resume.state.promptIndex : messages.length - 1;
 
   const wantsSchema = Boolean(outputParser?.schema);
   /** the native response format, when this model can combine it with the agent's tools */
@@ -128,11 +158,13 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     return native ? { type: 'json', schema: outputParser!.schema } : undefined;
   };
 
-  const usage: AgentUsage = { inputTokens: 0, outputTokens: 0, modelCalls: 0, toolCalls: 0 };
-  const steps: AgentStep[] = [];
+  const usage: AgentUsage = resume
+    ? { ...resume.state.usage }
+    : { inputTokens: 0, outputTokens: 0, modelCalls: 0, toolCalls: 0 };
+  const steps: AgentStep[] = resume ? [...(resume.state.steps as AgentStep[])] : [];
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
   const wantsStream = Boolean(options.streaming && options.onChunk);
-  let streamed = false;
+  let streamed = resume?.state.streamed ?? false;
 
   const invoke = (m: AiChatModel, request: AiChatRequest): Promise<AiChatResponse> => {
     if (wantsStream && m.stream) {
@@ -170,30 +202,29 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     return response;
   };
 
-  const runTool = async (call: NonNullable<AiChatMessage['toolCalls']>[number]): Promise<AiChatMessage> => {
+  const noSuchTool = (name: string) =>
+    new Error(
+      `There is no tool named "${name}". Available tools: ${[...toolsByName.keys()].join(', ') || 'none'}`,
+    );
+
+  /** one call, with its timeout, its step and its message; a failure goes back to the model as the result */
+  const runCall = async (
+    call: ToolCall,
+    work: (signal: AbortSignal | undefined) => Promise<unknown>,
+  ): Promise<AiChatMessage> => {
     const started = Date.now();
-    const tool = toolsByName.get(call.name);
     let observation: string;
     let failed = false;
     try {
-      if (!tool)
-        throw new Error(
-          `There is no tool named "${call.name}". Available tools: ${[...toolsByName.keys()].join(', ') || 'none'}`,
-        );
-      const errors = validateJsonSchema(call.arguments ?? {}, tool.parameters);
-      if (errors.length)
-        throw new Error(`Invalid arguments for "${call.name}": ${formatSchemaErrors(errors)}`);
       const signal = withTimeout(options.signal, options.toolTimeoutMs);
-      const result = await raceSignal(
-        tool.invoke(call.arguments ?? {}, { signal, toolCallId: call.id }),
-        signal,
-      );
+      const result = await raceSignal(work(signal), signal);
       observation = truncate(stringifyResult(result), MAX_OBSERVATION_CHARS);
     } catch (error) {
+      if (isToolSuspension(error)) throw error;
       if (options.signal?.aborted) throw options.signal.reason;
       failed = true;
-      observation = `Error: ${errorMessage(error)}`;
-      options.logger?.warn('Agent tool call failed', { tool: call.name, error: errorMessage(error) });
+      observation = `Error: ${redactSecrets(errorMessage(error))}`;
+      options.logger?.warn('Agent tool call failed', { tool: call.name });
       if (options.toolErrorBehavior === 'stop') {
         throw fail(`Tool "${call.name}" failed: ${errorMessage(error)}`, 'AI_TOOL_ERROR');
       }
@@ -221,13 +252,110 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     return failed ? markToolError(message) : message;
   };
 
+  const runTool = (call: ToolCall): Promise<AiChatMessage> =>
+    runCall(call, async (signal) => {
+      const tool = toolsByName.get(call.name);
+      if (!tool) throw noSuchTool(call.name);
+      const errors = validateJsonSchema(call.arguments ?? {}, tool.parameters);
+      if (errors.length)
+        throw new Error(`Invalid arguments for "${call.name}": ${formatSchemaErrors(errors)}`);
+      return tool.invoke(call.arguments ?? {}, { signal, toolCallId: call.id });
+    });
+
+  /** the loop's state for the checkpoint: the turn has `results` so far, `call` waits, `pending` have not started */
+  const suspendedAt = (
+    suspension: ToolSuspension,
+    call: ToolCall,
+    results: AiChatMessage[],
+    pending: ToolCall[],
+  ): AgentSuspended =>
+    new AgentSuspended(suspension, {
+      messages: storableMessages(messages),
+      promptIndex,
+      steps,
+      usage,
+      iterations,
+      parseRetried,
+      streamed,
+      results,
+      waiting: { call, ...(suspension.gatedTool ? { gatedTool: suspension.gatedTool } : {}) },
+      pending,
+    });
+
+  /**
+   * The calls of a turn, after the results it already has. Tools that cannot wait run in parallel; tools that can
+   * run one at a time, because a call that waits stops the rest: only one message goes out for a person to answer.
+   */
+  const runTurn = async (calls: ToolCall[], earlier: AiChatMessage[]): Promise<AiChatMessage[]> => {
+    const results = [...earlier];
+    const pending: ToolCall[] = [];
+    const stop: { waiting?: { suspension: ToolSuspension; call: ToolCall } } = {};
+    const attempt = async (call: ToolCall) => {
+      if (stop.waiting) {
+        pending.push(call);
+        return;
+      }
+      try {
+        results.push(await runTool(call));
+      } catch (error) {
+        if (!isToolSuspension(error)) throw error;
+        if (stop.waiting) pending.push(call);
+        else stop.waiting = { suspension: error, call };
+      }
+    };
+    const canWait = (call: ToolCall) => toolsByName.get(call.name)?.canWait === true;
+    const inTurn = async () => {
+      for (const call of calls.filter(canWait)) await attempt(call);
+    };
+    await Promise.all([...calls.filter((call) => !canWait(call)).map(attempt), inTurn()]);
+    if (stop.waiting) throw suspendedAt(stop.waiting.suspension, stop.waiting.call, results, pending);
+    return results;
+  };
+
+  /** the results in the order the model asked for them */
+  const inCallOrder = (results: AiChatMessage[]): AiChatMessage[] => {
+    const calls = messages.at(-1)?.toolCalls ?? [];
+    const position = (result: AiChatMessage) => calls.findIndex((call) => call.id === result.toolCallId);
+    return [...results].sort((a, b) => position(a) - position(b));
+  };
+
+  /** what the wait of `waiting` gave the model; a gated call asks its gate, which reads the answer */
+  const answerWait = (waiting: AgentLoopState['waiting'], answer: Item[][] | null) => {
+    const { call, gatedTool } = waiting;
+    return runCall(call, async (signal) => {
+      if (!gatedTool) return waitResult(answer);
+      const gate = toolsByName.get(call.name) as ReviewGate | undefined;
+      if (!gate?.answerReview) throw noSuchTool(call.name);
+      return gate.answerReview(gatedTool.arguments, answer, { signal, toolCallId: call.id });
+    });
+  };
+
+  /** the turn the run stopped in: the answer of the waiting call, then the calls that had to wait for it */
+  const finishTurn = async ({ state, answer }: NonNullable<AgentRunOptions['resume']>) => {
+    let answered: AiChatMessage;
+    try {
+      answered = await answerWait(state.waiting, answer);
+    } catch (error) {
+      if (!isToolSuspension(error)) throw error;
+      throw suspendedAt(error, state.waiting.call, state.results, state.pending);
+    }
+    return inCallOrder(await runTurn(state.pending, [...state.results, answered]));
+  };
+
   const modelTools = tools.length
     ? tools.map(({ name, description, parameters }) => ({ name, description, parameters }))
     : undefined;
   // the output-parser retry gets its own iteration budget
-  let iterations = 0;
-  let forceTool = Boolean(options.forceToolCallOnFirstIteration && modelTools);
+  let iterations = resume?.state.iterations ?? 0;
+  let parseRetried = resume?.state.parseRetried ?? false;
+  let forceTool = Boolean(options.forceToolCallOnFirstIteration && modelTools && !resume);
+  let resuming = resume;
   const answer = async (): Promise<string> => {
+    if (resuming) {
+      const turn = resuming;
+      resuming = undefined;
+      messages.push(...(await finishTurn(turn)));
+    }
     while (iterations < options.maxIterations) {
       iterations++;
       const response = await callModel({
@@ -240,8 +368,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
       messages.push(response.message);
       const calls = response.message.toolCalls ?? [];
       if (!calls.length) return messageText(response.message.content);
-      const results = await Promise.all(calls.map(runTool));
-      messages.push(...results);
+      messages.push(...inCallOrder(await runTurn(calls, [])));
     }
     throw fail(
       `Max iterations (${options.maxIterations}) reached. The agent could not complete the task within the allowed number of iterations.`,
@@ -257,6 +384,10 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     try {
       output = await outputParser.parse(finalText);
     } catch (firstError) {
+      if (parseRetried) {
+        throw fail(`The model output could not be parsed: ${errorMessage(firstError)}`, 'AI_OUTPUT_PARSE');
+      }
+      parseRetried = true;
       // one automatic retry: show the model its output and the parse error
       messages.push({
         role: 'user',

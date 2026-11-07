@@ -24,6 +24,7 @@ import {
   type ExecutionServices,
   getResolvedParameters,
   type NodeTypes,
+  reviewNodeKey,
 } from '@workflow/core';
 import {
   type DataObject,
@@ -33,7 +34,9 @@ import {
   type FormAuthHelper,
   type Item,
   isExpression,
+  isHitlVariant,
   isPlainObject,
+  type NodeType,
   type WebhookRequest,
   type WebhookResponse,
   type WebhookResponseData,
@@ -215,19 +218,39 @@ function formErrorFor(
   return formErrorPage(reply.statusCode, page);
 }
 
+/**
+ * The node as the run's links know it. At a human review the key holds the wait (`reviewNodeKey`), so the link of
+ * an answered review does not answer the next one on the same node.
+ */
+function asLinkedNode(
+  node: WorkflowNode | undefined,
+  type: NodeType | undefined,
+  state: ExecutionState | null,
+): WorkflowNode | undefined {
+  const suspended = state?.executionData.suspended;
+  if (!node || !type || suspended?.toolNode !== node.name || !isHitlVariant(type.description)) return node;
+  return { ...node, webhookId: reviewNodeKey(node, suspended.toolRunIndex) };
+}
+
 /** a browser on the link of a Send and Wait node the run no longer stands at gets a page, not JSON */
 function closedAnswerPage(
   kind: WebhookKind,
   incoming: IncomingWebhook,
-  definition: WorkflowDefinition,
+  workflow: Workflow,
   path: string,
 ): WebhookReply | undefined {
   if (kind !== 'webhook' || incoming.method !== 'GET') return undefined;
   if (!header(incoming.headers, 'accept')?.includes('text/html')) return undefined;
   const [nodeKey, suffix, ...more] = path.split('/');
   if (suffix !== ANSWER_SUFFIX || more.length) return undefined;
-  const node = definition.nodes.find((n) => (n.webhookId || n.id) === nodeKey);
-  return node?.parameters.operation === 'sendAndWait' ? formErrorPage(409, ANSWER_CLOSED) : undefined;
+  const node = workflow.definition.nodes.find((n) => {
+    const key = n.webhookId || n.id;
+    return nodeKey === key || nodeKey?.startsWith(`${key}-`);
+  });
+  // read with defaults: on a human review node the operation is a hidden default
+  return node && getResolvedParameters(workflow, node).operation === 'sendAndWait'
+    ? formErrorPage(409, ANSWER_CLOSED)
+    : undefined;
 }
 
 export interface WebhookServiceDeps {
@@ -541,7 +564,9 @@ export class WebhookService {
     const definition = data.workflowData as unknown as WorkflowDefinition;
     const state = data.state as unknown as ExecutionState | null;
     const nodeName = state?.resultData.lastNodeExecuted;
-    const node = definition.nodes.find((n) => n.name === nodeName);
+    const stored = definition.nodes.find((n) => n.name === nodeName);
+    const type = stored ? nodeTypes.get(stored.type) : undefined;
+    const node = asLinkedNode(stored, type, state);
 
     if (kind === 'form' && path === FORM_STATUS_SUFFIX) {
       const word = row.status === 'waiting' && isFormPage(node) ? 'form-waiting' : row.status;
@@ -553,11 +578,10 @@ export class WebhookService {
       );
       return { statusCode: 200, headers, body: word };
     }
-    const closedPage = () => closedAnswerPage(kind, incoming, definition, path);
+    const workflow = new Workflow(definition, nodeTypes);
+    const closedPage = () => closedAnswerPage(kind, incoming, workflow, path);
     if (row.status !== 'waiting') return closedPage() ?? this.notWaitingReply(kind, incoming, row.status);
 
-    const type = node ? nodeTypes.get(node.type) : undefined;
-    const workflow = new Workflow(definition, nodeTypes);
     const hooks = node && type ? nodeWebhooks(workflow, node, type, { restart: true }) : [];
     // a Wait has hooks of both families and serves the one its Resume parameter picks
     const family: WebhookKind | undefined =
@@ -611,6 +635,8 @@ export class WebhookService {
       // the context sees what the node saw when it stopped: a page can read earlier nodes and its input
       const runs = state?.resultData.runData[node.name];
       const task = runs?.[runs.length - 1];
+      // a tool that waits has no input of its own: it sees what its agent saw
+      const suspended = state?.executionData.suspended;
       const ctx = createWebhookContext(
         {
           workflow,
@@ -620,13 +646,15 @@ export class WebhookService {
           signal: AbortSignal.timeout(60_000),
           state: state ?? undefined,
           runIndex: runs ? runs.length - 1 : undefined,
-          executeData: task
-            ? {
-                node: node.name,
-                data: { main: [task.data?.main?.[0] ?? []] },
-                source: { main: task.source ?? [] },
-              }
-            : undefined,
+          executeData: suspended
+            ? { node: node.name, data: suspended.exec.data, source: suspended.exec.source }
+            : task
+              ? {
+                  node: node.name,
+                  data: { main: [task.data?.main?.[0] ?? []] },
+                  source: { main: task.source ?? [] },
+                }
+              : undefined,
         },
         request,
         hook.webhookName,

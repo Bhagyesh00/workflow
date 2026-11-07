@@ -45,6 +45,9 @@ import {
   sleep,
   sortByPosition,
   type TaskData,
+  type ToolResumeData,
+  type ToolSuspension,
+  type ToolSuspensionState,
   type Workflow,
   type WorkflowNode,
   WorkflowOperationError,
@@ -148,6 +151,10 @@ export class WorkflowExecute {
   private runFilter?: Set<string>;
   /** set by run() for a tool test: reaching `rootNode` calls the tool instead of running the root */
   private agentRequest?: AgentRequestState;
+  /** what the running node passed to `suspendForTool`; runNode turns it into the execution's wait */
+  private toolWait?: { suspension: ToolSuspension; checkpoint: DataObject };
+  /** the answer of a tool's wait, read by the run of the agent that waited for it */
+  private toolResume?: { agentNode: string; data: ToolResumeData };
 
   constructor(
     private readonly workflow: Workflow,
@@ -401,6 +408,8 @@ export class WorkflowExecute {
     if (!nodeName || !task || task.executionStatus !== 'waiting') {
       throw new WorkflowOperationError('Execution is not waiting');
     }
+    const suspended = this.state.executionData.suspended;
+    if (suspended) return this.resumeToolWait(suspended, options);
     const output = options.output
       ? deepFreeze(this.pairOutput(options.output, []))
       : (task.data?.main as Item[][]);
@@ -414,6 +423,83 @@ export class WorkflowExecute {
     this.lastNodeOutput = output;
     this.scheduleChildren(this.workflow.nodes[nodeName], output, runs!.length - 1);
     return this.process(options);
+  }
+
+  /**
+   * A tool's wait ended: its answer goes on the tool's run and the agent runs again, from its checkpoint. A wait
+   * that ended by itself has no answer.
+   */
+  private resumeToolWait(suspended: ToolSuspensionState, options: ResumeOptions): Promise<ExecutionResult> {
+    const { resultData, executionData } = this.state;
+    const answer = options.output ?? null;
+    const runs = resultData.runData[suspended.toolNode];
+    const task: TaskData = {
+      ...runs[suspended.toolRunIndex],
+      executionStatus: 'success',
+      data: { ai_tool: answer ? deepFreeze(this.pairOutput(answer, [])) : [[]] },
+      executionTime: Date.now() - runs[suspended.toolRunIndex].startTime,
+    };
+    runs[suspended.toolRunIndex] = task;
+    this.state.waitTill = undefined;
+    executionData.suspended = undefined;
+    executionData.nodeExecutionStack.unshift(suspended.exec);
+    this.toolResume = {
+      agentNode: suspended.agentNode,
+      data: { checkpoint: suspended.checkpoint, toolCallId: suspended.toolCallId, answer },
+    };
+    this.logToolAnswer(suspended, task);
+    return this.process(options);
+  }
+
+  /** the tool's run has changed: the hook lands before the parent node finishes, as for any sub-node */
+  private logToolAnswer(suspended: ToolSuspensionState, task: TaskData): void {
+    this.subNodeHooks = this.subNodeHooks
+      .then(() =>
+        this.services.hooks?.nodeExecuteAfter?.(suspended.toolNode, suspended.toolRunIndex, task, this.state),
+      )
+      .catch((e) =>
+        this.services.logger.warn('nodeExecuteAfter failed for sub-node', {
+          node: suspended.toolNode,
+          error: String(e),
+        }),
+      );
+  }
+
+  /**
+   * The agent stopped for a tool: the execution waits at the tool node. The agent has no task, so `lastNodeExecuted`
+   * and the last run of that node are what `resume()` and the resume webhook read; its `exec` runs again on resume.
+   */
+  private async suspendAgent(
+    agent: WorkflowNode,
+    exec: ExecuteData,
+    { suspension, checkpoint }: { suspension: ToolSuspension; checkpoint: DataObject },
+  ): Promise<NodeOutcome> {
+    const { resultData, executionData } = this.state;
+    if (!resultData.runData[agent.name]?.length) delete resultData.runData[agent.name];
+    const runs = (resultData.runData[suspension.toolNode] ??= []);
+    const toolRunIndex = runs.length;
+    const task: TaskData = {
+      startTime: Date.now(),
+      executionTime: 0,
+      executionStatus: 'waiting',
+      ...(suspension.gatedTool
+        ? { inputOverride: { ai_tool: [[{ json: { ...suspension.gatedTool } }]] } }
+        : {}),
+      source: [{ previousNode: agent.name }],
+    };
+    runs.push(task);
+    executionData.suspended = {
+      agentNode: agent.name,
+      exec,
+      toolNode: suspension.toolNode,
+      toolRunIndex,
+      toolCallId: suspension.toolCallId,
+      checkpoint,
+    };
+    resultData.lastNodeExecuted = suspension.toolNode;
+    this.state.waitTill = suspension.waitTill.toISOString();
+    await this.services.hooks?.nodeExecuteAfter?.(suspension.toolNode, toolRunIndex, task, this.state);
+    return 'wait';
   }
 
   // -------------------------------------------------------------------------------------------
@@ -448,6 +534,7 @@ export class WorkflowExecute {
           throw new QuotaExceededError(`Execution exceeded ${maxNodeRuns} node runs (infinite loop?)`);
         }
         const outcome = await this.runNode(next, signal);
+        if (this.toolResume?.agentNode === next.node) this.toolResume = undefined;
         if (outcome === 'stop') {
           status = 'error';
           break;
@@ -547,6 +634,7 @@ export class WorkflowExecute {
     await this.services.hooks?.nodeExecuteBefore?.(node.name, runIndex);
     const startTime = Date.now();
     this.waitTill = undefined;
+    this.toolWait = undefined;
     this.nodeHints = [];
     this.nodeMetadata = {};
 
@@ -599,6 +687,8 @@ export class WorkflowExecute {
       if (signal.aborted) throw signal.reason;
       error = e;
     }
+
+    if (!error && this.toolWait) return this.suspendAgent(node, exec, this.toolWait);
 
     let errorOutputUsed = false;
     if (error) {
@@ -765,12 +855,10 @@ export class WorkflowExecute {
       setMetadata: (data) => {
         Object.assign(this.nodeMetadata, data);
       },
-      suspendForTool: () => {
-        throw new Error('not implemented (L5)');
+      suspendForTool: (suspension, checkpoint) => {
+        this.toolWait = { suspension, checkpoint };
       },
-      getResumeData: () => {
-        throw new Error('not implemented (L5)');
-      },
+      getResumeData: () => (this.toolResume?.agentNode === node.name ? this.toolResume.data : undefined),
     });
     try {
       return await nodeType.execute(ctx);
