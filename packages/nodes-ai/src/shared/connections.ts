@@ -5,10 +5,12 @@
  * cannot redirect it.
  */
 import net from 'node:net';
-import type { BaseContext, DataObject } from '@workflow/workflow';
+import type { DataObject } from '@workflow/workflow';
 import { Redis } from 'ioredis';
 import pg from 'pg';
-import { acquireShared, type Shared, sharedKey } from './shared-resource';
+import { acquireShared, type ConnectionContext, type Shared, sharedKey } from './shared-resource';
+
+export type { ConnectionContext } from './shared-resource';
 
 export interface PostgresCredentials {
   host: string;
@@ -48,7 +50,7 @@ export function postgresTlsOptions(creds: PostgresCredentials): pg.ClientConfig[
   return false;
 }
 
-async function openPostgres(ctx: BaseContext, creds: PostgresCredentials): Promise<pg.Client> {
+async function openPostgres(ctx: ConnectionContext, creds: PostgresCredentials): Promise<pg.Client> {
   const host = creds.host.trim();
   const allowed = await ctx.helpers.resolveAllowedHost(host);
   const client = new pg.Client({
@@ -92,7 +94,7 @@ async function openPostgres(ctx: BaseContext, creds: PostgresCredentials): Promi
  * node's close function; the connection ends when the last user releases it.
  */
 export async function sharedPostgres(
-  ctx: BaseContext,
+  ctx: ConnectionContext,
   itemIndex: number,
   credentialType = 'postgres',
 ): Promise<Shared<pg.Client>> {
@@ -139,7 +141,7 @@ export function redisCredentials(data: DataObject): RedisCredentials {
   };
 }
 
-async function openRedis(ctx: BaseContext, creds: RedisCredentials): Promise<Redis> {
+async function openRedis(ctx: ConnectionContext, creds: RedisCredentials): Promise<Redis> {
   const allowed = await ctx.helpers.resolveAllowedHost(creds.host);
   const client = new Redis({
     // ioredis takes no `lookup`, so it is pinned to the first checked address
@@ -171,7 +173,7 @@ async function openRedis(ctx: BaseContext, creds: RedisCredentials): Promise<Red
 
 /** A Redis client for this node in this execution, shared by all items (see `sharedPostgres`). */
 export async function sharedRedis(
-  ctx: BaseContext,
+  ctx: ConnectionContext,
   itemIndex: number,
   credentialType = 'redis',
 ): Promise<Shared<Redis>> {

@@ -23,10 +23,17 @@ const EXTERNAL_CREDENTIALS = new Set([
   'awsAssumeRole',
   'googleApi',
   'databricksOAuth2Api',
+  'mongoDb',
+  'supabaseApi',
 ]);
 
-/** no `test` request, as n8n: Vertex is tested by its node, Azure has no test */
-const NO_TEST = new Set(['azureOpenAiApi', 'azureEntraCognitiveServicesOAuth2Api', 'googleVertexAiApi']);
+/** no `test` request, as n8n: Vertex is tested by its node, Azure and SearXNG have no test */
+const NO_TEST = new Set([
+  'azureOpenAiApi',
+  'azureEntraCognitiveServicesOAuth2Api',
+  'googleVertexAiApi',
+  'searXngApi',
+]);
 
 describe('package', () => {
   it('exports nodes and credentials', () => {
@@ -67,6 +74,36 @@ describe('package', () => {
       'outputParserStructured',
       'outputParserItemList',
       'outputParserAutofixing',
+      // S2: stores, reranker, retrievers, memories, tools, vendors
+      'vectorStorePinecone',
+      'vectorStoreSupabase',
+      'vectorStoreWeaviate',
+      'vectorStoreMongoDBAtlas',
+      'vectorStoreRedis',
+      'vectorStoreAzureAISearch',
+      'vectorStoreChromaDB',
+      'vectorStoreMilvus',
+      'vectorStoreDatabricks',
+      'rerankerCohere',
+      'retrieverVectorStore',
+      'retrieverContextualCompression',
+      'retrieverMultiQuery',
+      'retrieverWorkflow',
+      'memoryManager',
+      'memoryMongoDbChat',
+      'memoryXata',
+      'memoryLakebaseChat',
+      'toolSearXng',
+      'toolWikipedia',
+      'toolWolframAlpha',
+      'openAi',
+      'anthropic',
+      'googleGemini',
+      'ollama',
+      'moonshot',
+      'alibabaCloud',
+      'minimax',
+      'databricksAiAgent',
     ].map((n) => `ai.${n}`);
     expect(nodes.map((n) => n.description.name)).toEqual(expect.arrayContaining(required));
     expect(credentials.map((c) => c.name).sort()).toEqual(
@@ -93,6 +130,15 @@ describe('package', () => {
         'azureOpenAiApi',
         'azureEntraCognitiveServicesOAuth2Api',
         'googleVertexAiApi',
+        'pineconeApi',
+        'weaviateApi',
+        'azureAiSearchApi',
+        'chromaSelfHostedApi',
+        'chromaCloudApi',
+        'milvusApi',
+        'xataApi',
+        'searXngApi',
+        'wolframAlphaApi',
       ].sort(),
     );
   });
@@ -146,7 +192,10 @@ describe('package', () => {
     expect((await apply('qdrantApi', { apiKey: 'k' })).headers).toEqual({ a: '1', 'api-key': 'k' });
     for (const c of credentials) {
       if (NO_TEST.has(c.name)) continue;
-      expect(c.test?.request.url, c.name).toMatch(/^(=\{\{\$credentials\.\w+\}\}\/|https:\/\/)/);
+      // Xata's test URL is the endpoint and the branch: `={{$credentials.databaseEndpoint}}:{{...branch}}`
+      expect(c.test?.request.url, c.name).toMatch(
+        /^(=\{\{\$credentials\.\w+\}\}\/|=\{\{\$credentials\.databaseEndpoint\}\}:|https:\/\/)/,
+      );
     }
   });
 });
@@ -284,6 +333,7 @@ describe('embeddings', () => {
       executeWorkflow: async () => ({ executionId: '', data: null }),
       getToolParameter: () => undefined,
       logSubNodeRun: (input: DataObject, output: DataObject) => void logs.push({ input, output }),
+      getParentNodes: () => [],
     };
     const { response } = await type.supplyData!(ctx, 0);
     const embeddings = response as {
@@ -332,6 +382,7 @@ describe('embeddings', () => {
       executeWorkflow: async () => ({ executionId: '', data: null }),
       getToolParameter: () => undefined,
       logSubNodeRun: () => {},
+      getParentNodes: () => [],
     };
     const embeddings = (await type.supplyData!(ctx, 0)).response as {
       embedDocuments(t: string[]): Promise<number[][]>;

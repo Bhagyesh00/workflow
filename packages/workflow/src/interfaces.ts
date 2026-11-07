@@ -74,6 +74,7 @@ export const ConnectionTypes = {
   AiDocument: 'ai_document',
   AiTextSplitter: 'ai_textSplitter',
   AiRetriever: 'ai_retriever',
+  AiReranker: 'ai_reranker',
 } as const;
 
 export type ConnectionType = (typeof ConnectionTypes)[keyof typeof ConnectionTypes];

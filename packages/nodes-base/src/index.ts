@@ -26,6 +26,7 @@ import {
 import { imap } from './credentials/imap.credentials';
 import { jwtAuth } from './credentials/jwt.credentials';
 import { kafka, schemaRegistryApi } from './credentials/kafka.credentials';
+import { mongoDb } from './credentials/mongodb.credentials';
 import { mqtt } from './credentials/mqtt.credentials';
 import { oAuth1Api } from './credentials/oauth1.credentials';
 import {
@@ -37,6 +38,7 @@ import {
 } from './credentials/oauth2.credentials';
 import { rabbitmq } from './credentials/rabbitmq.credentials';
 import { sshPassword, sshPrivateKey } from './credentials/ssh.credentials';
+import { supabaseApi } from './credentials/supabase.credentials';
 import { totpApi } from './credentials/totp.credentials';
 import { AirtableNode } from './nodes/apps/Airtable.node';
 import { AmqpNode } from './nodes/apps/amqp/Amqp.node';
@@ -221,6 +223,8 @@ export const credentials: CredentialType[] = [
   awsAssumeRole,
   googleApi,
   databricksOAuth2Api,
+  mongoDb,
+  supabaseApi,
 ];
 
 export const nodesBasePackage: NodePackage = { name: '@workflow/nodes-base', nodes, credentials };

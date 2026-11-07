@@ -5,3 +5,7 @@ onlyBuiltDependencies:
   - isolated-vm
   - esbuild
   - "@biomejs/biome"
+
+# bson 7.3.4 (2026-11-05) is under the 14-day rule; mongodb 7.7.0 accepts ^7.3.2. Drop when mongodb moves on.
+overrides:
+  bson: 7.3.3

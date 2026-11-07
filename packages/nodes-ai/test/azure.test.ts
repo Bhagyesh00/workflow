@@ -478,6 +478,7 @@ describe('Embeddings Microsoft Foundry', () => {
       executeWorkflow: async () => ({ executionId: '', data: null }),
       getToolParameter: () => undefined,
       logSubNodeRun: () => undefined,
+      getParentNodes: () => [],
     };
     const { response } = await type.supplyData!(ctx, 0);
     return response as {

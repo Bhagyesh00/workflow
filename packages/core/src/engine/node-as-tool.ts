@@ -142,6 +142,52 @@ function modelResult(host: ToolRunHost, tool: WorkflowNode, items: Item[]): stri
   return JSON.stringify(items.map((item) => item.json));
 }
 
+/** an expression is read at the agent's item; one that names no operation yet, such as `$fromAI`, may still wait */
+function operationCanWait(
+  host: ToolRunHost,
+  tool: WorkflowNode,
+  parentExec: ExecuteData,
+  itemIndex: number,
+  signal: AbortSignal,
+): boolean {
+  const { operation } = getResolvedParameters(host.workflow, tool);
+  if (typeof operation !== 'string' || !operation.startsWith('=')) return operation === 'sendAndWait';
+  const runIndex = host.state.resultData.runData[tool.name]?.length ?? 0;
+  const exec: ExecuteData = { node: tool.name, data: parentExec.data, source: parentExec.source };
+  try {
+    const value = createBaseContext(host.contextDeps(tool, exec, runIndex, signal)).getNodeParameter(
+      'operation',
+      itemIndex,
+      '',
+    );
+    return typeof value !== 'string' || value === '' || value === 'sendAndWait';
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether a node run as a tool may wait for a person: it has webhooks, and when it offers a choice of operations
+ * with `sendAndWait`, the operation at the agent's item is that one or not known yet.
+ */
+export function toolCanWait(
+  host: ToolRunHost,
+  tool: WorkflowNode,
+  toolType: NodeType,
+  parentExec: ExecuteData,
+  itemIndex: number,
+  signal: AbortSignal,
+): boolean {
+  const { webhooks, properties } = toolType.description;
+  if (!webhooks?.length) return false;
+  // a node with a choice of operations waits only at this one
+  const offered = properties.some(
+    ({ name, options }) =>
+      name === 'operation' && options?.some((option) => 'value' in option && option.value === 'sendAndWait'),
+  );
+  return !offered || operationCanWait(host, tool, parentExec, itemIndex, signal);
+}
+
 export function createNodeAsTool(
   host: ToolRunHost,
   tool: WorkflowNode,
@@ -278,7 +324,7 @@ export function createNodeAsTool(
     name,
     description,
     parameters,
-    canWait: Boolean(toolType.description.webhooks?.length),
+    canWait: toolCanWait(host, tool, toolType, parentExec, itemIndex, signal),
     async invoke(rawArgs, options) {
       const args = declaredArguments(rawArgs, declared);
       const refusal = chainRefusal(tool, callers);

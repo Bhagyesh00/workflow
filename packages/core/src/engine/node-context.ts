@@ -576,7 +576,7 @@ function replaceScope(staticData: DataObject, key: string, contents: DataObject)
 }
 
 /** the nodes `names` lists, with their types */
-function connectedNodes(workflow: Workflow, names: string[]): ConnectedNode[] {
+export function connectedNodes(workflow: Workflow, names: string[]): ConnectedNode[] {
   return names.flatMap((name) => {
     const found = workflow.getNode(name);
     return found ? [{ name: found.name, type: found.type }] : [];

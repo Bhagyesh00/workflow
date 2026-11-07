@@ -184,6 +184,19 @@ export const minimaxApi: CredentialType = {
   },
 };
 
+/** Bearer token, plus the DashScope workspace header only when a workspace is set. */
+const dashScopeAuth = async (credentials: DataObject, request: HttpRequestOptions) => {
+  const workspace = String(credentials.workspaceId ?? '').trim();
+  return {
+    ...request,
+    headers: {
+      ...(request.headers ?? {}),
+      authorization: `Bearer ${String(credentials.apiKey ?? '')}`,
+      ...(workspace ? { 'X-DashScope-WorkSpace': workspace } : {}),
+    },
+  };
+};
+
 /** `url` is the region's host; the OpenAI-compatible API is at `<url>/compatible-mode/v1` */
 export const alibabaCloudApi: CredentialType = {
   name: 'alibabaCloudApi',
@@ -197,8 +210,15 @@ export const alibabaCloudApi: CredentialType = {
       { name: 'China (Beijing)', value: 'https://dashscope.aliyuncs.com' },
       { name: 'Hong Kong (China)', value: 'https://cn-hongkong.dashscope.aliyuncs.com' },
     ]),
+    {
+      displayName: 'Workspace ID',
+      name: 'workspaceId',
+      type: 'string',
+      default: '',
+      description: 'Only for a key of a sub-workspace: sent as the X-DashScope-WorkSpace header when set',
+    },
   ],
-  authenticate: bearer,
+  authenticate: dashScopeAuth,
   test: { request: { url: '={{$credentials.url}}/compatible-mode/v1/models' } },
 };
 

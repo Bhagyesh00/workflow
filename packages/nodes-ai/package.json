@@ -14,8 +14,12 @@
   "dependencies": {
     "@workflow/nodes-base": "workspace:*",
     "@workflow/workflow": "workspace:*",
+    "fast-xml-parser": "5.11.2",
     "ioredis": "6.0.0",
-    "pg": "8.23.1"
+    "js-tiktoken": "1.0.21",
+    "mongodb": "7.7.0",
+    "pg": "8.23.1",
+    "socks": "2.8.10"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

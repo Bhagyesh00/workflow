@@ -45,6 +45,8 @@ export interface AiChatMessage {
   /** tool result messages */
   toolCallId?: string;
   name?: string;
+  /** stored in memory but not shown in the chat UI (Chat Memory Manager insert) */
+  hideFromUI?: boolean;
 }
 
 export interface AiToolDefinition {
@@ -102,8 +104,13 @@ export interface AiTool extends AiToolDefinition {
 
 export interface AiMemory {
   readonly kind: 'memory';
+  /** the history the model sees (may be windowed) */
   load(sessionId: string): Promise<AiChatMessage[]>;
+  /** the full stored history, oldest first, never windowed */
+  loadAll(sessionId: string): Promise<AiChatMessage[]>;
   append(sessionId: string, messages: AiChatMessage[]): Promise<void>;
+  /** rewrite the whole stored history; one atomic rewrite where the store allows it */
+  replace(sessionId: string, messages: AiChatMessage[]): Promise<void>;
   clear(sessionId: string): Promise<void>;
 }
 
@@ -153,4 +160,14 @@ export interface AiDocumentLoader {
 export interface AiRetriever {
   readonly kind: 'retriever';
   retrieve(query: string): Promise<AiDocument[]>;
+}
+
+export interface AiReranker {
+  readonly kind: 'reranker';
+  /** best first, already cut to the node's Top N */
+  rerank(
+    query: string,
+    documents: AiDocument[],
+    options?: { signal?: AbortSignal },
+  ): Promise<Array<{ document: AiDocument; score: number }>>;
 }

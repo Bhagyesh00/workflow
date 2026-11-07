@@ -184,6 +184,7 @@ describe('Embeddings Mistral Cloud', () => {
       executeWorkflow: async () => ({ executionId: '', data: null }),
       getToolParameter: () => undefined,
       logSubNodeRun: (input: DataObject, output: DataObject) => void logs.push({ input, output }),
+      getParentNodes: () => [],
     };
     const { response } = await type.supplyData!(ctx, 0);
     return response as {

@@ -10,11 +10,14 @@ import { GuardrailsNode } from './nodes/guardrails/Guardrails.node';
 import { memoryNodes } from './nodes/memory/memory.nodes';
 import { chatModelNodes } from './nodes/models/chat-models.nodes';
 import { outputParserNodes } from './nodes/output-parsers/output-parsers.nodes';
+import { RerankerCohereNode } from './nodes/rerankers/RerankerCohere.node';
+import { retrieverNodes } from './nodes/retrievers/retrievers.nodes';
 import { textSplitterNodes } from './nodes/text-splitters/text-splitters.nodes';
 import { McpClientToolNode } from './nodes/tools/McpClientTool.node';
 import { toolNodes } from './nodes/tools/tools.nodes';
 import { ChatTriggerNode } from './nodes/trigger/ChatTrigger.node';
 import { vectorStoreNodes } from './nodes/vector-stores/vector-stores.nodes';
+import { vendorNodes } from './nodes/vendors';
 
 export const nodes: NodeType[] = [
   AgentNode,
@@ -22,6 +25,7 @@ export const nodes: NodeType[] = [
   GuardrailsNode,
   ...llmChainNodes,
   ...ragChainNodes,
+  ...retrieverNodes,
   ChatTriggerNode,
   ...chatModelNodes,
   ...memoryNodes,
@@ -29,9 +33,11 @@ export const nodes: NodeType[] = [
   McpClientToolNode,
   ...embeddingsNodes,
   ...vectorStoreNodes,
+  RerankerCohereNode,
   DocumentDefaultDataLoaderNode,
   ...textSplitterNodes,
   ...outputParserNodes,
+  ...vendorNodes,
 ];
 
 export const credentials: CredentialType[] = aiCredentials;

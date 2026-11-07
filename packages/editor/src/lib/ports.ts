@@ -54,6 +54,7 @@ export const AI_PORT_LABELS: Record<string, string> = {
   ai_document: 'Document',
   ai_textSplitter: 'Text splitter',
   ai_retriever: 'Retriever',
+  ai_reranker: 'Reranker',
 };
 
 export function handleId(direction: PortDirection, type: ConnectionType, index: number): string {

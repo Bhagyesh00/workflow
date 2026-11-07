@@ -6,7 +6,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./utils/filter": "./src/utils/filter.ts"
+    "./utils/filter": "./src/utils/filter.ts",
+    "./utils/ssh-tunnel": "./src/utils/ssh-tunnel.ts",
+    "./utils/archive": "./src/utils/archive.ts",
+    "./extract/pdf": "./src/nodes/core/extract/pdf.ts",
+    "./utils/databricks-lakebase": "./src/utils/databricks-lakebase.ts"
   },
   "scripts": {
     "test": "vitest run",

@@ -89,6 +89,14 @@ export function streamError(message: string, httpCode?: number): Error {
   return Object.assign(new Error(message), httpCode ? { httpCode } : {});
 }
 
+/**
+ * What `HttpChatModel` needs from its context. A sub-node's `SupplyDataContext` fits and logs every
+ * call for the AI logs; a root node's `ExecuteContext` (a vendor node) fits as well and logs nothing.
+ */
+export type ChatModelHost = Pick<SupplyDataContext, 'helpers' | 'signal' | 'getNode'> & {
+  logSubNodeRun?: SupplyDataContext['logSubNodeRun'];
+};
+
 export class HttpChatModel implements AiChatModel {
   readonly kind = 'chatModel' as const;
   readonly provider: string;
@@ -99,7 +107,7 @@ export class HttpChatModel implements AiChatModel {
   nodeName?: string;
 
   constructor(
-    private readonly ctx: SupplyDataContext,
+    private readonly ctx: ChatModelHost,
     private readonly adapter: ChatAdapter,
     private readonly options: HttpChatModelOptions,
   ) {
@@ -151,11 +159,11 @@ export class HttpChatModel implements AiChatModel {
         },
         { maxRetries: this.options.maxRetries, signal },
       );
-      this.ctx.logSubNodeRun(input, logOutput(response));
+      this.ctx.logSubNodeRun?.(input, logOutput(response));
       return response;
     } catch (caught) {
       const error = caught instanceof StreamInterruptedError ? caught.original : caught;
-      this.ctx.logSubNodeRun(input, {}, error as Error);
+      this.ctx.logSubNodeRun?.(input, {}, error as Error);
       if (error instanceof ModelRefusalError) {
         throw new NodeOperationError(this.ctx.getNode(), error.message, {
           code: 'AI_REFUSAL',

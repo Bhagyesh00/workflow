@@ -1,10 +1,14 @@
-# Local services for development and tests: Postgres 16 (with pgvector) and Redis 7.
+# Local services for development and tests: Postgres 16 (with pgvector) and Redis 8 (its query engine
+# serves the Redis vector store tests), plus test brokers and MongoDB behind --profile brokers.
 #
 #   docker compose -f docker/docker-compose.dev.yml up -d
+#   docker compose -f docker/docker-compose.dev.yml --profile brokers up -d   (also Kafka, RabbitMQ, MongoDB)
 #
 # Ports and credentials match what the tests expect:
 #   postgres://postgres:postgres@127.0.0.1:5432/<db>   (workflow_dev, workflow_test, nodes_test, ai_test)
 #   redis://127.0.0.1:6379
+#   kafka 127.0.0.1:9092 (PLAINTEXT), 127.0.0.1:9093 (SASL_PLAINTEXT)    amqp://workflow:workflow@127.0.0.1:5672
+#   mongodb://127.0.0.1:27017/?directConnection=true   (Atlas Local: $vectorSearch; no user)
 # The databases and the vector extension are created on first start by test-db-init/.
 # Reset everything with `docker compose -f docker/docker-compose.dev.yml down -v`.
 name: workflow-dev
@@ -28,7 +32,7 @@ services:
       retries: 20
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     restart: unless-stopped
     ports:
       - "127.0.0.1:6379:6379"
@@ -38,7 +42,7 @@ services:
       timeout: 5s
       retries: 20
 
-  # Test brokers for the Kafka and RabbitMQ nodes, off by default (--profile brokers).
+  # Test brokers for the Kafka and RabbitMQ nodes and MongoDB for the AI nodes, off by default (--profile brokers).
   # Kafka: PLAINTEXT 127.0.0.1:9092, SASL_PLAINTEXT 127.0.0.1:9093 (PLAIN, workflow/workflow).
   kafka:
     image: apache/kafka:4.4.0
@@ -89,6 +93,16 @@ services:
       timeout: 15s
       retries: 20
       start_period: 15s
+
+  # MongoDB Atlas Local for the MongoDB chat memory and the MongoDB Atlas vector store ($vectorSearch).
+  # A one-node replica set that reports its container host name, so clients connect with directConnection=true.
+  # No root user: the port is bound to loopback only, and each test drops its own database.
+  mongodb:
+    image: mongodb/mongodb-atlas-local:8.0.15-20261014T135244Z
+    profiles: [brokers]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
 
 configs:
   kafka-jaas:

@@ -283,6 +283,24 @@ describe('Execute step on a tool node', () => {
     if (!calculator) throw new Error('The demo types have no calculator');
     const added = [
       { ...calculator, name: 'ai.toolCode', displayName: 'Code Tool' },
+      { ...calculator, name: 'ai.toolWikipedia', displayName: 'Wikipedia' },
+      {
+        ...calculator,
+        name: 'ai.vectorStoreTest',
+        displayName: 'Test Vector Store',
+        properties: [
+          {
+            displayName: 'Operation Mode',
+            name: 'mode',
+            type: 'options' as const,
+            default: 'retrieve',
+            options: [
+              { name: 'Retrieve', value: 'retrieve' },
+              { name: 'Retrieve Documents (As Tool for AI Agent)', value: 'retrieve-as-tool' },
+            ],
+          },
+        ],
+      },
       {
         ...calculator,
         name: 'ai.agentTool',
@@ -326,6 +344,43 @@ describe('Execute step on a tool node', () => {
       expect(runCalls()[0].body).toMatchObject({
         agentRequest: { query: { My_Code: 'hello' }, toolName: 'My_Code' },
       });
+    });
+
+    it('a Wikipedia tool asks for one input, and it goes out bare under the tool name', async () => {
+      const user = userEvent.setup();
+      await openNdv('Wiki', toolGraph('Wiki', 'ai.toolWikipedia'));
+      await user.click(await executeStep());
+      await screen.findByRole('dialog', { name: 'Test Wiki' });
+      await user.type(screen.getByLabelText(/^input/), 'Ada Lovelace');
+      const buttons = screen.getAllByRole('button', { name: 'Execute step' });
+      await user.click(buttons[buttons.length - 1]);
+      await waitFor(() => expect(runCalls()).toHaveLength(1));
+      expect(runCalls()[0].body).toMatchObject({
+        agentRequest: { query: { Wiki: 'Ada Lovelace' }, toolName: 'Wiki' },
+      });
+    });
+
+    it('a vector store in retrieve-as-tool mode asks for one input, and it goes out bare', async () => {
+      const user = userEvent.setup();
+      await openNdv('Docs', toolGraph('Docs', 'ai.vectorStoreTest', { mode: 'retrieve-as-tool' }));
+      await user.click(await executeStep());
+      await screen.findByRole('dialog', { name: 'Test Docs' });
+      await user.type(screen.getByLabelText(/^input/), 'refunds');
+      const buttons = screen.getAllByRole('button', { name: 'Execute step' });
+      await user.click(buttons[buttons.length - 1]);
+      await waitFor(() => expect(runCalls()).toHaveLength(1));
+      expect(runCalls()[0].body).toMatchObject({
+        agentRequest: { query: { Docs: 'refunds' }, toolName: 'Docs' },
+      });
+    });
+
+    it('a vector store type alone does not ask: in another mode it runs with an empty query', async () => {
+      const user = userEvent.setup();
+      await openNdv('Docs', toolGraph('Docs', 'ai.vectorStoreTest'));
+      await user.click(await executeStep());
+      await waitFor(() => expect(runCalls()).toHaveLength(1));
+      expect(screen.queryByRole('dialog', { name: 'Test Docs' })).toBeNull();
+      expect(runCalls()[0].body).toMatchObject({ agentRequest: { query: {}, toolName: 'Docs' } });
     });
 
     it('a Calculator opens no modal and runs with an empty query', async () => {

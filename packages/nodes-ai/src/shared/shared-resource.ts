@@ -14,13 +14,22 @@ interface Entry {
 
 const entries = new Map<string, Entry>();
 
+/**
+ * What opening a shared connection needs from a node context. A list search (`LoadOptionsContext`)
+ * fits as well as an execution context, so a list search can open the same connection.
+ */
+export type ConnectionContext = Pick<
+  BaseContext,
+  'getCredentials' | 'helpers' | 'logger' | 'getTenantId' | 'getExecutionId' | 'getNode'
+>;
+
 export interface Shared<T> {
   value: T;
   release: () => Promise<void>;
 }
 
 /** Key scoped to tenant, execution and node; secrets in `parts` are hashed, never kept in clear. */
-export function sharedKey(ctx: BaseContext, ...parts: unknown[]): string {
+export function sharedKey(ctx: ConnectionContext, ...parts: unknown[]): string {
   const digest = createHash('sha256').update(JSON.stringify(parts)).digest('hex');
   return [ctx.getTenantId(), ctx.getExecutionId(), ctx.getNode().name, digest].join('\u0000');
 }

@@ -8,6 +8,7 @@
 import {
   type AiDocument,
   type AiEmbeddings,
+  type AiReranker,
   type AiVectorStore,
   type BaseContext,
   type DataObject,
@@ -26,10 +27,23 @@ export interface ScoredDocument {
   score: number;
 }
 
+/** Operation modes a vector store node can offer (n8n's names). */
+export type VectorStoreMode = 'load' | 'insert' | 'retrieve' | 'retrieve-as-tool' | 'update';
+
+/** Modes of a store without update; a store that updates lists `[...DEFAULT_VECTOR_STORE_MODES, 'update']`. */
+export const DEFAULT_VECTOR_STORE_MODES: VectorStoreMode[] = [
+  'load',
+  'insert',
+  'retrieve',
+  'retrieve-as-tool',
+];
+
 /** Storage behind a vector store node. Vectors are computed by the factory. */
 export interface VectorBackend {
-  add(documents: AiDocument[], vectors: number[][]): Promise<void>;
-  search(vector: number[], k: number, filter?: DataObject): Promise<ScoredDocument[]>;
+  /** `ids`, when given, has one entry per document: the store upserts by id (update mode). */
+  add(documents: AiDocument[], vectors: number[][], ids?: string[]): Promise<void>;
+  /** `text` is the query as typed, for stores that search by text too (hybrid search, Databricks). */
+  search(vector: number[], k: number, filter?: DataObject, text?: string): Promise<ScoredDocument[]>;
   clear?(): Promise<void>;
 }
 
@@ -48,6 +62,14 @@ export interface VectorStoreSpec {
   properties: NodeProperty[];
   /** store-specific insert options */
   insertOptions?: NodeProperty[];
+  /** modes offered; `DEFAULT_VECTOR_STORE_MODES` when not set */
+  modes?: VectorStoreMode[];
+  /** search filter shown: the Metadata Filter list, a JSON filter, or none (a store with its own filter option) */
+  filter?: 'metadata' | 'json' | 'none';
+  /** store-specific options of the load, retrieve and retrieve-as-tool modes */
+  retrieveOptions?: NodeProperty[];
+  /** list searches, load options and credential tests of the node */
+  methods?: NodeType['methods'];
   open(ctx: BaseContext, itemIndex: number): Promise<OpenedBackend>;
 }
 
@@ -113,6 +135,7 @@ export function toAiVectorStore(
   embeddings: AiEmbeddings,
   defaultFilter: DataObject | undefined,
   log?: SupplyDataContext['logSubNodeRun'],
+  _reranker?: AiReranker,
 ): AiVectorStore {
   return {
     kind: 'vectorStore',

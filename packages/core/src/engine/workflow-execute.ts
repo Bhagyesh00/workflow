@@ -53,10 +53,11 @@ import {
   WorkflowOperationError,
 } from '@workflow/workflow';
 import { createHitlGate } from './hitl-gate';
-import { createNodeAsTool, type ToolRunHost } from './node-as-tool';
+import { createNodeAsTool, type ToolRunHost, toolCanWait } from './node-as-tool';
 import {
   assertValidOutput,
   type ContextDeps,
+  connectedNodes,
   createBaseContext,
   createCodeRunnerCall,
   createExecuteContext,
@@ -1009,42 +1010,11 @@ export class WorkflowExecute {
   ): void {
     const { description } = this.workflow.getNodeType(parent);
     if (!isToolNode(description) || isHitlVariant(description)) return;
-    const { webhooks, properties } = toolType.description;
-    if (!webhooks?.length) return;
-    // a node with a choice of operations waits only at this one
-    const offered = properties.some(
-      ({ name, options }) =>
-        name === 'operation' &&
-        options?.some((option) => 'value' in option && option.value === 'sendAndWait'),
-    );
-    if (offered && !this.operationCanWait(tool, parentExec, itemIndex, signal)) return;
+    if (!toolCanWait(this.toolHost(), tool, toolType, parentExec, itemIndex, signal)) return;
     throw new NodeOperationError(
       tool,
       `Nodes that wait for an answer cannot be used inside a sub-agent. Move "${tool.name}" to the top-level workflow.`,
     );
-  }
-
-  /** an expression is read at the agent's item; one that names no operation yet, such as `$fromAI`, may still wait */
-  private operationCanWait(
-    tool: WorkflowNode,
-    parentExec: ExecuteData,
-    itemIndex: number,
-    signal: AbortSignal,
-  ): boolean {
-    const { operation } = getResolvedParameters(this.workflow, tool);
-    if (typeof operation !== 'string' || !operation.startsWith('=')) return operation === 'sendAndWait';
-    const runIndex = this.state.resultData.runData[tool.name]?.length ?? 0;
-    const exec: ExecuteData = { node: tool.name, data: parentExec.data, source: parentExec.source };
-    try {
-      const value = createBaseContext(this.contextDeps(tool, exec, runIndex, signal)).getNodeParameter(
-        'operation',
-        itemIndex,
-        '',
-      );
-      return typeof value !== 'string' || value === '' || value === 'sendAndWait';
-    } catch {
-      return true;
-    }
   }
 
   private createSupplyDataContext(
@@ -1070,6 +1040,12 @@ export class WorkflowExecute {
       getToolParameter: createToolParameterReader(deps),
       logSubNodeRun: (input: DataObject, output: DataObject, error?: Error) =>
         this.logSubNodeRun(sub, parent, type, input, output, error),
+      // the root a chain of sub-nodes feeds, so a memory under an Agent Tool under an Agent still finds the trigger
+      getParentNodes: () =>
+        connectedNodes(
+          this.workflow,
+          this.workflow.getParentNodes(toolRootOf(this.workflow, parent.name).name),
+        ),
     };
   }
 

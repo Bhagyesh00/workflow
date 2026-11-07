@@ -371,6 +371,8 @@ export interface SupplyDataContext extends BaseContext {
   logSubNodeRun(input: DataObject, output: DataObject, error?: Error): void;
   /** a parameter of this node, with `$fromAI` bound to `args` */
   getToolParameter(name: string, itemIndex: number, args: DataObject): unknown;
+  /** the main-input ancestors of the root node this sub-node feeds, nearest first (Chat Trigger session lookup) */
+  getParentNodes(): ConnectedNode[];
 }
 
 export interface SupplyData {

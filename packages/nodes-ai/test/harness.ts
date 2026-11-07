@@ -17,6 +17,8 @@ import { credentials as baseCredentials, nodes as baseNodes } from '@workflow/no
 import {
   type AiChatRequest,
   type AiChatResponse,
+  type AiDocument,
+  type AiReranker,
   type Connections,
   type ConnectionType,
   type DataObject,
@@ -29,6 +31,13 @@ import {
   withToolVariants,
 } from '@workflow/workflow';
 import { credentials, nodes } from '../src';
+import {
+  cosineSimilarity,
+  createVectorStoreNode,
+  matchesFilter,
+  type ScoredDocument,
+  type VectorBackend,
+} from '../src/nodes/vector-stores/vector-store-factory';
 
 // ---------------------------------------------------------------------------------------------
 // Fake HTTP
@@ -257,7 +266,122 @@ const triggerNode: NodeType = {
   },
 };
 
-export const testNodes: NodeType[] = [triggerNode, fakeChatModelNode, fakeEmbeddingsNode];
+// ---------------------------------------------------------------------------------------------
+// Fake reranker and a Map-backed vector store with every mode
+// ---------------------------------------------------------------------------------------------
+
+/** every call of a `test.fakeReranker`, in order; clear it in `beforeEach` */
+export const rerankerCalls: Array<{ node: string; query: string; documents: AiDocument[] }> = [];
+
+/**
+ * Reverses the order it gets, so a test sees the reranker win over the store's ranking. Scores come
+ * from the new position: (n - position) / n, so best first is 1. Top N 0 keeps every document.
+ */
+const fakeRerankerNode: NodeType = {
+  description: {
+    name: 'test.fakeReranker',
+    displayName: 'Fake Reranker',
+    description: '',
+    group: ['transform'],
+    version: 1,
+    defaults: { name: 'Reranker' },
+    inputs: [],
+    outputs: ['ai_reranker'],
+    properties: [{ displayName: 'Top N', name: 'topN', type: 'number', default: 0 }],
+  },
+  async supplyData(ctx, itemIndex) {
+    const name = ctx.getNode().name;
+    const topN = Number(ctx.getNodeParameter('topN', itemIndex, 0)) || 0;
+    const reranker: AiReranker = {
+      kind: 'reranker',
+      async rerank(query, documents) {
+        rerankerCalls.push({ node: name, query, documents: structuredClone(documents) });
+        const reversed = [...documents].reverse();
+        const kept = topN > 0 ? reversed.slice(0, topN) : reversed;
+        const ranked = kept.map((document, position) => ({
+          document,
+          score: (reversed.length - position) / reversed.length,
+        }));
+        ctx.logSubNodeRun({ query, documents: documents.length }, { documents: ranked.length });
+        return ranked;
+      },
+    };
+    return { response: reranker };
+  },
+};
+
+export interface StoredVector {
+  document: AiDocument;
+  vector: number[];
+}
+
+/** documents of every `test.vectorStoreMemory` by Memory Key, then by id; clear it in `beforeEach` */
+export const vectorStoreMemoryData = new Map<string, Map<string, StoredVector>>();
+let vectorStoreMemoryIds = 0;
+
+/**
+ * Upserts by id: the id given by the factory, else `metadata.id`, else a new `doc-<n>`. A second add
+ * with the same id replaces the document (P5-06's update test).
+ */
+export class MapVectorBackend implements VectorBackend {
+  constructor(private readonly entries: Map<string, StoredVector>) {}
+
+  async add(documents: AiDocument[], vectors: number[][], ids?: string[]): Promise<void> {
+    documents.forEach((document, i) => {
+      const given = ids?.[i] ?? document.metadata?.id;
+      const id =
+        given === undefined || given === null || given === ''
+          ? `doc-${++vectorStoreMemoryIds}`
+          : String(given);
+      this.entries.set(id, {
+        document: { pageContent: document.pageContent, metadata: { ...document.metadata } },
+        vector: [...(vectors[i] ?? [])],
+      });
+    });
+  }
+
+  async search(vector: number[], k: number, filter?: DataObject): Promise<ScoredDocument[]> {
+    return [...this.entries.values()]
+      .filter((e) => matchesFilter(e.document.metadata, filter))
+      .map((e) => ({
+        document: { pageContent: e.document.pageContent, metadata: { ...e.document.metadata } },
+        score: cosineSimilarity(vector, e.vector),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k);
+  }
+
+  async clear(): Promise<void> {
+    this.entries.clear();
+  }
+}
+
+const vectorStoreMemoryNode: NodeType = createVectorStoreNode({
+  name: 'test.vectorStoreMemory',
+  displayName: 'Test Vector Store',
+  description: 'Map-backed store with every mode, update included',
+  icon: 'lucide:database',
+  modes: ['load', 'insert', 'retrieve', 'retrieve-as-tool', 'update'],
+  filter: 'metadata',
+  properties: [{ displayName: 'Memory Key', name: 'memoryKey', type: 'string', default: 'test' }],
+  async open(ctx, itemIndex) {
+    const key = String(ctx.getNodeParameter('memoryKey', itemIndex, 'test') || 'test');
+    let entries = vectorStoreMemoryData.get(key);
+    if (!entries) {
+      entries = new Map();
+      vectorStoreMemoryData.set(key, entries);
+    }
+    return { backend: new MapVectorBackend(entries) };
+  },
+});
+
+export const testNodes: NodeType[] = [
+  triggerNode,
+  fakeChatModelNode,
+  fakeEmbeddingsNode,
+  fakeRerankerNode,
+  vectorStoreMemoryNode,
+];
 export const nodeTypes = new NodeTypes([...nodes, ...testNodes]);
 export const credentialTypes = new CredentialTypes(credentials);
 /** nodes-ai, nodes-base and the test nodes with their tool variants, as a server registers them */
@@ -297,6 +421,13 @@ export const PG_CREDENTIALS = {
   password: 'postgres',
 };
 export const REDIS_CREDENTIALS = { host: '127.0.0.1', port: 6379, database: 2 };
+/** Redis database 0: only the Redis vector store (L14) uses it, as RediSearch indexes need db 0 */
+export const REDIS_SEARCH_CREDENTIALS = { ...REDIS_CREDENTIALS, database: 0 };
+/**
+ * The atlas-local test server (docker-compose.dev.yml `mongodb`, profile brokers). It is a one-node
+ * replica set that reports its container host name, so only `directConnection` reaches it from here.
+ */
+export const MONGO_TEST_URL = 'mongodb://127.0.0.1:27017/?directConnection=true';
 
 export function services(
   options: {

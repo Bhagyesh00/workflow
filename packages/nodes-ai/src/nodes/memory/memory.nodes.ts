@@ -3,124 +3,27 @@
  * item (`sessionId` on the supplied object). Every store is tenant-scoped: the in-process
  * buffer keys by tenant, Postgres rows carry `tenant_id`, Redis keys embed the tenant id.
  */
-import {
-  type AiChatMessage,
-  type DataObject,
-  NodeOperationError,
-  type NodeProperty,
-  type NodeType,
-  type NodeTypeDescription,
-  type SupplyDataContext,
-} from '@workflow/workflow';
+import type { AiChatMessage, NodeType } from '@workflow/workflow';
 import type { SessionMemory } from '../../shared/ai-inputs';
 import { quoteTableName, sharedPostgres, sharedRedis } from '../../shared/connections';
 import { TenantStore } from '../../shared/tenant-store';
-import { messageText, truncate } from '../../shared/utils';
+import { messageText } from '../../shared/utils';
+import { MemoryLakebaseChatNode } from './MemoryLakebaseChat.node';
+import { MemoryManagerNode } from './MemoryManager.node';
+import { MemoryMongoDbChatNode } from './MemoryMongoDbChat.node';
+import { MemoryXataNode } from './MemoryXata.node';
+import {
+  fromStoredMessage,
+  logged,
+  memoryDescription,
+  toStoredMessage,
+  windowProperty,
+  windowSize,
+} from './memory-shared';
+import { readSessionKey, sessionProperties } from './session';
 
-/** a single stored message is capped so one huge answer cannot bloat every later prompt */
-const MAX_STORED_CHARS = 50_000;
-const MAX_SESSION_KEY = 512;
-
-const sessionKeyProperty: NodeProperty = {
-  displayName: 'Session Key',
-  name: 'sessionKey',
-  type: 'string',
-  default: '={{ $json.sessionId }}',
-  required: true,
-  description: 'Identifies the conversation. The Chat Trigger sends "sessionId".',
-};
-
-const windowProperty: NodeProperty = {
-  displayName: 'Context Window Length',
-  name: 'contextWindowLength',
-  type: 'number',
-  default: 5,
-  typeOptions: { minValue: 1, maxValue: 200 },
-  description: 'How many past exchanges (user message + answer) the model sees',
-};
-
-function memoryDescription(
-  base: Pick<NodeTypeDescription, 'name' | 'displayName' | 'description' | 'icon' | 'credentials'>,
-  properties: NodeProperty[],
-): NodeTypeDescription {
-  return {
-    ...base,
-    group: ['transform'],
-    version: 1,
-    defaults: { name: base.displayName },
-    inputs: [],
-    outputs: ['ai_memory'],
-    outputNames: ['Memory'],
-    categories: ['AI', 'Memory'],
-    alias: ['chat history', 'conversation', 'remember'],
-    properties,
-  };
-}
-
-function readSessionKey(ctx: SupplyDataContext, itemIndex: number): string {
-  const value = ctx.getNodeParameter('sessionKey', itemIndex, '');
-  const key = typeof value === 'number' ? String(value) : typeof value === 'string' ? value.trim() : '';
-  if (!key) {
-    throw new NodeOperationError(ctx.getNode(), 'The session key is empty', {
-      itemIndex,
-      description: 'Map a session id, e.g. {{ $json.sessionId }} from a Chat Trigger.',
-      parameter: 'sessionKey',
-    });
-  }
-  if (key.length > MAX_SESSION_KEY) {
-    throw new NodeOperationError(
-      ctx.getNode(),
-      `The session key is longer than ${MAX_SESSION_KEY} characters`,
-      {
-        itemIndex,
-      },
-    );
-  }
-  return key;
-}
-
-function windowSize(ctx: SupplyDataContext, itemIndex: number): number {
-  return Math.max(1, Math.min(200, Number(ctx.getNodeParameter('contextWindowLength', itemIndex, 5)) || 5));
-}
-
-/** Only role and text are stored: images and provider internals never reach memory. */
-export function toStoredMessage(message: AiChatMessage): { role: string; content: string } {
-  return { role: message.role, content: truncate(messageText(message.content), MAX_STORED_CHARS) };
-}
-
-export function fromStoredMessage(value: unknown): AiChatMessage | undefined {
-  const v = (typeof value === 'string' ? safeParse(value) : value) as DataObject | undefined;
-  if (!v || (v.role !== 'user' && v.role !== 'assistant' && v.role !== 'system')) return undefined;
-  return { role: v.role, content: typeof v.content === 'string' ? v.content : '' };
-}
-
-function safeParse(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-}
-
-function logged(ctx: SupplyDataContext, memory: SessionMemory): SessionMemory {
-  return {
-    kind: 'memory',
-    sessionId: memory.sessionId,
-    async load(sessionId) {
-      const messages = await memory.load(sessionId);
-      ctx.logSubNodeRun(
-        { action: 'loadMemoryVariables', sessionId },
-        { chatHistory: messages.map(toStoredMessage) },
-      );
-      return messages;
-    },
-    async append(sessionId, messages) {
-      await memory.append(sessionId, messages);
-      ctx.logSubNodeRun({ action: 'saveContext', sessionId }, { chatHistory: messages.map(toStoredMessage) });
-    },
-    clear: (sessionId) => memory.clear(sessionId),
-  };
-}
+/** kept here for the existing tests and importers; the shared memory parts live in memory-shared.ts */
+export { fromStoredMessage, toStoredMessage } from './memory-shared';
 
 // ---------------------------------------------------------------------------------------------
 // Window buffer (in-process)
@@ -185,7 +88,7 @@ export const MemoryBufferWindowNode: NodeType = {
         type: 'notice',
         default: '',
       },
-      sessionKeyProperty,
+      ...sessionProperties,
       windowProperty,
     ],
   ),
@@ -213,6 +116,12 @@ export const MemoryBufferWindowNode: NodeType = {
         );
         bufferStore.set(tenantId, keyOf(sessionId), next);
       },
+      async loadAll() {
+        throw new Error('not implemented (L19)');
+      },
+      async replace() {
+        throw new Error('not implemented (L19)');
+      },
       async clear(sessionId) {
         bufferStore.delete(tenantId, keyOf(sessionId));
       },
@@ -235,7 +144,7 @@ export const MemoryPostgresChatNode: NodeType = {
       credentials: [{ name: 'postgres', required: true }],
     },
     [
-      sessionKeyProperty,
+      ...sessionProperties,
       {
         displayName: 'Table Name',
         name: 'tableName',
@@ -283,6 +192,12 @@ export const MemoryPostgresChatNode: NodeType = {
           `INSERT INTO ${table} (tenant_id, session_id, message) VALUES ${rows.join(', ')}`,
           values,
         );
+      },
+      async loadAll() {
+        throw new Error('not implemented (L19)');
+      },
+      async replace() {
+        throw new Error('not implemented (L19)');
       },
       async clear(sessionId) {
         await client.query(`DELETE FROM ${table} WHERE tenant_id = $1 AND session_id = $2`, [
@@ -332,7 +247,7 @@ export const MemoryRedisChatNode: NodeType = {
       credentials: [{ name: 'redis', required: true }],
     },
     [
-      sessionKeyProperty,
+      ...sessionProperties,
       {
         displayName: 'Session Time To Live (s)',
         name: 'sessionTTL',
@@ -368,6 +283,12 @@ export const MemoryRedisChatNode: NodeType = {
         if (ttl > 0) tx.expire(key, ttl);
         await tx.exec();
       },
+      async loadAll() {
+        throw new Error('not implemented (L19)');
+      },
+      async replace() {
+        throw new Error('not implemented (L19)');
+      },
       async clear(sessionId) {
         await client.del(keyOf(sessionId));
       },
@@ -376,4 +297,12 @@ export const MemoryRedisChatNode: NodeType = {
   },
 };
 
-export const memoryNodes: NodeType[] = [MemoryBufferWindowNode, MemoryPostgresChatNode, MemoryRedisChatNode];
+export const memoryNodes: NodeType[] = [
+  MemoryBufferWindowNode,
+  MemoryPostgresChatNode,
+  MemoryRedisChatNode,
+  MemoryMongoDbChatNode,
+  MemoryXataNode,
+  MemoryLakebaseChatNode,
+  MemoryManagerNode,
+];

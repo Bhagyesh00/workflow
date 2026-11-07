@@ -1,9 +1,20 @@
-/** Vector stores: in-memory (tenant-scoped, bounded), PGVector and Qdrant. */
+/**
+ * Vector stores: in-memory (tenant-scoped, bounded), PGVector and Qdrant here; `vectorStoreNodes` also lists
+ * the stores that have their own file.
+ */
 import { randomUUID } from 'node:crypto';
 import type { AiDocument, BaseContext, DataObject, NodeType } from '@workflow/workflow';
 import { NodeOperationError } from '@workflow/workflow';
 import { quoteTableName, sharedPostgres } from '../../shared/connections';
 import { TenantStore } from '../../shared/tenant-store';
+import { VectorStoreAzureAISearchNode } from './azure-ai-search';
+import { VectorStoreChromaDBNode } from './chroma';
+import { VectorStoreDatabricksNode } from './databricks';
+import { VectorStoreMilvusNode } from './milvus';
+import { VectorStoreMongoDBAtlasNode } from './mongodb-atlas';
+import { VectorStorePineconeNode } from './pinecone';
+import { VectorStoreRedisNode } from './redis-vector';
+import { VectorStoreSupabaseNode } from './supabase';
 import {
   clearStoreOption,
   cosineSimilarity,
@@ -12,6 +23,7 @@ import {
   type ScoredDocument,
   type VectorBackend,
 } from './vector-store-factory';
+import { VectorStoreWeaviateNode } from './weaviate';
 
 // ---------------------------------------------------------------------------------------------
 // In-memory
@@ -443,4 +455,13 @@ export const vectorStoreNodes: NodeType[] = [
   VectorStoreInMemoryNode,
   VectorStorePGVectorNode,
   VectorStoreQdrantNode,
+  VectorStorePineconeNode,
+  VectorStoreSupabaseNode,
+  VectorStoreWeaviateNode,
+  VectorStoreMongoDBAtlasNode,
+  VectorStoreRedisNode,
+  VectorStoreAzureAISearchNode,
+  VectorStoreChromaDBNode,
+  VectorStoreMilvusNode,
+  VectorStoreDatabricksNode,
 ];

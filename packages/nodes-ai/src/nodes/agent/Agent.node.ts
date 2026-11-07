@@ -20,7 +20,7 @@ import {
 } from '../../shared/ai-inputs';
 import { batchingOption, runInBatches } from '../../shared/batching';
 import { errorMessage } from '../../shared/utils';
-import { runAgent } from './agent-loop';
+import { type AgentResult, runAgent } from './agent-loop';
 import { AgentSuspended, createCheckpoint, readCheckpoint } from './checkpoint';
 import { binaryParts } from './passthrough';
 
@@ -40,6 +40,9 @@ export const modelPort = (displayName: string) => ({
  * second chat-model port and exists only while `needsFallback` is on.
  */
 const AGENT_INPUTS = `={{ ['main', ${JSON.stringify(modelPort('Chat Model'))}, ...($parameter.needsFallback === true ? [${JSON.stringify(modelPort('Fallback Model'))}] : []), { type: 'ai_memory', displayName: 'Memory', maxConnections: 1 }, { type: 'ai_tool', displayName: 'Tool' }, ...($parameter.hasOutputParser !== false ? [{ type: 'ai_outputParser', displayName: 'Output Parser', maxConnections: 1 }] : [])] }}`;
+
+/** The agent's inputs expression, shared with the Databricks AI Agent node. */
+export const agentInputs = AGENT_INPUTS;
 
 /** The agent's own parameters, shared with the AI Agent Tool node. */
 export const agentProperties: NodeProperty[] = [
@@ -261,7 +264,40 @@ function tracingMetadata(options: DataObject): DataObject {
 /** an item that did not run because an earlier one failed */
 class SkippedItem extends Error {}
 
-export async function executeAgent(ctx: ExecuteContext): Promise<Item[][]> {
+/** one finished agent item, as an observer sees it (the Databricks node turns it into a trace) */
+export interface AgentItemEvent {
+  itemIndex: number;
+  /** the prompt sent to the model; empty when the item failed before the prompt was read */
+  input: string;
+  /** epoch milliseconds */
+  startedAt: number;
+  endedAt: number;
+  result?: AgentResult;
+  error?: Error;
+}
+
+/**
+ * Called once per item when the item ends, with its result or its error. An item that stops for a
+ * waiting tool, or is skipped after a failed one, fires nothing; a resumed item fires when it ends.
+ * A failing observer is logged as a warning and never fails the item.
+ */
+export type AgentItemObserver = (event: AgentItemEvent) => void | Promise<void>;
+
+async function notifyObserver(
+  ctx: ExecuteContext,
+  observer: AgentItemObserver | undefined,
+  event: AgentItemEvent,
+): Promise<void> {
+  if (!observer) return;
+  try {
+    await observer(event);
+  } catch {
+    // the error may quote the prompt or a tool result, so only the fact is logged
+    ctx.logger.warn('An agent item observer failed', { itemIndex: event.itemIndex });
+  }
+}
+
+export async function executeAgent(ctx: ExecuteContext, observer?: AgentItemObserver): Promise<Item[][]> {
   const items = ctx.getInputData();
   const resume = ctx.getResumeData();
   const checkpoint = resume ? readCheckpoint(ctx.getNode(), resume) : undefined;
@@ -275,9 +311,11 @@ export async function executeAgent(ctx: ExecuteContext): Promise<Item[][]> {
   }
 
   const processItem = async (i: number): Promise<Item> => {
+    const startedAt = Date.now();
+    let input = '';
     try {
       const options = (ctx.getNodeParameter('options', i, {}) ?? {}) as DataObject;
-      const input = getPrompt(ctx, i, items[i], { emptyText: 'No prompt specified' });
+      input = getPrompt(ctx, i, items[i], { emptyText: 'No prompt specified' });
       const model = await getChatModel(ctx, i, { chatOnly: true });
       let fallbackModel: Awaited<ReturnType<typeof getFallbackModel>> | undefined;
       if (ctx.getNodeParameter('needsFallback', i, false) === true) {
@@ -336,9 +374,17 @@ export async function executeAgent(ctx: ExecuteContext): Promise<Item[][]> {
       if (options.autoSaveHighlightedData !== false && i === 0 && typeof result.output === 'string') {
         ctx.setCustomData(highlightedResponseKey(ctx.getNode().name), result.output);
       }
+      await notifyObserver(ctx, observer, { itemIndex: i, input, startedAt, endedAt: Date.now(), result });
       return { json, pairedItem: { item: i } };
     } catch (error) {
       if (error instanceof AgentSuspended) throw error;
+      await notifyObserver(ctx, observer, {
+        itemIndex: i,
+        input,
+        startedAt,
+        endedAt: Date.now(),
+        error: error instanceof Error ? error : new Error(errorMessage(error)),
+      });
       if (ctx.continueOnFail()) {
         return {
           json: { error: errorMessage(error) },

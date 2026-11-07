@@ -1,10 +1,14 @@
 /**
- * The base URL of a Databricks workspace's OpenAI-compatible AI gateway. Token calls to this host carry
- * the client secret, so anything but plain https is refused. The error never repeats the host.
+ * Databricks workspace URLs. Calls to the workspace carry the client secret or an OAuth token, so
+ * anything but plain https is refused. The error never repeats the host.
  */
 import { trimSlash } from './chat-model';
 
-export function databricksGatewayUrl(host: string): string {
+/**
+ * The workspace host as an https origin with no trailing slash, such as
+ * `https://<workspace>.cloud.databricks.com`. Refuses http, credentials in the URL, a query and a hash.
+ */
+export function databricksHttpsHost(host: string): string {
   const base = trimSlash(host);
   let url: URL | undefined;
   try {
@@ -17,5 +21,10 @@ export function databricksGatewayUrl(host: string): string {
       'The Databricks host must be an https URL, such as https://<workspace>.cloud.databricks.com',
     );
   }
-  return `${base}/ai-gateway/openai/v1`;
+  return base;
+}
+
+/** The base URL of a Databricks workspace's OpenAI-compatible AI gateway. */
+export function databricksGatewayUrl(host: string): string {
+  return `${databricksHttpsHost(host)}/ai-gateway/openai/v1`;
 }

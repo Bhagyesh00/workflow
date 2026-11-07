@@ -80,6 +80,26 @@ describe('port derivation', () => {
     expect(ports.outputs.map((p) => p.id)).toEqual(['out:ai_languageModel:0']);
   });
 
+  it('labels a reranker port, and a reranker is a sub-node', () => {
+    const description = (inputs: NodeInputConfig[], outputs: NodeOutputConfig[]): NodeTypeDescription => ({
+      ...get('ai.agent'),
+      name: 'test.rerank',
+      inputs,
+      outputs,
+    });
+    const store = deriveNodePorts(
+      node('Store', 'test.store'),
+      description([{ type: 'ai_reranker', maxConnections: 1, required: true }], [{ type: 'ai_tool' }]),
+    );
+    expect(store.inputs.map((p) => [p.id, p.label])).toEqual([['in:ai_reranker:0', 'Reranker']]);
+    const reranker = deriveNodePorts(
+      node('Rerank', 'test.rerank'),
+      description([], [{ type: 'ai_reranker' }]),
+    );
+    expect(reranker.isSubNode).toBe(true);
+    expect(reranker.outputs.map((p) => [p.id, p.label])).toEqual([['out:ai_reranker:0', 'Reranker']]);
+  });
+
   it('adds an error output for continueErrorOutput', () => {
     const ports = deriveNodePorts(
       node('If', 'core.if', {}, { onError: 'continueErrorOutput' }),

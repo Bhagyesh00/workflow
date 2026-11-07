@@ -1,5 +1,6 @@
 /**
- * Agent tools: Calculator, Code, HTTP Request, Call Workflow, Think and Vector Store.
+ * Agent tools: Calculator, Code, HTTP Request, Call Workflow, Think and Vector Store; the search tools
+ * (SearXNG, Wikipedia, Wolfram|Alpha) live in their own files and are listed in `toolNodes`.
  * Tool arguments come from the model and are treated as untrusted data: the calculator accepts
  * only arithmetic, code runs in the isolate with the arguments passed as JSON, and the HTTP tool
  * never lets the model pick the host of a request that carries credentials.
@@ -40,6 +41,9 @@ import {
   truncate,
 } from '../../shared/utils';
 import { QA_PROMPT } from '../chains/rag-chains.nodes';
+import { ToolSearXngNode } from './ToolSearXng.node';
+import { ToolWikipediaNode } from './ToolWikipedia.node';
+import { ToolWolframAlphaNode } from './ToolWolframAlpha.node';
 import { loadWorkflowInputMappings, searchWorkflows, workflowToolInputs } from './workflow-inputs';
 
 function toolDescriptionOf(
@@ -984,4 +988,7 @@ export const toolNodes: NodeType[] = [
   ToolWorkflowNode,
   ToolThinkNode,
   ToolVectorStoreNode,
+  ToolSearXngNode,
+  ToolWikipediaNode,
+  ToolWolframAlphaNode,
 ];

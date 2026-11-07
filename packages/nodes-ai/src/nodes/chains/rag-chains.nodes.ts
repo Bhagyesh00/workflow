@@ -1,8 +1,7 @@
-/** Summarization (map-reduce / refine / stuff), Retrieval Q&A and the vector store retriever. */
+/** Summarization (map-reduce / refine / stuff) and Retrieval Q&A; the retrievers are in nodes/retrievers. */
 import {
   type AiChatModel,
   type AiDocument,
-  type AiRetriever,
   type DataObject,
   type Item,
   NodeOperationError,
@@ -369,52 +368,4 @@ export const ChainRetrievalQaNode: NodeType = {
   },
 };
 
-// ---------------------------------------------------------------------------------------------
-// Vector store retriever
-// ---------------------------------------------------------------------------------------------
-
-export const RetrieverVectorStoreNode: NodeType = {
-  description: {
-    name: 'ai.retrieverVectorStore',
-    displayName: 'Vector Store Retriever',
-    description: 'Uses a vector store as a retriever for chains',
-    icon: 'lucide:search',
-    group: ['transform'],
-    version: 1,
-    defaults: { name: 'Vector Store Retriever' },
-    inputs: [{ type: 'ai_vectorStore', displayName: 'Vector Store', required: true, maxConnections: 1 }],
-    outputs: ['ai_retriever'],
-    outputNames: ['Retriever'],
-    categories: ['AI', 'Retrievers'],
-    alias: ['rag', 'search'],
-    properties: [
-      {
-        displayName: 'Limit',
-        name: 'topK',
-        type: 'number',
-        default: 4,
-        typeOptions: { minValue: 1, maxValue: 100 },
-        description: 'Number of documents to retrieve',
-      },
-    ],
-  },
-  async supplyData(ctx, itemIndex) {
-    const store = (await getVectorStore(ctx, itemIndex))!;
-    const topK = Number(ctx.getNodeParameter('topK', itemIndex, 4));
-    const retriever: AiRetriever = {
-      kind: 'retriever',
-      async retrieve(query) {
-        const documents = (await store.similaritySearch(query, topK)).map((r) => r.document);
-        ctx.logSubNodeRun({ query }, { documents });
-        return documents;
-      },
-    };
-    return { response: retriever };
-  },
-};
-
-export const ragChainNodes: NodeType[] = [
-  ChainSummarizationNode,
-  ChainRetrievalQaNode,
-  RetrieverVectorStoreNode,
-];
+export const ragChainNodes: NodeType[] = [ChainSummarizationNode, ChainRetrievalQaNode];

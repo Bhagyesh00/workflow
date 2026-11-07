@@ -10,6 +10,7 @@ import {
   type AiImagePart,
   type AiMemory,
   type AiOutputParser,
+  type AiReranker,
   type AiRetriever,
   type AiTextSplitter,
   type AiTool,
@@ -138,6 +139,11 @@ export function getVectorStore(ctx: AnyContext, itemIndex: number, required = tr
 
 export function getRetriever(ctx: AnyContext, itemIndex: number) {
   return single<AiRetriever>(ctx, 'ai_retriever', 'retriever', itemIndex, 'retriever', false);
+}
+
+/** The reranker on the `ai_reranker` port, or `undefined` when none is connected. */
+export function getReranker(ctx: AnyContext, itemIndex: number): Promise<AiReranker | undefined> {
+  return single<AiReranker>(ctx, 'ai_reranker', 'reranker', itemIndex, 'reranker', false);
 }
 
 export function getTextSplitter(ctx: AnyContext, itemIndex: number, required = false) {

@@ -20,6 +20,7 @@ import {
 } from '@workflow/workflow';
 import { createNodeAsTool, type ToolRunHost } from './node-as-tool';
 import {
+  connectedNodes,
   createBaseContext,
   createCodeRunnerCall,
   createSubWorkflowCaller,
@@ -184,6 +185,7 @@ function supplyContext(
       host.supplySubNodes(tool, toolType, type, itemIndex, exec, signal, closeFunctions),
     getToolParameter: createToolParameterReader(deps),
     logSubNodeRun: (input, output, error) => host.logSubNodeRun(tool, root, 'ai_tool', input, output, error),
+    getParentNodes: () => connectedNodes(host.workflow, host.workflow.getParentNodes(root.name)),
   };
 }
 

@@ -9,6 +9,7 @@ import { OLLAMA_DEFAULT_BASE_URL } from '../providers/ollama';
 import { azureEntraCognitiveServicesOAuth2Api, azureOpenAiApi } from './azure.credentials';
 import { googleVertexAiApi } from './google-vertex.credentials';
 import { modelCredentials } from './models.credentials';
+import { ragCredentials } from './rag.credentials';
 
 const apiKey = (required = true) => ({
   displayName: 'API Key',
@@ -214,4 +215,5 @@ export const aiCredentials: CredentialType[] = [
   azureOpenAiApi,
   azureEntraCognitiveServicesOAuth2Api,
   googleVertexAiApi,
+  ...ragCredentials,
 ];

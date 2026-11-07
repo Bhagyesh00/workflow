@@ -48,9 +48,15 @@ import { ToolTestModal } from './ToolTestModal';
 /**
  * Tools that take one string and have no `$fromAI` to scan, from n8n's list: only these among the tools with no scan
  * ask for a value, and it goes out bare, under the tool's name. A Calculator or a Call Workflow Tool runs with none.
+ * n8n's list also holds the MCP Client Tool, which comes in a later stage.
  */
-const TOOL_TYPES_TAKING_INPUT: ReadonlySet<string> = new Set(['ai.toolCode']);
+const TOOL_TYPES_TAKING_INPUT: ReadonlySet<string> = new Set(['ai.toolCode', 'ai.toolWikipedia']);
 const IMPLICIT_INPUT: FromAiArgument[] = [{ key: 'input', type: 'string' }];
+
+/** n8n's other case: a vector store in its retrieve-as-tool mode takes the same one input */
+function isVectorStoreTool(nodeType: string, parameters: NodeParameters): boolean {
+  return nodeType.startsWith('ai.vectorStore') && parameters.mode === 'retrieve-as-tool';
+}
 
 /**
  * What a tool's model fills. The Call Workflow Tool's schema comes from its mapped inputs only, without the fields
@@ -220,7 +226,12 @@ export function NodeDetailsView({
   const openNdv = useUiStore((s) => s.openNdv);
   const [tab, setTab] = useState<'parameters' | 'settings'>('parameters');
   const [name, setName] = useState(nodeName);
-  const [toolTest, setToolTest] = useState<{ args: FromAiArgument[]; parentName: string } | null>(null);
+  /** `bare`: one `input` that goes out under the tool's name, as n8n sends it for the listed tools */
+  const [toolTest, setToolTest] = useState<{
+    args: FromAiArgument[];
+    bare: boolean;
+    parentName: string;
+  } | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => setName(nodeName), [nodeName]);
@@ -250,24 +261,22 @@ export function NodeDetailsView({
       onExecuteNode(node.name);
       return;
     }
-    let args: FromAiArgument[];
+    let args = IMPLICIT_INPUT;
+    let bare = TOOL_TYPES_TAKING_INPUT.has(node.type);
     try {
-      // the node stores only what a person changed, so a `$fromAI` can sit in a default
-      args = TOOL_TYPES_TAKING_INPUT.has(node.type)
-        ? IMPLICIT_INPUT
-        : extractFromAiArguments(
-            fromAiScanTarget(
-              node.type,
-              resolveNodeParameters(description.properties, node.parameters, {
-                nodeVersion: node.typeVersion,
-              }),
-            ),
-          );
+      if (!bare) {
+        // the node stores only what a person changed, so a `$fromAI` or the store's mode can sit in a default
+        const parameters = resolveNodeParameters(description.properties, node.parameters, {
+          nodeVersion: node.typeVersion,
+        });
+        bare = isVectorStoreTool(node.type, parameters);
+        if (!bare) args = extractFromAiArguments(fromAiScanTarget(node.type, parameters));
+      }
     } catch (error) {
       toast.error('Could not test this tool', errorMessage(error));
       return;
     }
-    if (args.length) setToolTest({ args, parentName: toolParentName(connections, node.name) ?? '' });
+    if (args.length) setToolTest({ args, bare, parentName: toolParentName(connections, node.name) ?? '' });
     else runToolTest(node.name, {}, onExecuteNode);
   }, [node, description, onExecuteNode, isTool, connections]);
 
@@ -547,7 +556,7 @@ export function NodeDetailsView({
               setToolTest(null);
               runToolTest(
                 node.name,
-                TOOL_TYPES_TAKING_INPUT.has(node.type) ? { [toolNameOf(node.name)]: query.input } : query,
+                toolTest.bare ? { [toolNameOf(node.name)]: query.input } : query,
                 onExecuteNode,
               );
             }}
