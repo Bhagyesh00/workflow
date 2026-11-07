@@ -308,7 +308,14 @@ describe('provider extras', () => {
       temperature: 0.1,
       top_p: 0.9,
       max_tokens: 300,
+      response_format: { type: 'json_object' },
     });
+  });
+
+  it('the Text response format sends no response_format', async () => {
+    const http = new FakeHttpClient(sequence(completion('ok')));
+    await runAgent('ai.lmChatDeepSeek', 'deepSeekApi', KEY, { options: { responseFormat: 'text' } }, http);
+    expect(http.requests[0].body).not.toHaveProperty('response_format');
   });
 
   it('a max tokens of -1 sends no limit', async () => {
@@ -413,6 +420,36 @@ describe('Databricks', () => {
     const options = await type?.methods?.loadOptions?.listModels(ctx);
     expect(options?.map((o) => o.value)).toEqual(['custom-model', 'databricks-llama']);
     expect(http.requests.some((q) => q.url === `${HOST}/api/2.0/serving-endpoints`)).toBe(true);
+  });
+
+  it('the model list sends nothing to an http host, also with a user grant token', async () => {
+    const http = new FakeHttpClient(() => ({ body: { endpoints: [] } }));
+    const svc: ExecutionServices = services({
+      creds: {
+        databricksOAuth2Api: {
+          host: 'http://adb-42.azuredatabricks.net',
+          grantType: 'pkce',
+          clientId: 'dbx-client',
+          oauthTokenData: { access_token: 'user-grant-token', token_type: 'Bearer' },
+        },
+      },
+      http,
+      nodeTypes: toolNodeTypes,
+    });
+    const n = withCred(node('Node', 'ai.lmChatDatabricks'), 'databricksOAuth2Api');
+    const workflow = new Workflow({ name: 'w', nodes: [n], connections: {} }, toolNodeTypes);
+    const base = createBaseContext({
+      workflow,
+      node: n,
+      services: svc,
+      evaluator: new ExpressionEvaluator(),
+      signal: new AbortController().signal,
+    });
+    const { getNodeParameter: _omit, ...rest } = base;
+    const ctx: LoadOptionsContext = { ...rest, getCurrentNodeParameter: () => undefined };
+    const type = toolNodeTypes.get('ai.lmChatDatabricks');
+    await expect(type?.methods?.loadOptions?.listModels(ctx)).rejects.toThrow(/must be an https URL/);
+    expect(http.requests).toEqual([]);
   });
 });
 

@@ -225,6 +225,8 @@ function openRouterBody(options: DataObject): DataObject {
 
 /** Databricks lists the serving endpoints of the workspace; the chat ones are the models to pick */
 async function listDatabricksModels(ctx: LoadOptionsContext, credential: string, host: string) {
+  // https only, as for the chat calls: a user grant adds its bearer token to this request
+  databricksGatewayUrl(host);
   const response = (await ctx.helpers.httpRequestWithAuthentication(credential, {
     url: `${trimSlash(host)}/api/2.0/serving-endpoints`,
   })) as { endpoints?: Array<{ name?: string; task?: string }> };
@@ -484,7 +486,11 @@ function presetNode(preset: Preset): NodeType {
       const num = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : Number(v));
       const reasoningEffort =
         preset.name === 'ai.lmChatXAiGrok' && options.reasoningEffort ? String(options.reasoningEffort) : undefined;
-      const extraBody = preset.extraBody ? preset.extraBody(options) : {};
+      // the option asks for JSON on every call; responseFormatMode covers only a request from a parser
+      const extraBody: DataObject = {
+        ...(preset.extraBody?.(options) ?? {}),
+        ...(options.responseFormat === 'json_object' ? { response_format: { type: 'json_object' } } : {}),
+      };
       let adapter = openAiAdapter({
         baseUrl: credentialBase(preset, creds),
         model: modelId,

@@ -84,11 +84,19 @@ export class OAuth2Service {
     return { row, data };
   }
 
-  /** a URL of the flow, with `={{$credentials.host}}` templates resolved; the https-only type refuses any other scheme */
+  /**
+   * A URL of the flow. Only a template the type itself fixes, such as `={{$credentials.host}}/oidc/...`, is
+   * resolved here: a typed value was resolved when it was read, and a second pass would expose stored
+   * secrets. The https-only type refuses any other scheme.
+   */
   private flowUrl(type: string, data: DataObject, field: 'authUrl' | 'accessTokenUrl', label: string): string {
     let resolved: string;
     try {
-      resolved = resolveCredentialUrl(String(data[field] ?? ''), data);
+      const raw = String(data[field] ?? '');
+      const fixed = this.credentials.types
+        .getResolved(type)
+        ?.properties.some((p) => p.name === field && p.type === 'hidden' && p.default !== '');
+      resolved = fixed ? resolveCredentialUrl(raw, data) : raw;
     } catch {
       throw ApiError.badRequest(`Invalid ${label}`);
     }

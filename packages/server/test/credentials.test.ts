@@ -191,6 +191,26 @@ describe('credentials', () => {
     }
   });
 
+  it('does not evaluate a typed authorization URL again, so stored secrets stay out of the answer', async () => {
+    const { client } = await signup(server.app);
+    const credential = await client.data(
+      client.post('/rest/credentials', {
+        name: 'Generic',
+        type: 'oAuth2Api',
+        data: {
+          authUrl: '={{"=https://x.example/{{$credentials.clientSecret}}"}}',
+          accessTokenUrl: `${remoteUrl}/token`,
+          clientId: 'client-1',
+          clientSecret: 'stored-client-secret',
+        },
+      }),
+    );
+    const response = await client.get(`/rest/oauth2/authorize?credentialId=${credential.id}`);
+    expect(response.statusCode).toBe(400);
+    expect(response.body).toContain('Invalid authorization URL');
+    expect(response.body).not.toContain('stored-client-secret');
+  });
+
   it('runs the OAuth2 authorization code flow with PKCE and stores tokens encrypted', async () => {
     const { client, tenant } = await signup(server.app);
     const credential = await client.data(
