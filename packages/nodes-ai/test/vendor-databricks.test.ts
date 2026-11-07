@@ -163,7 +163,7 @@ describe('Databricks AI Agent', () => {
   });
 
   it('exports one trace per item to the workspace and uploads its spans to the signed address', async () => {
-    const { result, at, uploads } = await agent({ exportTraces: true }, { questions: ['one', 'two'] });
+    const { result, at, uploads, fake } = await agent({ exportTraces: true }, { questions: ['one', 'two'] });
     expect(result.status).toBe('success');
     expect(result.output('Agent')).toEqual([{ output: 'first answer' }, { output: 'second answer' }]);
     // the experiment is looked up and created once, not per item
@@ -188,6 +188,10 @@ describe('Databricks AI Agent', () => {
     const spans = (uploads[0].body as any).spans;
     expect(spans[0]).toMatchObject({ trace_id: 'tr-1', name: 'Agent' });
     expect(JSON.parse(spans[0].attributes['mlflow.spanInputs'])).toEqual({ input: 'one' });
+    // a hanging workspace must not hold a finished item: every export call has a short timeout
+    const exportCalls = fake.requests.filter((r) => /mlflow/.test(r.url) || r.method === 'PUT');
+    expect(exportCalls.length).toBeGreaterThanOrEqual(8);
+    expect(exportCalls.map((r) => r.timeout)).toEqual(exportCalls.map(() => 10_000));
   });
 
   it('builds a tool span for each step and sends the workspace calls with the token', async () => {

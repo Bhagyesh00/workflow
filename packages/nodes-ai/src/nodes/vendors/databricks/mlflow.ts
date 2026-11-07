@@ -119,6 +119,9 @@ export function buildSpans(traceId: string, event: AgentItemEvent): Span[] {
   return spans;
 }
 
+/** each export call waits this long: a hanging workspace must not hold a finished agent item */
+const EXPORT_TIMEOUT_MS = 10_000;
+
 /**
  * The observer that exports one trace per finished agent item. A failed export logs a warning with no user
  * text and never fails the node.
@@ -134,6 +137,7 @@ export function createMlflowObserver(
       ...request,
       returnFullResponse: true,
       ignoreHttpStatusErrors: true,
+      timeout: EXPORT_TIMEOUT_MS,
     })) as { body?: T; statusCode: number };
     return { status: response.statusCode, body: (response.body ?? {}) as T };
   };
@@ -216,6 +220,7 @@ export function createMlflowObserver(
       headers,
       body: redactPayload({ spans: buildSpans(traceId, event) }),
       followRedirects: false,
+      timeout: EXPORT_TIMEOUT_MS,
     });
   };
 
