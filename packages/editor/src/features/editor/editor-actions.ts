@@ -4,6 +4,7 @@
  * so they can be used from buttons, keyboard shortcuts and the NDV alike.
  */
 import {
+  CHAT_TRIGGER_TYPE,
   type Connections,
   type DataObject,
   dirtyNodesFromDiff,
@@ -22,6 +23,7 @@ import { getAncestors } from '../../lib/workflow-ops';
 import { type RanDefinition, useRunStore } from '../../stores/run-store';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { toWorkflowBody, useWorkflowStore, type WorkflowState } from '../../stores/workflow-store';
+import { chatTriggerBelow, openChat } from './chat-actions';
 import { openTestForm } from './form-popup';
 
 export interface EditorDeps {
@@ -285,6 +287,20 @@ export async function runWorkflow(
     }
   }
 
+  // P5-59: a step run below a Chat Trigger that has no input or pin takes its input from the chat
+  if (options.destinationNode && !agentRequest) {
+    const wf = useWorkflowStore.getState();
+    const chatRun = useRunStore.getState();
+    const asked = chatTriggerBelow(wf.nodes, wf.connections, options.destinationNode, {
+      pinData: wf.pinData,
+      runData: chatRun.runData,
+    });
+    if (asked) {
+      openChat(options.destinationNode);
+      return;
+    }
+  }
+
   const id = await ensureSaved(deps, false);
   if (!id) return;
   const s = useWorkflowStore.getState();
@@ -360,6 +376,11 @@ function stopListeningAt(expiresAt: string): void {
 
 export async function listenForTestEvent(deps: EditorDeps, nodeName: string): Promise<void> {
   const type = useWorkflowStore.getState().nodes.find((n) => n.name === nodeName)?.type;
+  // P5-59: a Chat Trigger waits for a message typed in the chat, not for a call to its URL
+  if (type === CHAT_TRIGGER_TYPE) {
+    openChat(null);
+    return;
+  }
   if (isEventTrigger(deps.descriptions.get(type ?? ''))) return listenForTriggerEvent(deps, nodeName);
   const id = await ensureSaved(deps, true);
   if (!id) return;

@@ -1,10 +1,12 @@
 /** Floating run controls: execute, stop, listen state, clear results, logs toggle. */
-import { Copy, Eraser, Play, Radio, Square, Terminal } from 'lucide-react';
+import { CHAT_TRIGGER_TYPE } from '@workflow/workflow';
+import { Copy, Eraser, MessageSquare, Play, Radio, Square, Terminal } from 'lucide-react';
 import { Button, IconButton } from '../../components/ui/Button';
 import { StatusBadge } from '../../components/ui/misc';
 import { formatDuration } from '../../lib/format';
 import { useRunStore } from '../../stores/run-store';
 import { toast, useUiStore } from '../../stores/ui-store';
+import { useWorkflowStore } from '../../stores/workflow-store';
 
 export function ExecuteBar({
   onExecute,
@@ -21,7 +23,11 @@ export function ExecuteBar({
   const status = useRunStore((s) => s.status);
   const runData = useRunStore((s) => s.runData);
   const testWebhook = useRunStore((s) => s.testWebhook);
-  const testUrl = testWebhook?.testUrl;
+  // P5-59: a chat message's listener lasts for one send; there is no URL to call
+  const testUrl = testWebhook?.chat ? undefined : testWebhook?.testUrl;
+  const chatTrigger = useWorkflowStore((s) =>
+    Boolean(listenNode && s.nodes.find((n) => n.name === listenNode)?.type === CHAT_TRIGGER_TYPE),
+  );
   const startedAt = useRunStore((s) => s.startedAt);
   const finishedAt = useRunStore((s) => s.finishedAt);
   const logs = useRunStore((s) => s.logs.length);
@@ -66,7 +72,9 @@ export function ExecuteBar({
             ) : (
               <span className="flex items-center gap-2 pl-2 text-sm">
                 <Radio size={15} className="text-brand" />
-                <span className="font-semibold">Waiting for a trigger event</span>
+                <span className="font-semibold">
+                  {testWebhook.chat ? 'Sending the chat message' : 'Waiting for a trigger event'}
+                </span>
               </span>
             )}
             <Button size="md" onClick={onStop} icon={<Square size={13} />}>
@@ -94,10 +102,18 @@ export function ExecuteBar({
               size="lg"
               variant="primary"
               onClick={onExecute}
-              disabled={readOnly}
-              icon={listenNode ? <Radio size={16} /> : <Play size={16} />}
+              disabled={readOnly && !chatTrigger}
+              icon={
+                chatTrigger ? (
+                  <MessageSquare size={16} />
+                ) : listenNode ? (
+                  <Radio size={16} />
+                ) : (
+                  <Play size={16} />
+                )
+              }
             >
-              {listenNode ? 'Listen for test event' : 'Execute workflow'}
+              {chatTrigger ? 'Open chat' : listenNode ? 'Listen for test event' : 'Execute workflow'}
             </Button>
             {hasResults && (
               <IconButton label="Clear run data" onClick={reset}>

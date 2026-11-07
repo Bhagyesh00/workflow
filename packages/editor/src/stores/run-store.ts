@@ -28,6 +28,8 @@ export interface TestWebhookState {
   /** absent for a trigger without a URL (Kafka, IMAP, ...): it waits for an event of its own */
   testUrl?: string;
   expiresAt: string;
+  /** P5-59: the listener belongs to a chat message (the bar shows no URL to call) */
+  chat?: boolean;
 }
 
 /** P3-06: the graph that produced `runData` (dirty nodes are found by diffing it with the canvas) */
