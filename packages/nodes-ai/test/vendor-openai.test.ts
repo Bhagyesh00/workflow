@@ -22,7 +22,7 @@ import {
 } from './harness';
 
 const KEY = 'sk-test-key-0123456789abcdef';
-const BASE = 'http://openai.test/v1';
+const BASE = 'https://openai.test/v1';
 
 const calls: DataObject[] = [];
 
@@ -313,6 +313,20 @@ describe('text.response', () => {
     expect(out[0]!.usage).toEqual({ inputTokens: 9, outputTokens: 5 });
   });
 
+  it('does not offer or run a connected tool while Hide Tools is Hide', async () => {
+    const { fake, out } = await runOpenAi(response({ hideTools: 'hide' }), {
+      tool: 'test.lookupTool',
+      handler: () => responses('plain'),
+    });
+    expect((fake.requests[0]!.body as DataObject).tools).toBeUndefined();
+    expect(calls).toHaveLength(0);
+    expect(out[0]!.text).toBe('plain');
+    // a saved waiting tool behind the hidden input does not stop the run
+    const waiting = await runOpenAi(response(), { tool: 'test.waitTool' });
+    expect(waiting.result.status).toBe('success');
+    expect(waiting.fake.requests).toHaveLength(1);
+  });
+
   it('refuses a tool that waits before anything is sent', async () => {
     const { fake, result } = await runOpenAi(response({ hideTools: 'show' }), { tool: 'test.waitTool' });
     expect(result.status).toBe('error');
@@ -360,25 +374,33 @@ describe('text.classify', () => {
   const reply: FakeReply = {
     body: {
       id: 'modr-1',
-      model: 'text-moderation-latest',
+      model: 'omni-moderation-latest',
       results: [{ flagged: true, categories: { violence: true }, category_scores: { violence: 0.9 } }],
     },
   };
 
-  it('posts the text to /moderations and returns the reply', async () => {
+  it('posts the text to /moderations with the omni model and returns the first result', async () => {
     const { fake, out } = await runOpenAi({ resource: 'text', operation: 'classify', input: 'bad words' }, { handler: () => reply });
     expect(fake.requests[0]).toMatchObject({ url: `${BASE}/moderations`, method: 'POST' });
-    expect(fake.requests[0]!.body).toEqual({ input: 'bad words', model: 'text-moderation-latest' });
-    expect(out[0]).toMatchObject({ id: 'modr-1' });
+    expect(fake.requests[0]!.body).toEqual({ input: 'bad words', model: 'omni-moderation-latest' });
+    expect(out[0]).toEqual({
+      flagged: true,
+      categories: { violence: true },
+      category_scores: { violence: 0.9 },
+    });
   });
 
-  it('simplifies to the first result and can use the stable model', async () => {
+  it('simplifies to the flag, and has no Use Stable Model option', async () => {
     const { fake, out } = await runOpenAi(
       { resource: 'text', operation: 'classify', input: 'x', simplify: true, options: { useStableModel: true } },
       { handler: () => reply },
     );
-    expect((fake.requests[0]!.body as DataObject).model).toBe('text-moderation-stable');
-    expect(out[0]).toEqual({ flagged: true, categories: { violence: true }, category_scores: { violence: 0.9 } });
+    expect((fake.requests[0]!.body as DataObject).model).toBe('omni-moderation-latest');
+    expect(out[0]).toEqual({ flagged: true });
+    const names = OpenAiNode.description.properties
+      .filter((p) => p.displayOptions?.show?.operation?.includes('classify'))
+      .map((p) => p.name);
+    expect(names).toEqual(['input', 'simplify']);
   });
 });
 
@@ -469,6 +491,26 @@ describe('image', () => {
       ],
     });
     expect(out[0]).toEqual({ text: 'A cat.', model: 'gpt-4o' });
+  });
+
+  it('image analyze does not offer a connected tool', async () => {
+    const { fake, result } = await runOpenAi(
+      {
+        resource: 'image',
+        operation: 'analyze',
+        modelId: { __rl: true, mode: 'id', value: 'gpt-4o' },
+        text: 'Describe it',
+        inputType: 'base64',
+        binaryPropertyName: 'data',
+      },
+      {
+        tool: 'test.waitTool',
+        items: [binaryItem({ data: { text: 'IMG', mimeType: 'image/png' } })],
+        handler: () => responses('A cat.', { model: 'gpt-4o' }),
+      },
+    );
+    expect(result.status).toBe('success');
+    expect((fake.requests[0]!.body as DataObject).tools).toBeUndefined();
   });
 
   it('analyzes a binary image and sends no detail for auto', async () => {
@@ -711,6 +753,52 @@ describe('video', () => {
     expect(content.headers?.authorization).toBe(`Bearer ${KEY}`);
     expect(decode(items[0]!)).toMatchObject({ mimeType: 'video/mp4', text: 'MP4DATA' });
     expect(items[0]!.json).toMatchObject({ id: 'video_1', status: 'completed' });
+  });
+
+  it('a content link that redirects to another host is fetched there with no key and no custom header', async () => {
+    const seen: Array<{ url: string; headers: Record<string, unknown> }> = [];
+    const fake = new FakeHttpClient((request): FakeReply => {
+      seen.push({ url: request.url, headers: { ...(request.headers ?? {}) } });
+      if (request.method === 'POST') return { body: { id: 'video_9', status: 'queued' } };
+      if (request.url === `${BASE}/videos/video_9/content`) {
+        return { status: 302, headers: { location: 'https://storage.other.test/video_9.mp4' } };
+      }
+      if (request.url === 'https://storage.other.test/video_9.mp4') {
+        return { body: bytes('MP4DATA'), headers: { 'content-type': 'video/mp4' } };
+      }
+      return { body: { id: 'video_9', status: 'completed' } };
+    });
+    const list = [
+      node('Trigger', 'test.trigger'),
+      node('OpenAI', 'ai.openAi', params, { credentials: { openAiApi: { id: 'c', name: 'c' } } }),
+    ];
+    const result = await run(list, connect(['Trigger', 'OpenAI']), {
+      nodeTypes: types,
+      services: services({
+        nodeTypes: types,
+        creds: {
+          openAiApi: {
+            apiKey: KEY,
+            baseUrl: BASE,
+            organization: 'org-1',
+            header: true,
+            headerName: 'api-key',
+            headerValue: 'gateway-secret-value',
+          },
+        },
+        http: fake,
+      }),
+    });
+    expect(result.status).toBe('success');
+    const content = fake.requests.find((r) => r.url === `${BASE}/videos/video_9/content`)!;
+    expect(content.followRedirects).toBe(false);
+    expect(content.headers?.authorization).toBe(`Bearer ${KEY}`);
+    const landed = seen.find((r) => r.url === 'https://storage.other.test/video_9.mp4')!;
+    expect(JSON.stringify(landed.headers)).not.toContain(KEY);
+    expect(JSON.stringify(landed.headers)).not.toContain('gateway-secret-value');
+    expect(JSON.stringify(landed.headers)).not.toContain('org-1');
+    const delivered = result.runData.OpenAI!.at(-1)!.data!.main![0]![0] as Item;
+    expect(decode(delivered)).toMatchObject({ text: 'MP4DATA' });
   });
 
   it('sends a reference image as multipart', async () => {

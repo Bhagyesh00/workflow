@@ -420,22 +420,6 @@ const textResponseProperties: NodeProperty[] = [
 const classifyProperties: NodeProperty[] = [
   { displayName: 'Text Input', name: 'input', type: 'string', default: '', required: true },
   simplifyProperty(false),
-  {
-    displayName: 'Options',
-    name: 'options',
-    type: 'collection',
-    default: {},
-    placeholder: 'Add option',
-    options: [
-      {
-        displayName: 'Use Stable Model',
-        name: 'useStableModel',
-        type: 'boolean',
-        default: false,
-        description: 'Whether to use the stable version of the moderation model instead of the latest',
-      },
-    ],
-  },
 ];
 
 export const textProperties: NodeProperty[] = [
@@ -617,6 +601,7 @@ async function textResponse(ctx: ExecuteContext, itemIndex: number): Promise<Ite
       system: optionalText(options.instructions),
       maxIterations: Number(options.maxToolsIterations ?? 15),
       model,
+      useTools: ctx.getNodeParameter('hideTools', itemIndex, 'hide') === 'show',
     });
   } catch (error) {
     if ((error as { code?: string } | undefined)?.code === VENDOR_WAIT_TOOL) throw error;
@@ -646,10 +631,10 @@ async function textResponse(ctx: ExecuteContext, itemIndex: number): Promise<Ite
     text = messageText(parseOpenAiResponses(done).message.content);
   }
 
-  const usage = {
+  const usage: DataObject = {
     inputTokens: result.usage.inputTokens,
     outputTokens: result.usage.outputTokens,
-  } as unknown as DataObject;
+  };
   if (!simplify) {
     return { json: { ...(body ?? {}), output_text: text } as DataObject };
   }
@@ -668,20 +653,17 @@ async function textClassify(ctx: ExecuteContext, itemIndex: number): Promise<Ite
   const baseUrl = await openAiBaseUrl(ctx, itemIndex);
   const input = String(ctx.getNodeParameter('input', itemIndex, ''));
   if (!input.trim()) throw new NodeOperationError(ctx.getNode(), 'Enter the text to classify', { itemIndex });
-  const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
   const response = await openAiCall<DataObject>(ctx, itemIndex, {
     url: `${baseUrl}/moderations`,
     method: 'POST',
-    body: {
-      input,
-      model: options.useStableModel === true ? 'text-moderation-stable' : 'text-moderation-latest',
-    },
+    body: { input, model: 'omni-moderation-latest' },
   });
+  // the first result is the one for the input; Simplify keeps only its flag
+  const first = (response.results as DataObject[] | undefined)?.[0] ?? {};
   if (ctx.getNodeParameter('simplify', itemIndex, false) === true) {
-    const first = (response.results as DataObject[] | undefined)?.[0] ?? {};
-    return { json: first };
+    return { json: { flagged: first.flagged } };
   }
-  return { json: response };
+  return { json: first };
 }
 
 export async function executeText(ctx: ExecuteContext, itemIndex: number, operation: string): Promise<Item> {

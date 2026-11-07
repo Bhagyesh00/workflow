@@ -1,8 +1,9 @@
 /** OpenAI video generation: start the job, poll it, then read the file from the credential's host. */
 import { type DataObject, type ExecuteContext, type Item, NodeOperationError, type NodeProperty } from '@workflow/workflow';
+import { downloadMedia } from '../shared/api';
 import { fileToItem, readBinaryFields } from '../shared/binary';
 import { pollUntil } from '../shared/poll';
-import { bytesOf, forOperation, openAiBaseUrl, openAiCall } from './text';
+import { forOperation, OPENAI_CREDENTIAL, openAiBaseUrl, openAiCall } from './text';
 
 const choices = (...values: string[]) => values.map((value) => ({ name: value, value }));
 
@@ -118,18 +119,17 @@ async function generate(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
     );
   }
 
-  // the file is on the credential's own host, so the credential goes with the request
-  const content = await openAiCall<unknown>(ctx, itemIndex, {
-    url: `${baseUrl}/videos/${encodeURIComponent(id)}/content`,
-    method: 'GET',
-    responseType: 'arraybuffer',
-    timeout: 300_000,
+  // the credential goes only to its own https host and never follows a redirect: a gateway may answer with
+  // a link to storage, which is fetched again with no key and no custom header
+  const content = await downloadMedia(ctx, itemIndex, `${baseUrl}/videos/${encodeURIComponent(id)}/content`, {
+    credentialType: OPENAI_CREDENTIAL,
+    authHost: new URL(baseUrl).hostname,
   });
   const field = typeof options.outputField === 'string' && options.outputField.trim() ? options.outputField : 'data';
   return fileToItem(
     ctx,
     itemIndex,
-    { bytes: bytesOf(content), mimeType: 'video/mp4', fileName: `${id}.mp4` },
+    { bytes: content.bytes, mimeType: 'video/mp4', fileName: `${id}.mp4` },
     field,
     {
       id,

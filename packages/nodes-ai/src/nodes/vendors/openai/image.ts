@@ -340,6 +340,7 @@ async function analyze(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
     const result = await runVendorChat(ctx, itemIndex, adapter, {
       messages: [{ role: 'user', content: parts }],
       maxIterations: 1,
+      useTools: false,
     });
     const raw = (result.raw ?? {}) as DataObject;
     return {

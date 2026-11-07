@@ -167,8 +167,9 @@ async function transcribe(
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
   const [file] = await readBinaryFields(ctx, itemIndex, String(ctx.getNodeParameter('binaryPropertyName', itemIndex, 'data')));
   if (!file) throw new NodeOperationError(ctx.getNode(), 'The item has no recording', { itemIndex });
-  const body: DataObject = {
-    file: { data: file.bytes, fileName: file.fileName ?? 'audio', mimeType: file.mimeType } as unknown as DataObject,
+  // the multipart encoder takes the file part as { data, fileName, mimeType }
+  const body: Record<string, unknown> = {
+    file: { data: file.bytes, fileName: file.fileName ?? 'audio', mimeType: file.mimeType },
     model: 'whisper-1',
   };
   if (endpoint === 'transcriptions' && typeof options.language === 'string' && options.language.trim()) {
