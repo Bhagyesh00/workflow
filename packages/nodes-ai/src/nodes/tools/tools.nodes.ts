@@ -12,6 +12,7 @@ import {
   getCredentialAllowedDomains,
   type HttpMethod,
   type HttpRequestOptions,
+  isResourceLocatorValue,
   type Item,
   type JsonSchema,
   NodeOperationError,
@@ -39,6 +40,7 @@ import {
   truncate,
 } from '../../shared/utils';
 import { QA_PROMPT } from '../chains/rag-chains.nodes';
+import { loadWorkflowInputMappings, searchWorkflows, workflowToolInputs } from './workflow-inputs';
 
 function toolDescriptionOf(
   base: Pick<NodeTypeDescription, 'name' | 'displayName' | 'description' | 'icon' | 'properties'> & {
@@ -770,11 +772,21 @@ export const ToolWorkflowNode: NodeType = {
         ],
       },
       {
-        displayName: 'Workflow ID',
+        displayName: 'Workflow',
         name: 'workflowId',
-        type: 'string',
-        default: '',
+        type: 'resourceLocator',
+        default: { __rl: true, mode: 'list', value: '' },
         required: true,
+        modes: [
+          {
+            displayName: 'From List',
+            name: 'list',
+            type: 'list',
+            placeholder: 'Select a workflow...',
+            typeOptions: { searchListMethod: 'searchWorkflows', searchable: true },
+          },
+          { displayName: 'By ID', name: 'id', type: 'string', placeholder: 'Workflow ID' },
+        ],
         displayOptions: { show: { source: ['database'] } },
       },
       {
@@ -784,6 +796,33 @@ export const ToolWorkflowNode: NodeType = {
         default: '{\n  "name": "Tool workflow",\n  "nodes": [],\n  "connections": {}\n}',
         typeOptions: { rows: 10 },
         displayOptions: { show: { source: ['parameter'] } },
+      },
+      {
+        displayName: 'Workflow Inputs',
+        name: 'workflowInputs',
+        type: 'resourceMapper',
+        default: {
+          mappingMode: 'defineBelow',
+          value: null,
+          matchingColumns: [],
+          schema: [],
+          attemptToConvertTypes: false,
+          convertFieldsToString: false,
+        },
+        noDataExpression: true,
+        typeOptions: {
+          loadOptionsDependsOn: ['source', 'workflowId.value', 'workflowJson'],
+          resourceMapper: {
+            resourceMapperMethod: 'loadWorkflowInputMappings',
+            mode: 'map',
+            valuesLabel: 'Workflow Inputs',
+            fieldWords: { singular: 'input', plural: 'inputs' },
+            addAllFields: true,
+            multiKeyMatch: false,
+            supportAutoMap: false,
+          },
+        },
+        displayOptions: { hide: { specifyInputSchema: [true] } },
       },
       {
         displayName: 'Field to Return',
@@ -801,8 +840,9 @@ export const ToolWorkflowNode: NodeType = {
     const structured = Boolean(ctx.getNodeParameter('specifyInputSchema', itemIndex, false));
     let parameters: JsonSchema;
     let workflow: DataObject | undefined;
+    const mapped = structured ? undefined : workflowToolInputs(ctx);
     try {
-      parameters = toolInputSchema(ctx, itemIndex);
+      parameters = mapped ? mapped.parameters : toolInputSchema(ctx, itemIndex);
       if (source === 'parameter')
         workflow = parseJsonParameter(
           ctx.getNodeParameter('workflowJson', itemIndex, '{}'),
@@ -811,16 +851,18 @@ export const ToolWorkflowNode: NodeType = {
     } catch (error) {
       throw new NodeOperationError(ctx.getNode(), errorMessage(error), { itemIndex });
     }
-    const workflowId = String(ctx.getNodeParameter('workflowId', itemIndex, '') ?? '').trim();
+    // a node saved before the picker holds a plain id; the picker stores a locator value
+    const rawId = ctx.getNodeParameter('workflowId', itemIndex, '') as unknown;
+    const workflowId = String(isResourceLocatorValue(rawId) ? rawId.value : (rawId ?? '')).trim();
     if (source === 'database' && !workflowId)
-      throw new NodeOperationError(ctx.getNode(), 'Enter the workflow ID', { itemIndex });
+      throw new NodeOperationError(ctx.getNode(), 'Select a workflow', { itemIndex });
     const field = String(ctx.getNodeParameter('responsePropertyName', itemIndex, 'response') ?? '');
     return {
       response: createTool(
         ctx,
         { name: toolNameOf(ctx), description: describe(ctx, itemIndex, 'Runs a workflow'), parameters },
         async (args) => {
-          const json = structured ? args : { query: args.query };
+          const json = mapped ? mapped.buildItem(args, itemIndex) : args;
           const result = await ctx.executeWorkflow(
             source === 'parameter'
               ? { source: 'parameter', workflow: workflow as never }
@@ -834,6 +876,10 @@ export const ToolWorkflowNode: NodeType = {
         },
       ),
     };
+  },
+  methods: {
+    listSearch: { searchWorkflows },
+    resourceMapping: { loadWorkflowInputMappings },
   },
 };
 
