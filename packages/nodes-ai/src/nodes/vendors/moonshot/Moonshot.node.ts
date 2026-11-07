@@ -228,7 +228,12 @@ async function chat(
   const system = typeof options.system === 'string' && options.system.trim() ? options.system : undefined;
   let result: Awaited<ReturnType<typeof runVendorChat>>;
   try {
-    result = await runVendorChat(ctx, itemIndex, adapter, { messages, system, maxIterations });
+    result = await runVendorChat(ctx, itemIndex, adapter, {
+      messages,
+      system,
+      maxIterations,
+      useTools: ctx.getNodeParameter('hideTools', itemIndex, 'hide') === 'show',
+    });
   } catch (error) {
     if ((error as { code?: string } | undefined)?.code === VENDOR_WAIT_TOOL) throw error;
     throw vendorError(ctx, error, itemIndex);

@@ -293,6 +293,13 @@ describe('Ollama text.message', () => {
     expect(out).toEqual([{ role: 'assistant', content: 'Found cats' }]);
   });
 
+  it('sends no tool and does not refuse a waiting tool while Hide Tools is Hide', async () => {
+    const { fake, result } = await runOllama(ollamaText({ hideTools: 'hide' }), { tool: 'test.waitTool' });
+    expect(result.status).toBe('success');
+    expect(fake.requests).toHaveLength(1);
+    expect((fake.requests[0]!.body as DataObject).tools).toBeUndefined();
+  });
+
   it('refuses a tool that waits before anything is sent', async () => {
     const { fake, result } = await runOllama(ollamaText({ hideTools: 'show' }), { tool: 'test.waitTool' });
     expect(result.status).toBe('error');
@@ -489,6 +496,13 @@ describe('Moonshot text.message', () => {
     expect(bad.result.status).toBe('error');
     expect(bad.result.error?.message).toContain('cannot be sent to Kimi');
     expect(bad.fake.requests).toHaveLength(0);
+  });
+
+  it('sends no tool and does not refuse a waiting tool while Hide Tools is Hide', async () => {
+    const { fake, result } = await runMoonshot(moonText({ hideTools: 'hide' }), { tool: 'test.waitTool' });
+    expect(result.status).toBe('success');
+    expect(fake.requests).toHaveLength(1);
+    expect((fake.requests[0]!.body as DataObject).tools).toBeUndefined();
   });
 
   it('runs a tool turn when Hide Tools is Show', async () => {
