@@ -3,7 +3,8 @@
  * fetched from a fixed URL: the key file's own `token_uri` is never used. A secret that is denied,
  * missing or unavailable is skipped; any other failure stops the refresh.
  */
-import { createPrivateKey, createSign, type KeyObject } from 'node:crypto';
+import { createPrivateKey } from 'node:crypto';
+import { GOOGLE_TOKEN_URL, googleJwtAssertion, jwtBearerRequest, parseAccessToken } from '@workflow/core';
 import type { SecretProviderDeps, SecretProviderSettings, SecretProviderType } from '../types';
 import {
   asArray,
@@ -18,7 +19,7 @@ import {
   vaultCall,
 } from './errors';
 
-export const GCP_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+export const GCP_TOKEN_URL = GOOGLE_TOKEN_URL;
 const API = 'https://secretmanager.googleapis.com/v1';
 const SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
@@ -27,12 +28,10 @@ const SKIPPED = [403, 404, 503];
 const READ_CONCURRENCY = 10;
 const MAX_SECRETS = 10_000;
 
-const b64url = (data: string | Buffer): string => Buffer.from(data).toString('base64url');
-
 class GcpSecretsProvider extends MemoryProvider {
   private email = '';
   private projectId = '';
-  private key?: KeyObject;
+  private privateKey = '';
   private token = '';
   private tokenUntil = 0;
 
@@ -49,7 +48,8 @@ class GcpSecretsProvider extends MemoryProvider {
       throw new SecretProviderError(TEXT_BAD_SETTINGS);
     }
     try {
-      this.key = createPrivateKey(text(parsed.private_key));
+      createPrivateKey(text(parsed.private_key));
+      this.privateKey = text(parsed.private_key);
     } catch {
       throw new SecretProviderError(TEXT_BAD_SETTINGS);
     }
@@ -58,35 +58,30 @@ class GcpSecretsProvider extends MemoryProvider {
   }
 
   private assertion(): string {
-    if (!this.key) throw new SecretProviderError(TEXT_BAD_SETTINGS);
-    const now = Math.floor(Date.now() / 1000);
-    const head = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
-    const claims = b64url(
-      JSON.stringify({ iss: this.email, scope: SCOPE, aud: GCP_TOKEN_URL, iat: now, exp: now + 3600 }),
-    );
-    const signature = createSign('RSA-SHA256').update(`${head}.${claims}`).sign(this.key);
-    return `${head}.${claims}.${b64url(signature)}`;
+    if (!this.privateKey) throw new SecretProviderError(TEXT_BAD_SETTINGS);
+    return googleJwtAssertion({
+      email: this.email,
+      privateKey: this.privateKey,
+      scopes: [SCOPE],
+      tokenUrl: GCP_TOKEN_URL,
+    });
   }
 
   private async accessToken(timeoutMs: number): Promise<string> {
     if (this.token && Date.now() < this.tokenUntil - 60_000) return this.token;
     const answer = await vaultCall(
       this.deps,
-      {
-        url: GCP_TOKEN_URL,
-        method: 'POST',
-        bodyType: 'form-urlencoded',
-        body: { grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: this.assertion() },
-      },
+      jwtBearerRequest(this.assertion(), GCP_TOKEN_URL),
       timeoutMs,
     );
-    const body = asObject(answer.body);
-    const token = text(body.access_token);
-    if (!token) throw new SecretProviderError(TEXT_BAD_ANSWER);
-    const seconds = typeof body.expires_in === 'number' ? body.expires_in : 3600;
-    this.token = token;
-    this.tokenUntil = Date.now() + seconds * 1000;
-    return token;
+    try {
+      const { token, expiresInSeconds } = parseAccessToken(answer.body);
+      this.token = token;
+      this.tokenUntil = Date.now() + expiresInSeconds * 1000;
+      return token;
+    } catch {
+      throw new SecretProviderError(TEXT_BAD_ANSWER);
+    }
   }
 
   private async get(path: string, qs: Record<string, unknown>, timeoutMs: number, allow: number[] = []) {
@@ -146,7 +141,7 @@ class GcpSecretsProvider extends MemoryProvider {
   protected forget(): void {
     this.token = '';
     this.tokenUntil = 0;
-    this.key = undefined;
+    this.privateKey = '';
   }
 }
 

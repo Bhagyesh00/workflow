@@ -4,6 +4,7 @@
  * cannot be read is skipped; if none can be read the refresh fails.
  */
 
+import { clientCredentialsRequest, parseAccessToken } from '@workflow/core';
 import type { SecretProviderDeps, SecretProviderSettings, SecretProviderType } from '../types';
 import {
   asArray,
@@ -80,25 +81,22 @@ class AzureKeyVaultProvider extends MemoryProvider {
     if (this.token && Date.now() < this.tokenUntil - 60_000) return this.token;
     const answer = await vaultCall(
       this.deps,
-      {
-        url: `${this.authority}/${encodeURIComponent(this.tenantId)}/oauth2/v2.0/token`,
-        method: 'POST',
-        bodyType: 'form-urlencoded',
-        body: {
-          grant_type: 'client_credentials',
-          client_id: this.clientId,
-          client_secret: this.clientSecret,
-          scope: this.scope,
-        },
-      },
+      clientCredentialsRequest({
+        tokenUrl: `${this.authority}/${encodeURIComponent(this.tenantId)}/oauth2/v2.0/token`,
+        clientId: this.clientId,
+        clientSecret: this.clientSecret,
+        scope: this.scope,
+      }),
       timeoutMs,
     );
-    const body = asObject(answer.body);
-    const token = text(body.access_token);
-    if (!token) throw new SecretProviderError(TEXT_BAD_ANSWER);
-    this.token = token;
-    this.tokenUntil = Date.now() + (typeof body.expires_in === 'number' ? body.expires_in : 3600) * 1000;
-    return token;
+    try {
+      const { token, expiresInSeconds } = parseAccessToken(answer.body);
+      this.token = token;
+      this.tokenUntil = Date.now() + expiresInSeconds * 1000;
+      return token;
+    } catch {
+      throw new SecretProviderError(TEXT_BAD_ANSWER);
+    }
   }
 
   private async get(pathAndQuery: string, timeoutMs: number, allow: number[] = []) {

@@ -1,6 +1,6 @@
 /** SigV4 against AWS's published examples (P4-08): the signing-key derivation and three signed requests. */
+import { amzDate, signAwsRequest, signingKey } from '@workflow/core';
 import { describe, expect, it } from 'vitest';
-import { amzDate, signAwsRequest, signingKey } from '../src/services/secrets/providers/aws-sigv4';
 
 const KEY = { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY' };
 const DATE = new Date('2015-08-30T12:36:00Z');

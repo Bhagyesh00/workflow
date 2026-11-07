@@ -7,8 +7,7 @@
 import { createVerify, type KeyObject } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { HttpClient } from '@workflow/core';
-import { signAwsRequest } from '../../src/services/secrets/providers/aws-sigv4';
+import { type HttpClient, signAwsRequest } from '@workflow/core';
 
 export interface Recorded {
   method: string;

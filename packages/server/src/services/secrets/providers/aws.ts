@@ -4,8 +4,8 @@
  * ListSecrets for the names, BatchGetSecretValue in batches of 20 for the values; only SecretString is kept.
  */
 
+import { signAwsRequest } from '@workflow/core';
 import type { SecretProviderDeps, SecretProviderSettings, SecretProviderType } from '../types';
-import { signAwsRequest } from './aws-sigv4';
 import {
   asArray,
   asObject,
