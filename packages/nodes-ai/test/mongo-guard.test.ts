@@ -5,7 +5,7 @@
 import net from 'node:net';
 import { HttpClient } from '@workflow/core';
 import type { DataObject, Logger, WorkflowNode } from '@workflow/workflow';
-import { BSON } from 'mongodb';
+import { BSON, MongoClient } from 'mongodb';
 import { SocksClient } from 'socks';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -38,12 +38,17 @@ const helpers = {
 };
 
 let executions = 0;
-function connectionContext(credentials: DataObject, log: LogEntry[] = []): ConnectionContext {
+function connectionContext(
+  credentials: DataObject,
+  log: LogEntry[] = [],
+  signal = new AbortController().signal,
+): ConnectionContext & { signal: AbortSignal } {
   const execution = `guard-${process.pid}-${++executions}`;
   return {
     getCredentials: async () => credentials,
     helpers,
     logger: recordingLogger(log),
+    signal,
     getTenantId: () => 't1',
     getExecutionId: () => execution,
     getNode: () =>
@@ -55,7 +60,19 @@ function connectionContext(credentials: DataObject, log: LogEntry[] = []): Conne
         position: [0, 0],
         parameters: {},
       }) as WorkflowNode,
-  } as unknown as ConnectionContext;
+  } as unknown as ConnectionContext & { signal: AbortSignal };
+}
+
+/** true when nothing listens on the loopback port any more */
+function portClosed(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, '127.0.0.1');
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once('error', () => resolve(true));
+  });
 }
 
 function connectionString(url: string): DataObject {
@@ -225,6 +242,110 @@ describe('MongoDB guard: every socket of the driver goes through it', () => {
     expect(result.status).toBe('Error');
     expect(result.message).toMatch(/10\.0\.0\.5/);
     expect(result.message).not.toContain(PASSWORD);
+  });
+});
+
+describe('MongoDB guard: abort and timeouts', () => {
+  const unreachable = 'mongodb://10.0.0.5:27017/?serverSelectionTimeoutMS=8000';
+  const warnings = (log: LogEntry[]) => log.filter((e) => e.level === 'warn').length;
+
+  it('ends the credential test on abort while connecting and closes its guard', async () => {
+    const log: LogEntry[] = [];
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 300);
+    const started = Date.now();
+    const result = await mongoDbConnectionTest(
+      { helpers, logger: recordingLogger(log), signal: controller.signal, getTenantId: () => 't1' },
+      { type: 'mongoDb', data: connectionString(unreachable) },
+    );
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(result).toEqual({
+      status: 'Error',
+      message: "Couldn't connect to MongoDB: The connection was cancelled",
+    });
+    // nothing keeps asking the guard after the test answered
+    const seen = warnings(log);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(warnings(log)).toBe(seen);
+  });
+
+  it('ends a node connect on the execution abort', async () => {
+    const log: LogEntry[] = [];
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 300);
+    const started = Date.now();
+    const error = await sharedMongo(
+      connectionContext(connectionString(unreachable), log, controller.signal),
+      0,
+    ).then(
+      () => undefined,
+      (e: Error) => e,
+    );
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(error?.message).toBe('The connection was cancelled');
+    const seen = warnings(log);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(warnings(log)).toBe(seen);
+  });
+
+  it('closes a shared client and its guard on the execution abort', async () => {
+    const fake = await startFakeMongo({
+      ok: 1,
+      helloOk: true,
+      isWritablePrimary: true,
+      ismaster: true,
+      maxWireVersion: 25,
+      minWireVersion: 0,
+      maxBsonObjectSize: 16 * 1024 * 1024,
+      maxMessageSizeBytes: 48_000_000,
+      maxWriteBatchSize: 100_000,
+      logicalSessionTimeoutMinutes: 30,
+      connectionId: 1,
+    });
+    const controller = new AbortController();
+    const url = `mongodb://127.0.0.1:${fake.port}/?serverSelectionTimeoutMS=3000`;
+    const shared = await sharedMongo(connectionContext(connectionString(url), [], controller.signal), 0);
+    try {
+      const guardPort = Number(shared.value.client.options.proxyPort);
+      expect(await portClosed(guardPort)).toBe(false);
+      controller.abort();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(await portClosed(guardPort)).toBe(true);
+      await expect(shared.value.client.db('db').command({ ping: 1 })).rejects.toThrow();
+    } finally {
+      await shared.release();
+      await fake.close();
+    }
+  });
+
+  it('caps the credential test timeouts at 20 s and keeps the string values for node runs', async () => {
+    const seen: Array<[number, number]> = [];
+    vi.spyOn(MongoClient.prototype, 'connect').mockImplementation(async function (this: MongoClient) {
+      seen.push([this.options.serverSelectionTimeoutMS, this.options.connectTimeoutMS]);
+      throw new Error('stop');
+    });
+    const ctx = {
+      helpers,
+      logger: recordingLogger([]),
+      signal: new AbortController().signal,
+      getTenantId: () => 't1',
+    };
+    const huge = 'mongodb://db.example.com/?serverSelectionTimeoutMS=2147483647&connectTimeoutMS=0';
+    for (const url of [
+      huge,
+      'mongodb://db.example.com/?serverSelectionTimeoutMS=1000&connectTimeoutMS=5000',
+      'mongodb://db.example.com/',
+    ]) {
+      await mongoDbConnectionTest(ctx, { type: 'mongoDb', data: connectionString(url) });
+    }
+    expect(seen).toEqual([
+      [20_000, 20_000],
+      [1000, 5000],
+      [15_000, 10_000],
+    ]);
+    const { options } = buildMongoOptions(connectionString(huge));
+    expect(options.serverSelectionTimeoutMS).toBeUndefined();
+    expect(options.connectTimeoutMS).toBeUndefined();
   });
 });
 

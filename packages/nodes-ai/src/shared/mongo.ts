@@ -11,6 +11,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import net from 'node:net';
 import type {
   AllowedHost,
+  BaseContext,
   CredentialTestContext,
   DataObject,
   NodeCredentialTestResult,
@@ -312,8 +313,8 @@ function refuse(name: string): Error {
   return new Error(`The connection string option "${name}" is not allowed`);
 }
 
-/** Checks every option of the string; returns the lower-case names it sets. */
-function checkConnectionString(url: string): Set<string> {
+/** Checks every option of the string; returns the values it sets, by lower-case name. */
+function checkConnectionString(url: string): Map<string, string[]> {
   const match = CONNECTION_STRING.exec(url);
   const protocol = match?.groups?.protocol.toLowerCase();
   if (!match?.groups || (protocol !== 'mongodb' && protocol !== 'mongodb+srv')) {
@@ -322,14 +323,14 @@ function checkConnectionString(url: string): Set<string> {
   const rest = match.groups.rest.split('#')[0];
   const queryAt = rest.indexOf('?');
   const query = queryAt >= 0 ? rest.slice(queryAt + 1) : '';
-  const names = new Set<string>();
+  const values = new Map<string, string[]>();
   for (const [name, value] of new URLSearchParams(query)) {
     const lower = name.toLowerCase();
     if (!ALLOWED_OPTIONS.has(lower)) throw refuse(name);
     if (lower === 'authmechanism' && !ALLOWED_MECHANISMS.has(value.trim().toUpperCase())) throw refuse(name);
-    names.add(lower);
+    values.set(lower, [...(values.get(lower) ?? []), value]);
   }
-  return names;
+  return values;
 }
 
 function bracketHost(host: string): string {
@@ -350,11 +351,17 @@ function credentialDatabase(credentials: DataObject): string | undefined {
   }
 }
 
-/** Connection string (allow-listed options only) and driver options from a `mongoDb` credential. */
-export function buildMongoOptions(credentials: DataObject): { url: string; options: MongoClientOptions } {
+/**
+ * Connection string (allow-listed options only) and driver options from a `mongoDb` credential.
+ * `maxTimeoutMS` caps the string's server selection and connect timeouts (an object option wins).
+ */
+export function buildMongoOptions(
+  credentials: DataObject,
+  maxTimeoutMS?: number,
+): { url: string; options: MongoClientOptions } {
   const options: MongoClientOptions = {};
   let url: string;
-  let set: Set<string>;
+  let set: Map<string, string[]>;
   if (credentials.configurationType === 'connectionString') {
     url = text(credentials.connectionString);
     if (!url) throw new Error('The connection string is empty');
@@ -368,7 +375,7 @@ export function buildMongoOptions(credentials: DataObject): { url: string; optio
       throw new Error('The port must be between 1 and 65535');
     // the password goes to the driver as an option, never into the URL
     url = `mongodb://${bracketHost(host)}:${port}/`;
-    set = new Set();
+    set = new Map();
     const user = text(credentials.user);
     if (user) options.auth = { username: user, password: String(credentials.password ?? '') };
   }
@@ -382,8 +389,18 @@ export function buildMongoOptions(credentials: DataObject): { url: string; optio
   }
   // the string's own value wins; object options would override it
   if (!set.has('maxpoolsize')) options.maxPoolSize = 5;
-  if (!set.has('serverselectiontimeoutms')) options.serverSelectionTimeoutMS = DEFAULT_SERVER_SELECTION_MS;
-  if (!set.has('connecttimeoutms')) options.connectTimeoutMS = DEFAULT_CONNECT_MS;
+  const timeouts = [
+    ['serverselectiontimeoutms', 'serverSelectionTimeoutMS', DEFAULT_SERVER_SELECTION_MS],
+    ['connecttimeoutms', 'connectTimeoutMS', DEFAULT_CONNECT_MS],
+  ] as const;
+  for (const [name, option, fallback] of timeouts) {
+    const given = set.get(name);
+    if (!given) options[option] = fallback;
+    // 0 means no limit to the driver, so it is above any ceiling too
+    else if (maxTimeoutMS !== undefined && !given.every((v) => Number(v) > 0 && Number(v) <= maxTimeoutMS)) {
+      options[option] = maxTimeoutMS;
+    }
+  }
   return { url, options };
 }
 
@@ -426,19 +443,41 @@ export function sanitizeMongoError(error: unknown, credentials: DataObject): Err
 // Clients
 // ---------------------------------------------------------------------------------------------
 
-const guards = new WeakMap<MongoClient, Guard>();
+/** a client's guard, and the removal of its abort listener */
+const guards = new WeakMap<MongoClient, { guard: Guard; detach(): void }>();
 
-/** Opens a client whose every socket goes through a fresh guard; closes both on failure. */
+/** server selection and connect timeouts of a credential test, whatever the string says */
+const TEST_MAX_TIMEOUT_MS = 20_000;
+
+interface OpenOptions {
+  extra?: MongoClientOptions;
+  /** closes the client and its guard when aborted, also while connecting */
+  signal?: AbortSignal;
+  maxTimeoutMS?: number;
+}
+
+function cancelled(): Error {
+  return new Error('The connection was cancelled');
+}
+
+/** Opens a client whose every socket goes through a fresh guard; closes both on failure or abort. */
 async function openGuardedClient(
   ctx: GuardContext,
   credentials: DataObject,
-  extra: MongoClientOptions = {},
+  { extra = {}, signal, maxTimeoutMS }: OpenOptions = {},
 ): Promise<MongoClient> {
   let guard: Guard | undefined;
   let client: MongoClient | undefined;
+  const onAbort = () => {
+    void client?.close().catch(() => {});
+    void guard?.close();
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const detach = () => signal?.removeEventListener('abort', onAbort);
   try {
-    const { url, options } = buildMongoOptions(credentials);
+    const { url, options } = buildMongoOptions(credentials, maxTimeoutMS);
     guard = await createGuard(ctx);
+    if (signal?.aborted) throw cancelled();
     client = new MongoClient(url, {
       ...options,
       ...extra,
@@ -448,28 +487,32 @@ async function openGuardedClient(
       proxyUsername: guard.username,
       proxyPassword: guard.password,
     });
-    guards.set(client, guard);
+    guards.set(client, { guard, detach });
     await client.connect();
+    if (signal?.aborted) throw cancelled();
     return client;
   } catch (error) {
+    detach();
     const refusal = guard?.refusal();
     await client?.close().catch(() => {});
     await guard?.close();
-    throw sanitizeMongoError(refusal ?? error, credentials);
+    throw sanitizeMongoError(signal?.aborted ? cancelled() : (refusal ?? error), credentials);
   }
 }
 
 async function closeGuardedClient(client: MongoClient): Promise<void> {
+  const entry = guards.get(client);
+  entry?.detach();
   try {
     await client.close();
   } finally {
-    await guards.get(client)?.close();
+    await entry?.guard.close();
   }
 }
 
 /** A guarded MongoDB client for this node in this execution, shared by all items (see `sharedPostgres`). */
 export async function sharedMongo(
-  ctx: ConnectionContext,
+  ctx: ConnectionContext & Pick<BaseContext, 'signal'>,
   itemIndex: number,
   credentialType = 'mongoDb',
 ): Promise<Shared<MongoHandle>> {
@@ -483,7 +526,8 @@ export async function sharedMongo(
   const databaseName = credentialDatabase(credentials);
   return acquireShared<MongoHandle>(
     sharedKey(ctx, 'mongo', credentialType, built.url, built.options, databaseName),
-    async () => ({ client: await openGuardedClient(ctx, credentials), databaseName }),
+    // the execution's abort closes the client, also while it connects
+    async () => ({ client: await openGuardedClient(ctx, credentials, { signal: ctx.signal }), databaseName }),
     (handle) => closeGuardedClient(handle.client),
   );
 }
@@ -494,10 +538,13 @@ export async function mongoDbConnectionTest(
   credential: { type: string; data: DataObject },
 ): Promise<NodeCredentialTestResult> {
   let client: MongoClient | undefined;
-  const onAbort = () => void client?.close().catch(() => {});
-  ctx.signal.addEventListener('abort', onAbort, { once: true });
   try {
-    client = await openGuardedClient(ctx, credential.data, { maxPoolSize: 1 });
+    // the runner's abort closes the client and its guard, also while connecting
+    client = await openGuardedClient(ctx, credential.data, {
+      extra: { maxPoolSize: 1 },
+      signal: ctx.signal,
+      maxTimeoutMS: TEST_MAX_TIMEOUT_MS,
+    });
     await client.db(credentialDatabase(credential.data) ?? 'admin').command({ ping: 1 });
     return { status: 'OK', message: 'Connection successful' };
   } catch (error) {
@@ -506,7 +553,6 @@ export async function mongoDbConnectionTest(
       message: `Couldn't connect to MongoDB: ${sanitizeMongoError(error, credential.data).message}`,
     };
   } finally {
-    ctx.signal.removeEventListener('abort', onAbort);
     if (client) await closeGuardedClient(client).catch(() => {});
   }
 }
