@@ -21,6 +21,11 @@
  *
  * Streaming chats answer NDJSON frames (`ChatFrame`): `begin`, `item` and `end` per node run that sent
  * chunks, each with the run's metadata, and one `error` frame when the run fails or times out.
+ *
+ * "Using Response Nodes" chats (P5-58) answer the same frames from the Respond to Chat nodes. A run that stops at
+ * one of them to wait ends its stream with `{type:'wait', resumeUrl}`: the signed resume URL of the run, the
+ * waiting node's key and `chat-reply`. The next chat message goes there and gets the frames of the resumed run;
+ * an approval link fetched with `Accept: application/x-ndjson` does the same, a browser keeps the P4-17 page.
  */
 import { randomUUID } from 'node:crypto';
 import { PassThrough, type Readable } from 'node:stream';
@@ -170,6 +175,13 @@ const STREAM_FAILED = 'Error in workflow';
 const STREAM_TIMED_OUT = 'The workflow did not finish in time';
 /** the link of a Send and Wait node ends in this (nodes-base send-and-wait/descriptions.ts) */
 const ANSWER_SUFFIX = 'answer';
+/** the restart webhook of Respond to Chat that takes the next chat message of a waiting run */
+const CHAT_REPLY_HOOK = 'chatReply';
+const NDJSON = 'application/x-ndjson';
+
+/** a node that waits in a chat: its type (Respond to Chat, its tool and review copies) takes the chat reply */
+const takesChatReply = (type: NodeType | undefined): boolean =>
+  Boolean(type?.description.webhooks?.some((w) => w.restartWebhook && w.name === CHAT_REPLY_HOOK));
 const ANSWER_CLOSED = {
   title: 'Nothing more to do',
   message: 'This request was already answered, or it has closed.',
@@ -652,7 +664,11 @@ export class WebhookService {
       return notFound('This execution does not resume on this path');
     }
     const own = hooks.filter((h) => webhookUrlBase(h.description) === kind);
-    const hook = own.find((h) => h.method === incoming.method) ?? own[0];
+    // Respond to Chat has two POST hooks (the answer form and the chat reply): the path tells them apart
+    const hook =
+      own.find((h) => h.method === incoming.method && h.path === path) ??
+      own.find((h) => h.method === incoming.method) ??
+      own[0];
     const source: CorsSource | undefined = node
       ? { tenant, mode: row.mode as ExecutionMode, workflowId: row.workflowId ?? undefined, workflow, node }
       : undefined;
@@ -744,6 +760,14 @@ export class WebhookService {
     // a submitted page with another page after it answers once the run stands there
     const isFormSubmit = kind === 'form' && incoming.method === 'POST';
     const pagesFollow = isFormSubmit && node !== undefined && formPageFollows(workflow, node);
+    // the chat reply, and an approval button the chat widget fetches, answer with the frames of the resumed run
+    const chatStream =
+      hook?.responseMode === 'responseNodes' ||
+      (incoming.method === 'GET' &&
+        takesChatReply(type) &&
+        header(incoming.headers, 'accept')?.includes(NDJSON))
+        ? this.streamHandle(tenant, workflow, 'responseNodes')
+        : undefined;
     const responseMode = pagesFollow
       ? 'responseNode'
       : hook?.responseMode === 'streaming'
@@ -752,13 +776,14 @@ export class WebhookService {
     const handle = this.responseHandle(responseMode);
     const toolWait = state?.executionData.suspended;
     const resumed = await executions.resume(tenantId, executionId, output, {
-      wait: responseMode !== 'onReceived',
-      observer: responseMode === 'onReceived' ? undefined : handle.observer,
+      wait: Boolean(chatStream) || responseMode !== 'onReceived',
+      observer: chatStream?.observer ?? (responseMode === 'onReceived' ? undefined : handle.observer),
       ...(toolWait ? { atWait: { toolNode: toolWait.toolNode, toolRunIndex: toolWait.toolRunIndex } } : {}),
     });
     if (!resumed) {
       return cors(closedPage() ?? json(409, errorBody('not_waiting', 'The execution is not waiting')));
     }
+    if (chatStream) return cors(chatStream.attach(resumed));
     if (responseMode === 'onReceived') {
       return cors(answer ? fromWebhookResponse(answer) : json(200, { message: 'Workflow was resumed' }));
     }
@@ -897,7 +922,10 @@ export class WebhookService {
           incoming.method === 'POST' &&
           formPageFollows(workflow, node);
         const responseMode = pagesFollow ? 'onReceived' : hook.responseMode;
-        const streaming = responseMode === 'streaming' ? this.streamHandle(tenant, workflow) : undefined;
+        const streaming =
+          responseMode === 'streaming' || responseMode === 'responseNodes'
+            ? this.streamHandle(tenant, workflow, responseMode)
+            : undefined;
         const handle = this.responseHandle(responseMode);
         let execution: StartedExecution;
         try {
@@ -975,8 +1003,14 @@ export class WebhookService {
    * any chunk still answers: its last node's output becomes one group. A failure or a timeout writes one
    * `error` frame with fixed text in `content` and `message`, never a detail of the error.
    * A client that closes the stream before the end stops the run, so no model is called for nobody.
+   * In `responseNodes` mode only the Respond to Chat nodes speak (no last-node fallback), and a run that stops
+   * at one of them to wait ends with a `wait` frame naming where the next message goes.
    */
-  private streamHandle(tenant: TenantRow, workflow: Workflow) {
+  private streamHandle(
+    tenant: TenantRow,
+    workflow: Workflow,
+    mode: 'streaming' | 'responseNodes' = 'streaming',
+  ) {
     const stream = new PassThrough();
     let chunks = 0;
     /** open groups by node run, with the meta of their last chunk */
@@ -1027,9 +1061,26 @@ export class WebhookService {
           );
         });
       });
-      void execution.finished?.then((outcome) => {
+      void execution.finished?.then(async (outcome) => {
         clearTimeout(timer);
         if (outcome.status !== 'success' && outcome.status !== 'waiting') return fail(STREAM_FAILED);
+        if (mode === 'responseNodes') {
+          closeOpen();
+          if (outcome.status === 'waiting') {
+            const resumeUrl = await this.chatReplyUrl(tenant.id, workflow, execution.executionId).catch(
+              (error: unknown) => {
+                this.deps.logger.warn(
+                  { err: error, executionId: execution.executionId },
+                  'Could not read the waiting chat node',
+                );
+                return undefined;
+              },
+            );
+            if (resumeUrl) write({ type: 'wait', resumeUrl });
+          }
+          stream.end();
+          return;
+        }
         if (outcome.status === 'success' && !chunks) {
           const answer = finalAnswer(outcome);
           if (answer !== undefined) {
@@ -1053,6 +1104,30 @@ export class WebhookService {
       };
     };
     return { observer, attach };
+  }
+
+  /**
+   * Where the next chat message of a waiting run goes: its signed resume URL plus the `chat-reply` path of the
+   * node it stands at (`lastNodeExecuted`). The node key is the one its links carry (`asLinkedNode`): a human
+   * review holds its signed review key. Nothing when the run waits at a node that takes no chat reply.
+   */
+  private async chatReplyUrl(
+    tenantId: string,
+    workflow: Workflow,
+    executionId: string,
+  ): Promise<string | undefined> {
+    const { repos, nodeTypes, executions } = this.deps;
+    const data = await repos.executions.getData(tenantId, executionId);
+    const state = (data?.state ?? null) as unknown as ExecutionState | null;
+    const nodeName = state?.resultData.lastNodeExecuted;
+    const stored = nodeName ? workflow.getNode(nodeName) : undefined;
+    const type = stored ? nodeTypes.get(stored.type) : undefined;
+    if (!stored || !takesChatReply(type)) return undefined;
+    const node = asLinkedNode(stored, type, state, (key) => executions.signReviewKey(executionId, key))!;
+    const hook = nodeWebhooks(workflow, node, type!, { restart: true }).find(
+      (h) => h.webhookName === CHAT_REPLY_HOOK,
+    );
+    return hook ? `${executions.resumeUrl(executionId)}/${hook.path}` : undefined;
   }
 
   private responseHandle(mode: string) {
