@@ -1,8 +1,8 @@
 /** Summarization (map-reduce / refine / stuff) and Retrieval Q&A; the retrievers are in nodes/retrievers. */
 import {
   type AiChatModel,
-  type AiDocumentLoader,
   type AiDocument,
+  type AiDocumentLoader,
   type DataObject,
   type ExecuteContext,
   type Item,
@@ -21,7 +21,7 @@ import {
   promptTypeProperty,
 } from '../../shared/ai-inputs';
 import { batchingOption, runInBatches } from '../../shared/batching';
-import { fileToSources } from '../../shared/file-text';
+import { fileToSources, itemJsonToSources } from '../../shared/file-text';
 import { splitRecursively } from '../../shared/text-splitting';
 import { errorMessage, fillTemplate, mapLimit, messageText } from '../../shared/utils';
 
@@ -56,7 +56,7 @@ async function complete(model: AiChatModel, prompt: string, signal?: AbortSignal
 }
 
 export interface SummarizeOptions {
-  method: 'mapReduce' | 'refine' | 'stuff';
+  method: 'map_reduce' | 'refine' | 'stuff';
   chunkSize: number;
   mapPrompt: string;
   combinePrompt: string;
@@ -157,7 +157,15 @@ async function summaryChunks(
     text = sources.map((source) => source.text).join('\n\n');
   } else {
     const value = ctx.getNodeParameter('text', i, '');
-    text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+    // no Text set: summarize the whole item JSON, as n8n does
+    text =
+      value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
+        ? itemJsonToSources(items[i].json)
+            .map((source) => source.text)
+            .join('\n')
+        : typeof value === 'string'
+          ? value
+          : JSON.stringify(value);
   }
   if (!text.trim())
     throw new NodeOperationError(ctx.getNode(), 'The text to summarize is empty', { itemIndex: i });
@@ -195,7 +203,7 @@ export const ChainSummarizationNode: NodeType = {
           {
             name: 'Use Node Input (JSON)',
             value: 'nodeInputJson',
-            description: 'Summarize the text of the Text field',
+            description: 'Summarize the Text field, or the whole item JSON when the field is empty',
           },
           {
             name: 'Use Node Input (Binary)',
@@ -215,7 +223,7 @@ export const ChainSummarizationNode: NodeType = {
         type: 'string',
         default: '={{ $json.text }}',
         typeOptions: { rows: 2 },
-        description: 'Text to summarize',
+        description: 'Text to summarize. Leave empty to summarize the whole item JSON.',
         displayOptions: { show: { operationMode: ['nodeInputJson'] } },
       },
       {
@@ -267,7 +275,7 @@ export const ChainSummarizationNode: NodeType = {
             displayName: 'Summarization Method and Prompts',
             name: 'summarizationMethodAndPrompts',
             type: 'fixedCollection',
-            default: { values: { summarizationMethod: 'mapReduce' } },
+            default: { values: { summarizationMethod: 'map_reduce' } },
             placeholder: 'Add Option',
             options: [
               {
@@ -278,11 +286,11 @@ export const ChainSummarizationNode: NodeType = {
                     displayName: 'Summarization Method',
                     name: 'summarizationMethod',
                     type: 'options',
-                    default: 'mapReduce',
+                    default: 'map_reduce',
                     options: [
                       {
                         name: 'Map Reduce (Recommended)',
-                        value: 'mapReduce',
+                        value: 'map_reduce',
                         description: 'Summarize chunks in parallel, then combine',
                       },
                       {
@@ -304,7 +312,7 @@ export const ChainSummarizationNode: NodeType = {
                     default: MAP_PROMPT,
                     typeOptions: { rows: 4 },
                     description: 'Prompt for the summary of one chunk. Uses {text}.',
-                    displayOptions: { show: { summarizationMethod: ['mapReduce'] } },
+                    displayOptions: { show: { summarizationMethod: ['map_reduce'] } },
                   },
                   {
                     displayName: 'Final Prompt to Combine',
@@ -314,7 +322,7 @@ export const ChainSummarizationNode: NodeType = {
                     typeOptions: { rows: 4 },
                     description:
                       'Prompt that combines the summaries, or summarizes all text at once. Uses {text}.',
-                    displayOptions: { show: { summarizationMethod: ['mapReduce', 'stuff'] } },
+                    displayOptions: { show: { summarizationMethod: ['map_reduce', 'stuff'] } },
                   },
                   {
                     displayName: 'Initial Prompt',
@@ -346,7 +354,7 @@ export const ChainSummarizationNode: NodeType = {
             typeOptions: { minValue: 1, maxValue: 16 },
             description: 'Chunk summaries asked at the same time (Map Reduce)',
           },
-          batchingOption(1),
+          batchingOption(5),
         ],
       },
     ],
@@ -355,12 +363,12 @@ export const ChainSummarizationNode: NodeType = {
     const items = ctx.getInputData();
     const options0 = ctx.getNodeParameter('options', 0, {}) as DataObject;
     const batching = (options0.batching ?? {}) as DataObject;
-    const size = Number(batching.batchSize ?? 1);
+    const size = Number(batching.batchSize ?? 5);
     const delay = Number(batching.delayBetweenBatches ?? 0);
     const settled = await runInBatches(
       items.length,
       {
-        batchSize: Number.isFinite(size) && size >= 1 ? Math.floor(size) : 1,
+        batchSize: Number.isFinite(size) && size >= 1 ? Math.floor(size) : 5,
         delayMs: Number.isFinite(delay) && delay > 0 ? delay : 0,
         signal: ctx.signal,
         // without continue-on-fail, a failed item ends the node once its batch is done
@@ -381,7 +389,7 @@ export const ChainSummarizationNode: NodeType = {
         );
         const chosen = ((options.summarizationMethodAndPrompts as DataObject | undefined)?.values ??
           {}) as DataObject;
-        const method = (chosen.summarizationMethod ?? 'mapReduce') as SummarizeOptions['method'];
+        const method = (chosen.summarizationMethod ?? 'map_reduce') as SummarizeOptions['method'];
         const prompt = String(chosen.prompt ?? MAP_PROMPT);
         const model = await getChatModel(ctx, i);
         const summary = await summarize(model, chunks, {
