@@ -1,9 +1,46 @@
 /**
  * Google Gemini: message, image, audio, video and document operations, files and file search stores on
- * the Gemini API. Stub with the final name, credential and resource and operation shell; L4 fills it
- * (inputs gain the Tools port through `vendorToolsInput`).
+ * the Gemini API. Own REST calls on the guarded client; the Tools input shows for Text > Message a Model.
  */
-import type { NodeType } from '@workflow/workflow';
+import { type ExecuteContext, type Item, NodeOperationError, type NodeType } from '@workflow/workflow';
+import { eachVendorItem } from '../shared/messages';
+import { vendorToolsInput } from '../shared/tool-loop';
+import { createStore, deleteStore, fileSearchProperties, listStores, uploadToStore } from './file-search';
+import { fileProperties, fileUpload } from './files';
+import {
+  audioAnalyze,
+  audioTranscribe,
+  documentAnalyze,
+  imageAnalyze,
+  imageEdit,
+  imageGenerate,
+  mediaProperties,
+  videoAnalyze,
+  videoDownload,
+  videoGenerate,
+} from './media';
+import { messageProperties, textMessage } from './message';
+import { geminiListSearch, modelProperty } from './operations';
+
+type Handler = (ctx: ExecuteContext, itemIndex: number) => Promise<Item | Item[]>;
+
+const HANDLERS: Record<string, Handler> = {
+  'text.message': textMessage,
+  'image.analyze': imageAnalyze,
+  'image.generate': imageGenerate,
+  'image.edit': imageEdit,
+  'audio.transcribe': audioTranscribe,
+  'audio.analyze': audioAnalyze,
+  'video.analyze': videoAnalyze,
+  'video.generate': videoGenerate,
+  'video.download': videoDownload,
+  'document.analyze': documentAnalyze,
+  'file.upload': fileUpload,
+  'fileSearch.createStore': createStore,
+  'fileSearch.deleteStore': deleteStore,
+  'fileSearch.listStores': listStores,
+  'fileSearch.uploadToStore': uploadToStore,
+};
 
 export const GoogleGeminiNode: NodeType = {
   description: {
@@ -15,7 +52,7 @@ export const GoogleGeminiNode: NodeType = {
     group: ['transform'],
     version: 1,
     defaults: { name: 'Google Gemini' },
-    inputs: ['main'],
+    inputs: vendorToolsInput(`$parameter.resource === 'text' && $parameter.operation === 'message'`),
     outputs: ['main'],
     credentials: [{ name: 'googleGeminiApi', required: true }],
     categories: ['AI', 'Vendors'],
@@ -121,10 +158,70 @@ export const GoogleGeminiNode: NodeType = {
           },
         ],
       },
+      modelProperty({
+        resource: 'image',
+        operations: ['analyze'],
+        searchMethod: 'textModels',
+        defaultModel: 'gemini-2.5-flash',
+      }),
+      modelProperty({
+        resource: 'image',
+        operations: ['generate'],
+        searchMethod: 'imageModels',
+        defaultModel: 'imagen-4.0-generate-001',
+      }),
+      modelProperty({
+        resource: 'image',
+        operations: ['edit'],
+        searchMethod: 'imageEditModels',
+        defaultModel: 'gemini-2.5-flash-image',
+      }),
+      modelProperty({
+        resource: 'audio',
+        searchMethod: 'textModels',
+        defaultModel: 'gemini-2.5-flash',
+      }),
+      modelProperty({
+        resource: 'video',
+        operations: ['analyze'],
+        searchMethod: 'textModels',
+        defaultModel: 'gemini-2.5-flash',
+      }),
+      modelProperty({
+        resource: 'video',
+        operations: ['generate'],
+        searchMethod: 'videoModels',
+        defaultModel: 'veo-3.0-generate-001',
+      }),
+      modelProperty({
+        resource: 'document',
+        searchMethod: 'textModels',
+        defaultModel: 'gemini-2.5-flash',
+      }),
+      ...messageProperties,
+      ...mediaProperties,
+      ...fileProperties,
+      ...fileSearchProperties,
     ],
   },
 
-  async execute() {
-    throw new Error('not implemented (L4)');
+  async execute(ctx) {
+    return eachVendorItem(ctx, async (itemIndex): Promise<Item | Item[]> => {
+      const resource = String(ctx.getNodeParameter('resource', itemIndex, 'text'));
+      const operation = String(ctx.getNodeParameter('operation', itemIndex, ''));
+      const handler = HANDLERS[`${resource}.${operation}`];
+      if (!handler) {
+        throw new NodeOperationError(
+          ctx.getNode(),
+          `The operation "${operation}" is not known for "${resource}"`,
+          {
+            itemIndex,
+          },
+        );
+      }
+      return handler(ctx, itemIndex);
+    });
   },
+
+  methods: { listSearch: geminiListSearch },
 };
