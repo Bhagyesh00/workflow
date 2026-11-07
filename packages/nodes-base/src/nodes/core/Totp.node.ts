@@ -11,6 +11,7 @@ export const TotpNode: NodeType = {
     icon: 'lucide:timer',
     group: ['transform'],
     version: 1,
+    usableAsTool: true,
     defaults: { name: 'TOTP' },
     inputs: ['main'],
     outputs: ['main'],

@@ -66,6 +66,7 @@ export const CompressionNode: NodeType = {
     icon: 'lucide:file-archive',
     group: ['transform'],
     version: 1,
+    usableAsTool: true,
     defaults: { name: 'Compression' },
     inputs: ['main'],
     outputs: ['main'],

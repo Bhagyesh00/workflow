@@ -213,6 +213,7 @@ export const JwtNode: NodeType = {
     icon: 'lucide:key-square',
     group: ['transform'],
     version: 1,
+    usableAsTool: true,
     defaults: { name: 'JWT' },
     inputs: ['main'],
     outputs: ['main'],

@@ -425,6 +425,7 @@ export const RedisNode: NodeType = {
     iconColor: '#dc382d',
     group: ['input'],
     version: 1,
+    usableAsTool: true,
     defaults: { name: 'Redis' },
     inputs: ['main'],
     outputs: ['main'],

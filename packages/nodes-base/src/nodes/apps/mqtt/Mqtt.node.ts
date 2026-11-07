@@ -15,6 +15,7 @@ export const MqttNode: NodeType = {
     iconColor: '#660066',
     group: ['input'],
     version: 1,
+    usableAsTool: true,
     defaults: { name: 'MQTT' },
     inputs: ['main'],
     outputs: ['main'],

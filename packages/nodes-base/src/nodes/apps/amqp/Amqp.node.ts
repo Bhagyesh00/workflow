@@ -22,6 +22,7 @@ export const AmqpNode: NodeType = {
     iconColor: '#ff6600',
     group: ['output'],
     version: 1,
+    usableAsTool: true,
     defaults: { name: 'AMQP Sender' },
     inputs: ['main'],
     outputs: ['main'],

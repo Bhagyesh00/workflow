@@ -262,6 +262,7 @@ export const RabbitMqNode: NodeType = {
     iconColor: '#ff6600',
     group: ['transform'],
     version: 1,
+    usableAsTool: true,
     defaults: { name: 'RabbitMQ' },
     inputs: ['main'],
     outputs: ['main'],

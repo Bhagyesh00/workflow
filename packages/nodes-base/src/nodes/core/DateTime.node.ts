@@ -97,6 +97,7 @@ export const DateTimeNode: NodeType = {
     icon: 'lucide:calendar-clock',
     group: ['transform'],
     version: 1,
+    usableAsTool: true,
     defaults: { name: 'Date & Time' },
     inputs: ['main'],
     outputs: ['main'],
