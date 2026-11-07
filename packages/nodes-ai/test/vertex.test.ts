@@ -6,10 +6,7 @@
  */
 
 import { generateKeyPairSync } from 'node:crypto';
-import { EventEmitter } from 'node:events';
-import https from 'node:https';
-import { Readable } from 'node:stream';
-import { createBaseContext } from '@workflow/core';
+import { createBaseContext, createCredentialHelpers } from '@workflow/core';
 import {
   type AiChatMessage,
   type AiChatModel,
@@ -22,7 +19,7 @@ import {
   Workflow,
   type WorkflowNode,
 } from '@workflow/workflow';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { googleVertexAiApi } from '../src/credentials/google-vertex.credentials';
 import { readSafetySettings } from '../src/nodes/models/gemini-options';
 import { vertexHost, vertexModelBase } from '../src/providers/gemini';
@@ -412,19 +409,15 @@ describe('Vertex AI credential', () => {
 });
 
 describe('Vertex AI credential test', () => {
-  afterEach(() => vi.restoreAllMocks());
-
   const test =
     toolNodeTypes.get('ai.lmChatGoogleVertex')!.methods!.credentialTest!.googleVertexAiCredentialTest!;
-  const resolveAllowedHost = vi.fn(async (host: string) => ({
-    addresses: [{ address: '203.0.113.7', family: 4 }],
-    lookup: (_h: string, _o: unknown, cb: (e: null, a: string, f: number) => void) =>
-      cb(null, '203.0.113.7', 4),
-    host,
-  }));
-  const ctx = (): CredentialTestContext =>
+  const ctx = (http: FakeHttpClient, allowedDomains?: string[]): CredentialTestContext =>
     ({
-      helpers: { resolveAllowedHost, assertHostAllowed: vi.fn() },
+      helpers: {
+        resolveAllowedHost: vi.fn(),
+        assertHostAllowed: vi.fn(),
+        auth: createCredentialHelpers(http, allowedDomains),
+      },
       logger: { debug() {}, info() {}, warn() {}, error() {} },
       signal: new AbortController().signal,
       getTenantId: () => 't1',
@@ -434,105 +427,90 @@ describe('Vertex AI credential test', () => {
     ...serviceAccount('svc@my-project-1.iam.gserviceaccount.com'),
     ...over,
   });
-
-  interface Seen {
-    url: string;
-    method?: string;
-    headers: Record<string, string>;
-    body: string;
-  }
-
-  /** answers the https calls of the test in order, recording what was sent */
-  function fakeHttps(replies: Array<{ status: number; body: unknown }>) {
-    const seen: Seen[] = [];
-    vi.spyOn(https, 'request').mockImplementation(((
-      url: string,
-      options: DataObject,
-      callback: (response: Readable) => void,
-    ) => {
-      const request = new EventEmitter() as EventEmitter & { end(body?: string): void; destroy(): void };
-      const entry: Seen = {
-        url,
-        method: options.method as string,
-        headers: options.headers as never,
-        body: '',
-      };
-      seen.push(entry);
-      request.destroy = () => undefined;
-      request.end = (body?: string) => {
-        entry.body = body ?? '';
-        const reply = replies[seen.length - 1]!;
-        const response = Readable.from([Buffer.from(JSON.stringify(reply.body))]) as Readable & {
-          statusCode?: number;
-        };
-        response.statusCode = reply.status;
-        callback(response);
-      };
-      return request;
-    }) as never);
-    return seen;
-  }
+  const replying = (...replies: FakeReply[]) => new FakeHttpClient((_request, index) => replies[index]!);
+  const TOKEN_OK = { body: { access_token: 'ya29.tok', expires_in: 3599 } };
+  const CANNOT_CONNECT =
+    'Could not connect to Vertex AI. Check the service account details, project ID, and Vertex AI permissions.';
+  const assertionOf = (request: HttpRequestOptions) => (request.body as { assertion: string }).assertion;
 
   it('mints a token, lists the locations and reports OK', async () => {
-    const seen = fakeHttps([
-      { status: 200, body: { access_token: 'ya29.tok', expires_in: 3599 } },
-      { status: 200, body: { locations: [{ locationId: 'us-central1' }] } },
-    ]);
-    const result = await test(ctx(), { type: 'googleVertexAiApi', data: data() });
+    const http = replying(TOKEN_OK, { body: { locations: [{ locationId: 'us-central1' }] } });
+    const result = await test(ctx(http), { type: 'googleVertexAiApi', data: data() });
     expect(result.status).toBe('OK');
-    expect(seen[0].url).toBe('https://oauth2.googleapis.com/token');
-    expect(seen[0].method).toBe('POST');
-    const form = new URLSearchParams(seen[0].body);
-    expect(form.get('grant_type')).toBe('urn:ietf:params:oauth:grant-type:jwt-bearer');
-    expect(jwtClaims(form.get('assertion')!).aud).toBe('https://oauth2.googleapis.com/token');
-    expect(seen[1].url).toBe(
+    const [token, locations] = http.requests;
+    expect(token.url).toBe('https://oauth2.googleapis.com/token');
+    expect(token.method).toBe('POST');
+    expect(token.followRedirects).toBe(false);
+    expect((token.body as DataObject).grant_type).toBe('urn:ietf:params:oauth:grant-type:jwt-bearer');
+    expect(jwtClaims(assertionOf(token)).aud).toBe('https://oauth2.googleapis.com/token');
+    expect(locations.url).toBe(
       'https://aiplatform.googleapis.com/v1/projects/my-project-1/locations?pageSize=1',
     );
-    expect(seen[1].method).toBe('GET');
-    expect(seen[1].headers.authorization).toBe('Bearer ya29.tok');
-    // both hosts went through the guard before any socket
-    expect(resolveAllowedHost.mock.calls.map((c) => c[0])).toEqual([
-      'oauth2.googleapis.com',
-      'aiplatform.googleapis.com',
-    ]);
+    expect(locations.method).toBe('GET');
+    expect(locations.followRedirects).toBe(false);
+    expect(locations.headers?.authorization).toBe('Bearer ya29.tok');
   });
 
   it('asks for a project before it connects anywhere', async () => {
-    const seen = fakeHttps([]);
-    const result = await test(ctx(), { type: 'googleVertexAiApi', data: data({ projectId: ' ' }) });
+    const http = replying();
+    const result = await test(ctx(http), { type: 'googleVertexAiApi', data: data({ projectId: ' ' }) });
     expect(result).toEqual({ status: 'Error', message: 'Select or enter a Google Cloud project ID.' });
-    expect(seen).toHaveLength(0);
+    expect(http.requests).toHaveLength(0);
+  });
+
+  it('reads the scopes as a run does, and impersonates when asked', async () => {
+    const http = replying(TOKEN_OK, { body: {} });
+    const over = { scopes: ' a,b  c ', inpersonate: true, delegatedEmail: 'user@x.test' };
+    const result = await test(ctx(http), { type: 'googleVertexAiApi', data: data(over) });
+    expect(result.status).toBe('OK');
+    const claims = jwtClaims(assertionOf(http.requests[0]));
+    expect(claims.scope).toBe('a b c');
+    expect(claims.sub).toBe('user@x.test');
   });
 
   it('reports one plain message when the token or the locations call fails, with no detail', async () => {
-    fakeHttps([{ status: 400, body: { error: 'invalid_grant', error_description: SECRET_MARK } }]);
-    const denied = await test(ctx(), { type: 'googleVertexAiApi', data: data() });
-    vi.restoreAllMocks();
-    fakeHttps([
-      { status: 200, body: { access_token: 'tok' } },
-      { status: 403, body: { error: { message: SECRET_MARK } } },
-    ]);
-    const forbidden = await test(ctx(), { type: 'googleVertexAiApi', data: data() });
-    for (const result of [denied, forbidden]) {
-      expect(result.status).toBe('Error');
-      expect(result.message).toBe(
-        'Could not connect to Vertex AI. Check the service account details, project ID, and Vertex AI permissions.',
-      );
+    const refusals = [
+      replying({ status: 400, body: { error: 'invalid_grant', error_description: SECRET_MARK } }),
+      replying({ body: { error_description: SECRET_MARK } }),
+      replying(TOKEN_OK, { status: 403, body: { error: { message: SECRET_MARK } } }),
+      replying(TOKEN_OK, { status: 302, headers: { location: 'https://other.example/' }, body: '' }),
+    ];
+    for (const http of refusals) {
+      const result = await test(ctx(http), { type: 'googleVertexAiApi', data: data() });
+      expect(result).toEqual({ status: 'Error', message: CANNOT_CONNECT });
     }
   });
 
+  it('holds to the allowed domains of the credential, as a run does', async () => {
+    const onlyVertex = replying();
+    const refused = await test(ctx(onlyVertex, ['us-central1-aiplatform.googleapis.com']), {
+      type: 'googleVertexAiApi',
+      data: data(),
+    });
+    expect(refused).toEqual({ status: 'Error', message: CANNOT_CONNECT });
+    expect(onlyVertex.requests).toHaveLength(0);
+
+    const noLocations = replying(TOKEN_OK);
+    const stopped = await test(ctx(noLocations, ['oauth2.googleapis.com']), {
+      type: 'googleVertexAiApi',
+      data: data(),
+    });
+    expect(stopped).toEqual({ status: 'Error', message: CANNOT_CONNECT });
+    expect(noLocations.requests.map((r) => r.url)).toEqual(['https://oauth2.googleapis.com/token']);
+    expect(noLocations.requests[0].allowedDomains).toEqual(['oauth2.googleapis.com']);
+  });
+
   it('does not connect when the guard refuses the host, and does not quote the key', async () => {
-    resolveAllowedHost.mockRejectedValueOnce(new Error('blocked address'));
-    const seen = fakeHttps([]);
-    const d = data();
-    const result = await test(ctx(), { type: 'googleVertexAiApi', data: d });
-    expect(seen).toHaveLength(0);
-    expect(result.status).toBe('Error');
-    expect(result.message).not.toContain('PRIVATE KEY');
+    const blocked = new FakeHttpClient(() => {
+      throw new Error('blocked address');
+    });
+    const result = await test(ctx(blocked), { type: 'googleVertexAiApi', data: data() });
+    expect(result).toEqual({ status: 'Error', message: CANNOT_CONNECT });
     // a key that is not a key
-    const bad = await test(ctx(), { type: 'googleVertexAiApi', data: data({ privateKey: 'not a key' }) });
-    expect(bad.status).toBe('Error');
-    expect(bad.message).not.toContain('not a key');
+    const http = replying();
+    const bad = await test(ctx(http), { type: 'googleVertexAiApi', data: data({ privateKey: 'not a key' }) });
+    expect(bad).toEqual({ status: 'Error', message: CANNOT_CONNECT });
+    expect(http.requests).toHaveLength(0);
   });
 });
 

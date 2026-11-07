@@ -467,6 +467,7 @@ describe('awsAssumeRole', () => {
     expect(message).toContain('403');
     expect(message).not.toContain(String(creds.stsSecretAccessKey));
     expect(fake.requests[0]?.options.followRedirects).toBe(false);
+    expect(fake.requests[0]?.options.timeout).toBe(30_000);
     expect(fake.requests).toHaveLength(1);
   });
 
@@ -594,16 +595,54 @@ describe('googleApi', () => {
     expect(scope).not.toContain(String(creds.privateKey));
   });
 
+  it('asks for the cloud-platform scope on the Vertex AI and project list hosts when none is typed', async () => {
+    for (const url of [
+      API,
+      'https://aiplatform.eu.rep.googleapis.com/v1/x',
+      'https://us-central1-aiplatform.googleapis.com/v1/x',
+      'https://cloudresourcemanager.googleapis.com/v3/projects:search',
+    ]) {
+      const fake = new FakeHttpClient()
+        .on('POST', GOOGLE_TOKEN, () => ({ access_token: 'tok', expires_in: 3600 }))
+        .on('*', /googleapis/, () => ({ ok: 1 }));
+      const creds = googleKeys({ scopes: '' });
+      await send(fake, googleApi, creds, { url });
+      expect(claimsOf(tokenCalls(fake)[0]).scope).toBe('https://www.googleapis.com/auth/cloud-platform');
+    }
+  });
+
+  it('keeps a typed scope on a Vertex AI host', async () => {
+    const fake = tokenFake();
+    await send(fake, googleApi, googleKeys({ scopes: 'a' }), { url: API });
+    expect(claimsOf(tokenCalls(fake)[0]).scope).toBe('a');
+  });
+
   it('refuses a missing email, key or scope, and a bad key with no key text', async () => {
     const fake = tokenFake();
-    for (const extra of [{ email: '' }, { privateKey: '' }, { scopes: '  ' }]) {
-      expect(await messageOf(send(fake, googleApi, googleKeys(extra), { url: API }))).toBe(
+    const OTHER = 'https://sheets.googleapis.com/v4/x';
+    for (const [extra, url] of [
+      [{ email: '' }, API],
+      [{ privateKey: '' }, API],
+      [{ scopes: '  ' }, OTHER],
+      // the default scope is for https calls to these hosts only
+      [{ scopes: '  ' }, 'http://aiplatform.googleapis.com/v1/x'],
+      [{ scopes: '  ' }, 'https://aiplatform.googleapis.com.evil.example/v1/x'],
+    ] as const) {
+      expect(await messageOf(send(fake, googleApi, googleKeys(extra), { url }))).toBe(
         'The Google credential needs an email, a private key and at least one scope',
       );
     }
     const bad = await messageOf(send(fake, googleApi, googleKeys({ privateKey: SECRET }), { url: API }));
     expect(bad).toBe('The service account private key is not valid');
     expect(fake.requests).toHaveLength(0);
+  });
+});
+
+describe('credential icons', () => {
+  it('shows a brand icon for the AWS and Google types', () => {
+    expect(aws.icon).toBe('simple:amazonaws');
+    expect(awsAssumeRole.icon).toBe('simple:amazonaws');
+    expect(googleApi.icon).toBe('simple:googlecloud');
   });
 });
 

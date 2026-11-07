@@ -6,12 +6,26 @@
 import type { CredentialType } from '@workflow/workflow';
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const CLOUD_PLATFORM_SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
+/** the Vertex AI hosts and the project list: as in n8n, the Vertex nodes need no scope typed */
+const VERTEX_API_HOST =
+  /(^|[.-])aiplatform\.((eu|us)\.rep\.)?googleapis\.com$|^cloudresourcemanager\.googleapis\.com$/i;
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
+
+function isVertexApiUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && VERTEX_API_HOST.test(url.hostname);
+  } catch {
+    return false;
+  }
+}
 
 export const googleApi: CredentialType = {
   name: 'googleApi',
   displayName: 'Google Service Account API',
+  icon: 'simple:googlecloud',
   properties: [
     {
       displayName: 'Region',
@@ -62,9 +76,10 @@ export const googleApi: CredentialType = {
     if (!helpers) throw new Error('This credential can only get a token through the workflow engine');
     const email = text(credentials.email);
     const privateKey = text(credentials.privateKey);
-    const scopes = text(credentials.scopes)
+    const typed = text(credentials.scopes)
       .split(/[,\s]+/)
       .filter(Boolean);
+    const scopes = !typed.length && isVertexApiUrl(request.url) ? [CLOUD_PLATFORM_SCOPE] : typed;
     if (!email || !privateKey || !scopes.length) {
       throw new Error('The Google credential needs an email, a private key and at least one scope');
     }
