@@ -1,9 +1,16 @@
 /**
- * OpenAI: text, image, audio, file, conversation and video operations on the OpenAI API. Stub with the
- * final name, credential and resource and operation shell; L2 fills it (inputs gain the Tools port for
- * text.response through `vendorToolsInput`). Not usable as a tool, as n8n's OpenAI node.
+ * OpenAI: text, image, audio, file, conversation and video operations on the OpenAI API. The Tools port
+ * is on for Message a Model once Hide Tools is set to Show. Not usable as a tool, as n8n's OpenAI node.
  */
 import type { NodeType } from '@workflow/workflow';
+import { eachVendorItem } from '../shared/messages';
+import { vendorToolsInput } from '../shared/tool-loop';
+import { audioProperties, executeAudio } from './audio';
+import { conversationProperties, executeConversation } from './conversation';
+import { executeFile, fileProperties, searchFiles } from './file';
+import { executeImage, imageProperties } from './image';
+import { executeText, searchModels, TEXT_TOOLS_CONDITION, textProperties } from './text';
+import { executeVideo, videoProperties } from './video';
 
 export const OpenAiNode: NodeType = {
   description: {
@@ -15,7 +22,7 @@ export const OpenAiNode: NodeType = {
     group: ['transform'],
     version: 1,
     defaults: { name: 'OpenAI' },
-    inputs: ['main'],
+    inputs: vendorToolsInput(TEXT_TOOLS_CONDITION),
     outputs: ['main'],
     credentials: [{ name: 'openAiApi', required: true }],
     categories: ['AI', 'Vendors'],
@@ -110,10 +117,40 @@ export const OpenAiNode: NodeType = {
         default: 'generate',
         options: [{ name: 'Generate Video', value: 'generate', action: 'Generate a video' }],
       },
+      ...textProperties,
+      ...imageProperties,
+      ...audioProperties,
+      ...fileProperties,
+      ...conversationProperties,
+      ...videoProperties,
     ],
   },
-
-  async execute() {
-    throw new Error('not implemented (L2)');
+  methods: {
+    listSearch: {
+      modelSearch: searchModels,
+      fileSearch: searchFiles,
+    },
+  },
+  async execute(ctx) {
+    return eachVendorItem(ctx, async (itemIndex) => {
+      const resource = String(ctx.getNodeParameter('resource', itemIndex, 'text'));
+      const operation = String(ctx.getNodeParameter('operation', itemIndex, ''));
+      switch (resource) {
+        case 'text':
+          return executeText(ctx, itemIndex, operation);
+        case 'image':
+          return executeImage(ctx, itemIndex, operation);
+        case 'audio':
+          return executeAudio(ctx, itemIndex, operation);
+        case 'file':
+          return executeFile(ctx, itemIndex, operation);
+        case 'conversation':
+          return executeConversation(ctx, itemIndex, operation);
+        case 'video':
+          return executeVideo(ctx, itemIndex, operation);
+        default:
+          throw new Error(`The resource "${resource}" is not known`);
+      }
+    });
   },
 };
