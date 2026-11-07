@@ -327,6 +327,13 @@ describe('text.message', () => {
     expect(both.fake.requests).toHaveLength(0);
   });
 
+  it('sends no tool and does not refuse a waiting tool while Hide Tools is Hide', async () => {
+    const { fake, result } = await runAnthropic(text({ hideTools: 'hide' }), { tool: 'test.waitTool' });
+    expect(result.status).toBe('success');
+    expect(fake.requests).toHaveLength(1);
+    expect((fake.requests[0]!.body as DataObject).tools).toBeUndefined();
+  });
+
   it('runs a tool turn: tool_use, the tool, then the answer', async () => {
     const { fake, out } = await runAnthropic(text({ hideTools: 'show' }), {
       tool: 'test.lookupTool',
@@ -378,6 +385,30 @@ describe('text.message', () => {
     expect(out[0]!.content).toEqual([...paused, { type: 'text', text: 'Result.' }]);
     expect(out[0]!.usage).toEqual({ input_tokens: 30, output_tokens: 10 });
     expect(out[0]!.merged_response).toBe('Searching. Result.');
+  });
+
+  it('sends the blocks of every paused round once, in one assistant message', async () => {
+    const first = [
+      { type: 'text', text: 'One. ' },
+      { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'a' } },
+    ];
+    const second = [
+      { type: 'text', text: 'Two. ' },
+      { type: 'server_tool_use', id: 'srvtoolu_2', name: 'web_search', input: { query: 'b' } },
+    ];
+    const { fake, out } = await runAnthropic(text({ simplify: false, options: { webSearch: true } }), {
+      handler: (_request, index) =>
+        index === 0
+          ? messageReply('', { content: first, stop_reason: 'pause_turn' })
+          : index === 1
+            ? messageReply('', { content: second, stop_reason: 'pause_turn' })
+            : messageReply('Done.'),
+    });
+    expect(fake.requests).toHaveLength(3);
+    const third = (fake.requests[2]!.body as any).messages as Array<{ role: string; content: DataObject[] }>;
+    expect(third.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(third[1]!.content).toEqual([...first, ...second]);
+    expect(out[0]!.content).toEqual([...first, ...second, { type: 'text', text: 'Done.' }]);
   });
 
   it('stops a reply that keeps pausing at Max Tool Calls Iterations', async () => {

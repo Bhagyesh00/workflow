@@ -218,6 +218,8 @@ export function pauseTurnModel(
     model: adapter.model,
     async chat(request: AiChatRequest): Promise<AiChatResponse> {
       let sent = decorate(adapter.buildRequest(request, false));
+      // every round is rebuilt from the first request's messages plus one assistant turn holding all paused blocks
+      const baseMessages = (sent.body as DataObject).messages as DataObject[];
       let carried: Block[] = [];
       let usage: DataObject | undefined;
       for (let round = 0; ; round++) {
@@ -240,7 +242,7 @@ export function pauseTurnModel(
             ...sent,
             body: {
               ...body,
-              messages: [...(body.messages as DataObject[]), { role: 'assistant', content: carried }],
+              messages: [...baseMessages, { role: 'assistant', content: carried }],
             },
           };
           continue;
@@ -471,6 +473,7 @@ export async function executeMessage(
     system: typeof options.system === 'string' && options.system.trim() ? options.system : undefined,
     maxIterations,
     model,
+    useTools: ctx.getNodeParameter('hideTools', itemIndex, 'hide') === 'show',
   });
   const simplify = ctx.getNodeParameter('simplify', itemIndex, true) === true;
   const body: DataObject = raw ?? { content: [{ type: 'text', text: result.text }] };
