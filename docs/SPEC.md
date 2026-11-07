@@ -54,7 +54,7 @@
 | Data transformation methods (strings, numbers, arrays, objects, booleans, dates)                                                                                                         | M1  | ✅ (~80)                                |
 | Sandboxed evaluation: no eval/vm, per-expression step and time budget, frozen shared state                                                                                               | M1  | ✅                                      |
 | `$secrets` (external vaults)                                                                                                                                                             | M2  | ✅                                      |
-| `$fromAI()` for agent tool parameters                                                                                                                                                    | M2  | 📋                                      |
+| `$fromAI()` for agent tool parameters                                                                                                                                                    | M2  | ✅                                      |
 | `$getWorkflowStaticData` in the Code node (as in n8n), saved after runs from active triggers                                                                                             | M2  | ✅                                      |
 | Execution order v1 (depth-first by position)                                                                                                                                             | M1  | ✅ (the legacy v0 order is ⛔)          |
 
@@ -181,18 +181,24 @@
 
 | Capability                                                                                                                | M   | Status                         |
 | ------------------------------------------------------------------------------------------------------------------------- | --- | ------------------------------ |
-| AI Agent (tools agent): memory, tools, output parser, max iterations, streaming                                           | M1  | 🔨 (engine sub-node supply ✅) |
-| Chains: Basic LLM, Information Extractor, Text Classifier, Sentiment, Summarization, Retrieval QA                         | M1  | 🔨                             |
-| Chat models: OpenAI, Anthropic, Gemini, Ollama, any OpenAI-compatible (OpenRouter, Groq, Mistral, DeepSeek, xAI...)       | M1  | 🔨                             |
+| AI Agent (tools agent): memory, tools, output parser, max iterations, streaming                                           | M1  | ✅                             |
+| Chains: Basic LLM, Information Extractor, Text Classifier, Sentiment, Summarization, Retrieval QA                         | M1  | ✅                             |
+| Chat models: OpenAI, Anthropic, Gemini, Ollama, any OpenAI-compatible (OpenRouter, Groq, Mistral, DeepSeek, xAI...)       | M1  | ✅                             |
 | Memory: window, Postgres, Redis                                                                                           | M1  | 🔨                             |
-| Tools: Calculator, Code, HTTP Request, Call Workflow, Think, Vector Store, MCP Client                                     | M1  | 🔨                             |
+| Tools: Calculator, Code, HTTP Request, Call Workflow, Think, Vector Store, MCP Client                                     | M1  | 🔨 (Call Workflow Tool picker ✅) |
 | RAG: embeddings (OpenAI, Gemini, Ollama), vector stores (in-memory, PGVector, Qdrant), loaders, splitters, output parsers | M1  | 🔨                             |
 | Chat Trigger                                                                                                              | M1  | 🔨                             |
 | Hosted/embeddable chat widget (sandbox origin)                                                                            | M2  | 📋                             |
-| Any node usable as an agent tool, `$fromAI()`                                                                             | M2  | 📋                             |
-| Guardrails node (PII, jailbreak, secrets, URLs)                                                                           | M2  | 📋                             |
+| Any node usable as an agent tool, `$fromAI()`                                                                             | M2  | ✅                             |
+| Guardrails node (PII, jailbreak, secrets, URLs)                                                                           | M2  | ✅                             |
 | Evaluations (datasets, metrics, AI judge)                                                                                 | M2  | 📋                             |
-| More vector stores, rerankers, Bedrock/Vertex/Azure models                                                                | M2  | 📋                             |
+| More vector stores, rerankers                                                                                             | M2  | 📋                             |
+| Bedrock, Vertex AI, Azure OpenAI and Foundry, Mistral, Cohere and named OpenAI-compatible models                          | M2  | ✅                             |
+| Human review for agent tools, tools that wait, `$tool`                                                                    | M2  | ✅                             |
+| Test a tool with typed values (tool executor run)                                                                         | M2  | ✅                             |
+| Resource mapper control (Call Workflow Tool inputs)                                                                       | M2  | ✅                             |
+| Model Selector                                                                                                            | M2  | ✅                             |
+| Text completion models (Cohere, Ollama, Hugging Face and others)                                                          | M2  | ✅                             |
 | AI workflow copilot that produces reviewable drafts (NF-26)                                                               | M2  | 📋                             |
 | MCP server for the tenant (search/run/build workflows)                                                                    | M2  | 📋                             |
 
