@@ -140,10 +140,19 @@ describe('node registrations', () => {
   it('AI Agent Tool has no main input and outputs a tool', () => {
     const d = byName('ai.agentTool').description;
     expect(d.outputs).toEqual(['ai_tool']);
-    expect((d.inputs as NodeInputConfig[]).map(portType)).not.toContain('main');
-    expect((d.inputs as NodeInputConfig[]).map(portType)).toEqual(
+    const inputs = ports(byName('ai.agentTool'), 'inputs') as NodeInputConfig[];
+    expect(inputs.map(portType)).not.toContain('main');
+    expect(inputs.map(portType)).toEqual(
       expect.arrayContaining(['ai_languageModel', 'ai_memory', 'ai_tool', 'ai_outputParser']),
     );
+    expect(inputs.filter((port) => portType(port) === 'ai_languageModel')).toHaveLength(1);
+    const noParser = ports(byName('ai.agentTool'), 'inputs', { hasOutputParser: false }) as NodeInputConfig[];
+    expect(noParser.map(portType)).not.toContain('ai_outputParser');
+    const withFallback = ports(byName('ai.agentTool'), 'inputs', { needsFallback: true }) as NodeInputConfig[];
+    expect(withFallback.filter((port) => portType(port) === 'ai_languageModel')).toMatchObject([
+      { displayName: 'Chat Model', required: true },
+      { displayName: 'Fallback Model', required: true },
+    ]);
     expect(byName('ai.agentTool').execute).toBeTypeOf('function');
   });
 

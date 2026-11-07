@@ -26,7 +26,7 @@ import { binaryParts } from './passthrough';
 
 const DEFAULT_SYSTEM_MESSAGE = 'You are a helpful assistant';
 
-const modelPort = (displayName: string) => ({
+export const modelPort = (displayName: string) => ({
   type: 'ai_languageModel',
   displayName,
   required: true,
@@ -329,9 +329,8 @@ export async function executeAgent(ctx: ExecuteContext): Promise<Item[][]> {
           ? { resume: { state: checkpoint, answer: resume.answer } }
           : {}),
       });
-      const json: DataObject = { output: result.output as DataObject[string] };
-      if (options.returnIntermediateSteps)
-        json.intermediateSteps = result.intermediateSteps as unknown as DataObject[];
+      const json: DataObject = { output: result.output };
+      if (options.returnIntermediateSteps) json.intermediateSteps = result.intermediateSteps;
       if (options.returnUsage) json.usage = { ...result.usage };
       // the first output only, and only a text answer (a parser's object is not text)
       if (options.autoSaveHighlightedData !== false && i === 0 && typeof result.output === 'string') {

@@ -6,8 +6,7 @@
  * `text` is read with `$fromAI` and the sub-agent answers in `output`.
  */
 import type { NodeProperty, NodeType } from '@workflow/workflow';
-import { COMPLETION_MODEL_NODES } from '../../shared/ai-inputs';
-import { agentProperties, executeAgent } from './Agent.node';
+import { agentProperties, executeAgent, modelPort } from './Agent.node';
 
 const TOOL_DESCRIPTION = 'AI Agent that can call other tools';
 
@@ -34,10 +33,13 @@ const PROMPT_PROPERTIES: NodeProperty[] = [
   },
 ];
 
-/** the Agent's parameters, except what a tool cannot have: its own prompt source and the port-changing switches */
-const SHARED = agentProperties.filter(
-  ({ name }) => !['promptType', 'text', 'hasOutputParser', 'needsFallback'].includes(name),
-);
+/** the Agent's parameters, except its own prompt source; this node has one version, so the parser switch always shows */
+const SHARED = agentProperties
+  .filter(({ name }) => !['promptType', 'text'].includes(name))
+  .map((property) => (property.name === 'hasOutputParser' ? { ...property, displayOptions: undefined } : property));
+
+/** the Agent's inputs without `main`; the fallback model is the second chat-model port, as on the Agent */
+const AGENT_TOOL_INPUTS = `={{ [${JSON.stringify(modelPort('Chat Model'))}, ...($parameter.needsFallback === true ? [${JSON.stringify(modelPort('Fallback Model'))}] : []), { type: 'ai_memory', displayName: 'Memory', maxConnections: 1 }, { type: 'ai_tool', displayName: 'Tool' }, ...($parameter.hasOutputParser !== false ? [{ type: 'ai_outputParser', displayName: 'Output Parser', maxConnections: 1 }] : [])] }}`;
 
 export const AgentToolNode: NodeType = {
   description: {
@@ -48,18 +50,7 @@ export const AgentToolNode: NodeType = {
     group: ['transform'],
     version: 1,
     defaults: { name: 'AI Agent Tool' },
-    inputs: [
-      {
-        type: 'ai_languageModel',
-        displayName: 'Chat Model',
-        required: true,
-        maxConnections: 1,
-        filter: { excludedNodes: COMPLETION_MODEL_NODES },
-      },
-      { type: 'ai_memory', displayName: 'Memory', maxConnections: 1 },
-      { type: 'ai_tool', displayName: 'Tool' },
-      { type: 'ai_outputParser', displayName: 'Output Parser', maxConnections: 1 },
-    ],
+    inputs: AGENT_TOOL_INPUTS,
     outputs: ['ai_tool'],
     outputNames: ['Tool'],
     categories: ['AI', 'Tools'],
