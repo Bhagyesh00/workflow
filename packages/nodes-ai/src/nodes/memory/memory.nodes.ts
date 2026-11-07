@@ -116,11 +116,19 @@ export const MemoryBufferWindowNode: NodeType = {
         );
         bufferStore.set(tenantId, keyOf(sessionId), next);
       },
-      async loadAll() {
-        throw new Error('not implemented (L19)');
+      async loadAll(sessionId) {
+        return (bufferStore.get(tenantId, keyOf(sessionId)) ?? []).map((m) => ({ ...m }));
       },
-      async replace() {
-        throw new Error('not implemented (L19)');
+      async replace(sessionId, messages) {
+        // the byte budget still applies; the window does not, a rewrite keeps every message that fits
+        const next = appendWithinBudget(
+          [],
+          messages.map((m) => toStoredMessage(m) as AiChatMessage),
+          Math.max(messages.length, 1),
+          MEMORY_BUFFER_MAX_BYTES_PER_TENANT,
+        );
+        if (next.length) bufferStore.set(tenantId, keyOf(sessionId), next);
+        else bufferStore.delete(tenantId, keyOf(sessionId));
       },
       async clear(sessionId) {
         bufferStore.delete(tenantId, keyOf(sessionId));
@@ -193,11 +201,23 @@ export const MemoryPostgresChatNode: NodeType = {
           values,
         );
       },
-      async loadAll() {
-        throw new Error('not implemented (L19)');
+      async loadAll(sessionId) {
+        const result = await client.query(
+          `SELECT message FROM ${table} WHERE tenant_id = $1 AND session_id = $2 ORDER BY id`,
+          [tenantId, sessionId],
+        );
+        return result.rows
+          .map((r) => fromStoredMessage(r.message))
+          .filter((m): m is AiChatMessage => Boolean(m));
       },
-      async replace() {
-        throw new Error('not implemented (L19)');
+      async replace(sessionId, messages) {
+        // one statement, so a failure or a second writer never sees a half-rewritten history
+        await client.query(
+          `WITH del AS (DELETE FROM ${table} WHERE tenant_id = $1 AND session_id = $2)
+           INSERT INTO ${table} (tenant_id, session_id, message)
+           SELECT $1::text, $2::text, u.m::jsonb FROM unnest($3::text[]) WITH ORDINALITY AS u(m, ord) ORDER BY u.ord`,
+          [tenantId, sessionId, messages.map((m) => JSON.stringify(toStoredMessage(m)))],
+        );
       },
       async clear(sessionId) {
         await client.query(`DELETE FROM ${table} WHERE tenant_id = $1 AND session_id = $2`, [
@@ -283,11 +303,19 @@ export const MemoryRedisChatNode: NodeType = {
         if (ttl > 0) tx.expire(key, ttl);
         await tx.exec();
       },
-      async loadAll() {
-        throw new Error('not implemented (L19)');
+      async loadAll(sessionId) {
+        const raw = await client.lrange(keyOf(sessionId), 0, -1);
+        return raw.map(fromStoredMessage).filter((m): m is AiChatMessage => Boolean(m));
       },
-      async replace() {
-        throw new Error('not implemented (L19)');
+      async replace(sessionId, messages) {
+        const key = keyOf(sessionId);
+        const tx = client.multi().del(key);
+        if (messages.length) {
+          tx.rpush(key, ...messages.map((m) => JSON.stringify(toStoredMessage(m))));
+          tx.ltrim(key, -REDIS_MAX_MESSAGES, -1);
+          if (ttl > 0) tx.expire(key, ttl);
+        }
+        await tx.exec();
       },
       async clear(sessionId) {
         await client.del(keyOf(sessionId));

@@ -48,15 +48,25 @@ export function windowSize(ctx: SupplyDataContext, itemIndex: number): number {
   return Math.max(1, Math.min(200, Number(ctx.getNodeParameter('contextWindowLength', itemIndex, 5)) || 5));
 }
 
-/** Only role and text are stored: images and provider internals never reach memory. */
-export function toStoredMessage(message: AiChatMessage): { role: string; content: string } {
-  return { role: message.role, content: truncate(messageText(message.content), MAX_STORED_CHARS) };
+/**
+ * Only role, text and the hide flag are stored: images and provider internals never reach memory.
+ * `hideFromUI` is written only when true, so stored rows of earlier versions keep their shape.
+ */
+export function toStoredMessage(message: AiChatMessage): { role: string; content: string; hideFromUI?: true } {
+  const stored: { role: string; content: string; hideFromUI?: true } = {
+    role: message.role,
+    content: truncate(messageText(message.content), MAX_STORED_CHARS),
+  };
+  if (message.hideFromUI === true) stored.hideFromUI = true;
+  return stored;
 }
 
 export function fromStoredMessage(value: unknown): AiChatMessage | undefined {
   const v = (typeof value === 'string' ? safeParse(value) : value) as DataObject | undefined;
   if (!v || (v.role !== 'user' && v.role !== 'assistant' && v.role !== 'system')) return undefined;
-  return { role: v.role, content: typeof v.content === 'string' ? v.content : '' };
+  const message: AiChatMessage = { role: v.role, content: typeof v.content === 'string' ? v.content : '' };
+  if (v.hideFromUI === true) message.hideFromUI = true;
+  return message;
 }
 
 function safeParse(text: string): unknown {
