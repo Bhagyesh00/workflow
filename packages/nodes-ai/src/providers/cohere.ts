@@ -94,7 +94,8 @@ export function cohereRequestBody(
   const body: DataObject = { model: config.model, messages: toCohereMessages(request.messages) };
   const temperature = request.temperature ?? config.temperature;
   if (temperature !== undefined) body.temperature = temperature;
-  if (config.topP !== undefined) body.p = config.topP;
+  // Cohere takes `p` from 0.01 to 0.99; the node's Top P runs from 0 to 1
+  if (config.topP !== undefined) body.p = Math.min(0.99, Math.max(0.01, config.topP));
   const maxTokens = request.maxTokens ?? config.maxTokens;
   if (maxTokens !== undefined) body.max_tokens = maxTokens;
   if (request.tools?.length) {

@@ -103,6 +103,17 @@ describe('Cohere chat model', () => {
     expect(JSON.stringify(req.headers)).not.toMatch(/openai-platform|n8n/i);
   });
 
+  it('keeps Top P inside the range Cohere takes', async () => {
+    const body = async (topP: number) => {
+      const http = new FakeHttpClient(sequence(answer('42')));
+      await runAgent(http, { options: { topP } });
+      return http.requests[0].body as { p?: number };
+    };
+    expect((await body(1)).p).toBe(0.99);
+    expect((await body(0)).p).toBe(0.01);
+    expect((await body(0.5)).p).toBe(0.5);
+  });
+
   it('defaults to command-a-03-2025 and leaves unset options out', async () => {
     const http = new FakeHttpClient(sequence(answer('42')));
     await runAgent(http, {});
