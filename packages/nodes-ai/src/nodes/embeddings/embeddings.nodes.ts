@@ -91,6 +91,15 @@ const modelProperty = (defaultModel: string, description?: string): NodeProperty
   description,
 });
 
+/** The API's base64 form: little-endian float32 values. */
+const NEWLINE = new RegExp(String.fromCharCode(13) + '?' + String.fromCharCode(10), 'g');
+
+function decodeBase64Vector(encoded: string): number[] {
+  const bytes = Buffer.from(encoded, 'base64');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength - (bytes.byteLength % 4));
+  return Array.from({ length: view.byteLength / 4 }, (_, i) => view.getFloat32(i * 4, true));
+}
+
 export const EmbeddingsOpenAiNode: NodeType = {
   description: embeddingsDescription(
     {
@@ -110,14 +119,43 @@ export const EmbeddingsOpenAiNode: NodeType = {
           default: 1536,
           description: 'Shorter vectors (text-embedding-3 models only)',
         },
+        {
+          displayName: 'Strip New Lines',
+          name: 'stripNewLines',
+          type: 'boolean',
+          default: true,
+          description: 'Whether to replace new lines in the text with spaces before embedding',
+        },
+        {
+          displayName: 'Base URL',
+          name: 'baseURL',
+          type: 'string',
+          default: '',
+          placeholder: 'https://api.openai.com/v1',
+          description: 'Overrides the base URL of the credential',
+        },
+        {
+          displayName: 'Encoding Format',
+          name: 'encodingFormat',
+          type: 'options',
+          default: 'float',
+          options: [
+            { name: 'Float', value: 'float' },
+            { name: 'Base64', value: 'base64' },
+          ],
+          description: 'The format the API returns the vectors in',
+        },
       ]),
     ],
   ),
   async supplyData(ctx, itemIndex) {
     const creds = await ctx.getCredentials('openAiApi', itemIndex);
-    const { batchSize, maxRetries, timeoutMs, dimensions } = readOptions(ctx, itemIndex, 2048);
+    const { options, batchSize, maxRetries, timeoutMs, dimensions } = readOptions(ctx, itemIndex, 2048);
     const model = String(ctx.getNodeParameter('model', itemIndex, 'text-embedding-3-small'));
-    const baseUrl = trimSlash(String(creds.baseUrl || 'https://api.openai.com/v1'));
+    const optionUrl = String(options.baseURL ?? '').trim();
+    const baseUrl = trimSlash(optionUrl || String(creds.baseUrl || 'https://api.openai.com/v1'));
+    const strip = options.stripNewLines !== false;
+    const format = options.encodingFormat === 'base64' ? 'base64' : 'float';
     return {
       response: new HttpEmbeddings(ctx, {
         credentialType: 'openAiApi',
@@ -129,12 +167,17 @@ export const EmbeddingsOpenAiNode: NodeType = {
         dimensions,
         request: (texts) => ({
           url: `${baseUrl}/embeddings`,
-          body: { model, input: texts, encoding_format: 'float', ...(dimensions ? { dimensions } : {}) },
+          body: {
+            model,
+            input: strip ? texts.map((t) => t.split(NEWLINE).join(' ')) : texts,
+            encoding_format: format,
+            ...(dimensions ? { dimensions } : {}),
+          },
         }),
         parse: (body) =>
-          [...((body as { data?: Array<{ index: number; embedding: number[] }> }).data ?? [])]
+          [...((body as { data?: Array<{ index: number; embedding: number[] | string }> }).data ?? [])]
             .sort((a, b) => a.index - b.index)
-            .map((d) => d.embedding),
+            .map((d) => (typeof d.embedding === 'string' ? decodeBase64Vector(d.embedding) : d.embedding)),
       }),
     };
   },
