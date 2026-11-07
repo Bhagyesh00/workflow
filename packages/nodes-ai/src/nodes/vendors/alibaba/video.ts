@@ -11,22 +11,33 @@ import {
 } from '@workflow/workflow';
 import { downloadMedia, vendorError } from '../shared/api';
 import { fileToItem, readInputFile } from '../shared/binary';
+import { simplifyProperty } from '../shared/messages';
 import { num, pollTiming, readModel, runTask } from './text';
 
 const VIDEO_PATH = '/api/v1/services/aigc/video-generation/video-synthesis';
 
-const t2v = { show: { resource: ['video'], operation: ['textToVideo'] } };
-const i2v = { show: { resource: ['video'], operation: ['imageToVideo'] } };
-const both = { show: { resource: ['video'], operation: ['textToVideo', 'imageToVideo'] } };
+type Operation = 'textToVideo' | 'imageToVideo';
 
-const optionList = (operation: 'textToVideo' | 'imageToVideo'): NodeProperty => ({
+const when = (operation: Operation, extra: DataObject = {}) => ({
+  show: { resource: ['video'], operation: [operation], ...extra },
+});
+
+/** the options collection of one operation (n8n names them `videoOptions` and `imageToVideoOptions`) */
+const optionList = (operation: Operation): NodeProperty => ({
   displayName: 'Options',
-  name: 'options',
+  name: operation === 'textToVideo' ? 'videoOptions' : 'imageToVideoOptions',
   type: 'collection',
   placeholder: 'Add option',
   default: {},
-  displayOptions: operation === 'textToVideo' ? t2v : i2v,
+  displayOptions: when(operation),
   options: [
+    {
+      displayName: 'Prompt Extend',
+      name: 'promptExtend',
+      type: 'boolean',
+      default: false,
+      description: 'Whether the service may rewrite the prompt to add detail',
+    },
     {
       displayName: 'Audio',
       name: 'audio',
@@ -35,58 +46,91 @@ const optionList = (operation: 'textToVideo' | 'imageToVideo'): NodeProperty => 
       description: 'Whether the video gets generated sound',
     },
     {
-      displayName: 'Download Video',
-      name: 'downloadVideo',
-      type: 'boolean',
-      default: true,
-      description: 'Whether to download the video into a binary field instead of only returning its link',
-    },
-    {
-      displayName: 'Duration (Seconds)',
-      name: 'duration',
-      type: 'number',
-      default: 5,
-      typeOptions: { minValue: 2, maxValue: 15 },
-    },
-    { displayName: 'Prompt Extend', name: 'promptExtend', type: 'boolean', default: true },
-    {
-      displayName: 'Resolution',
-      name: 'resolution',
+      displayName: 'Audio Input Type',
+      name: 'audioInputType',
       type: 'options',
-      default: '1080P',
+      default: 'url',
       options: [
-        { name: '480P', value: '480P' },
-        { name: '720P', value: '720P' },
-        { name: '1080P', value: '1080P' },
+        { name: 'Audio URL', value: 'url' },
+        { name: 'Binary File', value: 'binary' },
       ],
     },
-    {
-      displayName: 'Shot Type',
-      name: 'shotType',
-      type: 'options',
-      default: 'single',
-      options: [
-        { name: 'Single Shot', value: 'single' },
-        { name: 'Multiple Shots', value: 'multi' },
-      ],
-    },
-    { displayName: 'Seed', name: 'seed', type: 'number', default: 1234 },
     {
       displayName: 'Audio URL',
       name: 'audioUrl',
       type: 'string',
       default: '',
+      placeholder: 'https://example.com/audio.mp3',
       description: 'Link of an audio file to use as the sound of the video',
+      displayOptions: { show: { audioInputType: ['url'] } },
     },
     {
-      displayName: 'Audio Binary Field',
-      name: 'audioField',
+      displayName: 'Audio Data Field Name',
+      name: 'audioBinaryPropertyName',
       type: 'string',
-      default: '',
-      description: 'Binary field with an audio file to use as the sound (sent inline)',
+      default: 'audio',
+      placeholder: 'e.g. audio',
+      description: 'The name of the binary field with an audio file to use as the sound (sent inline)',
+      displayOptions: { show: { audioInputType: ['binary'] } },
     },
   ],
 });
+
+/** the parameters both operations share, shown for one operation */
+const sharedProperties = (operation: Operation): NodeProperty[] => [
+  {
+    displayName: 'Prompt',
+    name: 'prompt',
+    type: 'string',
+    default: '',
+    required: true,
+    typeOptions: { rows: 4 },
+    placeholder:
+      operation === 'textToVideo' ? 'A cat playing with a ball of yarn' : 'A small cat running on the grass',
+    description: 'What the video should show',
+    displayOptions: when(operation),
+  },
+  {
+    displayName: 'Resolution',
+    name: 'resolution',
+    type: 'options',
+    default: '1080P',
+    options: [
+      { name: '720P', value: '720P' },
+      { name: '1080P', value: '1080P' },
+    ],
+    displayOptions: when(operation),
+  },
+  {
+    displayName: 'Duration (Seconds)',
+    name: 'duration',
+    type: 'number',
+    default: 5,
+    typeOptions: { minValue: 2, maxValue: 15 },
+    displayOptions: when(operation),
+  },
+  {
+    displayName: 'Shot Type',
+    name: 'shotType',
+    type: 'options',
+    default: 'single',
+    options: [
+      { name: 'Single', value: 'single' },
+      { name: 'Multi', value: 'multi' },
+    ],
+    displayOptions: when(operation),
+  },
+  {
+    displayName: 'Download Video',
+    name: 'downloadVideo',
+    type: 'boolean',
+    default: true,
+    description: 'Whether to download the video into a binary field. When off, only its link is returned.',
+    displayOptions: when(operation),
+  },
+  { ...simplifyProperty(true), displayOptions: when(operation) },
+  optionList(operation),
+];
 
 export const videoProperties: NodeProperty[] = [
   {
@@ -94,34 +138,19 @@ export const videoProperties: NodeProperty[] = [
     name: 'modelId',
     type: 'options',
     default: 'wan2.6-t2v',
-    displayOptions: t2v,
-    options: [
-      { name: 'Wan 2.6', value: 'wan2.6-t2v' },
-      { name: 'Wan 2.5 Preview', value: 'wan2.5-t2v-preview' },
-      { name: 'Wan 2.2 Plus', value: 'wan2.2-t2v-plus' },
-    ],
+    displayOptions: when('textToVideo'),
+    options: [{ name: 'Wan 2.6 Text-to-Video', value: 'wan2.6-t2v' }],
   },
   {
     displayName: 'Model',
     name: 'modelId',
     type: 'options',
-    default: 'wan2.6-i2v',
-    displayOptions: i2v,
+    default: 'wan2.6-i2v-flash',
+    displayOptions: when('imageToVideo'),
     options: [
-      { name: 'Wan 2.6', value: 'wan2.6-i2v' },
-      { name: 'Wan 2.5 Preview', value: 'wan2.5-i2v-preview' },
-      { name: 'Wan 2.2 Flash', value: 'wan2.2-i2v-flash' },
+      { name: 'Wan 2.6 Image-to-Video Flash', value: 'wan2.6-i2v-flash' },
+      { name: 'Wan 2.6 Image-to-Video', value: 'wan2.6-i2v' },
     ],
-  },
-  {
-    displayName: 'Prompt',
-    name: 'prompt',
-    type: 'string',
-    default: '',
-    required: true,
-    typeOptions: { rows: 3 },
-    description: 'What the video should show',
-    displayOptions: both,
   },
   {
     displayName: 'Input Type',
@@ -132,34 +161,43 @@ export const videoProperties: NodeProperty[] = [
       { name: 'Image URL', value: 'url' },
       { name: 'Binary File', value: 'binary' },
     ],
-    displayOptions: i2v,
+    displayOptions: when('imageToVideo'),
   },
   {
     displayName: 'Image URL',
-    name: 'imageUrl',
+    name: 'imgUrl',
     type: 'string',
     default: '',
-    displayOptions: { show: { resource: ['video'], operation: ['imageToVideo'], inputType: ['url'] } },
+    required: true,
+    placeholder: 'https://example.com/image.png',
+    displayOptions: when('imageToVideo', { inputType: ['url'] }),
   },
   {
     displayName: 'Input Data Field Name',
     name: 'binaryPropertyName',
     type: 'string',
     default: 'data',
-    displayOptions: { show: { resource: ['video'], operation: ['imageToVideo'], inputType: ['binary'] } },
+    required: true,
+    placeholder: 'e.g. data',
+    displayOptions: when('imageToVideo', { inputType: ['binary'] }),
   },
-  optionList('textToVideo'),
-  optionList('imageToVideo'),
+  ...sharedProperties('textToVideo'),
+  ...sharedProperties('imageToVideo'),
 ];
 
 const dataUrl = (bytes: Uint8Array, mimeType: string) =>
   `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`;
 
 async function generateVideo(ctx: ExecuteContext, itemIndex: number, imageToVideo: boolean): Promise<Item> {
-  const model = readModel(ctx, itemIndex, imageToVideo ? 'wan2.6-i2v' : 'wan2.6-t2v');
+  const operation: Operation = imageToVideo ? 'imageToVideo' : 'textToVideo';
+  const model = readModel(ctx, itemIndex, imageToVideo ? 'wan2.6-i2v-flash' : 'wan2.6-t2v');
   const prompt = String(ctx.getNodeParameter('prompt', itemIndex, '')).trim();
   if (!prompt) throw new NodeOperationError(ctx.getNode(), 'Enter a prompt', { itemIndex });
-  const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
+  const options = ctx.getNodeParameter(
+    operation === 'textToVideo' ? 'videoOptions' : 'imageToVideoOptions',
+    itemIndex,
+    {},
+  ) as DataObject;
 
   const input: DataObject = { prompt };
   if (imageToVideo) {
@@ -171,7 +209,7 @@ async function generateVideo(ctx: ExecuteContext, itemIndex: number, imageToVide
       });
       input.img_url = dataUrl(file.bytes, file.mimeType);
     } else {
-      const link = String(ctx.getNodeParameter('imageUrl', itemIndex, '')).trim();
+      const link = String(ctx.getNodeParameter('imgUrl', itemIndex, '')).trim();
       if (!/^https?:\/\//i.test(link)) {
         throw new NodeOperationError(ctx.getNode(), 'The image link must start with http:// or https://', {
           itemIndex,
@@ -180,46 +218,60 @@ async function generateVideo(ctx: ExecuteContext, itemIndex: number, imageToVide
       input.img_url = link;
     }
   }
-  const audioUrl = String(options.audioUrl ?? '').trim();
-  const audioField = String(options.audioField ?? '').trim();
-  if (audioUrl) {
-    if (!/^https?:\/\//i.test(audioUrl)) {
-      throw new NodeOperationError(ctx.getNode(), 'The audio link must start with http:// or https://', {
-        itemIndex,
-      });
-    }
-    input.audio_url = audioUrl;
-  } else if (audioField) {
-    const file = await readInputFile(ctx, itemIndex, { inputType: 'binary', binaryField: audioField });
+  if (options.audioInputType === 'binary') {
+    const file = await readInputFile(ctx, itemIndex, {
+      inputType: 'binary',
+      binaryField: String(options.audioBinaryPropertyName ?? '').trim() || 'audio',
+    });
     input.audio_url = dataUrl(file.bytes, file.mimeType);
+  } else {
+    const audioUrl = String(options.audioUrl ?? '').trim();
+    if (audioUrl) {
+      if (!/^https?:\/\//i.test(audioUrl)) {
+        throw new NodeOperationError(ctx.getNode(), 'The audio link must start with http:// or https://', {
+          itemIndex,
+        });
+      }
+      input.audio_url = audioUrl;
+    }
   }
 
-  const parameters: DataObject = {};
-  if (typeof options.resolution === 'string') parameters.resolution = options.resolution;
-  const duration = num(options.duration);
-  if (duration !== undefined) parameters.duration = duration;
-  if (typeof options.shotType === 'string') parameters.shot_type = options.shotType;
+  const parameters: DataObject = {
+    resolution: String(ctx.getNodeParameter('resolution', itemIndex, '1080P')),
+    duration: num(ctx.getNodeParameter('duration', itemIndex, 5)) ?? 5,
+    shot_type: String(ctx.getNodeParameter('shotType', itemIndex, 'single')),
+  };
   if (options.promptExtend !== undefined) parameters.prompt_extend = options.promptExtend === true;
   if (options.audio !== undefined) parameters.audio = options.audio === true;
-  const seed = num(options.seed);
-  if (seed !== undefined) parameters.seed = seed;
 
-  const output = await runTask(ctx, itemIndex, {
+  const { output, usage } = await runTask(ctx, itemIndex, {
     path: VIDEO_PATH,
     body: { model, input, parameters },
     intervalMs: pollTiming.videoIntervalMs,
     timeoutMs: pollTiming.videoTimeoutMs,
     what: 'video',
   });
-  const url = typeof output.video_url === 'string' ? output.video_url : '';
-  if (!url) throw new NodeOperationError(ctx.getNode(), 'Qwen Cloud returned no video', { itemIndex });
-  const taskId = typeof output.task_id === 'string' ? output.task_id : undefined;
-  const json: DataObject = { url, ...(taskId ? { taskId } : {}) };
-  if (options.downloadVideo === false) return { json, pairedItem: { item: itemIndex } };
+  const videoUrl = typeof output.video_url === 'string' ? output.video_url : '';
+  if (!videoUrl) throw new NodeOperationError(ctx.getNode(), 'Qwen Cloud returned no video', { itemIndex });
+  const json: DataObject =
+    ctx.getNodeParameter('simplify', itemIndex, true) === false
+      ? {
+          videoUrl,
+          model,
+          taskId: output.task_id,
+          usage,
+          taskStatus: output.task_status,
+          submitTime: output.submit_time,
+          endTime: output.end_time,
+        }
+      : { videoUrl };
+  if (ctx.getNodeParameter('downloadVideo', itemIndex, true) === false) {
+    return { json, pairedItem: { item: itemIndex } };
+  }
   let media: Awaited<ReturnType<typeof downloadMedia>>;
   try {
     // the link is the vendor's storage, not the credential's host: no key goes there
-    media = await downloadMedia(ctx, itemIndex, url);
+    media = await downloadMedia(ctx, itemIndex, videoUrl);
   } catch (error) {
     throw vendorError(ctx, error, itemIndex);
   }

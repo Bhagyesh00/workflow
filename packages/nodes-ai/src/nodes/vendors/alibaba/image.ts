@@ -1,7 +1,7 @@
 /**
  * Qwen Cloud images: Analyze Image (a vision model on the multimodal endpoint) and Generate an Image
- * (Qwen Image on the sync endpoint, Wan models as async tasks). Generated links are fetched with
- * `downloadMedia` and no key: they are vendor storage links, not the credential's host.
+ * (Qwen Image and Z-Image on the sync endpoint, Wan 2.6 models as async tasks). Generated links are fetched
+ * with `downloadMedia` and no key: they are vendor storage links, not the credential's host.
  */
 import {
   type DataObject,
@@ -10,9 +10,9 @@ import {
   NodeOperationError,
   type NodeProperty,
 } from '@workflow/workflow';
-import { vendorError } from '../shared/api';
-import { downloadMedia } from '../shared/api';
+import { downloadMedia, vendorError } from '../shared/api';
 import { fileToItem, readBinaryFields, type VendorFile } from '../shared/binary';
+import { simplifyProperty } from '../shared/messages';
 import {
   contentText,
   DEFAULT_VISION_MODEL,
@@ -57,16 +57,29 @@ async function imageSources(
   return list;
 }
 
+export const DEFAULT_IMAGE_MODEL = 'z-image-turbo';
+
 export const GENERATE_MODELS = [
+  { name: 'Qwen Image', value: 'qwen-image' },
   { name: 'Qwen Image Max', value: 'qwen-image-max' },
   { name: 'Qwen Image Plus', value: 'qwen-image-plus' },
-  { name: 'Qwen Image', value: 'qwen-image' },
-  { name: 'Wan 2.6 Image', value: 'wan2.6-t2i' },
-  { name: 'Wan 2.5 Image', value: 'wan2.5-t2i-preview' },
-  { name: 'Wan 2.2 Image Plus', value: 'wan2.2-t2i-plus' },
-  { name: 'Wan 2.2 Image Flash', value: 'wan2.2-t2i-flash' },
-  { name: 'Wan 2.5 Image Edit', value: 'wan2.5-i2i-preview' },
+  { name: 'Wan 2.6 Image', value: 'wan2.6-image' },
+  { name: 'Wan 2.6 T2I', value: 'wan2.6-t2i' },
+  { name: 'Z-Image Turbo', value: 'z-image-turbo' },
 ];
+
+const IMAGE_GENERATION_PATH = '/api/v1/services/aigc/image-generation/generation';
+/** Wan 2.6 Image edits reference images: one to four */
+const MAX_REFERENCES = 4;
+
+const sizeOption = (models: string[], sizes: Array<[string, string]>, fallback: string): NodeProperty => ({
+  displayName: 'Size',
+  name: 'size',
+  type: 'options',
+  default: fallback,
+  displayOptions: { show: { '/modelId': models } },
+  options: sizes.map(([name, value]) => ({ name, value })),
+});
 
 const analyze = { show: { resource: ['image'], operation: ['analyze'] } };
 const generate = { show: { resource: ['image'], operation: ['generate'] } };
@@ -82,7 +95,7 @@ export const imageProperties: NodeProperty[] = [
     displayName: 'Model',
     name: 'modelId',
     type: 'options',
-    default: 'qwen-image-plus',
+    default: DEFAULT_IMAGE_MODEL,
     displayOptions: generate,
     options: GENERATE_MODELS,
   },
@@ -90,8 +103,10 @@ export const imageProperties: NodeProperty[] = [
     displayName: 'Question',
     name: 'question',
     type: 'string',
-    default: "What's in this image?",
-    typeOptions: { rows: 2 },
+    default: '',
+    required: true,
+    placeholder: 'What is in this image?',
+    typeOptions: { rows: 4 },
     displayOptions: analyze,
   },
   {
@@ -100,7 +115,7 @@ export const imageProperties: NodeProperty[] = [
     type: 'string',
     default: '',
     required: true,
-    typeOptions: { rows: 3 },
+    typeOptions: { rows: 4 },
     description: 'What the image should show',
     displayOptions: generate,
   },
@@ -110,106 +125,155 @@ export const imageProperties: NodeProperty[] = [
     type: 'options',
     default: 'url',
     options: [
-      { name: 'Image URL(s)', value: 'url' },
-      { name: 'Binary File(s)', value: 'binary' },
+      { name: 'URL', value: 'url' },
+      { name: 'Binary Data', value: 'binary' },
     ],
     displayOptions: analyze,
   },
   {
-    displayName: 'Image URL(s)',
-    name: 'imageUrls',
+    displayName: 'Image URL',
+    name: 'imageUrl',
     type: 'string',
     default: '',
-    description: 'Comma separated links of the images',
+    required: true,
+    placeholder: 'https://example.com/image.jpg',
+    description: 'The link of the image. Several links can be separated by commas.',
     displayOptions: { show: { resource: ['image'], operation: ['analyze'], inputType: ['url'] } },
   },
   {
-    displayName: 'Input Data Field Name(s)',
+    displayName: 'Input Data Field Name',
     name: 'binaryPropertyName',
     type: 'string',
     default: 'data',
-    description: 'Comma separated names of the binary fields that hold the images',
+    required: true,
+    placeholder: 'e.g. data',
+    description:
+      'The name of the binary field that holds the image. Several names can be separated by commas.',
     displayOptions: { show: { resource: ['image'], operation: ['analyze'], inputType: ['binary'] } },
   },
-  {
-    displayName: 'Reference Image URL(s)',
-    name: 'referenceUrls',
-    type: 'string',
-    default: '',
-    description: 'Comma separated links of images to edit or use as a guide (Wan and Qwen Image models)',
-    displayOptions: generate,
-  },
-  {
-    displayName: 'Reference Binary Field(s)',
-    name: 'referenceFields',
-    type: 'string',
-    default: '',
-    description: 'Comma separated names of binary fields that hold reference images',
-    displayOptions: generate,
-  },
+  { ...simplifyProperty(true), displayOptions: analyze },
   {
     displayName: 'Options',
-    name: 'options',
+    name: 'visionOptions',
     type: 'collection',
     placeholder: 'Add option',
     default: {},
     displayOptions: analyze,
     options: [
-      { displayName: 'Max Tokens', name: 'maxTokens', type: 'number', default: 2000, typeOptions: { minValue: 1 } },
       {
         displayName: 'Temperature',
         name: 'temperature',
         type: 'number',
         default: 1,
         typeOptions: { minValue: 0, maxValue: 2, numberPrecision: 2 },
+        description: 'How random the answer is. Lower values make it more focused.',
+      },
+      {
+        displayName: 'Max Tokens',
+        name: 'maxTokens',
+        type: 'number',
+        default: 2000,
+        typeOptions: { minValue: 1 },
       },
     ],
   },
   {
+    displayName: 'Reference Images',
+    name: 'referenceImages',
+    type: 'fixedCollection',
+    placeholder: 'Add image',
+    typeOptions: { multipleValues: true },
+    default: { values: [{ inputType: 'url', imageUrl: '', binaryPropertyName: 'data' }] },
+    description: 'The images Wan 2.6 Image edits (one to four)',
+    displayOptions: { show: { resource: ['image'], operation: ['generate'], modelId: ['wan2.6-image'] } },
+    options: [
+      {
+        displayName: 'Image',
+        name: 'values',
+        values: [
+          {
+            displayName: 'Input Type',
+            name: 'inputType',
+            type: 'options',
+            default: 'url',
+            options: [
+              { name: 'URL', value: 'url' },
+              { name: 'Binary Data', value: 'binary' },
+            ],
+          },
+          {
+            displayName: 'Image URL',
+            name: 'imageUrl',
+            type: 'string',
+            default: '',
+            placeholder: 'https://example.com/image.png',
+            displayOptions: { show: { inputType: ['url'] } },
+          },
+          {
+            displayName: 'Input Data Field Name',
+            name: 'binaryPropertyName',
+            type: 'string',
+            default: 'data',
+            placeholder: 'e.g. data',
+            displayOptions: { show: { inputType: ['binary'] } },
+          },
+        ],
+      },
+    ],
+  },
+  {
+    displayName: 'Download Image',
+    name: 'downloadImage',
+    type: 'boolean',
+    default: true,
+    description: 'Whether to download the image into a binary field. When off, only its link is returned.',
+    displayOptions: generate,
+  },
+  {
     displayName: 'Options',
-    name: 'options',
+    name: 'imageOptions',
     type: 'collection',
     placeholder: 'Add option',
     default: {},
     displayOptions: generate,
     options: [
-      {
-        displayName: 'Download Image',
-        name: 'downloadImage',
-        type: 'boolean',
-        default: true,
-        description: 'Whether to download the image into a binary field instead of only returning its link',
-      },
-      {
-        displayName: 'Negative Prompt',
-        name: 'negativePrompt',
-        type: 'string',
-        default: '',
-        description: 'What the image should not show',
-      },
-      {
-        displayName: 'Number of Images',
-        name: 'n',
-        type: 'number',
-        default: 1,
-        typeOptions: { minValue: 1, maxValue: 4 },
-      },
+      sizeOption(
+        ['z-image-turbo'],
+        [
+          ['1024x1024', '1024*1024'],
+          ['720x1280', '720*1280'],
+          ['1280x720', '1280*720'],
+        ],
+        '1024*1024',
+      ),
+      sizeOption(
+        ['wan2.6-t2i', 'wan2.6-image'],
+        [
+          ['1104x1472 (3:4)', '1104*1472'],
+          ['1280x1280 (1:1)', '1280*1280'],
+          ['1472x1104 (4:3)', '1472*1104'],
+          ['1696x960 (16:9)', '1696*960'],
+          ['960x1696 (9:16)', '960*1696'],
+        ],
+        '1280*1280',
+      ),
+      sizeOption(
+        ['qwen-image', 'qwen-image-plus', 'qwen-image-max'],
+        [
+          ['1104x1472 (3:4)', '1104*1472'],
+          ['1328x1328 (1:1)', '1328*1328'],
+          ['1472x1104 (4:3)', '1472*1104'],
+          ['1664x928 (16:9)', '1664*928'],
+          ['928x1664 (9:16)', '928*1664'],
+        ],
+        '1664*928',
+      ),
       {
         displayName: 'Prompt Extend',
         name: 'promptExtend',
         type: 'boolean',
-        default: true,
+        default: false,
         description: 'Whether the service may rewrite the prompt to add detail',
-      },
-      { displayName: 'Seed', name: 'seed', type: 'number', default: 1234 },
-      {
-        displayName: 'Size',
-        name: 'size',
-        type: 'string',
-        default: '',
-        placeholder: '1328*1328',
-        description:
-          'Width*height in pixels, for example 1328*1328 for Qwen Image or 1280*1280 for Wan. Empty uses the model default.',
       },
     ],
   },
@@ -218,162 +282,153 @@ export const imageProperties: NodeProperty[] = [
 /** Image > Analyze Image */
 export async function imageAnalyze(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
   const model = readModel(ctx, itemIndex, DEFAULT_VISION_MODEL);
-  const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
+  const options = ctx.getNodeParameter('visionOptions', itemIndex, {}) as DataObject;
   const sources = await imageSources(
     ctx,
     itemIndex,
     String(ctx.getNodeParameter('inputType', itemIndex, 'url')),
-    ctx.getNodeParameter('imageUrls', itemIndex, ''),
+    ctx.getNodeParameter('imageUrl', itemIndex, ''),
     ctx.getNodeParameter('binaryPropertyName', itemIndex, 'data'),
   );
   if (!sources.length) {
     throw new NodeOperationError(ctx.getNode(), 'Add at least one image', { itemIndex });
   }
-  const question = String(ctx.getNodeParameter('question', itemIndex, "What's in this image?"));
+  const question = String(ctx.getNodeParameter('question', itemIndex, '')).trim() || "What's in this image?";
   const parameters: DataObject = {};
   const temperature = num(options.temperature);
   const maxTokens = num(options.maxTokens);
   if (temperature !== undefined) parameters.temperature = temperature;
   if (maxTokens !== undefined) parameters.max_tokens = maxTokens;
-  const response = await qwenCall<{ output?: { choices?: Array<{ message?: { content?: unknown } }> } }>(
-    ctx,
-    itemIndex,
-    MULTIMODAL_PATH,
-    {
-      method: 'POST',
-      body: {
-        model,
-        input: {
-          messages: [{ role: 'user', content: [...sources.map((image) => ({ image })), { text: question }] }],
-        },
-        parameters,
+  const response = await qwenCall<{
+    output?: { choices?: Array<{ message?: { content?: unknown } }> };
+    usage?: unknown;
+  }>(ctx, itemIndex, MULTIMODAL_PATH, {
+    method: 'POST',
+    body: {
+      model,
+      input: {
+        messages: [{ role: 'user', content: [...sources.map((image) => ({ image })), { text: question }] }],
       },
+      parameters,
     },
-  );
-  const text = contentText(response.output?.choices?.[0]?.message?.content);
-  return { json: { text }, pairedItem: { item: itemIndex } };
+  });
+  const content = contentText(response.output?.choices?.[0]?.message?.content);
+  const json: DataObject =
+    ctx.getNodeParameter('simplify', itemIndex, true) === false
+      ? { content, model, usage: response.usage, fullResponse: response as DataObject }
+      : { content };
+  return { json, pairedItem: { item: itemIndex } };
 }
 
-/** the image links in a finished task or sync answer */
-function imageLinks(output: DataObject | undefined): string[] {
-  const links: string[] = [];
-  for (const entry of (output?.results as Array<{ url?: unknown }> | undefined) ?? []) {
-    if (typeof entry?.url === 'string') links.push(entry.url);
-  }
+/** the first image link in a finished task or sync answer */
+function firstImageLink(output: DataObject | undefined): string {
   const choices = (output?.choices as Array<{ message?: { content?: unknown } }> | undefined) ?? [];
-  for (const choice of choices) {
-    const content = choice.message?.content;
-    if (!Array.isArray(content)) continue;
+  const content = choices[0]?.message?.content;
+  if (Array.isArray(content)) {
     for (const part of content) {
       const image = (part as { image?: unknown } | null)?.image;
-      if (typeof image === 'string') links.push(image);
+      if (typeof image === 'string' && image) return image;
     }
   }
-  return links;
+  for (const entry of (output?.results as Array<{ url?: unknown }> | undefined) ?? []) {
+    if (typeof entry?.url === 'string' && entry.url) return entry.url;
+  }
+  return '';
 }
 
 function extensionOf(mimeType: string | undefined): { mime: string; ext: string } {
-  const mime = mimeType && mimeType.startsWith('image/') ? mimeType : 'image/png';
+  const mime = mimeType?.startsWith('image/') ? mimeType : 'image/png';
   const ext = mime.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png';
   return { mime, ext: ext === 'jpeg' ? 'jpg' : ext };
 }
 
+/** the reference images of Wan 2.6 Image: links go to the service as they are, binary files inline */
+async function referenceSources(ctx: ExecuteContext, itemIndex: number): Promise<string[]> {
+  const collection = ctx.getNodeParameter('referenceImages', itemIndex, {}) as {
+    values?: Array<{ inputType?: string; imageUrl?: string; binaryPropertyName?: string }>;
+  };
+  const sources: string[] = [];
+  for (const entry of collection.values ?? []) {
+    if (entry.inputType === 'binary') {
+      sources.push(...(await imageSources(ctx, itemIndex, 'binary', '', entry.binaryPropertyName || 'data')));
+    } else if (String(entry.imageUrl ?? '').trim()) {
+      sources.push(...(await imageSources(ctx, itemIndex, 'url', entry.imageUrl, '')));
+    }
+  }
+  return sources;
+}
+
 /** Image > Generate an Image */
-export async function imageGenerate(ctx: ExecuteContext, itemIndex: number): Promise<Item[]> {
-  const model = readModel(ctx, itemIndex, 'qwen-image-plus');
+export async function imageGenerate(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
+  const model = readModel(ctx, itemIndex, DEFAULT_IMAGE_MODEL);
   const prompt = String(ctx.getNodeParameter('prompt', itemIndex, '')).trim();
   if (!prompt) throw new NodeOperationError(ctx.getNode(), 'Enter a prompt', { itemIndex });
-  const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
-  const references = [
-    ...(await imageSources(ctx, itemIndex, 'url', ctx.getNodeParameter('referenceUrls', itemIndex, ''), '')),
-    ...(String(ctx.getNodeParameter('referenceFields', itemIndex, '')).trim()
-      ? await imageSources(
-          ctx,
-          itemIndex,
-          'binary',
-          '',
-          ctx.getNodeParameter('referenceFields', itemIndex, ''),
-        )
-      : []),
-  ];
-  const size = String(options.size ?? '').trim();
+  const options = ctx.getNodeParameter('imageOptions', itemIndex, {}) as DataObject;
+  const wan = /^wan2\.6/.test(model);
+  const edit = model === 'wan2.6-image';
+  const references = edit ? await referenceSources(ctx, itemIndex) : [];
+  if (edit && (references.length < 1 || references.length > MAX_REFERENCES)) {
+    throw new NodeOperationError(
+      ctx.getNode(),
+      `Add 1 to ${MAX_REFERENCES} reference images, or use a Wan t2i model for text only`,
+      { itemIndex },
+    );
+  }
+  const size = String(options.size ?? '').trim() || (wan ? '1280*1280' : '');
   if (size && !/^\d{2,5}\*\d{2,5}$/.test(size)) {
     throw new NodeOperationError(ctx.getNode(), 'The size must be width*height, for example 1280*1280', {
       itemIndex,
     });
   }
-  const n = num(options.n);
-  const negative = String(options.negativePrompt ?? '').trim();
-  const seed = num(options.seed);
-  const parameters: DataObject = {};
+  const parameters: DataObject = { prompt_extend: options.promptExtend === true };
+  if (wan) parameters.n = 1;
   if (size) parameters.size = size;
-  if (n !== undefined) parameters.n = n;
-  if (options.promptExtend !== undefined) parameters.prompt_extend = options.promptExtend === true;
-  if (seed !== undefined) parameters.seed = seed;
-
-  const messageBody = {
+  const body = {
     model,
     input: {
-      messages: [{ role: 'user', content: [...references.map((image) => ({ image })), { text: prompt }] }],
-      ...(negative ? { negative_prompt: negative } : {}),
+      messages: [{ role: 'user', content: [{ text: prompt }, ...references.map((image) => ({ image }))] }],
     },
     parameters,
   };
-  const task = (path: string, body: DataObject) =>
-    runTask(ctx, itemIndex, {
-      path,
+
+  let output: DataObject;
+  let usage: unknown;
+  if (wan) {
+    ({ output, usage } = await runTask(ctx, itemIndex, {
+      path: IMAGE_GENERATION_PATH,
       body,
       intervalMs: pollTiming.imageIntervalMs,
       timeoutMs: pollTiming.imageTimeoutMs,
       what: 'image',
-    });
-
-  let output: DataObject;
-  if (/^qwen-image/.test(model)) {
-    const sync = await qwenCall<{ output?: DataObject }>(ctx, itemIndex, MULTIMODAL_PATH, {
+    }));
+  } else {
+    const sync = await qwenCall<{ output?: DataObject; usage?: unknown }>(ctx, itemIndex, MULTIMODAL_PATH, {
       method: 'POST',
-      body: messageBody,
+      body,
     });
     output = sync.output ?? {};
-  } else if (/^wan2\.6/.test(model)) {
-    output = await task('/api/v1/services/aigc/image-generation/generation', messageBody);
-  } else if (references.length) {
-    output = await task('/api/v1/services/aigc/image2image/image-synthesis', {
-      model,
-      input: { prompt, images: references, ...(negative ? { negative_prompt: negative } : {}) },
-      parameters,
-    });
-  } else {
-    output = await task('/api/v1/services/aigc/text2image/image-synthesis', {
-      model,
-      input: { prompt, ...(negative ? { negative_prompt: negative } : {}) },
-      parameters,
-    });
+    usage = sync.usage;
   }
 
-  const links = imageLinks(output);
-  if (!links.length) {
-    throw new NodeOperationError(ctx.getNode(), 'Qwen Cloud returned no image', { itemIndex });
+  const imageUrl = firstImageLink(output);
+  if (!imageUrl) throw new NodeOperationError(ctx.getNode(), 'Qwen Cloud returned no image', { itemIndex });
+  const json: DataObject = { model, imageUrl, usage };
+  if (ctx.getNodeParameter('downloadImage', itemIndex, true) === false) {
+    return { json, pairedItem: { item: itemIndex } };
   }
-  const taskId = typeof output.task_id === 'string' ? output.task_id : undefined;
-  const items: Item[] = [];
-  for (const [index, url] of links.entries()) {
-    const json: DataObject = { url, ...(taskId ? { taskId } : {}) };
-    if (options.downloadImage === false) {
-      items.push({ json, pairedItem: { item: itemIndex } });
-      continue;
-    }
-    let media: Awaited<ReturnType<typeof downloadMedia>>;
-    try {
-      // the link is the vendor's storage, not the credential's host: no key goes there
-      media = await downloadMedia(ctx, itemIndex, url);
-    } catch (error) {
-      throw vendorError(ctx, error, itemIndex);
-    }
-    const { mime, ext } = extensionOf(media.mimeType);
-    items.push(
-      await fileToItem(ctx, itemIndex, { bytes: media.bytes, mimeType: mime, fileName: `image-${index + 1}.${ext}` }, 'data', json),
-    );
+  let media: Awaited<ReturnType<typeof downloadMedia>>;
+  try {
+    // the link is the vendor's storage, not the credential's host: no key goes there
+    media = await downloadMedia(ctx, itemIndex, imageUrl);
+  } catch (error) {
+    throw vendorError(ctx, error, itemIndex);
   }
-  return items;
+  const { mime, ext } = extensionOf(media.mimeType);
+  return fileToItem(
+    ctx,
+    itemIndex,
+    { bytes: media.bytes, mimeType: mime, fileName: `image.${ext}` },
+    'data',
+    json,
+  );
 }

@@ -33,7 +33,7 @@ import { runVendorChat, VENDOR_WAIT_TOOL } from '../shared/tool-loop';
 
 export const QWEN_CREDENTIAL = 'alibabaCloudApi';
 export const DEFAULT_QWEN_REGION_URL = 'https://dashscope-intl.aliyuncs.com';
-export const DEFAULT_TEXT_MODEL = 'qwen3-max';
+export const DEFAULT_TEXT_MODEL = 'qwen3.5-flash';
 export const DEFAULT_VISION_MODEL = 'qwen3-vl-flash';
 
 /** Poll timing of the async tasks; tests shorten the intervals. */
@@ -142,13 +142,13 @@ const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 /**
  * Create an async task (`X-DashScope-Async: enable`), poll `/api/v1/tasks/<id>` until it ends, and return the
- * task's `output`. A failed, canceled or expired task is an error with the vendor's text.
+ * task's `output` and `usage`. A failed, canceled or expired task is an error with the vendor's text.
  */
 export async function runTask(
   ctx: ExecuteContext,
   itemIndex: number,
   options: { path: string; body: DataObject; intervalMs: number; timeoutMs: number; what: string },
-): Promise<DataObject> {
+): Promise<{ output: DataObject; usage: unknown }> {
   const created = await qwenCall<{ output?: { task_id?: unknown } }>(ctx, itemIndex, options.path, {
     method: 'POST',
     headers: { 'X-DashScope-Async': 'enable' },
@@ -161,7 +161,12 @@ export async function runTask(
     });
   }
   const final = await pollUntil(
-    () => qwenCall<{ output?: DataObject }>(ctx, itemIndex, `/api/v1/tasks/${encodeURIComponent(taskId)}`),
+    () =>
+      qwenCall<{ output?: DataObject; usage?: unknown }>(
+        ctx,
+        itemIndex,
+        `/api/v1/tasks/${encodeURIComponent(taskId)}`,
+      ),
     (value) => {
       const status = String(value.output?.task_status ?? '').toUpperCase();
       return status !== '' && status !== 'PENDING' && status !== 'RUNNING';
@@ -175,7 +180,7 @@ export async function runTask(
   );
   const output = final.output ?? {};
   const status = String(output.task_status ?? '').toUpperCase();
-  if (status === 'SUCCEEDED') return { ...output, task_id: taskId };
+  if (status === 'SUCCEEDED') return { output: { ...output, task_id: taskId }, usage: final.usage };
   if (status === 'CANCELED') {
     throw new NodeOperationError(ctx.getNode(), `The ${options.what} task was canceled`, { itemIndex });
   }
@@ -202,6 +207,8 @@ export interface DashScopeChatConfig {
   temperature?: number;
   maxTokens?: number;
   repetitionPenalty?: number;
+  topK?: number;
+  topP?: number;
   seed?: number;
   stop?: string[];
   enableSearch?: boolean;
@@ -272,6 +279,8 @@ export function dashScopeAdapter(config: DashScopeChatConfig): ChatAdapter {
       const maxTokens = request.maxTokens ?? config.maxTokens;
       if (maxTokens !== undefined) parameters.max_tokens = maxTokens;
       if (config.repetitionPenalty !== undefined) parameters.repetition_penalty = config.repetitionPenalty;
+      if (config.topK !== undefined) parameters.top_k = config.topK;
+      if (config.topP !== undefined) parameters.top_p = config.topP;
       if (config.seed !== undefined) parameters.seed = config.seed;
       if (config.stop?.length) parameters.stop = config.stop;
       if (config.enableSearch) parameters.enable_search = true;
@@ -333,16 +342,8 @@ export const textProperties: NodeProperty[] = [
     searchMethod: 'textModels',
     defaultModel: DEFAULT_TEXT_MODEL,
   }),
-  { ...messagesProperty({ roles: ['user', 'assistant', 'system'] }), displayOptions: shown() },
+  { ...messagesProperty({ roles: ['user', 'assistant'] }), displayOptions: shown() },
   { ...simplifyProperty(true), displayOptions: shown() },
-  {
-    displayName: 'Include Merged Response',
-    name: 'includeMergedResponse',
-    type: 'boolean',
-    default: false,
-    description: 'Whether to add the final text next to the raw response',
-    displayOptions: shown({ simplify: [false] }),
-  },
   {
     displayName: 'Options',
     name: 'options',
@@ -372,7 +373,7 @@ export const textProperties: NodeProperty[] = [
         name: 'repetitionPenalty',
         type: 'number',
         default: 1.1,
-        typeOptions: { minValue: 0, numberPrecision: 2 },
+        typeOptions: { minValue: 1, maxValue: 2, numberPrecision: 2 },
         description: 'Above 1 makes the model repeat itself less',
       },
       {
@@ -391,7 +392,7 @@ export const textProperties: NodeProperty[] = [
       },
       {
         displayName: 'System Message',
-        name: 'systemMessage',
+        name: 'system',
         type: 'string',
         default: '',
         typeOptions: { rows: 3 },
@@ -402,6 +403,22 @@ export const textProperties: NodeProperty[] = [
         type: 'number',
         default: 1,
         typeOptions: { minValue: 0, maxValue: 2, numberPrecision: 2 },
+      },
+      {
+        displayName: 'Top K',
+        name: 'topK',
+        type: 'number',
+        default: 50,
+        typeOptions: { minValue: 1, maxValue: 100, numberPrecision: 0 },
+        description: 'How many of the most likely words the model picks from',
+      },
+      {
+        displayName: 'Top P',
+        name: 'topP',
+        type: 'number',
+        default: 0.9,
+        typeOptions: { minValue: 0, maxValue: 1, numberPrecision: 2 },
+        description: 'Nucleus sampling. Lower values make the answer more focused.',
       },
     ],
   },
@@ -425,11 +442,13 @@ export async function textMessage(ctx: ExecuteContext, itemIndex: number): Promi
     temperature: num(options.temperature),
     maxTokens: num(options.maxTokens),
     repetitionPenalty: num(options.repetitionPenalty),
+    topK: num(options.topK),
+    topP: num(options.topP),
     seed: num(options.seed),
     stop,
     enableSearch: options.enableSearch === true,
   });
-  const system = String(options.systemMessage ?? '').trim();
+  const system = String(options.system ?? '').trim();
   let result: Awaited<ReturnType<typeof runVendorChat>>;
   try {
     result = await runVendorChat(ctx, itemIndex, adapter, {
@@ -442,11 +461,10 @@ export async function textMessage(ctx: ExecuteContext, itemIndex: number): Promi
     if ((error as { code?: string } | undefined)?.code === VENDOR_WAIT_TOOL) throw error;
     throw vendorError(ctx, error, itemIndex);
   }
-  const paired = { item: itemIndex };
-  if (ctx.getNodeParameter('simplify', itemIndex, true) === false) {
-    const raw = (result.raw && typeof result.raw === 'object' ? result.raw : {}) as DataObject;
-    const merged = ctx.getNodeParameter('includeMergedResponse', itemIndex, false) === true;
-    return { json: merged ? { ...raw, mergedResponse: result.text } : raw, pairedItem: paired };
-  }
-  return { json: { output: result.text }, pairedItem: paired };
+  const raw = (result.raw && typeof result.raw === 'object' ? result.raw : {}) as DataObject;
+  const json: DataObject =
+    ctx.getNodeParameter('simplify', itemIndex, true) === false
+      ? { content: result.text, model, usage: raw.usage, fullResponse: raw }
+      : { content: result.text };
+  return { json, pairedItem: { item: itemIndex } };
 }

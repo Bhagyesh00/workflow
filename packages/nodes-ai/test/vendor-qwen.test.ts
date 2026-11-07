@@ -201,9 +201,11 @@ describe('text.message', () => {
           ],
         },
         options: {
-          systemMessage: 'be brief',
+          system: 'be brief',
           temperature: 0.3,
           maxTokens: 50,
+          topK: 40,
+          topP: 0.8,
           repetitionPenalty: 1.2,
           seed: 7,
           stop: 'END, STOP',
@@ -212,7 +214,7 @@ describe('text.message', () => {
       },
       { handler: () => answer('hello'), creds: { workspaceId: ' ws-9 ' } },
     );
-    expect(out[0]).toEqual({ output: 'hello' });
+    expect(out[0]).toEqual({ content: 'hello' });
     const req = fake.requests[0]!;
     expect(req.url).toBe(`${HOST}/api/v1/services/aigc/text-generation/generation`);
     expect(req.method).toBe('POST');
@@ -230,6 +232,8 @@ describe('text.message', () => {
       result_format: 'message',
       temperature: 0.3,
       max_tokens: 50,
+      top_k: 40,
+      top_p: 0.8,
       repetition_penalty: 1.2,
       seed: 7,
       stop: ['END', 'STOP'],
@@ -243,18 +247,40 @@ describe('text.message', () => {
     expect(header(fake.requests[0]!, 'x-dashscope-workspace')).toBeUndefined();
   });
 
-  it('returns the raw reply with Simplify off, and the text next to it when asked', async () => {
-    const { out } = await qwen({
-      resource: 'text',
-      operation: 'message',
-      ...msg('hi'),
-      simplify: false,
-      includeMergedResponse: true,
+  it('gives {content, model, usage, fullResponse} with Simplify off, as n8n does', async () => {
+    const { out } = await qwen({ resource: 'text', operation: 'message', ...msg('hi'), simplify: false });
+    expect(out[0]).toMatchObject({
+      content: 'ok',
+      model: 'qwen3.5-flash',
+      usage: { input_tokens: 4, output_tokens: 2 },
+      fullResponse: { request_id: 'r1' },
     });
-    expect((out[0] as any).request_id).toBe('r1');
-    expect((out[0] as any).mergedResponse).toBe('ok');
-    const plain = await qwen({ resource: 'text', operation: 'message', ...msg('hi'), simplify: false });
-    expect((plain.out[0] as any).mergedResponse).toBeUndefined();
+    expect((out[0] as any).mergedResponse).toBeUndefined();
+    const simple = await qwen({ resource: 'text', operation: 'message', ...msg('hi') });
+    expect(simple.out[0]).toEqual({ content: 'ok' });
+  });
+
+  it('has the n8n options, defaults and ranges', () => {
+    const props = AlibabaCloudNode.description.properties as any[];
+    const options = props.find(
+      (p) => p.name === 'options' && p.displayOptions?.show?.resource?.[0] === 'text',
+    );
+    const byName = (name: string) => options.options.find((o: any) => o.name === name);
+    expect(byName('topK')).toMatchObject({ default: 50, typeOptions: { minValue: 1, maxValue: 100 } });
+    expect(byName('topP')).toMatchObject({ default: 0.9, typeOptions: { minValue: 0, maxValue: 1 } });
+    expect(byName('repetitionPenalty')).toMatchObject({
+      default: 1.1,
+      typeOptions: { minValue: 1, maxValue: 2 },
+    });
+    expect(byName('temperature')).toMatchObject({ default: 1, typeOptions: { minValue: 0, maxValue: 2 } });
+    expect(byName('system')).toBeTruthy();
+    const model = props.find((p) => p.name === 'modelId' && p.displayOptions?.show?.resource?.[0] === 'text');
+    expect(model.default.value).toBe('qwen3.5-flash');
+    const messages = props.find((p) => p.name === 'messages');
+    const roles = messages.options[0].values
+      .find((v: any) => v.name === 'role')
+      .options.map((o: any) => o.value);
+    expect(roles).toEqual(['user', 'assistant']);
   });
 
   it('runs a connected tool and sends its result back', async () => {
@@ -290,7 +316,7 @@ describe('text.message', () => {
             : answer('it is found'),
       },
     );
-    expect(out[0]).toEqual({ output: 'it is found' });
+    expect(out[0]).toEqual({ content: 'it is found' });
     expect(calls).toEqual([{ q: 'x' }]);
     const first = fake.requests[0]!.body as any;
     expect(first.parameters.tools[0]).toEqual({
@@ -374,12 +400,12 @@ describe('image.analyze', () => {
         modelId: 'qwen3-vl-flash',
         question: 'what is this',
         inputType: 'url',
-        imageUrls: 'http://img.test/a.png, http://img.test/b.png',
-        options: { maxTokens: 300, temperature: 0.2 },
+        imageUrl: 'http://img.test/a.png, http://img.test/b.png',
+        visionOptions: { maxTokens: 300, temperature: 0.2 },
       },
       { handler: () => multimodalAnswer('a cat') },
     );
-    expect(out[0]).toEqual({ text: 'a cat' });
+    expect(out[0]).toEqual({ content: 'a cat' });
     const req = fake.requests[0]!;
     expect(req.url).toBe(`${HOST}/api/v1/services/aigc/multimodal-generation/generation`);
     expect(req.body).toEqual({
@@ -409,10 +435,31 @@ describe('image.analyze', () => {
         handler: () => multimodalAnswer('a dog'),
       },
     );
-    expect(out[0]).toEqual({ text: 'a dog' });
+    expect(out[0]).toEqual({ content: 'a dog' });
     const content = (fake.requests[0]!.body as any).input.messages[0].content;
     expect(content[0]).toEqual({ image: `data:image/png;base64,${b64('AAA')}` });
     expect(content[1]).toEqual({ text: "What's in this image?" });
+  });
+
+  it('gives {content, model, usage, fullResponse} with Simplify off', async () => {
+    const { out } = await qwen(
+      {
+        resource: 'image',
+        operation: 'analyze',
+        modelId: 'qwen3-vl-plus',
+        question: 'q',
+        inputType: 'url',
+        imageUrl: 'http://img.test/a.png',
+        simplify: false,
+      },
+      { handler: () => multimodalAnswer('a cat') },
+    );
+    expect(out[0]).toMatchObject({
+      content: 'a cat',
+      model: 'qwen3-vl-plus',
+      usage: { input_tokens: 9, output_tokens: 3 },
+    });
+    expect((out[0] as any).fullResponse.output.choices).toHaveLength(1);
   });
 
   it('refuses a link that is not http', async () => {
@@ -420,7 +467,7 @@ describe('image.analyze', () => {
       resource: 'image',
       operation: 'analyze',
       inputType: 'url',
-      imageUrls: 'file:///etc/passwd',
+      imageUrl: 'file:///etc/passwd',
     });
     expect(result.status).toBe('error');
     expect(fake.requests).toHaveLength(0);
@@ -428,15 +475,22 @@ describe('image.analyze', () => {
 });
 
 describe('image.generate', () => {
-  it('creates a Wan task, polls pending then done, and downloads the image with no key', async () => {
+  const wanDone = (url: string, extra: DataObject = {}) =>
+    taskState({
+      task_status: 'SUCCEEDED',
+      choices: [{ message: { content: [{ image: url }] } }],
+      ...extra,
+    });
+
+  it('creates a Wan 2.6 task, polls pending then done, and downloads the image with no key', async () => {
     let polls = 0;
     const { fake, items } = await qwen(
       {
         resource: 'image',
         operation: 'generate',
-        modelId: 'wan2.2-t2i-flash',
+        modelId: 'wan2.6-t2i',
         prompt: 'a red fox',
-        options: { size: '1024*1024', n: 1, promptExtend: false, negativePrompt: 'blur', seed: 3 },
+        imageOptions: { size: '1104*1472', promptExtend: true },
       },
       {
         handler: (req) => {
@@ -447,22 +501,27 @@ describe('image.generate', () => {
           polls++;
           return polls === 1
             ? taskState({ task_id: 'task-1', task_status: 'RUNNING' })
-            : taskState({
-                task_id: 'task-1',
-                task_status: 'SUCCEEDED',
-                results: [{ url: `${MEDIA}/fox.png` }],
-              });
+            : {
+                body: {
+                  output: {
+                    task_id: 'task-1',
+                    task_status: 'SUCCEEDED',
+                    choices: [{ message: { content: [{ image: `${MEDIA}/fox.png` }] } }],
+                  },
+                  usage: { image_count: 1 },
+                },
+              };
         },
       },
     );
     const create = fake.requests[0]!;
-    expect(create.url).toBe(`${HOST}/api/v1/services/aigc/text2image/image-synthesis`);
+    expect(create.url).toBe(`${HOST}/api/v1/services/aigc/image-generation/generation`);
     expect(header(create, 'x-dashscope-async')).toBe('enable');
     expect(header(create, 'authorization')).toBe(`Bearer ${KEY}`);
     expect(create.body).toEqual({
-      model: 'wan2.2-t2i-flash',
-      input: { prompt: 'a red fox', negative_prompt: 'blur' },
-      parameters: { size: '1024*1024', n: 1, prompt_extend: false, seed: 3 },
+      model: 'wan2.6-t2i',
+      input: { messages: [{ role: 'user', content: [{ text: 'a red fox' }] }] },
+      parameters: { prompt_extend: true, n: 1, size: '1104*1472' },
     });
     const pollRequests = fake.requests.filter((r) => r.url === `${HOST}/api/v1/tasks/task-1`);
     expect(pollRequests).toHaveLength(2);
@@ -472,9 +531,37 @@ describe('image.generate', () => {
     expect(header(media, 'x-dashscope-workspace')).toBeUndefined();
     expect(JSON.stringify(media.headers ?? {})).not.toContain(KEY);
     expect(items).toHaveLength(1);
-    expect(items[0]!.json).toEqual({ url: `${MEDIA}/fox.png`, taskId: 'task-1' });
+    expect(items[0]!.json).toEqual({
+      model: 'wan2.6-t2i',
+      imageUrl: `${MEDIA}/fox.png`,
+      usage: { image_count: 1 },
+    });
     expect(items[0]!.binary?.data?.mimeType).toBe('image/png');
-    expect(items[0]!.binary?.data?.fileName).toBe('image-1.png');
+    expect(items[0]!.binary?.data?.fileName).toBe('image.png');
+  });
+
+  it('has the n8n models, Download Image on top and Prompt Extend off by default', () => {
+    const props = AlibabaCloudNode.description.properties as any[];
+    const shownFor = (p: any, op: string) => p.displayOptions?.show?.operation?.includes(op);
+    const model = props.find((p) => p.name === 'modelId' && p.type === 'options' && shownFor(p, 'generate'));
+    expect(model.options.map((o: any) => o.value)).toEqual([
+      'qwen-image',
+      'qwen-image-max',
+      'qwen-image-plus',
+      'wan2.6-image',
+      'wan2.6-t2i',
+      'z-image-turbo',
+    ]);
+    expect(model.default).toBe('z-image-turbo');
+    expect(props.find((p) => p.name === 'downloadImage' && shownFor(p, 'generate')).default).toBe(true);
+    const options = props.find((p) => p.name === 'imageOptions');
+    expect(options.options.find((o: any) => o.name === 'promptExtend').default).toBe(false);
+    const sizes = options.options.filter((o: any) => o.name === 'size');
+    expect(sizes.map((o: any) => o.options.map((x: any) => x.value))).toEqual([
+      ['1024*1024', '720*1280', '1280*720'],
+      ['1104*1472', '1280*1280', '1472*1104', '1696*960', '960*1696'],
+      ['1104*1472', '1328*1328', '1472*1104', '1664*928', '928*1664'],
+    ]);
   });
 
   it('returns only the link with Download Image off', async () => {
@@ -482,46 +569,72 @@ describe('image.generate', () => {
       {
         resource: 'image',
         operation: 'generate',
-        modelId: 'wan2.2-t2i-plus',
+        modelId: 'wan2.6-t2i',
         prompt: 'p',
-        options: { downloadImage: false },
+        downloadImage: false,
       },
       {
-        handler: (req) =>
-          req.method === 'POST'
-            ? taskCreated()
-            : taskState({ task_status: 'SUCCEEDED', results: [{ url: `${MEDIA}/a.png` }] }),
+        handler: (req) => (req.method === 'POST' ? taskCreated() : wanDone(`${MEDIA}/a.png`)),
       },
     );
-    expect(out[0]).toEqual({ url: `${MEDIA}/a.png`, taskId: 'task-1' });
+    expect(out[0]).toEqual({ model: 'wan2.6-t2i', imageUrl: `${MEDIA}/a.png` });
     expect(fake.requests.some((r) => r.url.startsWith(MEDIA))).toBe(false);
   });
 
-  it('sends reference images to the image2image endpoint', async () => {
+  it('sends the reference images of Wan 2.6 Image inside the message', async () => {
     const { fake } = await qwen(
       {
         resource: 'image',
         operation: 'generate',
-        modelId: 'wan2.5-i2i-preview',
+        modelId: 'wan2.6-image',
         prompt: 'make it night',
-        referenceUrls: 'http://img.test/day.png',
-        referenceFields: 'data',
-        options: { downloadImage: false },
+        referenceImages: {
+          values: [
+            { inputType: 'url', imageUrl: 'http://img.test/day.png' },
+            { inputType: 'binary', binaryPropertyName: 'data' },
+          ],
+        },
+        downloadImage: false,
       },
       {
         items: [{ json: {}, binary: { data: bin('BBB', 'image/jpeg') } }],
-        handler: (req) =>
-          req.method === 'POST'
-            ? taskCreated()
-            : taskState({ task_status: 'SUCCEEDED', results: [{ url: `${MEDIA}/n.png` }] }),
+        handler: (req) => (req.method === 'POST' ? taskCreated() : wanDone(`${MEDIA}/n.png`)),
       },
     );
     const create = fake.requests[0]!;
-    expect(create.url).toBe(`${HOST}/api/v1/services/aigc/image2image/image-synthesis`);
-    expect((create.body as any).input.images).toEqual([
-      'http://img.test/day.png',
-      `data:image/jpeg;base64,${b64('BBB')}`,
+    expect(create.url).toBe(`${HOST}/api/v1/services/aigc/image-generation/generation`);
+    expect((create.body as any).input.messages[0].content).toEqual([
+      { text: 'make it night' },
+      { image: 'http://img.test/day.png' },
+      { image: `data:image/jpeg;base64,${b64('BBB')}` },
     ]);
+  });
+
+  it('needs one to four reference images for Wan 2.6 Image', async () => {
+    const none = await qwen({
+      resource: 'image',
+      operation: 'generate',
+      modelId: 'wan2.6-image',
+      prompt: 'p',
+      referenceImages: { values: [{ inputType: 'url', imageUrl: '' }] },
+    });
+    expect(none.result.status).toBe('error');
+    expect(JSON.stringify(none.result.error)).toContain('Add 1 to 4 reference images');
+    expect(none.fake.requests).toHaveLength(0);
+    const five = await qwen({
+      resource: 'image',
+      operation: 'generate',
+      modelId: 'wan2.6-image',
+      prompt: 'p',
+      referenceImages: {
+        values: Array.from({ length: 5 }, (_, i) => ({
+          inputType: 'url',
+          imageUrl: `http://img.test/${i}.png`,
+        })),
+      },
+    });
+    expect(five.result.status).toBe('error');
+    expect(five.fake.requests).toHaveLength(0);
   });
 
   it('runs Qwen Image on the sync endpoint with no task', async () => {
@@ -531,7 +644,7 @@ describe('image.generate', () => {
         operation: 'generate',
         modelId: 'qwen-image-plus',
         prompt: 'a lake',
-        options: { size: '1328*1328' },
+        imageOptions: { size: '1328*1328' },
       },
       {
         handler: (req) =>
@@ -542,6 +655,7 @@ describe('image.generate', () => {
                   output: {
                     choices: [{ message: { role: 'assistant', content: [{ image: `${MEDIA}/lake.jpg` }] } }],
                   },
+                  usage: { width: 1328, height: 1328, image_count: 1 },
                 },
               },
       },
@@ -550,31 +664,34 @@ describe('image.generate', () => {
     expect(create.url).toBe(`${HOST}/api/v1/services/aigc/multimodal-generation/generation`);
     expect(header(create, 'x-dashscope-async')).toBeUndefined();
     expect((create.body as any).input.messages[0].content).toEqual([{ text: 'a lake' }]);
-    expect((create.body as any).parameters).toEqual({ size: '1328*1328' });
-    expect(items[0]!.binary?.data?.fileName).toBe('image-1.jpg');
+    expect((create.body as any).parameters).toEqual({ prompt_extend: false, size: '1328*1328' });
+    expect(items[0]!.json).toEqual({
+      model: 'qwen-image-plus',
+      imageUrl: `${MEDIA}/lake.jpg`,
+      usage: { width: 1328, height: 1328, image_count: 1 },
+    });
+    expect(items[0]!.binary?.data?.fileName).toBe('image.jpg');
     expect(header(fake.requests[1]!, 'authorization')).toBeUndefined();
   });
 
-  it('runs Wan 2.6 as a task on the image-generation endpoint', async () => {
+  it('runs Z-Image Turbo on the sync endpoint by default', async () => {
     const { fake, out } = await qwen(
-      { resource: 'image', operation: 'generate', modelId: 'wan2.6-t2i', prompt: 'p', options: { downloadImage: false } },
+      { resource: 'image', operation: 'generate', prompt: 'a cat', downloadImage: false },
       {
-        handler: (req) =>
-          req.method === 'POST'
-            ? taskCreated('t26')
-            : taskState({
-                task_status: 'SUCCEEDED',
-                choices: [{ message: { content: [{ image: `${MEDIA}/w.png` }] } }],
-              }),
+        handler: () => ({
+          body: { output: { choices: [{ message: { content: [{ image: `${MEDIA}/c.png` }] } }] } },
+        }),
       },
     );
-    expect(fake.requests[0]!.url).toBe(`${HOST}/api/v1/services/aigc/image-generation/generation`);
-    expect(out[0]).toEqual({ url: `${MEDIA}/w.png`, taskId: 't26' });
+    expect(fake.requests[0]!.url).toBe(`${HOST}/api/v1/services/aigc/multimodal-generation/generation`);
+    expect((fake.requests[0]!.body as any).model).toBe('z-image-turbo');
+    expect((fake.requests[0]!.body as any).parameters).toEqual({ prompt_extend: false });
+    expect(out[0]).toEqual({ model: 'z-image-turbo', imageUrl: `${MEDIA}/c.png` });
   });
 
   it('turns a failed task into the vendor text, without the key', async () => {
     const { result } = await qwen(
-      { resource: 'image', operation: 'generate', modelId: 'wan2.2-t2i-flash', prompt: 'p' },
+      { resource: 'image', operation: 'generate', modelId: 'wan2.6-t2i', prompt: 'p' },
       {
         handler: (req) =>
           req.method === 'POST'
@@ -595,7 +712,7 @@ describe('image.generate', () => {
   it('stops with a timeout text when the task never ends', async () => {
     pollTiming.imageTimeoutMs = 40;
     const { result } = await qwen(
-      { resource: 'image', operation: 'generate', modelId: 'wan2.2-t2i-flash', prompt: 'p' },
+      { resource: 'image', operation: 'generate', modelId: 'wan2.6-t2i', prompt: 'p' },
       {
         handler: (req) =>
           req.method === 'POST' ? taskCreated() : taskState({ task_status: 'RUNNING' }),
@@ -609,16 +726,16 @@ describe('image.generate', () => {
     const badSize = await qwen({
       resource: 'image',
       operation: 'generate',
-      modelId: 'wan2.2-t2i-flash',
+      modelId: 'wan2.6-t2i',
       prompt: 'p',
-      options: { size: '10x10' },
+      imageOptions: { size: '10x10' },
     });
     expect(badSize.result.status).toBe('error');
     expect(badSize.fake.requests).toHaveLength(0);
     const empty = await qwen({ resource: 'image', operation: 'generate', prompt: '  ' });
     expect(empty.result.status).toBe('error');
     const badTask = await qwen(
-      { resource: 'image', operation: 'generate', modelId: 'wan2.2-t2i-flash', prompt: 'p' },
+      { resource: 'image', operation: 'generate', modelId: 'wan2.6-t2i', prompt: 'p' },
       { handler: () => taskCreated('../../admin') },
     );
     expect(badTask.result.status).toBe('error');
@@ -638,7 +755,10 @@ describe('video', () => {
         operation: 'textToVideo',
         modelId: 'wan2.6-t2v',
         prompt: 'waves',
-        options: { resolution: '720P', duration: 6, shotType: 'multi', promptExtend: true, audio: false, seed: 5 },
+        resolution: '720P',
+        duration: 6,
+        shotType: 'multi',
+        videoOptions: { promptExtend: true, audio: false },
       },
       {
         handler: (req) => {
@@ -663,14 +783,13 @@ describe('video', () => {
         shot_type: 'multi',
         prompt_extend: true,
         audio: false,
-        seed: 5,
       },
     });
     expect(fake.requests.filter((r) => r.url === `${HOST}/api/v1/tasks/v1`)).toHaveLength(2);
     const media = fake.requests.find((r) => r.url.startsWith(MEDIA))!;
     expect(header(media, 'authorization')).toBeUndefined();
     expect(JSON.stringify(media.headers ?? {})).not.toContain(KEY);
-    expect(items[0]!.json).toEqual({ url: `${MEDIA}/clip.mp4`, taskId: 'v1' });
+    expect(items[0]!.json).toEqual({ videoUrl: `${MEDIA}/clip.mp4` });
     expect(items[0]!.binary?.data?.mimeType).toBe('video/mp4');
   });
 
@@ -684,8 +803,9 @@ describe('video', () => {
         modelId: 'wan2.6-i2v',
         prompt: 'zoom in',
         inputType: 'url',
-        imageUrl: 'http://img.test/start.png',
-        options: { downloadVideo: false, audioUrl: 'http://img.test/song.mp3' },
+        imgUrl: 'http://img.test/start.png',
+        downloadVideo: false,
+        imageToVideoOptions: { audioInputType: 'url', audioUrl: 'http://img.test/song.mp3' },
       },
       { handler },
     );
@@ -694,7 +814,7 @@ describe('video', () => {
       img_url: 'http://img.test/start.png',
       audio_url: 'http://img.test/song.mp3',
     });
-    expect(link.out[0]).toEqual({ url: `${MEDIA}/clip.mp4`, taskId: 'v2' });
+    expect(link.out[0]).toEqual({ videoUrl: `${MEDIA}/clip.mp4` });
     expect(link.fake.requests.some((r) => r.url.startsWith(MEDIA))).toBe(false);
 
     const inline = await qwen(
@@ -704,7 +824,8 @@ describe('video', () => {
         prompt: 'pan',
         inputType: 'binary',
         binaryPropertyName: 'data',
-        options: { downloadVideo: false, audioField: 'sound' },
+        downloadVideo: false,
+        imageToVideoOptions: { audioInputType: 'binary', audioBinaryPropertyName: 'sound' },
       },
       {
         handler,
@@ -714,7 +835,65 @@ describe('video', () => {
     const input = (inline.fake.requests[0]!.body as any).input;
     expect(input.img_url).toBe(`data:image/png;base64,${b64('IMG')}`);
     expect(input.audio_url).toBe(`data:audio/mpeg;base64,${b64('SND')}`);
-    expect((inline.fake.requests[0]!.body as any).model).toBe('wan2.6-i2v');
+    expect((inline.fake.requests[0]!.body as any).model).toBe('wan2.6-i2v-flash');
+  });
+
+  it('gives the full output with Simplify off and has the n8n defaults', async () => {
+    const { out, fake } = await qwen(
+      {
+        resource: 'video',
+        operation: 'textToVideo',
+        prompt: 'p',
+        downloadVideo: false,
+        simplify: false,
+      },
+      {
+        handler: (req) =>
+          req.method === 'POST'
+            ? taskCreated('v5')
+            : {
+                body: {
+                  output: {
+                    task_status: 'SUCCEEDED',
+                    video_url: `${MEDIA}/clip.mp4`,
+                    submit_time: '2026-11-07 10:00:00.000',
+                    end_time: '2026-11-07 10:03:00.000',
+                  },
+                  usage: { duration: 5, video_count: 1 },
+                },
+              },
+      },
+    );
+    expect(out[0]).toEqual({
+      videoUrl: `${MEDIA}/clip.mp4`,
+      model: 'wan2.6-t2v',
+      taskId: 'v5',
+      usage: { duration: 5, video_count: 1 },
+      taskStatus: 'SUCCEEDED',
+      submitTime: '2026-11-07 10:00:00.000',
+      endTime: '2026-11-07 10:03:00.000',
+    });
+    // resolution, duration and shot type come from the top-level parameters, with the n8n defaults
+    expect((fake.requests[0]!.body as any).parameters).toEqual({
+      resolution: '1080P',
+      duration: 5,
+      shot_type: 'single',
+    });
+    const props = AlibabaCloudNode.description.properties as any[];
+    const models = (op: string) =>
+      props.find((p) => p.name === 'modelId' && p.displayOptions?.show?.operation?.includes(op));
+    expect(models('textToVideo').options.map((o: any) => o.value)).toEqual(['wan2.6-t2v']);
+    expect(models('imageToVideo').options.map((o: any) => o.value)).toEqual([
+      'wan2.6-i2v-flash',
+      'wan2.6-i2v',
+    ]);
+    expect(models('imageToVideo').default).toBe('wan2.6-i2v-flash');
+    const resolution = props.find(
+      (p) => p.name === 'resolution' && p.displayOptions?.show?.operation?.includes('textToVideo'),
+    );
+    expect(resolution.options.map((o: any) => o.value)).toEqual(['720P', '1080P']);
+    const videoOptions = props.find((p) => p.name === 'videoOptions');
+    expect(videoOptions.options.find((o: any) => o.name === 'promptExtend').default).toBe(false);
   });
 
   it('turns a failed video task into its text', async () => {
