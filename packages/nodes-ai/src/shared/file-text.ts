@@ -409,11 +409,16 @@ function epubSources(files: ArchiveFile[]): TextSource[] {
     }
   }
   const sources: TextSource[] = [];
+  // A spine can point at one chapter again and again: read each file once. The text of distinct files
+  // is never longer than their decompressed bytes, which unzipBounded already limits.
+  const seen = new Set<string>();
   for (const ref of findAll(tree, 'itemref')) {
     const entry = manifest.get(attribute(ref, 'idref') ?? '');
     if (!entry || !/^(application\/xhtml\+xml|text\/html)$/i.test(entry.type)) continue;
     const name = resolveInArchive(opfName, entry.href);
-    const file = name ? findFile(files, name) : undefined;
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const file = findFile(files, name);
     if (!file) continue;
     const text = htmlText(parseXml(decoder.decode(file.data)));
     if (text !== '') sources.push({ text, metadata: { chapter: sources.length + 1 } });

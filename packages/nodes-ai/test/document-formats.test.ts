@@ -194,6 +194,36 @@ describe('fileToSources', () => {
     expect(sources.map((s) => s.metadata)).toEqual([{ chapter: 1 }, { chapter: 2 }]);
   });
 
+  it('reads a chapter once when the spine repeats it', async () => {
+    const epub = await makeEpub(
+      [
+        { file: 'one.xhtml', html: '<html><body><p>Only once</p></body></html>' },
+        { file: 'two.xhtml', html: '<html><body><p>Two</p></body></html>' },
+      ],
+      [0, 0, 1, 0, 1],
+    );
+    const sources = await fileToSources(
+      fakeCtx(),
+      0,
+      { bytes: epub, mimeType: 'application/epub+zip' },
+      { loader: 'auto' },
+    );
+    expect(sources.map((s) => s.text)).toEqual(['Only once', 'Two']);
+  });
+
+  it('does not multiply the text of a huge spine that repeats one chapter', async () => {
+    const chapter = `<html><body><p>${'word '.repeat(20_000)}</p></body></html>`;
+    const epub = await makeEpub([{ file: 'one.xhtml', html: chapter }], Array(5000).fill(0));
+    const sources = await fileToSources(
+      fakeCtx({ maxDecompressedBytes: 300_000 }),
+      0,
+      { bytes: epub, mimeType: 'application/epub+zip' },
+      { loader: 'auto' },
+    );
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.text.length).toBeLessThan(300_000);
+  });
+
   it('does not resolve an EPUB href outside the archive', async () => {
     const epub = await zipFiles([
       {
