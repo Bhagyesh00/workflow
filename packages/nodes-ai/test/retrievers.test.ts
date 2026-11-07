@@ -66,7 +66,11 @@ async function fill() {
       }),
       node('Embeddings', 'test.fakeEmbeddings'),
     ],
-    connect(['Trigger', 'Store'], ['Loader', 'Store', 'ai_document'], ['Embeddings', 'Store', 'ai_embedding']),
+    connect(
+      ['Trigger', 'Store'],
+      ['Loader', 'Store', 'ai_document'],
+      ['Embeddings', 'Store', 'ai_embedding'],
+    ),
     { triggerItems: DOCS.map((text) => ({ json: { text } })) },
   );
   expect(r.status, JSON.stringify(r.error)).toBe('success');
@@ -183,10 +187,13 @@ describe('Contextual Compression Retriever', () => {
     expect(docsOf(r)).toEqual([]);
     const messages = requests[0].messages;
     const user = String(messages.at(-1)!.content);
-    expect(messages.filter((m) => m.role === 'system').some((m) => String(m.content).includes('HACKED'))).toBe(
-      false,
+    expect(
+      messages.filter((m) => m.role === 'system').some((m) => String(m.content).includes('HACKED')),
+    ).toBe(false);
+    const inside = user.slice(
+      user.indexOf('<document>') + '<document>'.length,
+      user.lastIndexOf('</document>'),
     );
-    const inside = user.slice(user.indexOf('<document>') + '<document>'.length, user.lastIndexOf('</document>'));
     expect(inside).toContain('HACKED');
     expect(inside).not.toContain('</document>');
   });
@@ -295,10 +302,9 @@ describe('Workflow Retriever', () => {
 
   it('runs a workflow defined as JSON', async () => {
     const wf = { name: 'x', nodes: [], connections: {} };
-    const { r, calls } = await workflowRetriever(
-      { source: 'parameter', workflowJson: JSON.stringify(wf) },
-      [{ json: { t: 'a' } }],
-    );
+    const { r, calls } = await workflowRetriever({ source: 'parameter', workflowJson: JSON.stringify(wf) }, [
+      { json: { t: 'a' } },
+    ]);
     expect(r.status, JSON.stringify(r.error)).toBe('success');
     expect(calls[0].source).toEqual({ source: 'parameter', workflow: wf });
     expect(docsOf(r)[0].metadata.workflowSource).toBe('parameter');

@@ -146,7 +146,7 @@ describe('node shell', () => {
   it('is usable as a tool and has the five resources', () => {
     expect(AnthropicNode.description.usableAsTool).toBe(true);
     const resource = AnthropicNode.description.properties.find((p) => p.name === 'resource');
-    expect((resource?.options as Array<{ value: string }>).map((o) => o.value)).toEqual([
+    expect(((resource?.options ?? []) as Array<{ value: string }>).map((o) => o.value)).toEqual([
       'text',
       'image',
       'document',

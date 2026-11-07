@@ -101,9 +101,13 @@ export const MinimaxNode: NodeType = {
       const operation = String(ctx.getNodeParameter('operation', itemIndex));
       const handler = HANDLERS[`${resource}.${operation}`];
       if (!handler) {
-        throw new NodeOperationError(ctx.getNode(), `The operation "${resource} > ${operation}" is not supported`, {
-          itemIndex,
-        });
+        throw new NodeOperationError(
+          ctx.getNode(),
+          `The operation "${resource} > ${operation}" is not supported`,
+          {
+            itemIndex,
+          },
+        );
       }
       return handler(ctx, itemIndex);
     });

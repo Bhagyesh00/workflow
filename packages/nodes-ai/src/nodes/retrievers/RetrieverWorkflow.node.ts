@@ -28,7 +28,8 @@ function coerce(name: string, type: string, value: unknown): unknown {
       const parsed = parseJsonParameter(value, `Workflow value "${name}"`);
       const isArray = Array.isArray(parsed);
       const ok = type === 'array' ? isArray : !!parsed && typeof parsed === 'object' && !isArray;
-      if (!ok) throw new Error(`Workflow value "${name}" is not ${type === 'array' ? 'an array' : 'an object'}`);
+      if (!ok)
+        throw new Error(`Workflow value "${name}" is not ${type === 'array' ? 'an array' : 'an object'}`);
       return parsed;
     }
     default:
@@ -135,7 +136,10 @@ export const RetrieverWorkflowNode: NodeType = {
     ],
   },
   async supplyData(ctx, itemIndex) {
-    const source = String(ctx.getNodeParameter('source', itemIndex, 'database')) === 'parameter' ? 'parameter' : 'database';
+    const source =
+      String(ctx.getNodeParameter('source', itemIndex, 'database')) === 'parameter'
+        ? 'parameter'
+        : 'database';
     let workflow: DataObject | undefined;
     let fixed: DataObject = {};
     try {

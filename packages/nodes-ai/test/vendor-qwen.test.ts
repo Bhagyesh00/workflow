@@ -125,7 +125,9 @@ const msg = (content: string, extra: DataObject = {}) => ({
 });
 
 const header = (request: { headers?: Record<string, unknown> }, name: string): unknown => {
-  const found = Object.entries(request.headers ?? {}).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  const found = Object.entries(request.headers ?? {}).find(
+    ([key]) => key.toLowerCase() === name.toLowerCase(),
+  );
   return found?.[1];
 };
 
@@ -333,7 +335,11 @@ describe('text.message', () => {
       type: 'function',
       function: { name: 'lookup', arguments: '{"q":"x"}' },
     });
-    expect(second[second.length - 1]).toMatchObject({ role: 'tool', tool_call_id: 'call_1', content: 'found x' });
+    expect(second[second.length - 1]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call_1',
+      content: 'found x',
+    });
   });
 
   it('refuses a tool that waits before any request', async () => {
@@ -705,7 +711,9 @@ describe('image.generate', () => {
     );
     expect(result.status).toBe('error');
     const text = JSON.stringify(result.error);
-    expect(text).toContain('The image task failed: DataInspectionFailed: Input data may contain inappropriate content');
+    expect(text).toContain(
+      'The image task failed: DataInspectionFailed: Input data may contain inappropriate content',
+    );
     expect(text).not.toContain(KEY);
   });
 
@@ -714,8 +722,7 @@ describe('image.generate', () => {
     const { result } = await qwen(
       { resource: 'image', operation: 'generate', modelId: 'wan2.6-t2i', prompt: 'p' },
       {
-        handler: (req) =>
-          req.method === 'POST' ? taskCreated() : taskState({ task_status: 'RUNNING' }),
+        handler: (req) => (req.method === 'POST' ? taskCreated() : taskState({ task_status: 'RUNNING' })),
       },
     );
     expect(result.status).toBe('error');
@@ -794,8 +801,7 @@ describe('video', () => {
   });
 
   it('imageToVideo sends the image link, or the binary field inline, and the audio', async () => {
-    const handler: FakeHandler = (req) =>
-      req.method === 'POST' ? taskCreated('v2') : finished();
+    const handler: FakeHandler = (req) => (req.method === 'POST' ? taskCreated('v2') : finished());
     const link = await qwen(
       {
         resource: 'video',

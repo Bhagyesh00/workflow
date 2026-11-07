@@ -10,8 +10,8 @@ import {
   type DataObject,
   type ExecuteContext,
   type HttpRequestOptions,
-  isResourceLocatorValue,
   type Item,
+  isResourceLocatorValue,
   type ListSearchResult,
   type LoadOptionsContext,
   NodeOperationError,
@@ -133,7 +133,10 @@ export const qwenListSearch: Record<
   (ctx: LoadOptionsContext, filter?: string) => Promise<ListSearchResult>
 > = {
   textModels: modelListSearch(listApiModels, (id) => !NOT_CHAT.test(id)),
-  visionModels: modelListSearch(listApiModels, (id) => /(-vl|vision|omni)/i.test(id) && !/realtime/i.test(id)),
+  visionModels: modelListSearch(
+    listApiModels,
+    (id) => /(-vl|vision|omni)/i.test(id) && !/realtime/i.test(id),
+  ),
 };
 
 // ---- async tasks ----
@@ -333,7 +336,9 @@ export function dashScopeAdapter(config: DashScopeChatConfig): ChatAdapter {
 
 // ---- Text > Message a Model ----
 
-const shown = (extra: DataObject = {}) => ({ show: { resource: ['text'], operation: ['message'], ...extra } });
+const shown = (extra: DataObject = {}) => ({
+  show: { resource: ['text'], operation: ['message'], ...extra },
+});
 
 export const textProperties: NodeProperty[] = [
   modelProperty({

@@ -1,5 +1,11 @@
 /** OpenAI video generation: start the job, poll it, then read the file from the credential's host. */
-import { type DataObject, type ExecuteContext, type Item, NodeOperationError, type NodeProperty } from '@workflow/workflow';
+import {
+  type DataObject,
+  type ExecuteContext,
+  type Item,
+  NodeOperationError,
+  type NodeProperty,
+} from '@workflow/workflow';
 import { downloadMedia } from '../shared/api';
 import { fileToItem, readBinaryFields } from '../shared/binary';
 import { pollUntil } from '../shared/poll';
@@ -18,7 +24,14 @@ const generateProperties: NodeProperty[] = [
     default: 'sora-2',
     options: choices('sora-2', 'sora-2-pro'),
   },
-  { displayName: 'Prompt', name: 'prompt', type: 'string', default: '', required: true, typeOptions: { rows: 3 } },
+  {
+    displayName: 'Prompt',
+    name: 'prompt',
+    type: 'string',
+    default: '',
+    required: true,
+    typeOptions: { rows: 3 },
+  },
   {
     displayName: 'Seconds',
     name: 'seconds',
@@ -83,7 +96,11 @@ async function generate(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
   const referenceField = typeof options.referenceImage === 'string' ? options.referenceImage.trim() : '';
   if (referenceField) {
     const [image] = await readBinaryFields(ctx, itemIndex, referenceField);
-    body.input_reference = { data: image!.bytes, fileName: image!.fileName ?? 'reference.png', mimeType: image!.mimeType };
+    body.input_reference = {
+      data: image!.bytes,
+      fileName: image!.fileName ?? 'reference.png',
+      mimeType: image!.mimeType,
+    };
   }
   const started = await openAiCall<DataObject>(ctx, itemIndex, {
     url: `${baseUrl}/videos`,
@@ -96,7 +113,11 @@ async function generate(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
 
   const waitSeconds = options.waitTimeout !== undefined ? Number(options.waitTimeout) : 300;
   const finished = await pollUntil(
-    () => openAiCall<DataObject>(ctx, itemIndex, { url: `${baseUrl}/videos/${encodeURIComponent(id)}`, method: 'GET' }),
+    () =>
+      openAiCall<DataObject>(ctx, itemIndex, {
+        url: `${baseUrl}/videos/${encodeURIComponent(id)}`,
+        method: 'GET',
+      }),
     (video) => ['completed', 'failed', 'cancelled'].includes(String(video.status)),
     {
       intervalMs: videoPoll.intervalMs,
@@ -125,7 +146,8 @@ async function generate(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
     credentialType: OPENAI_CREDENTIAL,
     authHost: new URL(baseUrl).hostname,
   });
-  const field = typeof options.outputField === 'string' && options.outputField.trim() ? options.outputField : 'data';
+  const field =
+    typeof options.outputField === 'string' && options.outputField.trim() ? options.outputField : 'data';
   return fileToItem(
     ctx,
     itemIndex,

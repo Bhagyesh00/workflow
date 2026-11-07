@@ -276,11 +276,19 @@ async function generateVideo(ctx: ExecuteContext, itemIndex: number, imageToVide
     throw vendorError(ctx, error, itemIndex);
   }
   const mime = media.mimeType?.startsWith('video/') ? media.mimeType : 'video/mp4';
-  return fileToItem(ctx, itemIndex, { bytes: media.bytes, mimeType: mime, fileName: 'video.mp4' }, 'data', json);
+  return fileToItem(
+    ctx,
+    itemIndex,
+    { bytes: media.bytes, mimeType: mime, fileName: 'video.mp4' },
+    'data',
+    json,
+  );
 }
 
 /** Video > Text to Video */
-export const videoTextToVideo = (ctx: ExecuteContext, itemIndex: number) => generateVideo(ctx, itemIndex, false);
+export const videoTextToVideo = (ctx: ExecuteContext, itemIndex: number) =>
+  generateVideo(ctx, itemIndex, false);
 
 /** Video > Image to Video */
-export const videoImageToVideo = (ctx: ExecuteContext, itemIndex: number) => generateVideo(ctx, itemIndex, true);
+export const videoImageToVideo = (ctx: ExecuteContext, itemIndex: number) =>
+  generateVideo(ctx, itemIndex, true);

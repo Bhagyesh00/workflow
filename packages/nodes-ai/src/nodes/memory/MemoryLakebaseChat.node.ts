@@ -4,13 +4,7 @@
  * workspaces that share one table never see each other's history; the table needs no extra column.
  * The node cannot create the table: when it is missing, the error shows the SQL to run.
  */
-import {
-  type AiChatMessage,
-  NodeApiError,
-  NodeOperationError,
-  type NodeType,
-  type SupplyDataContext,
-} from '@workflow/workflow';
+
 import {
   LAKEBASE_MAX_PAGES,
   LAKEBASE_PAGE_SIZE,
@@ -21,6 +15,13 @@ import {
   lakebaseSelectAll,
   lakebaseTableUrl,
 } from '@workflow/nodes-base/utils/databricks-lakebase';
+import {
+  type AiChatMessage,
+  NodeApiError,
+  NodeOperationError,
+  type NodeType,
+  type SupplyDataContext,
+} from '@workflow/workflow';
 import type { SessionMemory } from '../../shared/ai-inputs';
 import {
   fromStoredMessage,
@@ -231,7 +232,8 @@ export const MemoryLakebaseChatNode: NodeType = {
               `The session holds more than ${LAKEBASE_PAGE_SIZE * LAKEBASE_MAX_PAGES} rows`,
               {
                 itemIndex,
-                description: 'Clear the session, or use a shorter-lived session ID, so the history stays readable.',
+                description:
+                  'Clear the session, or use a shorter-lived session ID, so the history stays readable.',
               },
             );
           }

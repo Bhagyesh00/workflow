@@ -317,10 +317,15 @@ async function generateVideo(ctx: ExecuteContext, itemIndex: number, imageToVide
   if (!IDENTIFIER.test(fileId)) {
     throw new NodeOperationError(ctx.getNode(), 'MiniMax returned no video', { itemIndex });
   }
-  const retrieved = await minimaxCall<{ file?: { download_url?: unknown } }>(ctx, itemIndex, '/files/retrieve', {
-    method: 'GET',
-    qs: { file_id: fileId },
-  });
+  const retrieved = await minimaxCall<{ file?: { download_url?: unknown } }>(
+    ctx,
+    itemIndex,
+    '/files/retrieve',
+    {
+      method: 'GET',
+      qs: { file_id: fileId },
+    },
+  );
   const url = typeof retrieved.file?.download_url === 'string' ? retrieved.file.download_url : '';
   if (!url) throw new NodeOperationError(ctx.getNode(), 'MiniMax returned no video link', { itemIndex });
 
@@ -336,11 +341,19 @@ async function generateVideo(ctx: ExecuteContext, itemIndex: number, imageToVide
     throw vendorError(ctx, error, itemIndex);
   }
   const mime = media.mimeType?.startsWith('video/') ? media.mimeType : 'video/mp4';
-  return fileToItem(ctx, itemIndex, { bytes: media.bytes, mimeType: mime, fileName: 'video.mp4' }, 'data', json);
+  return fileToItem(
+    ctx,
+    itemIndex,
+    { bytes: media.bytes, mimeType: mime, fileName: 'video.mp4' },
+    'data',
+    json,
+  );
 }
 
 /** Video > Text to Video */
-export const videoTextToVideo = (ctx: ExecuteContext, itemIndex: number) => generateVideo(ctx, itemIndex, false);
+export const videoTextToVideo = (ctx: ExecuteContext, itemIndex: number) =>
+  generateVideo(ctx, itemIndex, false);
 
 /** Video > Image to Video */
-export const videoImageToVideo = (ctx: ExecuteContext, itemIndex: number) => generateVideo(ctx, itemIndex, true);
+export const videoImageToVideo = (ctx: ExecuteContext, itemIndex: number) =>
+  generateVideo(ctx, itemIndex, true);

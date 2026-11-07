@@ -7,15 +7,14 @@ import { NodeTypes } from '@workflow/core';
 import type { AiTool, DataObject, Item, LoadOptionsContext, NodeType } from '@workflow/workflow';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { nodes } from '../src';
-import { pollTiming } from '../src/nodes/vendors/gemini/operations';
-import { geminiListSearch } from '../src/nodes/vendors/gemini/operations';
 import { GoogleGeminiNode } from '../src/nodes/vendors/gemini/GoogleGemini.node';
 import { replyImages, replyText } from '../src/nodes/vendors/gemini/media';
+import { geminiListSearch, pollTiming } from '../src/nodes/vendors/gemini/operations';
 import {
   connect,
   type FakeHandler,
-  type FakeReply,
   FakeHttpClient,
+  type FakeReply,
   type Link,
   node,
   run,

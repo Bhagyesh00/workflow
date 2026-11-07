@@ -36,7 +36,14 @@ const generateProperties: NodeProperty[] = [
     default: 'tts-1',
     options: choices('tts-1', 'tts-1-hd'),
   },
-  { displayName: 'Text Input', name: 'input', type: 'string', default: '', required: true, typeOptions: { rows: 3 } },
+  {
+    displayName: 'Text Input',
+    name: 'input',
+    type: 'string',
+    default: '',
+    required: true,
+    typeOptions: { rows: 3 },
+  },
   {
     displayName: 'Voice',
     name: 'voice',
@@ -165,7 +172,11 @@ async function transcribe(
 ): Promise<Item> {
   const baseUrl = await openAiBaseUrl(ctx, itemIndex);
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
-  const [file] = await readBinaryFields(ctx, itemIndex, String(ctx.getNodeParameter('binaryPropertyName', itemIndex, 'data')));
+  const [file] = await readBinaryFields(
+    ctx,
+    itemIndex,
+    String(ctx.getNodeParameter('binaryPropertyName', itemIndex, 'data')),
+  );
   if (!file) throw new NodeOperationError(ctx.getNode(), 'The item has no recording', { itemIndex });
   // the multipart encoder takes the file part as { data, fileName, mimeType }
   const body: Record<string, unknown> = {

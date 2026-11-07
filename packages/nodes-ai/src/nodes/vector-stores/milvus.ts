@@ -40,7 +40,11 @@ function locatorText(value: unknown): string {
 }
 
 /** The base URL of the Milvus server, without a trailing slash; the query and hash are refused. */
-function baseUrlOf(ctx: BaseContext | LoadOptionsContext, credentials: DataObject, itemIndex: number): string {
+function baseUrlOf(
+  ctx: BaseContext | LoadOptionsContext,
+  credentials: DataObject,
+  itemIndex: number,
+): string {
   const text = typeof credentials.baseUrl === 'string' ? credentials.baseUrl.trim() : '';
   let url: URL | undefined;
   try {
@@ -88,9 +92,13 @@ async function milvusCall(
   }
   const status = response.statusCode;
   if (status >= 300 && status < 400) {
-    throw new NodeOperationError(node, `Milvus answered with a redirect (status ${status}); it was not followed`, {
-      itemIndex,
-    });
+    throw new NodeOperationError(
+      node,
+      `Milvus answered with a redirect (status ${status}); it was not followed`,
+      {
+        itemIndex,
+      },
+    );
   }
   const parsed =
     response.body && typeof response.body === 'object' ? (response.body as DataObject) : ({} as DataObject);
@@ -134,7 +142,8 @@ async function milvusCollectionSearch(ctx: LoadOptionsContext, filter?: string):
 const clearCollectionOption: NodeProperty = {
   ...clearStoreOption,
   displayName: 'Clear Collection',
-  description: 'Whether to delete the collection before inserting; it is created again from the first document',
+  description:
+    'Whether to delete the collection before inserting; it is created again from the first document',
 };
 
 export const VectorStoreMilvusNode = createVectorStoreNode({

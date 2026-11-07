@@ -13,6 +13,7 @@ import {
 } from '@workflow/workflow';
 import { downloadMedia } from '../shared/api';
 import { fileToItem, readBinaryFields, readInputFile, type VendorFile } from '../shared/binary';
+import { uploadFile, waitForFile } from './files';
 import {
   GEMINI_CREDENTIAL,
   geminiAuthHost,
@@ -23,7 +24,6 @@ import {
   replyItems,
   waitForOperation,
 } from './operations';
-import { uploadFile, waitForFile } from './files';
 
 /** the largest file sent inside the request; bigger ones are uploaded first */
 export const INLINE_LIMIT = 18 * 1024 * 1024;

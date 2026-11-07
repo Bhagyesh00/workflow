@@ -214,7 +214,9 @@ export async function speechTextToSpeech(ctx: ExecuteContext, itemIndex: number)
   const isLink = /^https?:\/\//i.test(audio);
   if (!download) {
     if (!isLink) {
-      throw new NodeOperationError(ctx.getNode(), 'MiniMax returned audio data instead of a link', { itemIndex });
+      throw new NodeOperationError(ctx.getNode(), 'MiniMax returned audio data instead of a link', {
+        itemIndex,
+      });
     }
     return { json: { ...details, audioUrl: audio }, pairedItem: paired };
   }
@@ -229,7 +231,9 @@ export async function speechTextToSpeech(ctx: ExecuteContext, itemIndex: number)
     }
   } else {
     if (audio.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(audio)) {
-      throw new NodeOperationError(ctx.getNode(), 'MiniMax returned audio that is not valid hex', { itemIndex });
+      throw new NodeOperationError(ctx.getNode(), 'MiniMax returned audio that is not valid hex', {
+        itemIndex,
+      });
     }
     bytes = new Uint8Array(Buffer.from(audio, 'hex'));
   }

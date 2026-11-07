@@ -30,7 +30,16 @@ import { modelListSearch } from '../src/nodes/vendors/shared/model-lists';
 import { pollUntil } from '../src/nodes/vendors/shared/poll';
 import { runVendorChat, vendorToolsInput } from '../src/nodes/vendors/shared/tool-loop';
 import type { ChatAdapter } from '../src/shared/chat-model';
-import { connect, type FakeHandler, FakeHttpClient, type Link, node, run, services, testNodes } from './harness';
+import {
+  connect,
+  type FakeHandler,
+  FakeHttpClient,
+  type Link,
+  node,
+  run,
+  services,
+  testNodes,
+} from './harness';
 
 const KEY = 'AIzaSyTESTKEY0123456789abcdefghijklmnop';
 const VENDOR = 'http://vendor.test';
@@ -194,7 +203,7 @@ const toolNode = (name: string, canWait: boolean, calls: DataObject[]): NodeType
     outputs: ['ai_tool'],
     properties: [],
   },
-  async supplyData(ctx) {
+  async supplyData() {
     const tool: AiTool = {
       kind: 'tool',
       name: 'lookup',
@@ -257,7 +266,10 @@ async function runVendor(
   ];
   const result = await run(
     nodesList,
-    connect(['Trigger', 'Vendor'], ...(options.tool ? ([['Tool', 'Vendor', 'ai_tool'] satisfies Link] as Link[]) : [])),
+    connect(
+      ['Trigger', 'Vendor'],
+      ...(options.tool ? ([['Tool', 'Vendor', 'ai_tool'] satisfies Link] as Link[]) : []),
+    ),
     {
       nodeTypes: types,
       triggerItems: options.items,

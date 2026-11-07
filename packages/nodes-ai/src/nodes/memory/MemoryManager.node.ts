@@ -67,7 +67,10 @@ function resultItems(entries: DataObject[], group: boolean, itemIndex: number): 
   return entries.map((json) => ({ json, pairedItem: { item: itemIndex } }));
 }
 
-async function sessionOf(ctx: ExecuteContext, itemIndex: number): Promise<{ memory: SessionMemory; id: string }> {
+async function sessionOf(
+  ctx: ExecuteContext,
+  itemIndex: number,
+): Promise<{ memory: SessionMemory; id: string }> {
   const memory = await getMemory(ctx, itemIndex);
   if (!memory) {
     throw new NodeOperationError(ctx.getNode(), 'Connect a memory to this node', { itemIndex });

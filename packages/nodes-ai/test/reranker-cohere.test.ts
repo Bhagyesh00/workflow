@@ -197,7 +197,9 @@ describe('Reranker Cohere in a vector store load', () => {
     const http = new FakeHttpClient((req) => {
       const n = (req.body as { documents: string[] }).documents.length;
       return {
-        body: { results: Array.from({ length: n }, (_, i) => ({ index: n - 1 - i, relevance_score: 1 - i / n })) },
+        body: {
+          results: Array.from({ length: n }, (_, i) => ({ index: n - 1 - i, relevance_score: 1 - i / n })),
+        },
       };
     });
     const reranked = await load(http, true);

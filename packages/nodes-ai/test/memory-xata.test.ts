@@ -114,7 +114,9 @@ describe('P5-50 Xata memory', () => {
     const x = fakeXata();
     const r = await converse(x.http, 't1', 'https://example.com/nothing');
     expect(r.status).toBe('error');
-    expect(r.error?.message).toContain('It was not possible to extract the table from the Database Endpoint.');
+    expect(r.error?.message).toContain(
+      'It was not possible to extract the table from the Database Endpoint.',
+    );
     expect(x.http.requests).toHaveLength(0);
   });
 
@@ -135,7 +137,14 @@ describe('P5-50 Xata memory', () => {
     const rows = (list: Array<[string, string]>) => ({
       messageValues: list.map(([type, message]) => ({ type, message, hideFromUI: false })),
     });
-    await manage({ mode: 'insert', messages: rows([['user', 'a'], ['ai', 'b'], ['user', 'c']]) });
+    await manage({
+      mode: 'insert',
+      messages: rows([
+        ['user', 'a'],
+        ['ai', 'b'],
+        ['user', 'c'],
+      ]),
+    });
     const loaded = await manage({ mode: 'load', simplifyOutput: false });
     expect((loaded.output('Manager')[0].messages as any[]).map((m) => m.content)).toEqual(['a', 'b', 'c']);
     await manage({ mode: 'insert', insertMode: 'override', messages: rows([['user', 'z']]) });

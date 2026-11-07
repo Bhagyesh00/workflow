@@ -24,7 +24,11 @@ const stores: Store[] = [
     label: 'Simple memory',
     creds: {},
     memory: (session) =>
-      node('Memory', 'ai.memoryBufferWindow', { sessionIdType: 'customKey', sessionKey: session, contextWindowLength: 1 }),
+      node('Memory', 'ai.memoryBufferWindow', {
+        sessionIdType: 'customKey',
+        sessionKey: session,
+        contextWindowLength: 1,
+      }),
   },
   {
     label: 'Postgres memory',
@@ -224,7 +228,11 @@ describe.each(stores)('Chat Memory Manager on $label', (store) => {
       { messages: [{ human: 'q1', ai: 'a1' }, { human: 'q2' }, { human: 'q3', ai: 'a3' }], messagesCount: 3 },
     ]);
     const split = await manage(store, s, { mode: 'load', options: { groupMessages: false } });
-    expect(split.output('Manager')).toEqual([{ human: 'q1', ai: 'a1' }, { human: 'q2' }, { human: 'q3', ai: 'a3' }]);
+    expect(split.output('Manager')).toEqual([
+      { human: 'q1', ai: 'a1' },
+      { human: 'q2' },
+      { human: 'q3', ai: 'a3' },
+    ]);
     const raw = await manage(store, s, {
       mode: 'load',
       simplifyOutput: false,

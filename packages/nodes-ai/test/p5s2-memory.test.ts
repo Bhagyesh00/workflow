@@ -109,7 +109,12 @@ describe('memory split', () => {
 
 describe('new memory nodes', () => {
   it('are listed in memoryNodes and registered in the package, once each', () => {
-    for (const name of ['ai.memoryManager', 'ai.memoryMongoDbChat', 'ai.memoryXata', 'ai.memoryLakebaseChat']) {
+    for (const name of [
+      'ai.memoryManager',
+      'ai.memoryMongoDbChat',
+      'ai.memoryXata',
+      'ai.memoryLakebaseChat',
+    ]) {
       expect(byName(memoryNodes, name), name).toBeDefined();
       expect(nodes.filter((t) => t.description.name === name).length, name).toBe(1);
     }
@@ -125,7 +130,10 @@ describe('new memory nodes', () => {
       const type = byName(memoryNodes, name)!;
       expect(outputTypes(type), name).toEqual(['ai_memory']);
       expect(inputTypes(type), name).toEqual([]);
-      expect(type.description.credentials?.map((c) => c.name), name).toContain(credential);
+      expect(
+        type.description.credentials?.map((c) => c.name),
+        name,
+      ).toContain(credential);
       expect(typeof type.supplyData, name).toBe('function');
     }
   });
@@ -195,6 +203,7 @@ describe('ConnectionContext', () => {
 
 describe('helper modules exist with their final names', () => {
   it('shared/mongo.ts', () => {
+    const exported: Record<string, unknown> = mongo;
     for (const name of [
       'sharedMongo',
       'buildMongoOptions',
@@ -202,7 +211,7 @@ describe('helper modules exist with their final names', () => {
       'sanitizeMongoError',
       'mongoDbConnectionTest',
     ] as const) {
-      expect(typeof mongo[name], name).toBe('function');
+      expect(typeof exported[name], name).toBe('function');
     }
   });
 

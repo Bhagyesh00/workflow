@@ -42,7 +42,8 @@ export async function minimaxBase(ctx: ExecuteContext, itemIndex: number): Promi
 export function checkBaseResp(ctx: ExecuteContext, itemIndex: number, body: unknown): void {
   const resp = (body as { base_resp?: { status_code?: unknown; status_msg?: unknown } } | null)?.base_resp;
   if (!resp || resp.status_code === undefined || resp.status_code === 0) return;
-  const text = typeof resp.status_msg === 'string' && resp.status_msg ? resp.status_msg : 'The request failed';
+  const text =
+    typeof resp.status_msg === 'string' && resp.status_msg ? resp.status_msg : 'The request failed';
   throw new NodeOperationError(
     ctx.getNode(),
     `MiniMax: ${redactSecrets(text)} (code ${String(resp.status_code)})`,
@@ -58,7 +59,10 @@ export async function minimaxCall<T = DataObject>(
   request: Omit<HttpRequestOptions, 'url'> = {},
 ): Promise<T> {
   const base = await minimaxBase(ctx, itemIndex);
-  const body = await vendorRequest<T>(ctx, MINIMAX_CREDENTIAL, itemIndex, { ...request, url: `${base}${path}` });
+  const body = await vendorRequest<T>(ctx, MINIMAX_CREDENTIAL, itemIndex, {
+    ...request,
+    url: `${base}${path}`,
+  });
   checkBaseResp(ctx, itemIndex, body);
   return body;
 }
@@ -100,7 +104,8 @@ export function minimaxAdapter(config: {
   return {
     ...base,
     parseResponse: (body: unknown): AiChatResponse => {
-      const resp = (body as { base_resp?: { status_code?: unknown; status_msg?: unknown } } | null)?.base_resp;
+      const resp = (body as { base_resp?: { status_code?: unknown; status_msg?: unknown } } | null)
+        ?.base_resp;
       if (resp && resp.status_code !== undefined && resp.status_code !== 0) {
         throw new Error(
           `MiniMax: ${String(resp.status_msg || 'The request failed')} (code ${String(resp.status_code)})`,

@@ -68,7 +68,11 @@ beforeEach(() => {
 });
 
 /** Chat -> Agent with one memory node, run once */
-async function converse(memory: WorkflowNode, items: Item[] = chatItem('s1'), opts: { chatName?: string } = {}) {
+async function converse(
+  memory: WorkflowNode,
+  items: Item[] = chatItem('s1'),
+  opts: { chatName?: string } = {},
+) {
   const chat = opts.chatName ?? 'Chat';
   const requests = scriptModel('Model', ['ok']);
   const r = await run(

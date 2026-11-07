@@ -165,7 +165,10 @@ describe('Ollama node shell', () => {
   it('is usable as a tool, has text and image, and shows the Tools port only with Hide Tools = Show', () => {
     expect(OllamaNode.description.usableAsTool).toBe(true);
     const resource = OllamaNode.description.properties.find((p) => p.name === 'resource');
-    expect((resource?.options as Array<{ value: string }>).map((o) => o.value)).toEqual(['text', 'image']);
+    expect(((resource?.options ?? []) as Array<{ value: string }>).map((o) => o.value)).toEqual([
+      'text',
+      'image',
+    ]);
     const body = String(OllamaNode.description.inputs).slice(3, -2);
     const evaluate = (p: DataObject) => new Function('$parameter', `return ${body}`)(p) as unknown[];
     expect(evaluate({ resource: 'text', operation: 'message', hideTools: 'hide' })).toEqual(['main']);
@@ -178,7 +181,16 @@ describe('Ollama node shell', () => {
       (p) => p.name === 'options' && p.displayOptions?.show?.operation?.[0] === 'message',
     )!;
     const names = (options.options as Array<{ name: string }>).map((o) => o.name);
-    for (const name of ['think', 'temperature', 'topP', 'topK', 'numPredict', 'numCtx', 'keepAlive', 'format']) {
+    for (const name of [
+      'think',
+      'temperature',
+      'topP',
+      'topK',
+      'numPredict',
+      'numCtx',
+      'keepAlive',
+      'format',
+    ]) {
       expect(names).toContain(name);
     }
     expect(names).not.toContain('timeout');
@@ -226,7 +238,13 @@ describe('Ollama text.message', () => {
   it('maps the options to the Ollama options object and the system message', async () => {
     const { fake } = await runOllama(
       ollamaText({
-        messages: { values: [{ role: 'user', content: 'Hi' }, { role: 'assistant', content: 'Yo' }, { role: 'user', content: 'Again' }] },
+        messages: {
+          values: [
+            { role: 'user', content: 'Hi' },
+            { role: 'assistant', content: 'Yo' },
+            { role: 'user', content: 'Again' },
+          ],
+        },
         options: {
           system: 'Be brief',
           think: false,
@@ -333,12 +351,15 @@ describe('Ollama image.analyze', () => {
   });
 
   it('downloads an image URL through the guard, without the credential, and sends it', async () => {
-    const { fake } = await runOllama(ollamaImage({ inputType: 'url', url: 'https://cdn.example.com/x.png' }), {
-      handler: (request) =>
-        request.method === 'GET'
-          ? { body: bytes('URLBYTES'), headers: { 'content-type': 'image/png' } }
-          : ollamaReply('a cat'),
-    });
+    const { fake } = await runOllama(
+      ollamaImage({ inputType: 'url', url: 'https://cdn.example.com/x.png' }),
+      {
+        handler: (request) =>
+          request.method === 'GET'
+            ? { body: bytes('URLBYTES'), headers: { 'content-type': 'image/png' } }
+            : ollamaReply('a cat'),
+      },
+    );
     expect(fake.requests).toHaveLength(2);
     expect(fake.requests[0]!.url).toBe('https://cdn.example.com/x.png');
     expect(fake.requests[1]!.body).toMatchObject({ messages: [{ images: [b64('URLBYTES')] }] });
@@ -354,7 +375,9 @@ describe('Ollama image.analyze', () => {
   });
 
   it('names the missing binary field', async () => {
-    const { result } = await runOllama(ollamaImage({ binaryPropertyName: 'nope' }), { items: [{ json: {} }] });
+    const { result } = await runOllama(ollamaImage({ binaryPropertyName: 'nope' }), {
+      items: [{ json: {} }],
+    });
     expect(result.status).toBe('error');
     expect(result.error?.message).toContain('"nope"');
   });
@@ -471,7 +494,9 @@ describe('Moonshot text.message', () => {
   });
 
   it('returns the raw reply with the merged response when Simplify Output is off', async () => {
-    const { out } = await runMoonshot(moonText({ simplify: false, options: { includeMergedResponse: true } }));
+    const { out } = await runMoonshot(
+      moonText({ simplify: false, options: { includeMergedResponse: true } }),
+    );
     expect(out[0]).toMatchObject({ object: 'chat.completion', merged_response: 'ok' });
     expect((out[0]!.choices as unknown[]).length).toBe(1);
   });
@@ -615,12 +640,15 @@ describe('Moonshot image.analyze', () => {
   });
 
   it('downloads an image URL through the guard and sends it', async () => {
-    const { fake } = await runMoonshot(moonImage({ inputType: 'url', url: 'https://cdn.example.com/x.png' }), {
-      handler: (request) =>
-        request.method === 'GET'
-          ? { body: bytes('URLBYTES'), headers: { 'content-type': 'image/png' } }
-          : chatReply('a cat'),
-    });
+    const { fake } = await runMoonshot(
+      moonImage({ inputType: 'url', url: 'https://cdn.example.com/x.png' }),
+      {
+        handler: (request) =>
+          request.method === 'GET'
+            ? { body: bytes('URLBYTES'), headers: { 'content-type': 'image/png' } }
+            : chatReply('a cat'),
+      },
+    );
     expect(fake.requests).toHaveLength(2);
     expect(fake.requests[0]!.headers?.authorization).toBeUndefined();
     const content = (fake.requests[1]!.body as any).messages[0].content as DataObject[];

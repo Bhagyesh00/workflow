@@ -2,7 +2,13 @@
  * Milvus and Databricks Vector Store (P5-43): FakeHttpClient fixtures written from the Milvus REST v2 docs
  * and the Databricks Vector Search REST docs. A fixture proves the request we send, not the vendor's answer.
  */
-import type { DataObject, HttpRequestOptions, Item, LoadOptionsContext, WorkflowNode } from '@workflow/workflow';
+import type {
+  DataObject,
+  HttpRequestOptions,
+  Item,
+  LoadOptionsContext,
+  WorkflowNode,
+} from '@workflow/workflow';
 import { describe, expect, it } from 'vitest';
 import { VectorStoreDatabricksNode } from '../src/nodes/vector-stores/databricks';
 import { VectorStoreMilvusNode } from '../src/nodes/vector-stores/milvus';
@@ -101,7 +107,10 @@ async function milvusLoad(storeNode: WorkflowNode, prompt: string, http: FakeHtt
   return run(
     [node('Trigger', 'test.trigger'), storeNode, node('Embeddings', 'test.fakeEmbeddings')],
     connect(['Trigger', storeNode.name], ['Embeddings', storeNode.name, 'ai_embedding']),
-    { triggerItems: [{ json: { chatInput: prompt } }], services: services({ creds: MILVUS_CREDS as never, http }) },
+    {
+      triggerItems: [{ json: { chatInput: prompt } }],
+      services: services({ creds: MILVUS_CREDS as never, http }),
+    },
   );
 }
 
@@ -109,9 +118,9 @@ describe('Milvus', () => {
   it('describes the node: default modes, no filter, collection locator', () => {
     const d = VectorStoreMilvusNode.description;
     expect(d.credentials).toEqual([{ name: 'milvusApi', required: true }]);
-    const modes = (d.properties.find((p) => p.name === 'mode')?.options as Array<{ value: string }>).map(
-      (o) => o.value,
-    );
+    const modes = (
+      (d.properties.find((p) => p.name === 'mode')?.options ?? []) as Array<{ value: string }>
+    ).map((o) => o.value);
     expect(modes).toEqual(['load', 'insert', 'retrieve', 'retrieve-as-tool']);
     expect(d.properties.some((p) => p.name === 'milvusCollection')).toBe(true);
     expect(VectorStoreMilvusNode.methods?.listSearch?.milvusCollectionSearch).toBeTypeOf('function');
@@ -141,8 +150,16 @@ describe('Milvus', () => {
     expect(insert.body).toEqual({
       collectionName: 'docs_p5',
       data: [
-        { vector: fakeVector('Cats and dogs are pets'), text: 'Cats and dogs are pets', metadata: { source: 'json', topic: 'animals' } },
-        { vector: fakeVector('A car has an engine'), text: 'A car has an engine', metadata: { source: 'json', topic: 'vehicles' } },
+        {
+          vector: fakeVector('Cats and dogs are pets'),
+          text: 'Cats and dogs are pets',
+          metadata: { source: 'json', topic: 'animals' },
+        },
+        {
+          vector: fakeVector('A car has an engine'),
+          text: 'A car has an engine',
+          metadata: { source: 'json', topic: 'vehicles' },
+        },
       ],
     });
     for (const request of http.requests) {
@@ -222,7 +239,10 @@ describe('Milvus', () => {
     const failing = fakeMilvus({
       fail: {
         '/v2/vectordb/collections/list': {
-          body: { code: 1800, message: 'user hasn\'t authenticated with token sk-abcdefghijklmnopqrstuvwxyz123456' },
+          body: {
+            code: 1800,
+            message: "user hasn't authenticated with token sk-abcdefghijklmnopqrstuvwxyz123456",
+          },
         },
       },
     });
@@ -240,7 +260,12 @@ describe('Milvus', () => {
 const HOST = 'https://dbx.example.com';
 const TOKEN = 'dapi-token-0123456789abcdef';
 const DBX_CREDS = {
-  databricksOAuth2Api: { host: HOST, grantType: 'clientCredentials', clientId: 'sp-1', clientSecret: 'shh-secret' },
+  databricksOAuth2Api: {
+    host: HOST,
+    grantType: 'clientCredentials',
+    clientId: 'sp-1',
+    clientSecret: 'shh-secret',
+  },
 };
 const INDEX = 'main.docs.kb_index';
 const INFO_PATH = `/api/2.0/vector-search/indexes/${encodeURIComponent(INDEX)}`;
@@ -284,7 +309,8 @@ function indexInfo(kind: IndexKind): DataObject {
 function fakeDatabricks(kind: IndexKind, query?: (body: DataObject) => FakeReply) {
   return new FakeHttpClient((req: HttpRequestOptions) => {
     const path = new URL(req.url).pathname;
-    if (path === '/oidc/v1/token') return { body: { access_token: TOKEN, token_type: 'Bearer', expires_in: 3600 } };
+    if (path === '/oidc/v1/token')
+      return { body: { access_token: TOKEN, token_type: 'Bearer', expires_in: 3600 } };
     if (path === INFO_PATH) return { body: indexInfo(kind) };
     if (path === `${INFO_PATH}/upsert-data`) {
       return { body: { status: 'SUCCESS', result: { success_row_count: 2, failed_primary_keys: [] } } };
@@ -305,9 +331,12 @@ function fakeDatabricks(kind: IndexKind, query?: (body: DataObject) => FakeReply
         }
       );
     }
-    if (path === '/api/2.0/vector-search/endpoints') return { body: { endpoints: [{ name: 'ep1' }, { name: '../evil' }] } };
+    if (path === '/api/2.0/vector-search/endpoints')
+      return { body: { endpoints: [{ name: 'ep1' }, { name: '../evil' }] } };
     if (path === '/api/2.0/vector-search/indexes') {
-      return { body: { vector_indexes: [{ name: INDEX }, { name: 'bad name' }, { name: 'main.docs.alpha' }] } };
+      return {
+        body: { vector_indexes: [{ name: INDEX }, { name: 'bad name' }, { name: 'main.docs.alpha' }] },
+      };
     }
     return { status: 404, body: { message: `no route ${req.method ?? 'GET'} ${path}` } };
   });
@@ -355,7 +384,8 @@ async function dbxLoad(storeNode: WorkflowNode, prompt: string, http: FakeHttpCl
   );
 }
 
-const apiCalls = (http: FakeHttpClient) => http.requests.filter((q) => new URL(q.url).pathname !== '/oidc/v1/token');
+const apiCalls = (http: FakeHttpClient) =>
+  http.requests.filter((q) => new URL(q.url).pathname !== '/oidc/v1/token');
 
 describe('Databricks', () => {
   it('describes the node: databricksOAuth2Api only, JSON filter, index locator', () => {
@@ -373,7 +403,11 @@ describe('Databricks', () => {
     const [info, upsert] = apiCalls(http);
     expect(info.url).toBe(`${HOST}${INFO_PATH}`);
     expect(info.headers?.authorization).toBe(`Bearer ${TOKEN}`);
-    expect(upsert).toMatchObject({ url: `${HOST}${INFO_PATH}/upsert-data`, method: 'POST', followRedirects: false });
+    expect(upsert).toMatchObject({
+      url: `${HOST}${INFO_PATH}/upsert-data`,
+      method: 'POST',
+      followRedirects: false,
+    });
     expect(upsert.headers?.authorization).toBe(`Bearer ${TOKEN}`);
     const rows = JSON.parse((upsert.body as { inputs_json: string }).inputs_json) as DataObject[];
     expect(rows).toHaveLength(2);
@@ -493,13 +527,19 @@ describe('Databricks', () => {
     const ctx = {
       getNode: () => ({ name: 'Store' }),
       getCredentials: async () => DBX_CREDS.databricksOAuth2Api,
-      helpers: { httpRequestWithAuthentication: (_type: string, options: HttpRequestOptions) => http.request(options) },
+      helpers: {
+        httpRequestWithAuthentication: (_type: string, options: HttpRequestOptions) => http.request(options),
+      },
     } as unknown as LoadOptionsContext;
     const search = VectorStoreDatabricksNode.methods!.listSearch!.databricksIndexSearch;
-    expect((await search(ctx, 'alpha')).results).toEqual([{ name: 'main.docs.alpha', value: 'main.docs.alpha' }]);
+    expect((await search(ctx, 'alpha')).results).toEqual([
+      { name: 'main.docs.alpha', value: 'main.docs.alpha' },
+    ]);
     const all = await search(ctx);
     expect(all.results.map((x) => x.value)).toEqual(['main.docs.alpha', INDEX]);
     // the endpoint with a path-like name is never queried
-    expect(http.requests.filter((q) => q.url.endsWith('/indexes')).every((q) => q.qs?.endpoint_name === 'ep1')).toBe(true);
+    expect(
+      http.requests.filter((q) => q.url.endsWith('/indexes')).every((q) => q.qs?.endpoint_name === 'ep1'),
+    ).toBe(true);
   });
 });

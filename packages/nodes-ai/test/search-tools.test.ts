@@ -6,8 +6,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { formatSearXngReply } from '../src/nodes/tools/ToolSearXng.node';
 import {
   connect,
-  FakeHttpClient,
   type FakeHandler,
+  FakeHttpClient,
   modelRequests,
   node,
   run,
@@ -22,7 +22,11 @@ async function ask(tool: WorkflowNode, args: DataObject, svc: ReturnType<typeof 
   const r = await run(
     [
       node('Trigger', 'test.trigger'),
-      node('Agent', 'ai.agent', { promptType: 'define', text: 'go', options: { returnIntermediateSteps: true } }),
+      node('Agent', 'ai.agent', {
+        promptType: 'define',
+        text: 'go',
+        options: { returnIntermediateSteps: true },
+      }),
       node('Model', 'test.fakeChatModel'),
       tool,
     ],
@@ -73,7 +77,13 @@ describe('SearXNG tool', () => {
   it('uses the defaults when no option is set', async () => {
     const client = fake(() => ({ body: { results: [] } }));
     await ask(searx(), { query: 'x' }, services({ http: client, creds }));
-    expect(client.requests[0].qs).toEqual({ q: 'x', format: 'json', pageno: 1, safesearch: 0, language: 'en' });
+    expect(client.requests[0].qs).toEqual({
+      q: 'x',
+      format: 'json',
+      pageno: 1,
+      safesearch: 0,
+      language: 'en',
+    });
   });
 
   it('falls back to the answer, the infobox text, the suggestions and the no-result text', () => {
@@ -90,11 +100,7 @@ describe('SearXNG tool', () => {
   });
 
   it('reaches the infobox, suggestion and no-result forms through the tool', async () => {
-    const bodies: unknown[] = [
-      { infoboxes: [{ content: '<i>Hi</i> there' }] },
-      { suggestions: ['one'] },
-      {},
-    ];
+    const bodies: unknown[] = [{ infoboxes: [{ content: '<i>Hi</i> there' }] }, { suggestions: ['one'] }, {}];
     for (const [i, expected] of ['Hi there', 'Suggestions: one', 'No good results found.'].entries()) {
       const { observation } = await ask(
         searx(),
@@ -129,7 +135,10 @@ describe('SearXNG tool', () => {
       const { observation } = await ask(
         searx(),
         { query: 'hello world' },
-        services({ http: new HttpClient({ ssrf: { allow: ['127.0.0.1'] } }), creds: { searXngApi: { apiUrl } } }),
+        services({
+          http: new HttpClient({ ssrf: { allow: ['127.0.0.1'] } }),
+          creds: { searXngApi: { apiUrl } },
+        }),
       );
       expect(seen[0].method).toBe('POST');
       expect(seen[0].url).toBe('/search?q=hello+world&format=json&pageno=1&safesearch=0&language=en');
@@ -147,12 +156,15 @@ describe('Wikipedia tool', () => {
     if (qs.list === 'search') {
       return {
         body: {
-          query: { search: ['Alan Turing', 'Turing machine', 'Turing test', 'Fourth'].map((title) => ({ title })) },
+          query: {
+            search: ['Alan Turing', 'Turing machine', 'Turing test', 'Fourth'].map((title) => ({ title })),
+          },
         },
       };
     }
     const title = String(qs.titles);
-    const extract = title === 'Alan Turing' ? 'T'.repeat(5000) : title === 'Turing test' ? '' : `About ${title}`;
+    const extract =
+      title === 'Alan Turing' ? 'T'.repeat(5000) : title === 'Turing test' ? '' : `About ${title}`;
     return { body: { query: { pages: { '1': { title, extract } } } } };
   };
 
@@ -168,7 +180,9 @@ describe('Wikipedia tool', () => {
       'Turing machine',
       'Turing test',
     ]);
-    expect(observation).toBe(`Page: Alan Turing\nSummary: ${'T'.repeat(4000)}\n\nPage: Turing machine\nSummary: About Turing machine`);
+    expect(observation).toBe(
+      `Page: Alan Turing\nSummary: ${'T'.repeat(4000)}\n\nPage: Turing machine\nSummary: About Turing machine`,
+    );
   });
 
   it('says so when nothing is found', async () => {

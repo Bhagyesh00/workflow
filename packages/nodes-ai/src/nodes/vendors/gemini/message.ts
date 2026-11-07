@@ -12,13 +12,13 @@ import {
 } from '@workflow/workflow';
 import { geminiAdapter } from '../../../providers/gemini';
 import type { ChatAdapter } from '../../../shared/chat-model';
+import { vendorError } from '../shared/api';
 import {
   maxToolIterationsOption,
   readVendorMessages,
   simplifyProperty,
   toChatMessages,
 } from '../shared/messages';
-import { vendorError } from '../shared/api';
 import { runVendorChat, VENDOR_WAIT_TOOL } from '../shared/tool-loop';
 import { normalizeStoreName } from './file-search';
 import { geminiHost, modelProperty, readModelId, replyItems } from './operations';

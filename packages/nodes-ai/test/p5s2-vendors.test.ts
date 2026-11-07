@@ -50,7 +50,10 @@ describe('vendor nodes', () => {
       const d = vendorNodes.find((n) => n.description.name === name)!.description;
       expect(d.categories, name).toEqual(['AI', 'Vendors']);
       expect(d.icon, name).toMatch(/^simple:[a-z0-9-]+$/);
-      expect(d.credentials?.map((c) => c.name), name).toEqual([credential]);
+      expect(
+        d.credentials?.map((c) => c.name),
+        name,
+      ).toEqual([credential]);
       expect(d.outputs, name).toEqual(['main']);
     }
     expect(vendorNodes.every((n) => typeof n.execute === 'function')).toBe(true);
@@ -307,7 +310,9 @@ describe('executeAgent observer', () => {
 
 describe('databricksHttpsHost', () => {
   it('keeps an https host and cuts the trailing slash', () => {
-    expect(databricksHttpsHost('https://adb-1.azuredatabricks.net/')).toBe('https://adb-1.azuredatabricks.net');
+    expect(databricksHttpsHost('https://adb-1.azuredatabricks.net/')).toBe(
+      'https://adb-1.azuredatabricks.net',
+    );
     expect(databricksHttpsHost(' https://w.cloud.databricks.com ')).toBe('https://w.cloud.databricks.com');
   });
 
@@ -352,7 +357,11 @@ describe('alibabaCloudApi workspace', () => {
   });
 
   it('sends Bearer and no workspace header when the field is empty', async () => {
-    const out = await applyAuthentication(alibabaCloudApi, { apiKey: 'dash-key', workspaceId: '  ' }, request);
+    const out = await applyAuthentication(
+      alibabaCloudApi,
+      { apiKey: 'dash-key', workspaceId: '  ' },
+      request,
+    );
     expect(out.headers).toEqual({ a: '1', authorization: 'Bearer dash-key' });
   });
 

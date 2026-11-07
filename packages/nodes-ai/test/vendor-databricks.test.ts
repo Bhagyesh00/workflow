@@ -62,7 +62,8 @@ function workspace(fixture: Fixture = {}): FakeHandler {
   return (request) => {
     const url = new URL(request.url);
     const path = url.pathname;
-    if (path === '/oidc/v1/token') return { body: { access_token: TOKEN, token_type: 'Bearer', expires_in: 3600 } };
+    if (path === '/oidc/v1/token')
+      return { body: { access_token: TOKEN, token_type: 'Bearer', expires_in: 3600 } };
     if (path === '/api/2.0/mlflow/experiments/get-by-name') {
       return fixture.existingExperiment
         ? { body: { experiment: { experiment_id: '77', name: 'x' } } }
@@ -95,7 +96,12 @@ function warnings(): { logger: Logger; messages: Array<{ message: string; meta?:
   const noop = () => {};
   return {
     messages,
-    logger: { debug: noop, info: noop, error: noop, warn: (message, meta) => messages.push({ message, meta }) } as Logger,
+    logger: {
+      debug: noop,
+      info: noop,
+      error: noop,
+      warn: (message, meta) => messages.push({ message, meta }),
+    } as Logger,
   };
 }
 
@@ -232,7 +238,9 @@ describe('Databricks AI Agent', () => {
     scriptModel('Model', [toolCalls(['lookup', { q: 'x' }]), `final ${SECRET}`]);
     const { result, fake, uploads } = await agent({ exportTraces: true }, { tool: true });
     expect(result.status).toBe('success');
-    const sent = JSON.stringify(fake.requests.filter((r) => /mlflow/.test(r.url) || r.method === 'PUT').map((r) => r.body));
+    const sent = JSON.stringify(
+      fake.requests.filter((r) => /mlflow/.test(r.url) || r.method === 'PUT').map((r) => r.body),
+    );
     expect(sent).not.toContain(SECRET);
     expect(JSON.stringify(uploads[0].body)).toContain('[redacted]');
   });
@@ -272,14 +280,22 @@ describe('Databricks AI Agent', () => {
       experiment: { __rl: true, mode: 'id', value: '555' },
     });
     expect(byId.at('/api/2.0/mlflow/experiments/get-by-name')).toHaveLength(0);
-    expect((byId.at('/api/3.0/mlflow/traces')[0].body as any).trace.trace_info.trace_location.mlflow_experiment.experiment_id).toBe('555');
+    expect(
+      (byId.at('/api/3.0/mlflow/traces')[0].body as any).trace.trace_info.trace_location.mlflow_experiment
+        .experiment_id,
+    ).toBe('555');
     const byName = await agent(
       { exportTraces: true, experiment: { __rl: true, mode: 'name', value: '/Shared/mine' } },
       { fixture: { existingExperiment: true } },
     );
-    expect(byName.at('/api/2.0/mlflow/experiments/get-by-name')[0].qs).toEqual({ experiment_name: '/Shared/mine' });
+    expect(byName.at('/api/2.0/mlflow/experiments/get-by-name')[0].qs).toEqual({
+      experiment_name: '/Shared/mine',
+    });
     expect(byName.at('/api/2.0/mlflow/experiments/create')).toHaveLength(0);
-    expect((byName.at('/api/3.0/mlflow/traces')[0].body as any).trace.trace_info.trace_location.mlflow_experiment.experiment_id).toBe('77');
+    expect(
+      (byName.at('/api/3.0/mlflow/traces')[0].body as any).trace.trace_info.trace_location.mlflow_experiment
+        .experiment_id,
+    ).toBe('77');
   });
 
   it('refuses an http workspace host', async () => {
@@ -287,9 +303,14 @@ describe('Databricks AI Agent', () => {
     const result = await run(
       [
         node('Trigger', 'test.trigger'),
-        node('Agent', 'ai.databricksAiAgent', { promptType: 'define', text: 'hi', exportTraces: true }, {
-          credentials: { databricksOAuth2Api: { id: 'c', name: 'c' } },
-        }),
+        node(
+          'Agent',
+          'ai.databricksAiAgent',
+          { promptType: 'define', text: 'hi', exportTraces: true },
+          {
+            credentials: { databricksOAuth2Api: { id: 'c', name: 'c' } },
+          },
+        ),
         node('Model', 'test.fakeChatModel'),
       ],
       connect(['Trigger', 'Agent'], ['Model', 'Agent', 'ai_languageModel']),
@@ -319,10 +340,15 @@ describe('mlflow helpers', () => {
   });
 
   it('marks a failed item as an error span', () => {
-    const spans = buildSpans('t', { itemIndex: 0, input: 'q', startedAt: 1000, endedAt: 2000, error: new Error('boom') });
+    const spans = buildSpans('t', {
+      itemIndex: 0,
+      input: 'q',
+      startedAt: 1000,
+      endedAt: 2000,
+      error: new Error('boom'),
+    });
     expect(spans).toHaveLength(1);
     expect(spans[0].status.code).toBe('STATUS_CODE_ERROR');
     expect(spans[0].start_time_unix_nano).toBe('1000000000');
   });
 });
-

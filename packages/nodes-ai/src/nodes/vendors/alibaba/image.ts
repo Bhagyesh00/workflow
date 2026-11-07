@@ -16,8 +16,8 @@ import { simplifyProperty } from '../shared/messages';
 import {
   contentText,
   DEFAULT_VISION_MODEL,
-  modelProperty,
   MULTIMODAL_PATH,
+  modelProperty,
   num,
   pollTiming,
   qwenCall,

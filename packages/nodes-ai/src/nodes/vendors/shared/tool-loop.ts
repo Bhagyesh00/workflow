@@ -81,7 +81,7 @@ export async function runVendorChat(
 
   const last = options.messages.length - 1;
   const prompt = options.messages[last];
-  if (!prompt || prompt.role !== 'user') {
+  if (prompt?.role !== 'user') {
     throw new NodeOperationError(node, 'The last message must be a user message', {
       itemIndex,
       description: 'Add a message with the role "user" at the end of the Messages.',

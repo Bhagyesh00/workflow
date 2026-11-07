@@ -52,7 +52,11 @@ export function windowSize(ctx: SupplyDataContext, itemIndex: number): number {
  * Only role, text and the hide flag are stored: images and provider internals never reach memory.
  * `hideFromUI` is written only when true, so stored rows of earlier versions keep their shape.
  */
-export function toStoredMessage(message: AiChatMessage): { role: string; content: string; hideFromUI?: true } {
+export function toStoredMessage(message: AiChatMessage): {
+  role: string;
+  content: string;
+  hideFromUI?: true;
+} {
   const stored: { role: string; content: string; hideFromUI?: true } = {
     role: message.role,
     content: truncate(messageText(message.content), MAX_STORED_CHARS),

@@ -109,7 +109,9 @@ const list = (value: unknown): DataObject[] =>
 
 async function databricksIndexSearch(ctx: LoadOptionsContext, filter?: string): Promise<ListSearchResult> {
   const host = await workspaceHost(ctx, 0);
-  const endpoints = list((await databricksCall(ctx, host, { path: '/api/2.0/vector-search/endpoints' }, 0)).endpoints)
+  const endpoints = list(
+    (await databricksCall(ctx, host, { path: '/api/2.0/vector-search/endpoints' }, 0)).endpoints,
+  )
     .map((e) => e.name)
     .filter((name): name is string => typeof name === 'string' && ENDPOINT_NAME.test(name));
   const needle = (filter ?? '').trim().toLowerCase();

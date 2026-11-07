@@ -87,7 +87,9 @@ export function lakebaseHttpsHost(host: string): string {
     url = undefined;
   }
   if (url?.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
-    throw new Error('The Databricks host must be an https URL, such as https://<workspace>.cloud.databricks.com');
+    throw new Error(
+      'The Databricks host must be an https URL, such as https://<workspace>.cloud.databricks.com',
+    );
   }
   return base;
 }
@@ -284,9 +286,12 @@ async function listSearch(
       return { name: typeof label === 'string' && label ? label : value, value };
     })
     .filter(
-      (r) => r.value && (!wanted || r.name.toLowerCase().includes(wanted) || r.value.toLowerCase().includes(wanted)),
+      (r) =>
+        r.value &&
+        (!wanted || r.name.toLowerCase().includes(wanted) || r.value.toLowerCase().includes(wanted)),
     );
-  const next = typeof res?.next_page_token === 'string' && res.next_page_token ? res.next_page_token : undefined;
+  const next =
+    typeof res?.next_page_token === 'string' && res.next_page_token ? res.next_page_token : undefined;
   return { results, ...(next ? { paginationToken: next } : {}) };
 }
 
@@ -302,9 +307,16 @@ export const lakebaseListSearch: Record<
   LakebaseLevel,
   (ctx: LoadOptionsContext, filter?: string, paginationToken?: string) => Promise<ListSearchResult>
 > = {
-  projects: async (ctx, filter, token) => listSearch(ctx, '/api/2.0/postgres/projects', 'projects', filter, token),
+  projects: async (ctx, filter, token) =>
+    listSearch(ctx, '/api/2.0/postgres/projects', 'projects', filter, token),
   branches: async (ctx, filter, token) =>
-    listSearch(ctx, `/api/2.0/postgres/projects/${selected(ctx, 'project')}/branches`, 'branches', filter, token),
+    listSearch(
+      ctx,
+      `/api/2.0/postgres/projects/${selected(ctx, 'project')}/branches`,
+      'branches',
+      filter,
+      token,
+    ),
   databases: async (ctx, filter, token) =>
     listSearch(
       ctx,

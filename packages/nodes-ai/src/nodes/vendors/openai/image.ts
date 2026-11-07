@@ -29,7 +29,16 @@ const sizeOption: NodeProperty = {
   type: 'options',
   default: '1024x1024',
   description: 'The size of the image. The sizes a model accepts differ; "auto" is for GPT Image models.',
-  options: choices('256x256', '512x512', '1024x1024', '1024x1536', '1536x1024', '1792x1024', '1024x1792', 'auto'),
+  options: choices(
+    '256x256',
+    '512x512',
+    '1024x1024',
+    '1024x1536',
+    '1536x1024',
+    '1792x1024',
+    '1024x1792',
+    'auto',
+  ),
 };
 
 const generateProperties: NodeProperty[] = [
@@ -40,7 +49,14 @@ const generateProperties: NodeProperty[] = [
     default: 'dall-e-3',
     options: choices('dall-e-3', 'dall-e-2', 'gpt-image-1'),
   },
-  { displayName: 'Prompt', name: 'prompt', type: 'string', default: '', required: true, typeOptions: { rows: 3 } },
+  {
+    displayName: 'Prompt',
+    name: 'prompt',
+    type: 'string',
+    default: '',
+    required: true,
+    typeOptions: { rows: 3 },
+  },
   {
     displayName: 'Options',
     name: 'options',
@@ -78,8 +94,7 @@ const generateProperties: NodeProperty[] = [
         name: 'returnImageUrls',
         type: 'boolean',
         default: false,
-        description:
-          'Whether to return links instead of binary files. GPT Image models always return files.',
+        description: 'Whether to return links instead of binary files. GPT Image models always return files.',
       },
     ],
   },
@@ -153,7 +168,14 @@ const editProperties: NodeProperty[] = [
     default: 'gpt-image-1',
     options: choices('gpt-image-1', 'dall-e-2'),
   },
-  { displayName: 'Prompt', name: 'prompt', type: 'string', default: '', required: true, typeOptions: { rows: 3 } },
+  {
+    displayName: 'Prompt',
+    name: 'prompt',
+    type: 'string',
+    default: '',
+    required: true,
+    typeOptions: { rows: 3 },
+  },
   {
     displayName: 'Image(s)',
     name: 'images',
@@ -309,7 +331,11 @@ async function analyze(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
 
   let files: VendorFile[];
   if (inputType === 'base64') {
-    files = await readBinaryFields(ctx, itemIndex, String(ctx.getNodeParameter('binaryPropertyName', itemIndex, 'data')));
+    files = await readBinaryFields(
+      ctx,
+      itemIndex,
+      String(ctx.getNodeParameter('binaryPropertyName', itemIndex, 'data')),
+    );
   } else {
     const urls = String(ctx.getNodeParameter('imageUrls', itemIndex, ''))
       .split(',')
@@ -357,7 +383,11 @@ async function edit(ctx: ExecuteContext, itemIndex: number): Promise<Item[]> {
   const prompt = String(ctx.getNodeParameter('prompt', itemIndex, ''));
   if (!prompt.trim()) throw new NodeOperationError(ctx.getNode(), 'Enter a prompt', { itemIndex });
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
-  const images = await readBinaryFields(ctx, itemIndex, String(ctx.getNodeParameter('images', itemIndex, 'data')));
+  const images = await readBinaryFields(
+    ctx,
+    itemIndex,
+    String(ctx.getNodeParameter('images', itemIndex, 'data')),
+  );
   const body: Record<string, unknown> = {
     model,
     prompt,

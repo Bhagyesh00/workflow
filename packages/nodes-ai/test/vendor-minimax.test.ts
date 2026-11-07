@@ -105,7 +105,9 @@ async function minimax(
 const msg = (content: string) => ({ messages: { values: [{ role: 'user', content }] } });
 
 const header = (request: { headers?: Record<string, unknown> }, name: string): unknown => {
-  const found = Object.entries(request.headers ?? {}).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  const found = Object.entries(request.headers ?? {}).find(
+    ([key]) => key.toLowerCase() === name.toLowerCase(),
+  );
   return found?.[1];
 };
 
@@ -324,7 +326,7 @@ describe('image.generate', () => {
       {
         handler: (req) =>
           req.url.startsWith(MEDIA)
-            ? { body: Buffer.from('JPG' + req.url.slice(-5)), headers: { 'content-type': 'image/jpeg' } }
+            ? { body: Buffer.from(`JPG${req.url.slice(-5)}`), headers: { 'content-type': 'image/jpeg' } }
             : images([`${MEDIA}/a.jpg`, `${MEDIA}/b.jpg`]),
       },
     );

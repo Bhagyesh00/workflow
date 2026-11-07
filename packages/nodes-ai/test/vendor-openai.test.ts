@@ -54,7 +54,12 @@ const toolNode = (name: string, canWait: boolean): NodeType => ({
   },
 });
 
-const types = new NodeTypes([...nodes, ...testNodes, toolNode('test.lookupTool', false), toolNode('test.waitTool', true)]);
+const types = new NodeTypes([
+  ...nodes,
+  ...testNodes,
+  toolNode('test.lookupTool', false),
+  toolNode('test.waitTool', true),
+]);
 
 const responses = (text: string, extra: DataObject = {}): FakeReply => ({
   body: {
@@ -144,7 +149,7 @@ describe('node shell', () => {
   it('is not usable as a tool and has the six resources', () => {
     expect(OpenAiNode.description.usableAsTool).toBeUndefined();
     const resource = OpenAiNode.description.properties.find((p) => p.name === 'resource');
-    expect((resource?.options as Array<{ value: string }>).map((o) => o.value)).toEqual([
+    expect(((resource?.options ?? []) as Array<{ value: string }>).map((o) => o.value)).toEqual([
       'text',
       'image',
       'audio',
@@ -168,8 +173,20 @@ describe('node shell', () => {
       helpers: {
         httpRequestWithAuthentication: async (_type: string, request: { url: string }) =>
           request.url.endsWith('/models')
-            ? { data: [{ id: 'gpt-5-mini' }, { id: 'text-embedding-3-small' }, { id: 'whisper-1' }, { id: 'o3' }] }
-            : { data: [{ id: 'file-1', filename: 'a.txt' }, { id: 'file-2', filename: 'b.pdf' }] },
+            ? {
+                data: [
+                  { id: 'gpt-5-mini' },
+                  { id: 'text-embedding-3-small' },
+                  { id: 'whisper-1' },
+                  { id: 'o3' },
+                ],
+              }
+            : {
+                data: [
+                  { id: 'file-1', filename: 'a.txt' },
+                  { id: 'file-2', filename: 'b.pdf' },
+                ],
+              },
       },
     };
     const models = await OpenAiNode.methods!.listSearch!.modelSearch!(ctx as never);
@@ -227,7 +244,13 @@ describe('text.response', () => {
           include: 'code_interpreter_call.outputs',
           prompt: { promptOptions: { id: 'pmpt_1', version: '2', variables: '{"name":"Ada"}' } },
           textFormat: {
-            values: { type: 'json_schema', name: 'answer', description: 'The answer', schema: '{"type":"object"}', strict: true },
+            values: {
+              type: 'json_schema',
+              name: 'answer',
+              description: 'The answer',
+              schema: '{"type":"object"}',
+              strict: true,
+            },
           },
         },
       }),
@@ -262,8 +285,17 @@ describe('text.response', () => {
     const { fake } = await runOpenAi(
       response({
         builtInTools: {
-          webSearch: { searchContextSize: 'high', allowedDomains: 'a.com, b.org', country: 'US', city: 'Austin' },
-          fileSearch: { vectorStoreIds: 'vs_1, vs_2', maxResults: 4, filters: '{"type":"eq","key":"k","value":"v"}' },
+          webSearch: {
+            searchContextSize: 'high',
+            allowedDomains: 'a.com, b.org',
+            country: 'US',
+            city: 'Austin',
+          },
+          fileSearch: {
+            vectorStoreIds: 'vs_1, vs_2',
+            maxResults: 4,
+            filters: '{"type":"eq","key":"k","value":"v"}',
+          },
           codeInterpreter: {},
         },
       }),
@@ -295,7 +327,9 @@ describe('text.response', () => {
               body: {
                 id: 'resp_a',
                 status: 'completed',
-                output: [{ type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{"q":"x"}' }],
+                output: [
+                  { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{"q":"x"}' },
+                ],
                 usage: { input_tokens: 4, output_tokens: 2 },
               },
             }
@@ -306,9 +340,11 @@ describe('text.response', () => {
     const first = fake.requests[0]!.body as DataObject;
     expect((first.tools as DataObject[])[0]).toMatchObject({ type: 'function', name: 'lookup' });
     const second = (fake.requests[1]!.body as DataObject).input as DataObject[];
-    expect(second.some((i) => i.type === 'function_call_output' && i.call_id === 'call_1' && i.output === 'found x')).toBe(
-      true,
-    );
+    expect(
+      second.some(
+        (i) => i.type === 'function_call_output' && i.call_id === 'call_1' && i.output === 'found x',
+      ),
+    ).toBe(true);
     expect(out[0]!.text).toBe('the answer is found x');
     expect(out[0]!.usage).toEqual({ inputTokens: 9, outputTokens: 5 });
   });
@@ -337,7 +373,8 @@ describe('text.response', () => {
   it('reads a background response until it has finished', async () => {
     const { fake, out } = await runOpenAi(response({ options: { backgroundMode: true } }), {
       handler: (_request, index) => {
-        if (index === 0) return { body: { id: 'resp_bg', status: 'queued', model: 'gpt-5-mini', output: [] } };
+        if (index === 0)
+          return { body: { id: 'resp_bg', status: 'queued', model: 'gpt-5-mini', output: [] } };
         if (index === 1) return { body: { id: 'resp_bg', status: 'in_progress', output: [] } };
         return responses('done later', { id: 'resp_bg' });
       },
@@ -349,13 +386,19 @@ describe('text.response', () => {
 
   it('gives n8n texts for a spent quota and a rate limit', async () => {
     const quota = await runOpenAi(response(), {
-      handler: () => ({ status: 429, body: { error: { code: 'insufficient_quota', message: `You exceeded ${KEY}` } } }),
+      handler: () => ({
+        status: 429,
+        body: { error: { code: 'insufficient_quota', message: `You exceeded ${KEY}` } },
+      }),
     });
     expect(quota.result.status).toBe('error');
     expect(quota.result.error?.message).toContain('Insufficient quota detected');
     expect(JSON.stringify(quota.result.error)).not.toContain(KEY);
     const limit = await runOpenAi(response(), {
-      handler: () => ({ status: 429, body: { error: { code: 'rate_limit_exceeded', message: 'slow down' } } }),
+      handler: () => ({
+        status: 429,
+        body: { error: { code: 'rate_limit_exceeded', message: 'slow down' } },
+      }),
     });
     expect(limit.result.error?.message).toContain('OpenAI: Rate limit reached');
   });
@@ -380,7 +423,10 @@ describe('text.classify', () => {
   };
 
   it('posts the text to /moderations with the omni model and returns the first result', async () => {
-    const { fake, out } = await runOpenAi({ resource: 'text', operation: 'classify', input: 'bad words' }, { handler: () => reply });
+    const { fake, out } = await runOpenAi(
+      { resource: 'text', operation: 'classify', input: 'bad words' },
+      { handler: () => reply },
+    );
     expect(fake.requests[0]).toMatchObject({ url: `${BASE}/moderations`, method: 'POST' });
     expect(fake.requests[0]!.body).toEqual({ input: 'bad words', model: 'omni-moderation-latest' });
     expect(out[0]).toEqual({
@@ -392,7 +438,13 @@ describe('text.classify', () => {
 
   it('simplifies to the flag, and has no Use Stable Model option', async () => {
     const { fake, out } = await runOpenAi(
-      { resource: 'text', operation: 'classify', input: 'x', simplify: true, options: { useStableModel: true } },
+      {
+        resource: 'text',
+        operation: 'classify',
+        input: 'x',
+        simplify: true,
+        options: { useStableModel: true },
+      },
       { handler: () => reply },
     );
     expect((fake.requests[0]!.body as DataObject).model).toBe('omni-moderation-latest');
@@ -407,8 +459,18 @@ describe('text.classify', () => {
 describe('image', () => {
   it('generates with DALL-E 3 and returns a binary file', async () => {
     const { fake, items } = await runOpenAi(
-      { resource: 'image', operation: 'generate', model: 'dall-e-3', prompt: 'a cat', options: { quality: 'hd', size: '1792x1024', style: 'natural', n: 1 } },
-      { handler: () => ({ body: { created: 1, data: [{ b64_json: b64('PNGDATA'), revised_prompt: 'a nice cat' }] } }) },
+      {
+        resource: 'image',
+        operation: 'generate',
+        model: 'dall-e-3',
+        prompt: 'a cat',
+        options: { quality: 'hd', size: '1792x1024', style: 'natural', n: 1 },
+      },
+      {
+        handler: () => ({
+          body: { created: 1, data: [{ b64_json: b64('PNGDATA'), revised_prompt: 'a nice cat' }] },
+        }),
+      },
     );
     expect(fake.requests[0]).toMatchObject({ url: `${BASE}/images/generations`, method: 'POST' });
     expect(fake.requests[0]!.body).toEqual({
@@ -427,8 +489,18 @@ describe('image', () => {
 
   it('asks a GPT Image model with no response format and gets every image', async () => {
     const { fake, items } = await runOpenAi(
-      { resource: 'image', operation: 'generate', model: 'gpt-image-1', prompt: 'a dog', options: { n: 2, returnImageUrls: true } },
-      { handler: () => ({ body: { output_format: 'webp', data: [{ b64_json: b64('A') }, { b64_json: b64('B') }] } }) },
+      {
+        resource: 'image',
+        operation: 'generate',
+        model: 'gpt-image-1',
+        prompt: 'a dog',
+        options: { n: 2, returnImageUrls: true },
+      },
+      {
+        handler: () => ({
+          body: { output_format: 'webp', data: [{ b64_json: b64('A') }, { b64_json: b64('B') }] },
+        }),
+      },
     );
     expect(fake.requests[0]!.body).toEqual({ model: 'gpt-image-1', prompt: 'a dog', n: 2 });
     expect(items.map((i) => decode(i).text)).toEqual(['A', 'B']);
@@ -438,7 +510,13 @@ describe('image', () => {
   it('returns links when asked, and downloads a link without the key', async () => {
     const urlReply: FakeReply = { body: { data: [{ url: 'http://files.test/img.png' }] } };
     const links = await runOpenAi(
-      { resource: 'image', operation: 'generate', model: 'dall-e-3', prompt: 'p', options: { returnImageUrls: true } },
+      {
+        resource: 'image',
+        operation: 'generate',
+        model: 'dall-e-3',
+        prompt: 'p',
+        options: { returnImageUrls: true },
+      },
       { handler: () => urlReply },
     );
     expect((links.fake.requests[0]!.body as DataObject).response_format).toBe('url');
@@ -479,7 +557,9 @@ describe('image', () => {
       },
     );
     const sent = fake.requests.find((r) => r.url === `${BASE}/responses`)!;
-    expect(fake.requests.find((r) => r.url.startsWith('http://files.test'))!.headers?.authorization).toBeUndefined();
+    expect(
+      fake.requests.find((r) => r.url.startsWith('http://files.test'))!.headers?.authorization,
+    ).toBeUndefined();
     const body = sent.body as DataObject;
     expect(body.model).toBe('gpt-4o');
     expect(body.max_output_tokens).toBe(120);
@@ -524,7 +604,8 @@ describe('image', () => {
       },
       { items: [binaryItem({ pic: { text: 'JPG', mimeType: 'image/jpeg' } })] },
     );
-    const content = ((fake.requests[0]!.body as DataObject).input as DataObject[])[0]!.content as DataObject[];
+    const content = ((fake.requests[0]!.body as DataObject).input as DataObject[])[0]!
+      .content as DataObject[];
     expect(content[0]).toEqual({ type: 'input_text', text: "What's in this image?" });
     expect(content[1]).toEqual({ type: 'input_image', image_url: `data:image/jpeg;base64,${b64('JPG')}` });
   });
@@ -537,7 +618,16 @@ describe('image', () => {
         model: 'gpt-image-1',
         prompt: 'add a hat',
         images: 'one, two',
-        options: { n: 1, size: '1024x1024', quality: 'high', outputFormat: 'jpeg', outputCompression: 80, background: 'opaque', inputFidelity: 'high', mask: 'mask' },
+        options: {
+          n: 1,
+          size: '1024x1024',
+          quality: 'high',
+          outputFormat: 'jpeg',
+          outputCompression: 80,
+          background: 'opaque',
+          inputFidelity: 'high',
+          mask: 'mask',
+        },
       },
       {
         items: [
@@ -585,7 +675,11 @@ describe('audio', () => {
       },
       { handler: () => ({ body: bytes('WAVDATA'), headers: { 'content-type': 'audio/wav' } }) },
     );
-    expect(fake.requests[0]).toMatchObject({ url: `${BASE}/audio/speech`, method: 'POST', responseType: 'arraybuffer' });
+    expect(fake.requests[0]).toMatchObject({
+      url: `${BASE}/audio/speech`,
+      method: 'POST',
+      responseType: 'arraybuffer',
+    });
     expect(fake.requests[0]!.body).toEqual({
       model: 'tts-1-hd',
       input: 'Hi there',
@@ -598,7 +692,12 @@ describe('audio', () => {
 
   it('transcribes a recording with its language and temperature', async () => {
     const { fake, out } = await runOpenAi(
-      { resource: 'audio', operation: 'transcribe', binaryPropertyName: 'rec', options: { language: 'de', temperature: 0.2 } },
+      {
+        resource: 'audio',
+        operation: 'transcribe',
+        binaryPropertyName: 'rec',
+        options: { language: 'de', temperature: 0.2 },
+      },
       {
         items: [binaryItem({ rec: { text: 'SOUND', mimeType: 'audio/mpeg', fileName: 'a.mp3' } })],
         handler: () => ({ body: { text: 'Hallo Welt' } }),
@@ -633,7 +732,9 @@ describe('file', () => {
       { resource: 'file', operation: 'upload', options: { purpose: 'assistants' } },
       {
         items: [binaryItem({ data: { text: 'DOC', mimeType: 'application/pdf', fileName: 'doc.pdf' } })],
-        handler: () => ({ body: { id: 'file-1', object: 'file', filename: 'doc.pdf', purpose: 'assistants' } }),
+        handler: () => ({
+          body: { id: 'file-1', object: 'file', filename: 'doc.pdf', purpose: 'assistants' },
+        }),
       },
     );
     const request = fake.requests[0]!;
@@ -654,7 +755,11 @@ describe('file', () => {
             : { body: { data: [{ id: 'file-3' }], has_more: false, last_id: 'file-3' } },
       },
     );
-    expect(fake.requests[0]).toMatchObject({ url: `${BASE}/files`, method: 'GET', qs: { limit: 100, purpose: 'vision' } });
+    expect(fake.requests[0]).toMatchObject({
+      url: `${BASE}/files`,
+      method: 'GET',
+      qs: { limit: 100, purpose: 'vision' },
+    });
     expect(fake.requests[1]!.qs).toMatchObject({ after: 'file-2' });
     expect(out.map((o) => o.id)).toEqual(['file-1', 'file-2', 'file-3']);
   });
@@ -685,7 +790,12 @@ describe('conversation', () => {
       {
         resource: 'conversation',
         operation: 'create',
-        messages: { values: [{ role: 'system', content: 'Be kind' }, { role: 'user', content: 'Hi' }] },
+        messages: {
+          values: [
+            { role: 'system', content: 'Be kind' },
+            { role: 'user', content: 'Hi' },
+          ],
+        },
         metadata: '{"topic":"demo"}',
       },
       { handler: () => ({ body: { id: 'conv_1', object: 'conversation', metadata: { topic: 'demo' } } }) },
@@ -724,21 +834,34 @@ describe('conversation', () => {
   });
 
   it('refuses metadata that is not a JSON object', async () => {
-    const { result } = await runOpenAi({ resource: 'conversation', operation: 'update', conversationId: 'c', metadata: '[1]' });
+    const { result } = await runOpenAi({
+      resource: 'conversation',
+      operation: 'update',
+      conversationId: 'c',
+      metadata: '[1]',
+    });
     expect(result.status).toBe('error');
     expect(result.error?.message).toContain('must be a JSON object');
   });
 });
 
 describe('video', () => {
-  const params = { resource: 'video', operation: 'generate', model: 'sora-2', prompt: 'a wave', seconds: '8', size: '720x1280' };
+  const params = {
+    resource: 'video',
+    operation: 'generate',
+    model: 'sora-2',
+    prompt: 'a wave',
+    seconds: '8',
+    size: '720x1280',
+  };
 
   it('starts the job, waits for it and reads the file from the credential host', async () => {
     let polls = 0;
     const { fake, items } = await runOpenAi(params, {
       handler: (request) => {
         if (request.method === 'POST') return { body: { id: 'video_1', status: 'queued' } };
-        if (request.url.endsWith('/content')) return { body: bytes('MP4DATA'), headers: { 'content-type': 'video/mp4' } };
+        if (request.url.endsWith('/content'))
+          return { body: bytes('MP4DATA'), headers: { 'content-type': 'video/mp4' } };
         polls++;
         return polls < 3
           ? { body: { id: 'video_1', status: 'in_progress', progress: 40 } }
@@ -746,10 +869,19 @@ describe('video', () => {
       },
     });
     expect(fake.requests[0]).toMatchObject({ url: `${BASE}/videos`, method: 'POST' });
-    expect(fake.requests[0]!.body).toEqual({ model: 'sora-2', prompt: 'a wave', seconds: '8', size: '720x1280' });
+    expect(fake.requests[0]!.body).toEqual({
+      model: 'sora-2',
+      prompt: 'a wave',
+      seconds: '8',
+      size: '720x1280',
+    });
     expect(polls).toBe(3);
     const content = fake.requests.at(-1)!;
-    expect(content).toMatchObject({ url: `${BASE}/videos/video_1/content`, method: 'GET', responseType: 'arraybuffer' });
+    expect(content).toMatchObject({
+      url: `${BASE}/videos/video_1/content`,
+      method: 'GET',
+      responseType: 'arraybuffer',
+    });
     expect(content.headers?.authorization).toBe(`Bearer ${KEY}`);
     expect(decode(items[0]!)).toMatchObject({ mimeType: 'video/mp4', text: 'MP4DATA' });
     expect(items[0]!.json).toMatchObject({ id: 'video_1', status: 'completed' });
@@ -850,7 +982,10 @@ describe('video', () => {
 
 describe('credentials and hosts', () => {
   it('sends every request to the credential host with the key and never a partner header', async () => {
-    const { fake } = await runOpenAi({ resource: 'conversation', operation: 'get', conversationId: 'c1' }, { handler: () => ({ body: {} }) });
+    const { fake } = await runOpenAi(
+      { resource: 'conversation', operation: 'get', conversationId: 'c1' },
+      { handler: () => ({ body: {} }) },
+    );
     for (const request of fake.requests) {
       expect(new URL(request.url).host).toBe('openai.test');
       expect(request.headers?.authorization).toBe(`Bearer ${KEY}`);

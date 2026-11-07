@@ -134,7 +134,11 @@ export async function searchFiles(ctx: LoadOptionsContext, filter?: string): Pro
 async function upload(ctx: ExecuteContext, itemIndex: number): Promise<Item> {
   const baseUrl = await openAiBaseUrl(ctx, itemIndex);
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
-  const [file] = await readBinaryFields(ctx, itemIndex, String(ctx.getNodeParameter('binaryPropertyName', itemIndex, 'data')));
+  const [file] = await readBinaryFields(
+    ctx,
+    itemIndex,
+    String(ctx.getNodeParameter('binaryPropertyName', itemIndex, 'data')),
+  );
   if (!file) throw new NodeOperationError(ctx.getNode(), 'The item has no file', { itemIndex });
   const response = await openAiCall<DataObject>(ctx, itemIndex, {
     url: `${baseUrl}/files`,
@@ -153,20 +157,26 @@ async function list(ctx: ExecuteContext, itemIndex: number): Promise<Item[]> {
   const baseUrl = await openAiBaseUrl(ctx, itemIndex);
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
   const all = ctx.getNodeParameter('returnAll', itemIndex, false) === true;
-  const limit = all ? Number.POSITIVE_INFINITY : Math.max(1, Number(ctx.getNodeParameter('limit', itemIndex, 50)));
+  const limit = all
+    ? Number.POSITIVE_INFINITY
+    : Math.max(1, Number(ctx.getNodeParameter('limit', itemIndex, 50)));
   const purpose = options.purpose && options.purpose !== 'any' ? String(options.purpose) : undefined;
   const files: DataObject[] = [];
   let after: string | undefined;
   while (files.length < limit) {
-    const page = await openAiCall<{ data?: DataObject[]; has_more?: boolean; last_id?: string }>(ctx, itemIndex, {
-      url: `${baseUrl}/files`,
-      method: 'GET',
-      qs: {
-        limit: Math.min(100, Number.isFinite(limit) ? limit - files.length : 100),
-        ...(purpose ? { purpose } : {}),
-        ...(after ? { after } : {}),
+    const page = await openAiCall<{ data?: DataObject[]; has_more?: boolean; last_id?: string }>(
+      ctx,
+      itemIndex,
+      {
+        url: `${baseUrl}/files`,
+        method: 'GET',
+        qs: {
+          limit: Math.min(100, Number.isFinite(limit) ? limit - files.length : 100),
+          ...(purpose ? { purpose } : {}),
+          ...(after ? { after } : {}),
+        },
       },
-    });
+    );
     const data = page.data ?? [];
     files.push(...data);
     const last = page.last_id ?? (data[data.length - 1]?.id as string | undefined);

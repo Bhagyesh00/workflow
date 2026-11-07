@@ -17,7 +17,11 @@ const TARGET = { project: 'p', branch: 'b', database: 'db1', schema: 'public', t
 
 type Answer = { body: unknown; headers?: Record<string, string> };
 
-function fakeCtx(answer: (req: HttpRequestOptions) => Answer, host = HOST, params: Record<string, unknown> = {}) {
+function fakeCtx(
+  answer: (req: HttpRequestOptions) => Answer,
+  host = HOST,
+  params: Record<string, unknown> = {},
+) {
   const calls: Array<{ type: string; req: HttpRequestOptions }> = [];
   const ctx = {
     getCredentials: async () => ({ host }),
@@ -26,7 +30,9 @@ function fakeCtx(answer: (req: HttpRequestOptions) => Answer, host = HOST, param
       httpRequestWithAuthentication: async (type: string, req: HttpRequestOptions) => {
         calls.push({ type, req });
         const a = answer(req);
-        return req.returnFullResponse ? { body: a.body, headers: a.headers ?? {}, statusCode: 200, statusMessage: 'OK' } : a.body;
+        return req.returnFullResponse
+          ? { body: a.body, headers: a.headers ?? {}, statusCode: 200, statusMessage: 'OK' }
+          : a.body;
       },
     },
   };
@@ -58,7 +64,14 @@ const workspace = (req: HttpRequestOptions): Answer | undefined =>
 describe('lakebaseHttpsHost', () => {
   it('keeps an https origin and refuses http, credentials, query and fragment', () => {
     expect(lakebaseHttpsHost(`${HOST}/`)).toBe(HOST);
-    for (const bad of ['http://x.databricks.com', 'https://u:p@x.com', 'https://x.com/?a=1', 'https://x.com/#f', 'nope', '']) {
+    for (const bad of [
+      'http://x.databricks.com',
+      'https://u:p@x.com',
+      'https://x.com/?a=1',
+      'https://x.com/#f',
+      'nope',
+      '',
+    ]) {
       expect(() => lakebaseHttpsHost(bad), bad).toThrow(/https URL/);
     }
   });
@@ -74,10 +87,14 @@ describe('lakebaseRequest', () => {
 
   it('refuses an http credential host and a URL on another host before any call', async () => {
     const http = fakeCtx(() => ({ body: {} }), 'http://adb-1.databricks.com');
-    await expect(lakebaseRequest(http.ctx, 0, { url: 'http://adb-1.databricks.com/x' })).rejects.toThrow(/https URL/);
+    await expect(lakebaseRequest(http.ctx, 0, { url: 'http://adb-1.databricks.com/x' })).rejects.toThrow(
+      /https URL/,
+    );
     expect(http.calls).toHaveLength(0);
     const other = fakeCtx(() => ({ body: {} }));
-    await expect(lakebaseRequest(other.ctx, 0, { url: 'https://evil.example/x' })).rejects.toThrow(/host of the Databricks credential/);
+    await expect(lakebaseRequest(other.ctx, 0, { url: 'https://evil.example/x' })).rejects.toThrow(
+      /host of the Databricks credential/,
+    );
     expect(other.calls).toHaveLength(0);
   });
 
@@ -202,7 +219,10 @@ describe('lakebaseSelectAll', () => {
   it('stops at 100 pages and says rows were left', async () => {
     const { ctx, calls } = fakeCtx((req) => {
       const offset = Number(req.qs?.offset);
-      return { body: rowsOf(LAKEBASE_PAGE_SIZE, offset), headers: { 'content-range': `${offset}-${offset + 999}/9999999` } };
+      return {
+        body: rowsOf(LAKEBASE_PAGE_SIZE, offset),
+        headers: { 'content-range': `${offset}-${offset + 999}/9999999` },
+      };
     });
     const { rows, truncated } = await lakebaseSelectAll(ctx, 0, `${HOST}/t`, {});
     expect(calls).toHaveLength(LAKEBASE_MAX_PAGES);
@@ -220,17 +240,14 @@ describe('lakebaseSelectAll', () => {
 
 describe('list searches', () => {
   it('names match the locators', () => {
-    const modes = lakebaseLocatorProperties.map((p) => (p.modes?.[0] as any).typeOptions.searchListMethod);
+    const modes = lakebaseLocatorProperties.map((p) => p.modes?.[0]?.typeOptions?.searchListMethod);
     expect(modes).toEqual(Object.keys(lakebaseListSearch));
   });
 
   it('lists projects, filters them and passes the page token on', async () => {
     const { ctx, calls } = fakeCtx(() => ({
       body: {
-        projects: [
-          { name: 'projects/alpha', status: { display_name: 'Alpha' } },
-          { name: 'projects/beta' },
-        ],
+        projects: [{ name: 'projects/alpha', status: { display_name: 'Alpha' } }, { name: 'projects/beta' }],
         next_page_token: 'tok',
       },
     }));
@@ -248,7 +265,9 @@ describe('list searches', () => {
 
   it('branches and databases read the locators before them, encoded', async () => {
     const { ctx, calls } = fakeCtx(
-      () => ({ body: { branches: [{ name: 'projects/p/branches/main' }], databases: [{ name: 'x/databases/d1' }] } }),
+      () => ({
+        body: { branches: [{ name: 'projects/p/branches/main' }], databases: [{ name: 'x/databases/d1' }] },
+      }),
       HOST,
       { project: { __rl: true, mode: 'id', value: 'p-1' }, branch: 'main' },
     );

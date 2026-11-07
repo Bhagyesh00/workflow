@@ -49,8 +49,7 @@ export const RerankerCohereNode: NodeType = {
   },
   async supplyData(ctx, itemIndex) {
     const creds = await ctx.getCredentials('cohereApi', itemIndex);
-    const model =
-      String(ctx.getNodeParameter('modelName', itemIndex, 'rerank-v3.5')).trim() || 'rerank-v3.5';
+    const model = String(ctx.getNodeParameter('modelName', itemIndex, 'rerank-v3.5')).trim() || 'rerank-v3.5';
     const topN = Math.max(1, Math.floor(Number(ctx.getNodeParameter('topN', itemIndex, 3)) || 3));
     const baseUrl = trimSlash(String(creds.url || COHERE_DEFAULT_BASE_URL));
 

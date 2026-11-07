@@ -122,7 +122,11 @@ export const MemoryXataNode: NodeType = {
     const call = <T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown) =>
       ctx.helpers.httpRequestWithAuthentication<T>(
         'xataApi',
-        { method, url: `${tableUrl}${path}`, ...(body === undefined ? {} : { body: body as never, json: true }) },
+        {
+          method,
+          url: `${tableUrl}${path}`,
+          ...(body === undefined ? {} : { body: body as never, json: true }),
+        },
         itemIndex,
       ) as Promise<T>;
 

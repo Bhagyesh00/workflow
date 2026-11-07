@@ -2,7 +2,16 @@
 import type { HttpRequestOptions } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { clearBufferMemory } from '../src/nodes/memory/memory.nodes';
-import { connect, FakeHttpClient, type FakeReply, node, run, scriptModel, services, toolNodeTypes } from './harness';
+import {
+  connect,
+  FakeHttpClient,
+  type FakeReply,
+  node,
+  run,
+  scriptModel,
+  services,
+  toolNodeTypes,
+} from './harness';
 
 const HOST = 'https://adb-1.7.azuredatabricks.net';
 /** the Data API is the read-write endpoint of the branch, not the workspace host */
@@ -57,7 +66,9 @@ function fakeLakebase(fail?: { status: number; body: unknown }, pageTotal?: numb
     const offset = Number(req.qs?.offset ?? 0);
     const limit = Number(req.qs?.limit ?? 1000);
     const total = pageTotal ?? found.length;
-    const page = pageTotal ? Array.from({ length: Math.min(limit, total - offset) }, (_, i) => rows[0] ?? { id: i }) : found.slice(offset, offset + limit);
+    const page = pageTotal
+      ? Array.from({ length: Math.min(limit, total - offset) }, (_, i) => rows[0] ?? { id: i })
+      : found.slice(offset, offset + limit);
     return { body: page, headers: { 'content-range': `${offset}-${offset + page.length - 1}/${total}` } };
   };
   return { rows, http: new FakeHttpClient(handler) };
@@ -86,9 +97,17 @@ async function converse(
 ) {
   scriptModel('Model', [text]);
   return run(
-    [node('Trigger', 'test.trigger'), node('Agent', 'ai.agent', { promptType: 'define', text: 'hello' }), node('Model', 'test.fakeChatModel'), mem],
+    [
+      node('Trigger', 'test.trigger'),
+      node('Agent', 'ai.agent', { promptType: 'define', text: 'hello' }),
+      node('Model', 'test.fakeChatModel'),
+      mem,
+    ],
     connect(['Trigger', 'Agent'], ['Model', 'Agent', 'ai_languageModel'], ['Mem', 'Agent', 'ai_memory']),
-    { nodeTypes: toolNodeTypes, services: services({ nodeTypes: toolNodeTypes, creds: creds(host), http, tenantId }) },
+    {
+      nodeTypes: toolNodeTypes,
+      services: services({ nodeTypes: toolNodeTypes, creds: creds(host), http, tenantId }),
+    },
   );
 }
 
@@ -108,7 +127,9 @@ describe('P5-51 Lakebase memory', () => {
     const load = tableCalls(x.http)[0];
     expect(load.method).toBe('GET');
     expect(load.qs).toMatchObject({ session_id: 'eq.t1:s1', order: 'id.desc', limit: 10 });
-    expect(x.http.requests.every((r) => (r.headers as any)?.authorization === 'Bearer dapi-test-token')).toBe(true);
+    expect(x.http.requests.every((r) => (r.headers as any)?.authorization === 'Bearer dapi-test-token')).toBe(
+      true,
+    );
     const post = tableCalls(x.http).find((r) => r.method === 'POST')!;
     expect(Array.isArray(post.body)).toBe(true);
     expect(post.followRedirects).toBe(false);
@@ -141,7 +162,9 @@ describe('P5-51 Lakebase memory', () => {
   it('uses the table name from the node, default ai_chat_histories', async () => {
     const x = fakeLakebase();
     await converse(x.http, { mem: memNode({ lakebaseTable: 'my_chats' }) });
-    expect(x.http.requests.some((r) => r.url === TABLE_URL.replace('ai_chat_histories', 'my_chats'))).toBe(true);
+    expect(x.http.requests.some((r) => r.url === TABLE_URL.replace('ai_chat_histories', 'my_chats'))).toBe(
+      true,
+    );
   });
 
   it('refuses an http credential host before any request', async () => {
@@ -225,7 +248,10 @@ describe('P5-51 Lakebase memory', () => {
       const r = await run(
         [node('Trigger', 'test.trigger'), node('Manager', 'ai.memoryManager', parameters), memNode()],
         connect(['Trigger', 'Manager'], ['Mem', 'Manager', 'ai_memory']),
-        { nodeTypes: toolNodeTypes, services: services({ nodeTypes: toolNodeTypes, creds: creds(), http: x.http }) },
+        {
+          nodeTypes: toolNodeTypes,
+          services: services({ nodeTypes: toolNodeTypes, creds: creds(), http: x.http }),
+        },
       );
       expect(r.status, JSON.stringify(r.error)).toBe('success');
       return r;
@@ -233,13 +259,24 @@ describe('P5-51 Lakebase memory', () => {
     const rows = (list: Array<[string, string]>) => ({
       messageValues: list.map(([type, message]) => ({ type, message, hideFromUI: false })),
     });
-    await manage({ mode: 'insert', messages: rows([['user', 'a'], ['ai', 'b'], ['user', 'c']]) });
+    await manage({
+      mode: 'insert',
+      messages: rows([
+        ['user', 'a'],
+        ['ai', 'b'],
+        ['user', 'c'],
+      ]),
+    });
     const loaded = await manage({ mode: 'load', simplifyOutput: false });
     expect((loaded.output('Manager')[0].messages as any[]).map((m) => m.content)).toEqual(['a', 'b', 'c']);
     x.http.requests.length = 0;
     await manage({ mode: 'insert', insertMode: 'override', messages: rows([['user', 'z']]) });
     // replace is a DELETE, then one array POST
-    expect(tableCalls(x.http).map((r) => r.method).filter((m) => m !== 'GET')).toEqual(['DELETE', 'POST']);
+    expect(
+      tableCalls(x.http)
+        .map((r) => r.method)
+        .filter((m) => m !== 'GET'),
+    ).toEqual(['DELETE', 'POST']);
     expect(x.rows.map((r) => r.message.content)).toEqual(['z']);
     await manage({ mode: 'delete', deleteMode: 'all' });
     expect(x.rows).toHaveLength(0);
@@ -248,9 +285,16 @@ describe('P5-51 Lakebase memory', () => {
   it('loadAll pages through Content-Range', async () => {
     const x = fakeLakebase(undefined, 2500);
     const r = await run(
-      [node('Trigger', 'test.trigger'), node('Manager', 'ai.memoryManager', { mode: 'load', simplifyOutput: false }), memNode()],
+      [
+        node('Trigger', 'test.trigger'),
+        node('Manager', 'ai.memoryManager', { mode: 'load', simplifyOutput: false }),
+        memNode(),
+      ],
       connect(['Trigger', 'Manager'], ['Mem', 'Manager', 'ai_memory']),
-      { nodeTypes: toolNodeTypes, services: services({ nodeTypes: toolNodeTypes, creds: creds(), http: x.http }) },
+      {
+        nodeTypes: toolNodeTypes,
+        services: services({ nodeTypes: toolNodeTypes, creds: creds(), http: x.http }),
+      },
     );
     // the paged fake returns blank rows (no stored message): the paging itself is what is checked
     expect(r.status, JSON.stringify(r.error)).toBe('success');
@@ -262,9 +306,16 @@ describe('P5-51 Lakebase memory', () => {
   it('a session over 1000 x 100 rows ends with the too-many-rows error', async () => {
     const x = fakeLakebase(undefined, 5_000_000);
     const r = await run(
-      [node('Trigger', 'test.trigger'), node('Manager', 'ai.memoryManager', { mode: 'load', simplifyOutput: false }), memNode()],
+      [
+        node('Trigger', 'test.trigger'),
+        node('Manager', 'ai.memoryManager', { mode: 'load', simplifyOutput: false }),
+        memNode(),
+      ],
       connect(['Trigger', 'Manager'], ['Mem', 'Manager', 'ai_memory']),
-      { nodeTypes: toolNodeTypes, services: services({ nodeTypes: toolNodeTypes, creds: creds(), http: x.http }) },
+      {
+        nodeTypes: toolNodeTypes,
+        services: services({ nodeTypes: toolNodeTypes, creds: creds(), http: x.http }),
+      },
     );
     expect(r.status).toBe('error');
     expect(r.error?.message).toContain('more than 100000 rows');

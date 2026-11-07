@@ -59,7 +59,10 @@ export const DatabricksAiAgentNode: NodeType = {
   async execute(ctx) {
     if (ctx.getNodeParameter('exportTraces', 0, false) !== true) return executeAgent(ctx);
     if (!ctx.getNode().credentials?.[CREDENTIAL]) {
-      throw new NodeOperationError(ctx.getNode(), 'Select a Databricks credential to export traces to MLflow');
+      throw new NodeOperationError(
+        ctx.getNode(),
+        'Select a Databricks credential to export traces to MLflow',
+      );
     }
     const credentials = await ctx.getCredentials<{ host?: string }>(CREDENTIAL, 0);
     const experiment = readExperiment(ctx.getNodeParameter('experiment', 0, ''), ctx.getWorkflow().id);

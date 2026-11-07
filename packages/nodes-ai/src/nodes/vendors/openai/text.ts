@@ -26,8 +26,8 @@ import { messageText } from '../../../shared/utils';
 import { vendorError } from '../shared/api';
 import {
   maxToolIterationsOption,
-  readVendorMessages,
   messagesProperty,
+  readVendorMessages,
   simplifyProperty,
   toChatMessages,
 } from '../shared/messages';
@@ -108,7 +108,11 @@ export function readJsonObject(
 }
 
 /** `properties` shown for one resource and operation only */
-export function forOperation(resource: string, operation: string, properties: NodeProperty[]): NodeProperty[] {
+export function forOperation(
+  resource: string,
+  operation: string,
+  properties: NodeProperty[],
+): NodeProperty[] {
   return properties.map((property) => ({
     ...property,
     displayOptions: {
@@ -139,7 +143,8 @@ export function modelLocator(defaultModel: string): NodeProperty {
   };
 }
 
-const NOT_A_TEXT_MODEL = /audio|realtime|transcribe|tts|image|embed|moderation|search-preview|whisper|dall-e|sora/i;
+const NOT_A_TEXT_MODEL =
+  /audio|realtime|transcribe|tts|image|embed|moderation|search-preview|whisper|dall-e|sora/i;
 
 async function listModels(ctx: LoadOptionsContext) {
   const credentials = await ctx.getCredentials(OPENAI_CREDENTIAL);
@@ -264,7 +269,13 @@ const textResponseProperties: NodeProperty[] = [
         placeholder: 'code_interpreter_call.outputs',
         description: 'Comma separated names of extra data the reply should hold',
       },
-      { displayName: 'Instructions', name: 'instructions', type: 'string', default: '', typeOptions: { rows: 3 } },
+      {
+        displayName: 'Instructions',
+        name: 'instructions',
+        type: 'string',
+        default: '',
+        typeOptions: { rows: 3 },
+      },
       {
         displayName: 'Max Tokens',
         name: 'maxTokens',
@@ -518,7 +529,8 @@ async function textResponse(ctx: ExecuteContext, itemIndex: number): Promise<Ite
     extraBody.include = [...include, ...(topLogprobs ? ['message.output_text.logprobs'] : [])];
   }
   if (options.maxToolCalls !== undefined) extraBody.max_tool_calls = Number(options.maxToolCalls);
-  if (options.parallelToolCalls !== undefined) extraBody.parallel_tool_calls = options.parallelToolCalls === true;
+  if (options.parallelToolCalls !== undefined)
+    extraBody.parallel_tool_calls = options.parallelToolCalls === true;
   if (optionalText(options.previousResponseId)) extraBody.previous_response_id = options.previousResponseId;
   if (reasoning?.summary) {
     extraBody.reasoning = {
@@ -546,7 +558,8 @@ async function textResponse(ctx: ExecuteContext, itemIndex: number): Promise<Ite
     reasoningEffort: optionalText(reasoning?.effort),
     verbosity,
     textFormat: format?.format,
-    serviceTier: options.serviceTier && options.serviceTier !== 'auto' ? String(options.serviceTier) : undefined,
+    serviceTier:
+      options.serviceTier && options.serviceTier !== 'auto' ? String(options.serviceTier) : undefined,
     topLogprobs,
     promptCacheKey: optionalText(options.promptCacheKey),
     safetyIdentifier: optionalText(options.safetyIdentifier),
@@ -594,7 +607,7 @@ async function textResponse(ctx: ExecuteContext, itemIndex: number): Promise<Ite
     ...(timeout > 0 ? { timeoutMs: timeout * 1000 } : {}),
   });
 
-  let result;
+  let result: Awaited<ReturnType<typeof runVendorChat>>;
   try {
     result = await runVendorChat(ctx, itemIndex, wrapped, {
       messages,
