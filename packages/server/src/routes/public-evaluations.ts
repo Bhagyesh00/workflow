@@ -4,15 +4,13 @@
  * row needs (public-api.ts spreads it; the role and scope gates run there). The handlers call
  * `ctx.evaluations`; lists answer `{data, nextCursor}` with the cursor helpers of public-data-tables.ts.
  * Create answers 201 (409 `Workflow has no evaluation trigger`; no 402, there is no licence gate).
- *
- * C0 STUB: lane L10 writes the handlers in `publicEvaluationHandlers` (every body throws
- * `not implemented (L10)`); the rows are final.
  */
 import { MAX_EVALUATION_CONCURRENCY, MAX_EVALUATION_ROWS } from '@workflow/workflow';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import type { Role } from '../db/schema';
 import type { ApiKeyScope } from '../http/api-key-scopes';
+import { ApiError } from '../http/errors';
 import type { PublicApiInput } from './public-api';
 
 type Handler = (ctx: ServerContext, input: PublicApiInput) => Promise<unknown>;
@@ -53,15 +51,72 @@ const createBody = z.object({
   rowIndices: z.array(z.number().int().min(0)).max(MAX_EVALUATION_ROWS).optional(),
 });
 
-const notImplemented = (): Promise<unknown> => Promise.reject(new Error('not implemented (L10)'));
+/** the cursor is an opaque offset: `o` and the number of rows already sent (as public-data-tables.ts) */
+const CURSOR_PREFIX = 'o';
 
-/** L10 fills these; the rows below bind to them late, so the handler that runs is the one here */
+function decodeCursor(raw: string | undefined): number {
+  if (raw === undefined) return 0;
+  const text = Buffer.from(raw, 'base64url').toString('utf8');
+  const skip = text.startsWith(CURSOR_PREFIX) ? Number(text.slice(CURSOR_PREFIX.length)) : Number.NaN;
+  if (
+    !Number.isSafeInteger(skip) ||
+    skip < 0 ||
+    Buffer.from(raw, 'base64url').toString('base64url') !== raw
+  ) {
+    throw ApiError.badRequest('Invalid cursor');
+  }
+  return skip;
+}
+
+const encodeCursor = (skip: number) => Buffer.from(`${CURSOR_PREFIX}${skip}`, 'utf8').toString('base64url');
+
+/** one page of `{count, data}` as `{data, nextCursor}` */
+function paged<T>(page: { count: number; data: T[] }, skip: number) {
+  const end = skip + page.data.length;
+  return {
+    data: page.data,
+    nextCursor: page.data.length > 0 && end < page.count ? encodeCursor(end) : null,
+  };
+}
+
+const actorOf = ({ auth, request }: PublicApiInput) => ({ userId: auth.user.id, ip: request.ip });
+
+/** the handlers; the rows below bind to them late, so the handler that runs is the one here */
 export const publicEvaluationHandlers: Record<PublicEvaluationHandler, Handler> = {
-  list: () => notImplemented(),
-  create: () => notImplemented(),
-  get: () => notImplemented(),
-  listCases: () => notImplemented(),
-  cancel: () => notImplemented(),
+  list: async (ctx, { auth, params, query }) => {
+    const skip = decodeCursor(query.cursor);
+    const page = await ctx.evaluations.list(auth.tenant.id, params.workflowId, {
+      skip,
+      limit: query.limit,
+      status: query.status,
+    });
+    return paged(page, skip);
+  },
+  create: async (ctx, input) => {
+    const { auth, params, body } = input;
+    const { testRunId } = await ctx.evaluations.start(
+      auth.tenant,
+      params.workflowId,
+      { concurrency: body?.concurrency, rowIndices: body?.rowIndices },
+      actorOf(input),
+    );
+    return { data: await ctx.evaluations.get(auth.tenant.id, params.workflowId, testRunId) };
+  },
+  get: async (ctx, { auth, params }) => ({
+    data: await ctx.evaluations.get(auth.tenant.id, params.workflowId, params.runId),
+  }),
+  listCases: async (ctx, { auth, params, query }) => {
+    const skip = decodeCursor(query.cursor);
+    const page = await ctx.evaluations.listCases(auth.tenant.id, params.workflowId, params.runId, {
+      skip,
+      limit: query.limit,
+    });
+    return paged(page, skip);
+  },
+  cancel: async (ctx, { auth, params }) => {
+    await ctx.evaluations.cancel(auth.tenant.id, params.workflowId, params.runId);
+    return { data: { ok: true } };
+  },
 };
 
 const route = (
