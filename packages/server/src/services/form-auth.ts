@@ -3,7 +3,7 @@
  * the form for a 60 minute token. Codes and tokens are never logged, and a stored code is only a hash.
  */
 import { randomBytes } from 'node:crypto';
-import type { FormAuthHelper, FormUser } from '@workflow/workflow';
+import { CHAT_TOKEN_KINDS, type FormAuthHelper, type FormUser } from '@workflow/workflow';
 import type { ServiceDeps } from '../context';
 import { ApiError } from '../http/errors';
 import { hasRole, sha256 } from './auth';
@@ -11,14 +11,16 @@ import { hasRole, sha256 } from './auth';
 const CODE_TTL_MS = 60_000;
 /** n8n's FORM_USER_AUTH_TOKEN_TTL_SECONDS */
 const TOKEN_TTL_SECONDS = 60 * 60;
-const TOKEN_KIND = 'form-user';
+const FORM_TOKEN_KIND = 'form-user';
+/** the address of a Chat Trigger: its codes and tokens are of the chat kind (P5-57) */
+const CHAT_PATH = /^\/webhook(-test)?\/[^/]+\/.+\/chat$/;
 /** 32 random bytes in base64url */
 const CODE_SHAPE = /^[\w-]{43}$/;
 
 interface IssuedCode {
   userId: string;
   tenantId: string;
-  /** the form it opens */
+  /** the form or chat it opens */
   path: string;
 }
 
@@ -36,23 +38,27 @@ export class FormAuthService implements FormAuthHelper {
     return `/form-auth?redirect=${encodeURIComponent(returnTo)}`;
   }
 
-  /** the token for a code, null for a used or expired code */
+  /** the token for a code, null for a used or expired code; a chat path's code gives a `chat-user` token */
   async exchangeCode(code: string): Promise<string | null> {
     if (!CODE_SHAPE.test(code)) return null;
     const issued = await this.take(code);
     if (!issued) return null;
-    return this.deps
-      .context()
-      .formTokens.sign(
-        { kind: TOKEN_KIND, userId: issued.userId, tenantId: issued.tenantId, path: issued.path },
-        TOKEN_TTL_SECONDS,
-      );
+    return this.deps.context().formTokens.sign(
+      {
+        kind: CHAT_PATH.test(issued.path) ? CHAT_TOKEN_KINDS.user : FORM_TOKEN_KIND,
+        userId: issued.userId,
+        tenantId: issued.tenantId,
+        path: issued.path,
+      },
+      TOKEN_TTL_SECONDS,
+    );
   }
 
   /** the user of a valid token who is still a member of its workspace */
   async verifyToken(token: string): Promise<FormUser | null> {
     const payload = this.deps.context().formTokens.verify(token);
-    if (payload?.kind !== TOKEN_KIND) return null;
+    // the page's own check binds the kind: a form token never opens a chat and the reverse
+    if (payload?.kind !== FORM_TOKEN_KIND && payload?.kind !== CHAT_TOKEN_KINDS.user) return null;
     const { userId, tenantId } = payload;
     if (typeof userId !== 'string' || typeof tenantId !== 'string') return null;
     const { repos } = this.deps;
@@ -89,7 +95,7 @@ export class FormAuthService implements FormAuthHelper {
     return code;
   }
 
-  /** `/form[-test]/<tenantSlug>/...` or `/form-waiting/<executionId>/...` */
+  /** `/form[-test]/<tenantSlug>/...`, `/webhook[-test]/<tenantSlug>/...` or `/form-waiting/<executionId>/...` */
   private async tenantOfForm(path: string): Promise<string | undefined> {
     const { repos } = this.deps;
     const [, base, owner] = path.split('/');

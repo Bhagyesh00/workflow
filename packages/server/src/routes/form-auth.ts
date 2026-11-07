@@ -1,7 +1,7 @@
 /**
  * /rest/form-auth (P4-16). FormSignInPage calls it with the session; any member may ask, and only for
- * themselves. returnTo must be a form path on this server, so the page cannot be used to redirect
- * elsewhere.
+ * themselves. returnTo must be a form path or a chat path (P5-57) on this server, so the page cannot be
+ * used to redirect elsewhere.
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -16,11 +16,15 @@ function staysOnForm(returnTo: string): boolean {
   return !segments.some((segment) => /^(\.|%2e){1,2}$/i.test(segment));
 }
 
+/** a Chat Trigger's address: production or test, any path after the workspace, ending in /chat */
+const CHAT_PATH = /^\/webhook(-test)?\/[^/]+\/.+\/chat$/;
+const FORM_PATH = /^\/form(-test|-waiting)?\//;
+
 const codeBody = z.object({
   returnTo: z
     .string()
     .max(2048)
-    .regex(/^\/form(-test|-waiting)?\//)
+    .refine((value) => FORM_PATH.test(value) || CHAT_PATH.test(value.split('?')[0]))
     .refine(staysOnForm),
 });
 

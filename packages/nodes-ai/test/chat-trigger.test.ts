@@ -14,14 +14,23 @@ import { connect, node, nodeTypes, run, scriptModel, services } from './harness'
 async function callWebhook(
   parameters: DataObject,
   request: Partial<WebhookRequest>,
-  options: { mode?: ExecutionMode; webhookName?: string; creds?: Record<string, DataObject> } = {},
+  options: {
+    mode?: ExecutionMode;
+    webhookName?: string;
+    creds?: Record<string, DataObject>;
+    formTokens?: ExecutionServices['formTokens'];
+  } = {},
 ): Promise<WebhookResponseData> {
   const trigger = node('Chat', 'ai.chatTrigger', parameters, {
     webhookId: 'hook-1',
     credentials: { httpBasicAuth: { id: 'b', name: 'b' } },
   });
   const workflow = new Workflow({ name: 'chat', nodes: [trigger], connections: {} }, nodeTypes);
-  const svc: ExecutionServices = services({ creds: options.creds, mode: options.mode ?? 'webhook' });
+  const svc: ExecutionServices = services({
+    creds: options.creds,
+    mode: options.mode ?? 'webhook',
+    formTokens: options.formTokens,
+  });
   const ctx = createWebhookContext(
     {
       workflow,
@@ -37,6 +46,14 @@ async function callWebhook(
 }
 
 const message = { sessionId: 'abc', chatInput: 'Hello bot' };
+
+/** tokens the way the host signs them: readable payloads, no secret */
+const formTokens: ExecutionServices['formTokens'] = {
+  sign: (payload) => `tok:${JSON.stringify(payload)}`,
+  verify: (token) => (token.startsWith('tok:') ? (JSON.parse(token.slice(4)) as DataObject) : null),
+};
+/** the test token the editor's listen route hands a non-public chat (tenant t1, no workflow id, node Chat) */
+const testToken = formTokens.sign({ kind: 'chat-test', tenantId: 't1', workflowId: '', node: 'Chat' }, 60);
 
 describe('Chat Trigger', () => {
   it('declares a POST webhook and a GET setup endpoint', () => {
@@ -80,10 +97,14 @@ describe('Chat Trigger', () => {
   });
 
   it('accepts test messages from the editor when the chat is not public', async () => {
-    expect((await callWebhook({}, { body: message }, { mode: 'manual' })).workflowData).toBeDefined();
-    const closed = await callWebhook({}, { body: message }, { mode: 'webhook' });
+    const withToken = { body: message, headers: { 'x-chat-test-token': testToken } };
+    expect((await callWebhook({}, withToken, { mode: 'manual', formTokens })).workflowData).toBeDefined();
+    const closed = await callWebhook({}, withToken, { mode: 'webhook', formTokens });
     expect(closed.workflowData).toBeUndefined();
     expect(closed.webhookResponse?.statusCode).toBe(404);
+    // a test run needs its token too: without it the chat is closed
+    const bare = await callWebhook({}, { body: message }, { mode: 'manual', formTokens });
+    expect(bare.webhookResponse?.statusCode).toBe(404);
   });
 
   it('validates the body strictly', async () => {
@@ -108,10 +129,12 @@ describe('Chat Trigger', () => {
       { body: message, headers: { authorization: basic('ada:wrong') } },
       { creds },
     );
-    expect(denied.webhookResponse?.statusCode).toBe(401);
-    expect(denied.webhookResponse?.headers?.['www-authenticate']).toContain('Basic');
+    expect(denied.webhookResponse?.statusCode).toBe(403);
+    expect(denied.webhookResponse?.body).toEqual({ message: 'Authorization data is wrong!' });
     const missing = await callWebhook(params, { body: message }, { creds });
     expect(missing.webhookResponse?.statusCode).toBe(401);
+    expect(missing.webhookResponse?.headers?.['www-authenticate']).toContain('Basic');
+    expect(missing.webhookResponse?.body).toEqual({ message: 'Authorization is required!' });
     const ok = await callWebhook(
       params,
       { body: message, headers: { authorization: basic('ada:s3cret') } },

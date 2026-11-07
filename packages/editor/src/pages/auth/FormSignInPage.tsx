@@ -1,7 +1,7 @@
 /**
- * Top-level `/form-auth`: signs a user in for a protected form. A form never sees the session, so it
- * sends every visitor without a form token here. With a session this page asks for the one-time code
- * and goes back to the form; without one it goes to sign-in and comes back.
+ * Top-level `/form-auth`: signs a user in for a protected form or chat. A form or chat never sees the
+ * session, so it sends every visitor without a token here. With a session this page asks for the one-time
+ * code and goes back to the form or chat; without one it goes to sign-in and comes back.
  */
 import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useSearchParams } from 'react-router';
@@ -10,9 +10,14 @@ import { formAuthApi } from '../../api/endpoints';
 import { Callout, PageLoader } from '../../components/ui/misc';
 import { AuthLayout } from './AuthLayout';
 
-/** a form path on this server, as the server checks it */
+/** a Chat Trigger's address on this server: production or test, ending in /chat */
+export function isChatPath(value: string): boolean {
+  return /^\/webhook(-test)?\/[^/]+\/.+\/chat$/.test(value.split('?')[0]);
+}
+
+/** a form or chat path on this server, as the server checks it */
 export function isFormReturnPath(value: string | null): value is string {
-  if (!value || !/^\/form(-test|-waiting)?\/./.test(value)) return false;
+  if (!value || !(/^\/form(-test|-waiting)?\/./.test(value) || isChatPath(value))) return false;
   if (/[^\x21-\x7e]|\\/.test(value)) return false;
   return !value
     .split('?')[0]
@@ -35,10 +40,18 @@ function withCode(returnTo: string, code: string): string {
 
 type Failure = { signedOut: true } | { signedOut: false; message: string };
 
-function CouldNotOpen({ message, signInUrl }: { message: string; signInUrl?: string }) {
+function CouldNotOpen({
+  message,
+  signInUrl,
+  what = 'form',
+}: {
+  message: string;
+  signInUrl?: string;
+  what?: 'form' | 'chat';
+}) {
   return (
     <AuthLayout
-      title="Couldn't open this form"
+      title={`Couldn't open this ${what}`}
       footer={
         signInUrl ? (
           <Link to={signInUrl} className="font-semibold text-brand hover:underline">
@@ -73,8 +86,9 @@ export function FormSignInPage() {
   }, [valid, returnTo]);
 
   if (!valid) return <CouldNotOpen message="This sign-in link isn't valid." />;
+  const what = isChatPath(returnTo) ? 'chat' : 'form';
   const signInUrl = `/signin?redirect=${encodeURIComponent(`/form-auth?redirect=${encodeURIComponent(returnTo)}`)}`;
   if (failure?.signedOut) return <Navigate to={signInUrl} replace />;
-  if (failure) return <CouldNotOpen message={failure.message} signInUrl={signInUrl} />;
-  return <PageLoader label="Opening the form" />;
+  if (failure) return <CouldNotOpen message={failure.message} signInUrl={signInUrl} what={what} />;
+  return <PageLoader label={`Opening the ${what}`} />;
 }
