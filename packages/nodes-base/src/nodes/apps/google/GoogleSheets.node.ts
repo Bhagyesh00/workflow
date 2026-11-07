@@ -20,23 +20,25 @@ import {
 import { errorItem, withItemIndex } from '../../../utils/utilities';
 import { compact, forOps, locator, operationProperty, resourceProperty } from '../shared';
 
-const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
+export const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
 const CREDENTIAL = 'googleSheetsOAuth2Api';
 const DOC_URL_REGEX = 'https://docs\\.google\\.com/spreadsheets/d/([0-9a-zA-Z_-]+)';
 
 type GoogleContext = Pick<BaseContext, 'helpers'>;
 
-async function sheetsRequest<T = DataObject>(
+/** `credential` is the credential type that signs the call: the node's own unless the caller names another */
+export async function sheetsRequest<T = DataObject>(
   ctx: GoogleContext,
   method: HttpMethod,
   url: string,
   body?: DataObject,
   qs?: DataObject,
   itemIndex = 0,
+  credential: string = CREDENTIAL,
 ): Promise<T> {
   return (await ctx.helpers.httpRequestWithAuthentication(
-    CREDENTIAL,
+    credential,
     {
       method,
       url,
@@ -80,7 +82,7 @@ function cell(value: unknown): unknown {
   return value;
 }
 
-interface SheetRef {
+export interface SheetRef {
   spreadsheetId: string;
   title: string;
   sheetId: number;
@@ -92,7 +94,12 @@ function documentIdFrom(value: unknown): string {
   return (fromUrl?.[1] ?? raw).trim();
 }
 
-async function sheetList(ctx: GoogleContext, spreadsheetId: string, itemIndex = 0): Promise<SheetRef[]> {
+async function sheetList(
+  ctx: GoogleContext,
+  spreadsheetId: string,
+  itemIndex = 0,
+  credential: string = CREDENTIAL,
+): Promise<SheetRef[]> {
   const response = await sheetsRequest(
     ctx,
     'GET',
@@ -102,6 +109,7 @@ async function sheetList(ctx: GoogleContext, spreadsheetId: string, itemIndex = 
       fields: 'sheets.properties',
     },
     itemIndex,
+    credential,
   );
   return ((response.sheets as Array<{ properties: DataObject }>) ?? []).map((s) => ({
     spreadsheetId,
@@ -111,10 +119,11 @@ async function sheetList(ctx: GoogleContext, spreadsheetId: string, itemIndex = 
 }
 
 /** Resolve the sheet locator (list/id = gid, name = title, url = gid in the URL). */
-async function resolveSheet(
+export async function resolveSheet(
   ctx: ExecuteContext,
   i: number,
   cache: Map<string, Promise<SheetRef[]>>,
+  credential: string = CREDENTIAL,
 ): Promise<SheetRef> {
   const spreadsheetId = documentIdFrom(ctx.getNodeParameter('documentId', i));
   if (!spreadsheetId)
@@ -128,7 +137,7 @@ async function resolveSheet(
   if (mode === 'url') value = /gid=(\d+)/.exec(value)?.[1] ?? '0';
   if (!value)
     throw new NodeOperationError(ctx.getNode(), 'Select a sheet', { itemIndex: i, parameter: 'sheetName' });
-  if (!cache.has(spreadsheetId)) cache.set(spreadsheetId, sheetList(ctx, spreadsheetId, i));
+  if (!cache.has(spreadsheetId)) cache.set(spreadsheetId, sheetList(ctx, spreadsheetId, i, credential));
   const sheets = await cache.get(spreadsheetId)!;
   const sheet =
     mode === 'name' ? sheets.find((s) => s.title === value) : sheets.find((s) => String(s.sheetId) === value);
@@ -141,17 +150,18 @@ async function resolveSheet(
   return sheet;
 }
 
-interface SheetData {
+export interface SheetData {
   headers: string[];
   /** data rows with their 1-based sheet row numbers */
   rows: Array<{ rowNumber: number; values: unknown[] }>;
 }
 
-async function readSheet(
+export async function readSheet(
   ctx: ExecuteContext,
   sheet: SheetRef,
   i: number,
   options: DataObject = {},
+  credential: string = CREDENTIAL,
 ): Promise<SheetData> {
   const headerRow = Math.max(1, Number(options.headerRow ?? 1));
   const firstDataRow = Math.max(headerRow + 1, Number(options.firstDataRow ?? headerRow + 1));
@@ -168,6 +178,7 @@ async function readSheet(
       dateTimeRenderOption: 'FORMATTED_STRING',
     },
     i,
+    credential,
   );
   const values = (response.values as unknown[][]) ?? [];
   // with a custom range, rows are relative to the range start
@@ -225,12 +236,13 @@ function extendHeaders(
   return { headers: [...headers, ...extra], added: extra };
 }
 
-async function writeHeaders(
+export async function writeHeaders(
   ctx: ExecuteContext,
   sheet: SheetRef,
   headers: string[],
   headerRow: number,
   i: number,
+  credential: string = CREDENTIAL,
 ) {
   const range = `${quoteSheet(sheet.title)}!A${headerRow}:${columnLetter(headers.length)}${headerRow}`;
   await sheetsRequest(
@@ -244,6 +256,7 @@ async function writeHeaders(
     },
     { valueInputOption: 'RAW' },
     i,
+    credential,
   );
 }
 

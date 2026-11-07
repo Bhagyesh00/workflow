@@ -10,15 +10,26 @@ const CLOUD_PLATFORM_SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
 /** the Vertex AI hosts and the project list: as in n8n, the Vertex nodes need no scope typed */
 const VERTEX_API_HOST =
   /(^|[.-])aiplatform\.((eu|us)\.rep\.)?googleapis\.com$|^cloudresourcemanager\.googleapis\.com$/i;
+/** the Sheets API host: as in n8n, a Sheets call with a service account needs no scope typed */
+const SHEETS_API_HOST = /^sheets\.googleapis\.com$/i;
+/** the scopes n8n's Sheets path asks for */
+const SHEETS_SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/spreadsheets',
+];
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
 
-function isVertexApiUrl(value: string): boolean {
+/** the scopes a call to `value` gets when none is typed; none for any other host */
+function defaultScopes(value: string): string[] {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && VERTEX_API_HOST.test(url.hostname);
+    if (url.protocol !== 'https:') return [];
+    if (VERTEX_API_HOST.test(url.hostname)) return [CLOUD_PLATFORM_SCOPE];
+    if (SHEETS_API_HOST.test(url.hostname)) return SHEETS_SCOPES;
+    return [];
   } catch {
-    return false;
+    return [];
   }
 }
 
@@ -79,7 +90,7 @@ export const googleApi: CredentialType = {
     const typed = text(credentials.scopes)
       .split(/[,\s]+/)
       .filter(Boolean);
-    const scopes = !typed.length && isVertexApiUrl(request.url) ? [CLOUD_PLATFORM_SCOPE] : typed;
+    const scopes = typed.length ? typed : defaultScopes(request.url);
     if (!email || !privateKey || !scopes.length) {
       throw new Error('The Google credential needs an email, a private key and at least one scope');
     }
