@@ -561,19 +561,6 @@ export const VectorStorePGVectorNode = createVectorStoreNode({
 const QDRANT_PAYLOAD_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const QDRANT_COLLECTION = /^[A-Za-z0-9_.-]{1,255}$/;
 
-/** `must` conditions from the metadata filter, merged with the JSON filter the user typed. */
-function qdrantFilter(metadataKey: string, filter?: DataObject, extra?: DataObject): DataObject | undefined {
-  const must: unknown[] = Object.entries(filter ?? {}).map(([key, value]) => ({
-    key: `${metadataKey}.${key}`,
-    match: { value },
-  }));
-  const { must: extraMust, ...rest } = extra ?? {};
-  if (Array.isArray(extraMust)) must.push(...extraMust);
-  else if (extraMust && typeof extraMust === 'object') must.push(extraMust);
-  if (!must.length && !Object.keys(rest).length) return undefined;
-  return { ...rest, ...(must.length ? { must } : {}) };
-}
-
 const qdrantContentKeyOption: NodeProperty = {
   displayName: 'Content Payload Key',
   name: 'contentPayloadKey',
@@ -595,7 +582,7 @@ async function qdrantCollectionsSearch(ctx: LoadOptionsContext, filter?: string)
   const creds = await ctx.getCredentials('qdrantApi', 0);
   const response = (await ctx.helpers.httpRequestWithAuthentication(
     'qdrantApi',
-    { url: `${String(creds.url ?? '').replace(/\/+$/, '')}/collections` },
+    { url: `${String(creds.url ?? '').replace(/\/+$/, '')}/collections`, followRedirects: false },
     0,
   )) as { result?: { collections?: Array<{ name?: unknown }> } };
   const needle = (filter ?? '').trim().toLowerCase();
@@ -646,18 +633,8 @@ export const VectorStoreQdrantNode = createVectorStoreNode({
         'JSON merged into the request that creates the collection, for example {"on_disk_payload": true}',
     },
   ],
-  retrieveOptions: [
-    qdrantContentKeyOption,
-    qdrantMetadataKeyOption,
-    {
-      displayName: 'Search Filter JSON',
-      name: 'searchFilterJson',
-      type: 'json',
-      default: '',
-      typeOptions: { rows: 4 },
-      description: 'A Qdrant filter; its "must" conditions are added to the metadata filter',
-    },
-  ],
+  retrieveOptions: [qdrantContentKeyOption, qdrantMetadataKeyOption],
+  filter: 'json',
   methods: { listSearch: { qdrantCollectionsSearch } },
   async open(ctx, itemIndex) {
     const creds = await ctx.getCredentials('qdrantApi', itemIndex);
@@ -683,11 +660,15 @@ export const VectorStoreQdrantNode = createVectorStoreNode({
         );
       }
     }
-    const searchFilter = parseQdrantJson(ctx, options.searchFilterJson, 'The search filter JSON');
     const collectionConfig = parseQdrantJson(ctx, options.collectionConfig, 'The collection config');
     const base = `${String(creds.url ?? '').replace(/\/+$/, '')}/collections/${encodeURIComponent(collection)}`;
+    // the api-key header goes with every call, so a redirect is an error and the key stays on this host
     const request = (options: Parameters<BaseContext['helpers']['httpRequestWithAuthentication']>[1]) =>
-      ctx.helpers.httpRequestWithAuthentication('qdrantApi', options, itemIndex);
+      ctx.helpers.httpRequestWithAuthentication(
+        'qdrantApi',
+        { ...options, followRedirects: false },
+        itemIndex,
+      );
     let ensured = false;
     const ensureCollection = async (size: number) => {
       if (ensured) return;
@@ -726,11 +707,10 @@ export const VectorStoreQdrantNode = createVectorStoreNode({
         }
       },
       async search(vector, k, filter) {
-        const merged = qdrantFilter(metadataKey, filter, searchFilter);
         const response = (await request({
           url: `${base}/points/search`,
           method: 'POST',
-          body: { vector, limit: k, with_payload: true, ...(merged ? { filter: merged } : {}) },
+          body: { vector, limit: k, with_payload: true, ...(filter ? { filter } : {}) },
           ignoreHttpStatusErrors: true,
           returnFullResponse: true,
         })) as {

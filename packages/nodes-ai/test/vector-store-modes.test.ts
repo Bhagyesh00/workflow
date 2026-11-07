@@ -130,7 +130,7 @@ describe('modes and filter kind of the 12 stores', () => {
   const EXPECTED: Array<[string, boolean, 'none' | 'metadata' | 'json']> = [
     ['ai.vectorStoreInMemory', false, 'none'],
     ['ai.vectorStorePGVector', false, 'metadata'],
-    ['ai.vectorStoreQdrant', false, 'metadata'],
+    ['ai.vectorStoreQdrant', false, 'json'],
     ['ai.vectorStorePinecone', true, 'metadata'],
     ['ai.vectorStoreSupabase', true, 'metadata'],
     ['ai.vectorStoreWeaviate', false, 'json'],

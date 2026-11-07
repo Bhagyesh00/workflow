@@ -219,6 +219,16 @@ function readFilter(
   return entries.length ? Object.fromEntries(entries.map((e) => [e.name, e.value])) : undefined;
 }
 
+const PER_ITEM_PARAMETERS = new Set([
+  'mode',
+  'prompt',
+  'id',
+  'topK',
+  'includeDocumentMetadata',
+  'useReranker',
+  'toolDescription',
+]);
+
 function batchSizeOf(ctx: BaseContext, itemIndex: number): number {
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
   const n = Math.trunc(Number(options.embeddingBatchSize));
@@ -389,6 +399,14 @@ export function createVectorStoreNode(spec: VectorStoreSpec): NodeType {
     ],
   };
 
+  // every top-level setting a store can read in open(), except the ones that only matter per search
+  const settingNames = [
+    ...new Set(description.properties.map((p) => p.name).filter((name) => !PER_ITEM_PARAMETERS.has(name))),
+  ];
+  /** The resolved store settings of one item; equal keys mean the same store can serve both items. */
+  const storeSettingsKey = (ctx: BaseContext, itemIndex: number): string =>
+    JSON.stringify(settingNames.map((name) => ctx.getNodeParameter(name, itemIndex, null)));
+
   const requireMode = (ctx: BaseContext, mode: string): void => {
     if (!modes.includes(mode as VectorStoreMode)) {
       throw new NodeOperationError(
@@ -435,15 +453,34 @@ export function createVectorStoreNode(spec: VectorStoreSpec): NodeType {
         );
       }
       const embeddings = (await getEmbeddings(ctx, 0))!;
-      const { backend, close } = await spec.open(ctx, 0);
+      if (mode === 'insert') {
+        const { backend, close } = await spec.open(ctx, 0);
+        try {
+          return [await insert(ctx, backend, embeddings, items)];
+        } finally {
+          await close?.().catch(() => {});
+        }
+      }
+      // Get Many and Update read the store settings per item (as n8n); the backend is reused while they match
+      let current:
+        | { key: string; opened: { backend: VectorBackend; close?: () => Promise<void> } }
+        | undefined;
+      const backendFor = async (i: number): Promise<VectorBackend> => {
+        const key = storeSettingsKey(ctx, i);
+        if (current?.key === key) return current.opened.backend;
+        const previous = current;
+        current = undefined;
+        await previous?.opened.close?.().catch(() => {});
+        current = { key, opened: await spec.open(ctx, i) };
+        return current.opened.backend;
+      };
       try {
-        if (mode === 'insert') return [await insert(ctx, backend, embeddings, items)];
         const out: Item[] = [];
         const reranker = mode === 'load' ? await rerankerFor(ctx, 0) : undefined;
         for (let i = 0; i < items.length; i++) {
           try {
             if (mode === 'update') {
-              out.push(await updateDocument(ctx, backend, embeddings, items[i], i));
+              out.push(await updateDocument(ctx, await backendFor(i), embeddings, items[i], i));
               continue;
             }
             const prompt = String(ctx.getNodeParameter('prompt', i, '') ?? '');
@@ -452,7 +489,7 @@ export function createVectorStoreNode(spec: VectorStoreSpec): NodeType {
             const topK = Number(ctx.getNodeParameter('topK', i, 4));
             const includeMetadata = ctx.getNodeParameter('includeDocumentMetadata', i, true) !== false;
             const store = toAiVectorStore(
-              backend,
+              await backendFor(i),
               embeddings,
               readFilter(ctx, i, filterKind),
               undefined,
@@ -480,7 +517,7 @@ export function createVectorStoreNode(spec: VectorStoreSpec): NodeType {
         }
         return [out];
       } finally {
-        await close?.().catch(() => {});
+        await current?.opened.close?.().catch(() => {});
       }
     },
 

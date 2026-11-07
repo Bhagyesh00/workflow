@@ -348,7 +348,7 @@ describe('Qdrant store', () => {
     const loaded = await load(
       store('load', {
         topK: 3,
-        options: { metadata: { metadataValues: [{ name: 'topic', value: 'animals' }] } },
+        options: { searchFilterJson: '{"must":[{"key":"metadata.topic","match":{"value":"animals"}}]}' },
       }),
       'dog',
       services({ creds, http }),
@@ -567,25 +567,36 @@ describe('Qdrant options', () => {
     ]);
   });
 
-  it('merges the search filter JSON into must next to the metadata filter', async () => {
+  it('sends the search filter JSON as the filter as it is, and has no metadata filter list', async () => {
     const http = fake();
+    const filter = {
+      must: [{ key: 'lang', match: { value: 'en' } }],
+      must_not: [{ key: 'x', match: { value: 1 } }],
+    };
     const options = {
       metadataPayloadKey: 'meta',
+      // a leftover metadata list from an older save is not read
       metadata: { metadataValues: [{ name: 'topic', value: 'animals' }] },
-      searchFilterJson:
-        '{"must":[{"key":"lang","match":{"value":"en"}}],"must_not":[{"key":"x","match":{"value":1}}]}',
+      searchFilterJson: JSON.stringify(filter),
     };
     const r = await load(store('load', { options }), 'dog', services({ creds, http }));
     expect(r.status, JSON.stringify(r.error)).toBe('success');
-    expect(http.requests.at(-1)!.body).toMatchObject({
-      filter: {
-        must: [
-          { key: 'meta.topic', match: { value: 'animals' } },
-          { key: 'lang', match: { value: 'en' } },
-        ],
-        must_not: [{ key: 'x', match: { value: 1 } }],
-      },
-    });
+    expect((http.requests.at(-1)!.body as DataObject).filter).toEqual(filter);
+    const names = (
+      VectorStoreQdrantNode.description.properties.flatMap((p) => p.options ?? []) as Array<{
+        name: string;
+      }>
+    ).map((o) => o.name);
+    expect(names.filter((n) => n === 'searchFilterJson')).toHaveLength(1);
+    expect(names).not.toContain('metadata');
+  });
+
+  it('sends no redirect-following request while the api-key header is set', async () => {
+    const http = fake();
+    await insert(store('insert'), services({ creds, http }), [DOCS[0]]);
+    await load(store('load'), 'dog', services({ creds, http }));
+    expect(http.requests.length).toBeGreaterThan(3);
+    for (const request of http.requests) expect(request.followRedirects).toBe(false);
   });
 
   it('refuses bad payload keys and a filter that is not a JSON object, with no request', async () => {
@@ -614,8 +625,12 @@ describe('Qdrant options', () => {
     const context = {
       getCredentials: async () => creds.qdrantApi,
       helpers: {
-        httpRequestWithAuthentication: async (_type: string, options: { url: string }) => {
+        httpRequestWithAuthentication: async (
+          _type: string,
+          options: { url: string; followRedirects?: boolean },
+        ) => {
           requested.push(options.url);
+          expect(options.followRedirects).toBe(false);
           return { result: { collections: [{ name: 'zeta' }, { name: 'Docs' }, { name: 'notes' }] } };
         },
       },

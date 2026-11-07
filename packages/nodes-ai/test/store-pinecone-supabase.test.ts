@@ -249,6 +249,39 @@ describe('Pinecone store', () => {
     expect(String(vectors[0].metadata.text)).toContain('new text');
   });
 
+  it('reads the namespace per item in Get Many and opens the index once while settings match', async () => {
+    const http = pineconeHttp();
+    const items = [{ json: { chatInput: 'dog', ns: 'n1' } }, { json: { chatInput: 'cat', ns: 'n2' } }];
+    const same = await withEmbeddings(
+      pinecone('load', { options: { pineconeNamespace: '={{ $json.ns }}' } }),
+      items,
+      svcOf(pcCreds, http),
+    );
+    expect(same.status, JSON.stringify(same.error)).toBe('success');
+    const queries = http.requests.filter((q) => q.url.endsWith('/query'));
+    expect(queries.map((q) => (q.body as DataObject).namespace)).toEqual(['n1', 'n2']);
+    const sameIndex = pineconeHttp();
+    await withEmbeddings(
+      pinecone('load', { options: { pineconeNamespace: 'fixed' } }),
+      items,
+      svcOf(pcCreds, sameIndex),
+    );
+    expect(sameIndex.requests.filter((q) => q.url === 'https://api.pinecone.io/indexes')).toHaveLength(1);
+  });
+
+  it('reads the index per item in Update', async () => {
+    const http = pineconeHttp({ indexes: ['docs', 'other'] });
+    const items = [{ json: { text: 'first', idx: 'docs' } }, { json: { text: 'second', idx: 'other' } }];
+    const r = await withEmbeddings(
+      pinecone('update', { id: 'doc-1', pineconeIndex: '={{ $json.idx }}' }),
+      items,
+      svcOf(pcCreds, http),
+    );
+    expect(r.status, JSON.stringify(r.error)).toBe('success');
+    expect(http.requests.filter((q) => q.url.endsWith('/vectors/upsert'))).toHaveLength(2);
+    expect(http.requests.filter((q) => q.url === 'https://api.pinecone.io/indexes')).toHaveLength(2);
+  });
+
   it('clears the namespace on insert only when a namespace is set', async () => {
     const withNs = pineconeHttp();
     await insert(
