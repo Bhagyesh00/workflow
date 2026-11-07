@@ -209,6 +209,22 @@ export class ExecutionService {
     return `${this.deps.config.baseUrl}/form-waiting/${executionId}/${this.resumeSignature(executionId, 'form')}`;
   }
 
+  /**
+   * What a human review's link holds after its key, signed for this execution. `linkKey` is the key part of a link:
+   * its signature comes back when a key of this instance made it, so a key rotated since the link went out still counts.
+   */
+  signReviewKey(executionId: string, key: string, linkKey?: string): string {
+    const signatures = this.resumeKeys.map((secret) =>
+      createHmac('sha256', secret).update(`review:${executionId}:${key}`).digest('base64url'),
+    );
+    const given = Buffer.from(linkKey?.slice(key.length + 1) ?? '');
+    const held = signatures.find((signature) => {
+      const expected = Buffer.from(signature);
+      return given.length === expected.length && timingSafeEqual(given, expected);
+    });
+    return held ?? signatures[0];
+  }
+
   private resumeSignature(executionId: string, kind: 'webhook' | 'form' = 'webhook'): string {
     return createHmac('sha256', this.resumeKeys[0]).update(`${kind}:${executionId}`).digest('base64url');
   }
@@ -876,6 +892,7 @@ export class ExecutionService {
       instanceBaseUrl: config.baseUrl,
       resumeUrl: executionId ? this.resumeUrl(executionId) : undefined,
       resumeFormUrl: executionId ? this.resumeFormUrl(executionId) : undefined,
+      signReviewKey: executionId ? (key) => this.signReviewKey(executionId, key) : undefined,
       nodeTypes,
       credentialTypes: credentials.types,
       credentials: credentials.provider(tenant.id),
@@ -1087,21 +1104,26 @@ export class ExecutionService {
 
   /**
    * Resume a waiting execution. Claims it atomically (waiting -> running) so that concurrent
-   * resume calls and the wait tracker cannot resume it twice.
+   * resume calls and the wait tracker cannot resume it twice. `atWait` is the tool's wait the caller checked its
+   * answer against: the claim fails when the run has moved on to another.
    */
   async resume(
     tenantId: string,
     executionId: string,
     output?: Item[][],
-    opts: { wait?: boolean; observer?: ExecutionObserver } = {},
+    opts: {
+      wait?: boolean;
+      observer?: ExecutionObserver;
+      atWait?: { toolNode: string; toolRunIndex: number };
+    } = {},
   ): Promise<StartedExecution | undefined> {
     const { repos, queue } = this.deps;
     const data = await repos.executions.getData(tenantId, executionId);
     if (!data) return undefined;
-    const claimed = await repos.executions.transition(tenantId, executionId, ['waiting'], {
-      status: 'running',
-      waitTill: null,
-    });
+    const claim = { status: 'running', waitTill: null };
+    const claimed = opts.atWait
+      ? await repos.executions.claimToolWait(tenantId, executionId, opts.atWait, claim)
+      : await repos.executions.transition(tenantId, executionId, ['waiting'], claim);
     if (!claimed) return undefined;
     await repos.executions.updateRunOptions(tenantId, executionId, {
       ...(data.runOptions ?? {}),

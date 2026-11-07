@@ -32,7 +32,7 @@ import {
 import type { SessionMemory } from '../../shared/ai-inputs';
 import { capabilitiesOf } from '../../shared/chat-model';
 import { formatSchemaErrors, validateJsonSchema } from '../../shared/json-schema';
-import { markToolError } from '../../shared/markers';
+import { hasRestoredRawContent, markToolError } from '../../shared/markers';
 import {
   errorMessage,
   messageText,
@@ -42,7 +42,13 @@ import {
   truncate,
   withTimeout,
 } from '../../shared/utils';
-import { type AgentLoopState, AgentSuspended, restoreMessages, storableMessages } from './checkpoint';
+import {
+  type AgentLoopState,
+  AgentSuspended,
+  restoreMessages,
+  storableMessages,
+  storableRawContent,
+} from './checkpoint';
 
 export interface AgentStep {
   action: { tool: string; toolInput: DataObject; toolCallId: string; log: string };
@@ -71,7 +77,7 @@ export interface AgentRunOptions {
   input: string;
   /** images, PDFs and text files that go to the model after the prompt text */
   attachments?: AiContentPart[];
-  /** answers the turn when `model` fails; same tools and messages */
+  /** answers the turn when `model` fails, while no text has gone out; same tools and messages */
   fallbackModel?: AiChatModel;
   /** the first model call of the run must call a tool */
   forceToolCallOnFirstIteration?: boolean;
@@ -168,25 +174,41 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
 
   const invoke = (m: AiChatModel, request: AiChatRequest): Promise<AiChatResponse> => {
     if (wantsStream && m.stream) {
-      streamed = true;
-      return m.stream(request, (delta) => options.onChunk!(delta));
+      return m.stream(request, (delta) => {
+        if (delta) streamed = true;
+        options.onChunk!(delta);
+      });
     }
     return m.chat(request);
   };
+
+  const madeByFallback = new WeakSet<AiChatMessage>();
+  for (const { message, fallback } of resume?.state.rawContent ?? []) {
+    if (fallback && messages[message]) madeByFallback.add(messages[message]);
+  }
+  /** as before a wait, raw content goes back only to the model that made it: the other gets a copy without it */
+  const forModel = (list: AiChatMessage[], fallback: boolean): AiChatMessage[] =>
+    list.map((m) => (hasRestoredRawContent(m) && madeByFallback.has(m) !== fallback ? { ...m } : m));
 
   const callModel = async (request: AiChatRequest): Promise<AiChatResponse> => {
     if (options.signal?.aborted) throw options.signal.reason;
     let response: AiChatResponse;
     try {
-      response = await invoke(model, { ...request, responseFormat: responseFormatFor(model) });
+      response = await invoke(model, {
+        ...request,
+        messages: forModel(request.messages, false),
+        responseFormat: responseFormatFor(model),
+      });
     } catch (error) {
-      // a cancelled run is not a model failure
-      if (!options.fallbackModel || options.signal?.aborted) throw error;
+      // a cancelled run is not a model failure, and a stream cannot be taken back
+      if (!options.fallbackModel || options.signal?.aborted || streamed) throw error;
       options.logger?.warn('Agent model call failed, using the fallback model');
       response = await invoke(options.fallbackModel, {
         ...request,
+        messages: forModel(request.messages, true),
         responseFormat: responseFormatFor(options.fallbackModel),
       });
+      madeByFallback.add(response.message);
     }
     usage.modelCalls++;
     usage.inputTokens += response.usage?.inputTokens ?? 0;
@@ -218,7 +240,8 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     try {
       const signal = withTimeout(options.signal, options.toolTimeoutMs);
       const result = await raceSignal(work(signal), signal);
-      observation = truncate(stringifyResult(result), MAX_OBSERVATION_CHARS);
+      // a tool with an error output returns its error text as a result, so this path redacts too
+      observation = truncate(redactSecrets(stringifyResult(result)), MAX_OBSERVATION_CHARS);
     } catch (error) {
       if (isToolSuspension(error)) throw error;
       if (options.signal?.aborted) throw options.signal.reason;
@@ -226,7 +249,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
       observation = `Error: ${redactSecrets(errorMessage(error))}`;
       options.logger?.warn('Agent tool call failed', { tool: call.name });
       if (options.toolErrorBehavior === 'stop') {
-        throw fail(`Tool "${call.name}" failed: ${errorMessage(error)}`, 'AI_TOOL_ERROR');
+        throw fail(`Tool "${call.name}" failed: ${redactSecrets(errorMessage(error))}`, 'AI_TOOL_ERROR');
       }
     }
     const durationMs = Date.now() - started;
@@ -268,9 +291,10 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
     call: ToolCall,
     results: AiChatMessage[],
     pending: ToolCall[],
-  ): AgentSuspended =>
-    new AgentSuspended(suspension, {
-      messages: storableMessages(messages),
+  ): AgentSuspended => {
+    const rawContent = storableRawContent(messages, madeByFallback);
+    return new AgentSuspended(suspension, {
+      messages: storableMessages(messages, promptIndex),
       promptIndex,
       steps,
       usage,
@@ -280,7 +304,9 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentResult> {
       results,
       waiting: { call, ...(suspension.gatedTool ? { gatedTool: suspension.gatedTool } : {}) },
       pending,
+      ...(rawContent.length ? { rawContent } : {}),
     });
+  };
 
   /**
    * The calls of a turn, after the results it already has. Tools that cannot wait run in parallel; tools that can

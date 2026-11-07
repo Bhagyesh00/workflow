@@ -153,6 +153,10 @@ const ANSWER_CLOSED = {
   title: 'Nothing more to do',
   message: 'This request was already answered, or it has closed.',
 };
+const ANSWER_BUSY = {
+  title: 'Still working',
+  message: 'The workflow is still working on this request. Try again in a moment.',
+};
 
 /** a node that shows a form page while the run waits at it */
 const isFormPage = (node: WorkflowNode | undefined): boolean => {
@@ -226,18 +230,23 @@ function asLinkedNode(
   node: WorkflowNode | undefined,
   type: NodeType | undefined,
   state: ExecutionState | null,
+  sign: (key: string) => string,
 ): WorkflowNode | undefined {
   const suspended = state?.executionData.suspended;
   if (!node || !type || suspended?.toolNode !== node.name || !isHitlVariant(type.description)) return node;
-  return { ...node, webhookId: reviewNodeKey(node, suspended.toolRunIndex) };
+  return { ...node, webhookId: reviewNodeKey(node, suspended.toolRunIndex, sign) };
 }
 
-/** a browser on the link of a Send and Wait node the run no longer stands at gets a page, not JSON */
+/**
+ * A browser on the link of a Send and Wait node the run no longer stands at gets a page, not JSON. A run that is still
+ * going may yet stop there: a review goes out before the other tools of its turn finish, so that page keeps the answer.
+ */
 function closedAnswerPage(
   kind: WebhookKind,
   incoming: IncomingWebhook,
   workflow: Workflow,
   path: string,
+  status?: string,
 ): WebhookReply | undefined {
   if (kind !== 'webhook' || incoming.method !== 'GET') return undefined;
   if (!header(incoming.headers, 'accept')?.includes('text/html')) return undefined;
@@ -249,7 +258,7 @@ function closedAnswerPage(
   });
   // read with defaults: on a human review node the operation is a hidden default
   return node && getResolvedParameters(workflow, node).operation === 'sendAndWait'
-    ? formErrorPage(409, ANSWER_CLOSED)
+    ? formErrorPage(409, status === 'new' || status === 'running' ? ANSWER_BUSY : ANSWER_CLOSED)
     : undefined;
 }
 
@@ -566,7 +575,9 @@ export class WebhookService {
     const nodeName = state?.resultData.lastNodeExecuted;
     const stored = definition.nodes.find((n) => n.name === nodeName);
     const type = stored ? nodeTypes.get(stored.type) : undefined;
-    const node = asLinkedNode(stored, type, state);
+    const node = asLinkedNode(stored, type, state, (key) =>
+      executions.signReviewKey(executionId, key, rest[0]),
+    );
 
     if (kind === 'form' && path === FORM_STATUS_SUFFIX) {
       const word = row.status === 'waiting' && isFormPage(node) ? 'form-waiting' : row.status;
@@ -579,8 +590,10 @@ export class WebhookService {
       return { statusCode: 200, headers, body: word };
     }
     const workflow = new Workflow(definition, nodeTypes);
-    const closedPage = () => closedAnswerPage(kind, incoming, workflow, path);
-    if (row.status !== 'waiting') return closedPage() ?? this.notWaitingReply(kind, incoming, row.status);
+    const closedPage = (status?: string) => closedAnswerPage(kind, incoming, workflow, path, status);
+    if (row.status !== 'waiting') {
+      return closedPage(row.status) ?? this.notWaitingReply(kind, incoming, row.status);
+    }
 
     const hooks = node && type ? nodeWebhooks(workflow, node, type, { restart: true }) : [];
     // a Wait has hooks of both families and serves the one its Resume parameter picks
@@ -691,9 +704,11 @@ export class WebhookService {
         ? 'lastNode'
         : (hook?.responseMode ?? 'onReceived');
     const handle = this.responseHandle(responseMode);
+    const toolWait = state?.executionData.suspended;
     const resumed = await executions.resume(tenantId, executionId, output, {
       wait: responseMode !== 'onReceived',
       observer: responseMode === 'onReceived' ? undefined : handle.observer,
+      ...(toolWait ? { atWait: { toolNode: toolWait.toolNode, toolRunIndex: toolWait.toolRunIndex } } : {}),
     });
     if (!resumed) {
       return cors(closedPage() ?? json(409, errorBody('not_waiting', 'The execution is not waiting')));

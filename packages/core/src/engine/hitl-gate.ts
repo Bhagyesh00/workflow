@@ -28,7 +28,13 @@ import {
   type WorkflowNode,
 } from '@workflow/workflow';
 import type { ToolRunHost } from './node-as-tool';
-import { assertValidOutput, type ContextDeps, createBaseContext, createExecuteContext } from './node-context';
+import {
+  assertValidOutput,
+  type ContextDeps,
+  createBaseContext,
+  createExecuteContext,
+  getResolvedParameters,
+} from './node-context';
 
 /** a gate's tool: the agent's way back in once the person has answered */
 export interface HitlGatedTool extends AiTool {
@@ -41,10 +47,15 @@ export interface HitlGatedTool extends AiTool {
 
 /**
  * What stands for the node in the links of one review. The run index keeps a link to its own wait: the URL of an
- * answered review cannot answer the next review on the same node.
+ * answered review cannot answer the next review on the same node. The signature keeps it there when someone edits it.
  */
-export function reviewNodeKey(node: WorkflowNode, runIndex: number): string {
-  return `${node.webhookId || node.id}-${runIndex}`;
+export function reviewNodeKey(
+  node: WorkflowNode,
+  runIndex: number,
+  sign?: (key: string) => string,
+): string {
+  const key = `${node.webhookId || node.id}-${runIndex}`;
+  return sign ? `${key}-${sign(key)}` : key;
 }
 
 const isPlainObject = (value: unknown): value is DataObject =>
@@ -96,8 +107,10 @@ export async function createHitlGate(
   );
   const gatedTools = (Array.isArray(supplied) ? supplied : [supplied]).flat(2).filter(isAiTool);
 
-  const declared = extractFromAiArguments(hitlNode.parameters);
-  const hitlSchema = fromAiSchema(hitlNode.parameters);
+  // the editor stores only what a person changed, so a `$fromAI` can sit in a default
+  const resolved = getResolvedParameters(host.workflow, hitlNode);
+  const declared = extractFromAiArguments(resolved);
+  const hitlSchema = fromAiSchema(resolved);
   const parentItems = parentExec.data.main?.[0] ?? [];
 
   /** runs the review node's `execute` for one call: the message goes out, the node names when the wait ends */
@@ -109,7 +122,10 @@ export async function createHitlGate(
   ): Promise<Date> => {
     // the node's links carry the run this wait gets: the engine writes it at the end of the node's runs
     const runIndex = host.state.resultData.runData[hitlNode.name]?.length ?? 0;
-    const node: WorkflowNode = { ...hitlNode, webhookId: reviewNodeKey(hitlNode, runIndex) };
+    const node: WorkflowNode = {
+      ...hitlNode,
+      webhookId: reviewNodeKey(hitlNode, runIndex, host.services.signReviewKey),
+    };
     const item = parentItems[itemIndex] ?? { json: {} };
     const exec: ExecuteData = {
       node: hitlNode.name,
@@ -127,16 +143,17 @@ export async function createHitlGate(
     // expressions read at the agent's index, in the agent's input: the node itself asks for item 0 of its one item
     const reader = createBaseContext(withVariables({ ...exec, data: parentExec.data }));
     let waitTill: Date | undefined;
+    const base = createExecuteContext(withVariables(exec), {
+      getInputConnectionData: (type) =>
+        host.supplySubNodes(hitlNode, hitlType, type, itemIndex, parentExec, callSignal, closeFunctions),
+      putExecutionToWait: (time) => {
+        waitTill = time;
+      },
+      continueOnFail: () => false,
+      addExecutionHints: () => {},
+    });
     const ctx: ExecuteContext = {
-      ...createExecuteContext(withVariables(exec), {
-        getInputConnectionData: (type) =>
-          host.supplySubNodes(hitlNode, hitlType, type, itemIndex, parentExec, callSignal, closeFunctions),
-        putExecutionToWait: (time) => {
-          waitTill = time;
-        },
-        continueOnFail: () => false,
-        addExecutionHints: () => {},
-      }),
+      ...base,
       getNodeParameter: (
         parameter: string,
         _index: number,
@@ -144,6 +161,14 @@ export async function createHitlGate(
         options?: GetNodeParameterOptions,
       ) => reader.getNodeParameter(parameter, itemIndex, fallback, options),
       evaluateExpression: (expression: string) => reader.evaluateExpression(expression, itemIndex),
+      // a credential id can be a per-item expression: it resolves at the agent's index, as a parameter does
+      getCredentials: <T extends DataObject = DataObject>(type: string) =>
+        reader.getCredentials<T>(type, itemIndex),
+      helpers: {
+        ...base.helpers,
+        httpRequestWithAuthentication: (type, options) =>
+          reader.helpers.httpRequestWithAuthentication(type, options, itemIndex),
+      },
     };
     const output = await execute.call(hitlType, ctx);
     assertValidOutput(hitlNode, output);

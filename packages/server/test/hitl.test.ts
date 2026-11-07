@@ -318,11 +318,60 @@ describe('a gated tool on the agent', () => {
     expect(await run.status()).toBe('waiting');
     expect(refunds).toEqual([{ amount: '10' }]);
 
+    // the key is signed: an edited run index, or a key without its signature, opens nothing
     const second = linksOf(sent[1]).Approve;
+    for (const edited of [first.replace('-0-', '-1-'), second.replace(/-1-[^/]+\/answer/, '-1/answer')]) {
+      expect(edited).not.toBe(first);
+      expect(edited).not.toBe(second);
+      expect((await get(edited)).statusCode).toBe(404);
+    }
+    expect(await run.status()).toBe('waiting');
+    expect(refunds).toEqual([{ amount: '10' }]);
+
     expect(second).not.toBe(first);
     expect((await get(second)).statusCode).toBe(200);
     await run.finished();
     expect(refunds).toEqual([{ amount: '10' }, { amount: '9999' }]);
+  });
+
+  it('a click while the run is still going gets a busy page and keeps the answer', async () => {
+    scripts.Model = [call('10', 'c1'), say('done')];
+    const run = await telegramReview();
+    const { Approve } = linksOf(sent[0]);
+    const { repos } = server.ctx;
+    // the run stands here while the other tools of the turn finish
+    expect(await repos.executions.transition(run.tenantId, run.executionId, ['waiting'], { status: 'running' })).toBe(
+      true,
+    );
+    const busy = await get(Approve, { accept: 'text/html,application/xhtml+xml' });
+    expect(busy.statusCode).toBe(409);
+    expect(busy.headers['content-type']).toContain('text/html');
+    expect(busy.body).toContain('still working on this request');
+    expect(busy.body).not.toContain('already answered');
+    expect(refunds).toEqual([]);
+
+    expect(await repos.executions.transition(run.tenantId, run.executionId, ['running'], { status: 'waiting' })).toBe(
+      true,
+    );
+    expect((await get(Approve)).statusCode).toBe(200);
+    await run.finished();
+    expect(refunds).toEqual([{ amount: '10' }]);
+  });
+
+  it('an answer checked against another wait does not land on this one', async () => {
+    scripts.Model = [call('10', 'c1'), say('done')];
+    const run = await telegramReview();
+    const { executions } = server.ctx;
+    for (const atWait of [
+      { toolNode: 'Review', toolRunIndex: 1 },
+      { toolNode: 'Other', toolRunIndex: 0 },
+    ]) {
+      expect(await executions.resume(run.tenantId, run.executionId, undefined, { atWait })).toBeUndefined();
+      expect(await run.status()).toBe('waiting');
+    }
+    const atWait = { toolNode: 'Review', toolRunIndex: 0 };
+    expect(await executions.resume(run.tenantId, run.executionId, undefined, { atWait })).toBeTruthy();
+    await run.finished();
   });
 
   it('only a real answer on the link decides', async () => {

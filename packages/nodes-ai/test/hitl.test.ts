@@ -3,6 +3,8 @@ import { NodeTypes, WorkflowExecute } from '@workflow/core';
 import { nodes as baseNodes } from '@workflow/nodes-base';
 import {
   type AiChatMessage,
+  type AiChatRequest,
+  type AiChatResponse,
   type Connections,
   type DataObject,
   type ExecutionResult,
@@ -16,6 +18,8 @@ import {
 } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { nodes as aiNodes } from '../src';
+import { readCheckpoint } from '../src/nodes/agent/checkpoint';
+import { isToolError, RawContentCache } from '../src/shared/markers';
 import { connect, type Link, node, reply, scriptModel, services, testNodes, toolCalls } from './harness';
 
 const WAIT_UNTIL = new Date('2030-01-02T03:04:05Z');
@@ -71,8 +75,87 @@ const sendType: NodeType = {
   },
 };
 
+/** what each thinking model was given back for a tool call turn, and what it answers next */
+let thinking: Record<string, { recalled: unknown[]; replies: AiChatResponse[] }> = {};
+
 const testTypes: NodeType[] = [
   sendType,
+  {
+    // a review node with a `$fromAI` in a default, whose credential can differ per item
+    description: {
+      ...sendType.description,
+      name: 'test.sendAsking',
+      properties: [
+        ...sendType.description.properties,
+        { displayName: 'Reason', name: 'reason', type: 'string', default: "={{ $fromAI('reason', 'Why ask') }}" },
+      ],
+    },
+    async execute(ctx) {
+      if (ctx.getNode().credentials) await ctx.getCredentials('httpHeaderAuth');
+      messages.push(String(ctx.getNodeParameter('reason', 0, '')));
+      await ctx.putExecutionToWait(WAIT_UNTIL);
+      return [ctx.getInputData()];
+    },
+  },
+  {
+    description: description('test.plainSend', {
+      inputs: ['main'],
+      outputs: ['main'],
+      webhooks: WEBHOOKS,
+      usableAsTool: true,
+      properties: [
+        {
+          displayName: 'Operation',
+          name: 'operation',
+          type: 'options',
+          default: 'post',
+          options: [
+            { name: 'Post', value: 'post' },
+            { name: 'Send and Wait', value: 'sendAndWait' },
+          ],
+        },
+      ],
+    }),
+    async execute(ctx) {
+      messages.push(String(ctx.getNodeParameter('operation', 0, '')));
+      if (ctx.getNodeParameter('operation', 0, '') === 'sendAndWait') await ctx.putExecutionToWait(WAIT_UNTIL);
+      return [[{ json: { posted: true } }]];
+    },
+  },
+  {
+    // like a provider adapter: raw content lives in a cache per model object, and each run makes a new model
+    description: description('test.thinkingModel', { outputs: ['ai_languageModel'] }),
+    async supplyData(ctx) {
+      const name = ctx.getNode().name;
+      const cache = new RawContentCache<string>();
+      return {
+        response: {
+          kind: 'chatModel',
+          provider: 'fake',
+          model: 'thinking',
+          chat: async (request: AiChatRequest): Promise<AiChatResponse> => {
+            const script = thinking[name];
+            for (const message of request.messages) {
+              if (message.role === 'assistant' && message.toolCalls?.length) {
+                script.recalled.push(cache.recall(message));
+              }
+            }
+            const next = script.replies.shift();
+            if (!next) throw new Error(`The model ${name} has no reply left`);
+            if (next.message.toolCalls?.length) cache.remember(next.message, `thought of ${name}`);
+            return next;
+          },
+        },
+      };
+    },
+  },
+  {
+    description: description('test.softFail', {}),
+    async execute(ctx) {
+      if (ctx.continueOnFail()) return [[{ json: { error: FAILURE } }]];
+      throw new Error(FAILURE);
+    },
+  },
   {
     description: description('test.echo', {
       properties: [
@@ -165,6 +248,7 @@ beforeEach(() => {
   ran = [];
   messages = [];
   memoryAppends = [];
+  thinking = {};
 });
 
 describe('a plain waiting tool', () => {
@@ -308,6 +392,150 @@ describe('the checkpoint', () => {
     expect(requests[1].messages).toHaveLength(requests[0].messages.length + 2);
   });
 
+  it('holds no text file either, and the resumed prompt has the file once', async () => {
+    const requests = scriptModel('Model', [toolCalls(['Waiter', {}, 'w1']), 'done']);
+    const definition = graph([agent({ passthroughBinaryPdfs: true }), node('Waiter', 'test.waiter')], [
+      'Waiter',
+      'Agent',
+      'ai_tool',
+    ]);
+    const body = 'BODY-OF-THE-TEXT-FILE';
+    const waiting = await start(definition, [
+      {
+        json: { chatInput: 'x' },
+        binary: {
+          a: { data: Buffer.from(body).toString('base64'), mimeType: 'text/plain', fileName: 'a.txt' },
+        },
+      },
+    ]);
+    const checkpoint = waiting.state.executionData.suspended?.checkpoint as { messages: AiChatMessage[] };
+    expect(JSON.stringify(checkpoint)).not.toContain(body);
+    expect(checkpoint.messages.find((m) => m.role === 'user')?.content).toBe('Go');
+
+    const result = await resume(definition, waiting, APPROVED);
+    expect(result.status).toBe('success');
+    const prompt = requests[1].messages.find((m) => m.role === 'user')!;
+    expect(prompt.content).toEqual(requests[0].messages.find((m) => m.role === 'user')!.content);
+    expect(JSON.stringify(prompt.content).split(body)).toHaveLength(2);
+  });
+
+  it('a state of the wrong shape cannot continue', () => {
+    const good = {
+      version: 1,
+      waiting: { call: { id: 'c1' } },
+      messages: [],
+      steps: [],
+      results: [],
+      pending: [],
+      usage: {},
+    };
+    const read = (checkpoint: DataObject) => readCheckpoint(TRIGGER, { checkpoint, toolCallId: 'c1', answer: null });
+    expect(read(good).version).toBe(1);
+    for (const broken of [
+      { version: 2 },
+      { waiting: { call: { id: 'other' } } },
+      { waiting: null },
+      { messages: 'x' },
+      { steps: {} },
+      { results: null },
+      { pending: undefined },
+      { usage: [] },
+      { usage: null },
+      { rawContent: {} },
+    ]) {
+      expect(() => read({ ...good, ...broken })).toThrow('This run cannot continue from the point where it waited');
+    }
+  });
+
+  it('a tool that failed before the wait is still flagged as failed after it', async () => {
+    const flagged: Array<Array<[string | undefined, boolean]>> = [];
+    const requests = scriptModel('Model', (request) => {
+      flagged.push(request.messages.filter((m) => m.role === 'tool').map((m) => [m.toolCallId, isToolError(m)]));
+      return flagged.length === 1
+        ? toolCalls(['Echo', { value: 'x' }, 'c0'])
+        : flagged.length === 2
+          ? toolCalls(['Echo', { value: 'y' }, 'c1'], ['Waiter', {}, 'w1'], ['Broken', {}, 'c2'])
+          : reply('done');
+    });
+    const definition = graph(
+      [
+        agent(),
+        node('Echo', 'test.echo', { value: `={{ $fromAI('value', 'A value', 'string') }}` }),
+        node('Broken', 'test.echo', { fail: true }),
+        node('Waiter', 'test.waiter'),
+      ],
+      ['Echo', 'Agent', 'ai_tool'],
+      ['Broken', 'Agent', 'ai_tool'],
+      ['Waiter', 'Agent', 'ai_tool'],
+    );
+    const waiting = await start(definition);
+    expect(waiting.status).toBe('waiting');
+    const result = await resume(definition, waiting, APPROVED);
+    expect(result.status).toBe('success');
+    expect(requests).toHaveLength(3);
+    expect(flagged[2]).toEqual([
+      ['c0', false],
+      ['c1', false],
+      ['w1', false],
+      ['c2', true],
+    ]);
+  });
+
+  describe('raw model content', () => {
+    const say = (text: string): AiChatResponse => reply(text);
+    const thinkingGraph = (...models: string[]) => {
+      const nodes = [
+        TRIGGER,
+        agent({}, { needsFallback: models.length > 1 }),
+        node('Waiter', 'test.waiter'),
+        ...models.map((name) => node(name, 'test.thinkingModel')),
+      ].map((n, i) => ({ ...n, position: [i * 200, 0] as [number, number] }));
+      const connections: Connections = connect(['Trigger', 'Agent'], ['Waiter', 'Agent', 'ai_tool']);
+      models.forEach((name, index) => {
+        connections[name] = { ai_languageModel: [[{ node: 'Agent', type: 'ai_languageModel', index }]] };
+      });
+      return { id: 'wf', name: 'wf', nodes, connections };
+    };
+
+    it('goes through the wait, so a new model object can replay every tool call turn', async () => {
+      thinking.Main = {
+        recalled: [],
+        replies: [toolCalls(['Waiter', {}, 'w1']), toolCalls(['Waiter', {}, 'w2']), say('done')],
+      };
+      const definition = thinkingGraph('Main');
+      const first = await start(definition);
+      expect(JSON.stringify(first.state.executionData.suspended?.checkpoint)).toContain('thought of Main');
+      const second = await resume(definition, first, APPROVED);
+      expect(second.status).toBe('waiting');
+      const result = await resume(definition, second, APPROVED);
+      expect(result.status).toBe('success');
+      // the second call has the first turn back, the third has both
+      expect(thinking.Main.recalled).toEqual(Array.from({ length: 3 }, () => 'thought of Main'));
+    });
+
+    it('goes back only to the model that made it', async () => {
+      thinking.Main = { recalled: [], replies: [toolCalls(['Waiter', {}, 'w1'])] };
+      thinking.Spare = { recalled: [], replies: [say('from the spare')] };
+      const definition = thinkingGraph('Main', 'Spare');
+      const result = await resume(definition, await start(definition), APPROVED);
+      expect(result.status).toBe('success');
+      expect(agentOutput(result)).toEqual([{ output: 'from the spare' }]);
+      expect(thinking.Main.recalled).toEqual(['thought of Main']);
+      expect(thinking.Spare.recalled).toEqual([undefined]);
+    });
+
+    it('made by the fallback goes back to the fallback', async () => {
+      const fail = { get message(): never { throw new Error('main down'); } } as unknown as AiChatResponse;
+      thinking.Main = { recalled: [], replies: [fail, fail] };
+      thinking.Spare = { recalled: [], replies: [toolCalls(['Waiter', {}, 'w1']), say('done')] };
+      const definition = thinkingGraph('Main', 'Spare');
+      const result = await resume(definition, await start(definition), APPROVED);
+      expect(result.status).toBe('success');
+      expect(thinking.Main.recalled).toEqual([undefined]);
+      expect(thinking.Spare.recalled).toEqual(['thought of Spare']);
+    });
+  });
+
   it('memory is read once and written only at the end', async () => {
     const requests = scriptModel('Model', [toolCalls(['Waiter', {}, 'w1']), 'done']);
     const definition = graph(
@@ -336,6 +564,32 @@ describe('the checkpoint', () => {
     const [[, text]] = toolMessages(requests[1].messages);
     expect(text).toContain('Error: Bad token');
     expect(text).not.toContain('abcdefghijklmnopqrstuvwxyz123456');
+  });
+
+  it('a tool that returns its error as a result gets it redacted too', async () => {
+    const requests = scriptModel('Model', [toolCalls(['Soft', {}, 's1']), 'done']);
+    const definition = graph(
+      [agent({ returnIntermediateSteps: true }), node('Soft', 'test.softFail', {}, { onError: 'continueRegularOutput' })],
+      ['Soft', 'Agent', 'ai_tool'],
+    );
+    const result = await start(definition);
+    expect(result.status).toBe('success');
+    const [[, text]] = toolMessages(requests[1].messages);
+    expect(text).toContain('Bad token Bearer [redacted]');
+    expect(text).not.toContain('abcdefghijklmnopqrstuvwxyz123456');
+    expect(JSON.stringify(agentOutput(result))).not.toContain('abcdefghijklmnopqrstuvwxyz123456');
+  });
+
+  it('On Tool Error Stop leaves the secret out of the error', async () => {
+    scriptModel('Model', [toolCalls(['Echo', {}, 'e1'])]);
+    const definition = graph(
+      [agent({ toolErrorBehavior: 'stop' }), node('Echo', 'test.echo', { fail: true })],
+      ['Echo', 'Agent', 'ai_tool'],
+    );
+    const result = await start(definition);
+    expect(result.status).toBe('error');
+    expect(result.state.resultData.error?.message).toContain('Bad token Bearer [redacted]');
+    expect(result.state.resultData.error?.message).not.toContain('abcdefghijklmnopqrstuvwxyz123456');
   });
 });
 
@@ -438,6 +692,63 @@ describe('the human review gate', () => {
   const call = (value: string, id = 'c1') =>
     ['Echo', { toolParameters: { value }, hitlParameters: {} }, id] as [string, DataObject, string];
 
+  describe('a review node as the editor stores it', () => {
+    const asking = (credentials?: WorkflowNode['credentials']) =>
+      graph(
+        [
+          agent(),
+          node('Review', 'test.sendAskingHitlTool', {}, credentials ? { credentials } : {}),
+          node('Echo', 'test.echo', { value: `={{ $fromAI('value', 'A value', 'string') }}` }),
+        ],
+        ['Review', 'Agent', 'ai_tool'],
+        ['Echo', 'Review', 'ai_tool'],
+      );
+
+    it('a $fromAI in a default is declared and gets the value', async () => {
+      const requests = scriptModel('Model', [
+        toolCalls(['Echo', { toolParameters: { value: 'a' }, hitlParameters: { reason: 'because' } }, 'c1']),
+      ]);
+      const waiting = await start(asking());
+      expect(waiting.status).toBe('waiting');
+      const tool = requests[0].tools?.[0];
+      expect(tool?.name).toBe('Echo');
+      const properties = (tool?.parameters as DataObject | undefined)?.properties as DataObject;
+      expect(properties.hitlParameters).toMatchObject({ properties: { reason: { type: 'string' } } });
+      expect(messages).toEqual(['because']);
+    });
+
+    it('a credential id that is an expression resolves at the agent item', async () => {
+      const asked: string[] = [];
+      const definition = asking({ httpHeaderAuth: { id: `={{ $('Trigger').item.json.cred }}`, name: 'c' } });
+      const withCredentials = () =>
+        services({
+          nodeTypes: types,
+          resumeUrl: 'http://localhost/webhook-waiting/e1/sig',
+          credentials: {
+            get: async (ref) => {
+              asked.push(String(ref.id));
+              return {};
+            },
+            update: async () => {},
+          },
+        });
+      const call = (id: string) =>
+        toolCalls(['Echo', { toolParameters: { value: id }, hitlParameters: { reason: id } }, id]);
+      scriptModel('Model', [call('c1'), 'first', call('c2'), 'second']);
+      const first = await new WorkflowExecute(new Workflow(definition, types), withCredentials()).run({
+        triggerItems: [{ json: { cred: 'CRED-A' } }, { json: { cred: 'CRED-B' } }],
+        startNode: 'Trigger',
+      });
+      expect(first.status).toBe('waiting');
+      const state = JSON.parse(JSON.stringify(first.state)) as ExecutionState;
+      const second = await new WorkflowExecute(new Workflow(definition, types), withCredentials(), state).resume({
+        output: DECLINED,
+      });
+      expect(second.status).toBe('waiting');
+      expect(asked).toEqual(['CRED-A', 'CRED-B']);
+    });
+  });
+
   it('Approve runs the tool with the original arguments', async () => {
     const requests = scriptModel('Model', [toolCalls(call('hello')), 'done']);
     const definition = gated();
@@ -494,6 +805,31 @@ describe('the human review gate', () => {
     expect(toolMessages(requests[1].messages)[1][1]).toContain('User rejected the tool call to Echo (id: c2)');
   });
 
+  it('a retry after an approval starts over and asks again: one approval runs the tool once', async () => {
+    scriptModel('Model', (_request, nth) => {
+      if (nth === 0) return toolCalls(call('pay', 'c1'));
+      if (nth === 1) throw new Error('The model is down');
+      if (nth === 2) return toolCalls(call('pay', 'c2'));
+      return reply('done');
+    });
+    const definition = gated();
+    definition.nodes = definition.nodes.map((n) =>
+      n.name === 'Agent' ? { ...n, retryOnFail: true, maxTries: 3, waitBetweenTries: 0 } : n,
+    );
+    const waiting = await start(definition);
+    expect(messages).toHaveLength(1);
+
+    const again = await resume(definition, waiting, APPROVED);
+    expect(again.status).toBe('waiting');
+    expect(again.state.executionData.suspended).toMatchObject({ toolCallId: 'c2' });
+    expect(ran).toEqual([{ node: 'Echo', args: { value: 'pay' } }]);
+    expect(messages).toHaveLength(2);
+
+    const result = await resume(definition, again, APPROVED);
+    expect(result.status).toBe('success');
+    expect(ran).toHaveLength(2);
+  });
+
   it('a call without toolParameters goes back to the model and sends nothing', async () => {
     const requests = scriptModel('Model', [toolCalls(['Echo', { value: 'x' }, 'c1']), 'done']);
     const result = await start(gated());
@@ -524,7 +860,10 @@ describe('the human review gate', () => {
 describe('under an AI Agent Tool', () => {
   const subAgent = () => node('Sub', 'ai.agentTool', { text: `={{ $fromAI('input', 'Prompt') }}` });
 
-  it('a plain waiting tool cannot stop the run', async () => {
+  const refusal = (name: string) =>
+    `Nodes that wait for an answer cannot be used inside a sub-agent. Move "${name}" to the top-level workflow.`;
+
+  it('a plain waiting tool is refused', async () => {
     const outer = scriptModel('Model', [toolCalls(['Sub', { input: 'go' }, 's1']), 'done']);
     scriptModel('Sub Model', [toolCalls(['Waiter', {}, 'w1'])]);
     const definition = graph(
@@ -535,7 +874,60 @@ describe('under an AI Agent Tool', () => {
     );
     const result = await start(definition);
     expect(result.status).toBe('success');
-    expect(String(toolMessages(outer[1].messages)[0][1])).toContain('This run cannot wait for a tool');
+    expect(String(toolMessages(outer[1].messages)[0][1])).toContain(refusal('Waiter'));
+  });
+
+  const underSubAgent = (operation?: string) =>
+    graph(
+      [
+        agent(),
+        subAgent(),
+        node('Sub Model', 'test.fakeChatModel'),
+        node('Post', 'test.plainSendTool', operation ? { operation } : {}),
+      ],
+      ['Sub', 'Agent', 'ai_tool'],
+      ['Sub Model', 'Sub', 'ai_languageModel'],
+      ['Post', 'Sub', 'ai_tool'],
+    );
+
+  it('a send and wait tool is refused before anything is sent', async () => {
+    const outer = scriptModel('Model', [toolCalls(['Sub', { input: 'go' }, 's1']), 'done']);
+    const inner = scriptModel('Sub Model', [toolCalls(['Post', {}, 'p1']), 'never']);
+    const result = await start(underSubAgent('sendAndWait'));
+    expect(result.status).toBe('success');
+    expect(String(toolMessages(outer[1].messages)[0][1])).toContain(refusal('Post'));
+    expect(inner).toHaveLength(0);
+    expect(messages).toEqual([]);
+  });
+
+  it('an operation set by an expression is refused when it waits, or when it can only be known later', async () => {
+    for (const operation of ["={{ 'sendAndWait' }}", "={{ $fromAI('operation', 'Which one') }}", '={{ $json.nothing }}']) {
+      const outer = scriptModel('Model', [toolCalls(['Sub', { input: 'go' }, 's1']), 'done']);
+      const inner = scriptModel('Sub Model', [toolCalls(['Post', {}, 'p1']), 'never']);
+      const result = await start(underSubAgent(operation));
+      expect(result.status).toBe('success');
+      expect(String(toolMessages(outer[1].messages)[0][1])).toContain(refusal('Post'));
+      expect(inner).toHaveLength(0);
+      expect(messages).toEqual([]);
+    }
+  });
+
+  it('an operation set by an expression that does not wait still works', async () => {
+    scriptModel('Model', [toolCalls(['Sub', { input: 'go' }, 's1']), 'done']);
+    const inner = scriptModel('Sub Model', [toolCalls(['Post', {}, 'p1']), 'posted']);
+    const result = await start(underSubAgent("={{ 'post' }}"));
+    expect(result.status).toBe('success');
+    expect(messages).toEqual(['post']);
+    expect(toolMessages(inner[1].messages)).toEqual([['p1', '[{"posted":true}]']]);
+  });
+
+  it('the same node at an operation that does not wait still works', async () => {
+    scriptModel('Model', [toolCalls(['Sub', { input: 'go' }, 's1']), 'done']);
+    const inner = scriptModel('Sub Model', [toolCalls(['Post', {}, 'p1']), 'posted']);
+    const result = await start(underSubAgent());
+    expect(result.status).toBe('success');
+    expect(messages).toEqual(['post']);
+    expect(toolMessages(inner[1].messages)).toEqual([['p1', '[{"posted":true}]']]);
   });
 
   it('a human review gate is refused with its text', async () => {

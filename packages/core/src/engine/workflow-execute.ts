@@ -133,6 +133,7 @@ export function createInitialState(): ExecutionState {
 const MAX_NODE_RUNS = 100_000;
 const MAX_ITEMS_PER_OUTPUT = 1_000_000;
 const MAX_RETRY_WAIT_MS = 60_000;
+const MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024;
 
 export class WorkflowExecute {
   readonly state: ExecutionState;
@@ -856,9 +857,23 @@ export class WorkflowExecute {
         Object.assign(this.nodeMetadata, data);
       },
       suspendForTool: (suspension, checkpoint) => {
+        const limit = this.services.limits?.maxCheckpointBytes ?? MAX_CHECKPOINT_BYTES;
+        const size = Buffer.byteLength(JSON.stringify(checkpoint));
+        if (size > limit) {
+          throw new NodeOperationError(
+            node,
+            `Couldn't stop the run to wait for "${suspension.toolNode}": the agent's state is ${size} bytes, over the limit of ${limit}`,
+          );
+        }
         this.toolWait = { suspension, checkpoint };
       },
-      getResumeData: () => (this.toolResume?.agentNode === node.name ? this.toolResume.data : undefined),
+      // handed out once: a retry starts over and asks the person again, so one answer never runs a gated tool twice
+      getResumeData: () => {
+        if (this.toolResume?.agentNode !== node.name) return undefined;
+        const { data } = this.toolResume;
+        this.toolResume = undefined;
+        return data;
+      },
     });
     try {
       return await nodeType.execute(ctx);
@@ -956,7 +971,7 @@ export class WorkflowExecute {
     for (const sub of subNodes) {
       const subType = this.workflow.getNodeType(sub);
       if (subType.supplyData) {
-        const ctx = this.createSupplyDataContext(sub, parent, parentExec, type, signal);
+        const ctx = this.createSupplyDataContext(sub, parent, parentExec, type, signal, closeFunctions);
         const supplied = await subType.supplyData(ctx, itemIndex);
         if (supplied.closeFunction) closeFunctions.push(supplied.closeFunction);
         results.push(supplied.response);
@@ -974,6 +989,7 @@ export class WorkflowExecute {
         );
         results.push(...tools);
       } else if (subType.execute && isToolNode(subType.description)) {
+        this.refuseWaitInSubAgent(sub, subType, parent, parentExec, itemIndex, signal);
         results.push(createNodeAsTool(this.toolHost(), sub, subType, parent, parentExec, itemIndex, signal));
       } else {
         throw new NodeOperationError(sub, `Node "${sub.name}" cannot be used as a ${type} sub-node`);
@@ -982,19 +998,67 @@ export class WorkflowExecute {
     return typeof port === 'object' && port.maxConnections === 1 ? results[0] : results;
   }
 
+  /** a sub-agent cannot stop the run, so a tool that waits for a person is refused before its message goes out */
+  private refuseWaitInSubAgent(
+    tool: WorkflowNode,
+    toolType: NodeType,
+    parent: WorkflowNode,
+    parentExec: ExecuteData,
+    itemIndex: number,
+    signal: AbortSignal,
+  ): void {
+    const { description } = this.workflow.getNodeType(parent);
+    if (!isToolNode(description) || isHitlVariant(description)) return;
+    const { webhooks, properties } = toolType.description;
+    if (!webhooks?.length) return;
+    // a node with a choice of operations waits only at this one
+    const offered = properties.some(
+      ({ name, options }) =>
+        name === 'operation' && options?.some((option) => 'value' in option && option.value === 'sendAndWait'),
+    );
+    if (offered && !this.operationCanWait(tool, parentExec, itemIndex, signal)) return;
+    throw new NodeOperationError(
+      tool,
+      `Nodes that wait for an answer cannot be used inside a sub-agent. Move "${tool.name}" to the top-level workflow.`,
+    );
+  }
+
+  /** an expression is read at the agent's item; one that names no operation yet, such as `$fromAI`, may still wait */
+  private operationCanWait(
+    tool: WorkflowNode,
+    parentExec: ExecuteData,
+    itemIndex: number,
+    signal: AbortSignal,
+  ): boolean {
+    const { operation } = getResolvedParameters(this.workflow, tool);
+    if (typeof operation !== 'string' || !operation.startsWith('=')) return operation === 'sendAndWait';
+    const runIndex = this.state.resultData.runData[tool.name]?.length ?? 0;
+    const exec: ExecuteData = { node: tool.name, data: parentExec.data, source: parentExec.source };
+    try {
+      const value = createBaseContext(this.contextDeps(tool, exec, runIndex, signal)).getNodeParameter(
+        'operation',
+        itemIndex,
+        '',
+      );
+      return typeof value !== 'string' || value === '' || value === 'sendAndWait';
+    } catch {
+      return true;
+    }
+  }
+
   private createSupplyDataContext(
     sub: WorkflowNode,
     parent: WorkflowNode,
     parentExec: ExecuteData,
     type: ConnectionType,
     signal: AbortSignal,
+    closeFunctions: Array<() => Promise<void>>,
   ): SupplyDataContext {
     const runIndex = this.state.resultData.runData[sub.name]?.length ?? 0;
     const exec: ExecuteData = { node: sub.name, data: parentExec.data, source: parentExec.source };
     const deps = this.contextDeps(sub, exec, runIndex, signal);
     const base = createBaseContext(deps);
     const subType = this.workflow.getNodeType(sub);
-    const closeFunctions: Array<() => Promise<void>> = [];
     return {
       ...base,
       runCode: createCodeRunnerCall(deps, base),

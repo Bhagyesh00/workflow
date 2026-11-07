@@ -1,5 +1,8 @@
 import { NodeTypes } from '@workflow/core';
 import {
+  type AiChatModel,
+  type AiChatResponse,
+  type AiTool,
   type Connections,
   type DataObject,
   evaluatePortExpression,
@@ -11,9 +14,10 @@ import {
   resolvePorts,
   type WorkflowNode,
 } from '@workflow/workflow';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nodes } from '../src';
 import { AgentNode } from '../src/nodes/agent/Agent.node';
+import { runAgent } from '../src/nodes/agent/agent-loop';
 import { clearBufferMemory } from '../src/nodes/memory/memory.nodes';
 import {
   connect,
@@ -82,6 +86,136 @@ async function runSetup(
 beforeEach(() => {
   clearBufferMemory();
   modelRequests.clear();
+});
+
+describe('Agent parity: fallback model on a streaming run', () => {
+  const AGENT = node('Agent', 'ai.agent');
+  const answer = (content: string, toolCallsOf: AiChatResponse['message']['toolCalls'] = undefined) =>
+    ({ message: { role: 'assistant', content, toolCalls: toolCallsOf } }) as AiChatResponse;
+  const model = (extra: Partial<AiChatModel>): AiChatModel => ({
+    kind: 'chatModel',
+    provider: 'fake',
+    model: 'fake-1',
+    chat: async () => {
+      throw new Error('only chat here');
+    },
+    ...extra,
+  });
+  const failsAfter = (text?: string) =>
+    model({
+      stream: async (_request, onDelta) => {
+        if (text) onDelta(text);
+        throw new Error('The stream broke');
+      },
+    });
+  const streamingAnswer = (text: string) =>
+    model({
+      stream: async (_request, onDelta) => {
+        onDelta(text);
+        return answer(text);
+      },
+    });
+  const go = async (main: AiChatModel, fallbackModel: AiChatModel, tools: AiTool[] = []) => {
+    const chunks: string[] = [];
+    const run = runAgent({
+      node: AGENT,
+      itemIndex: 0,
+      model: main,
+      fallbackModel,
+      tools,
+      systemMessage: '',
+      input: 'Hi',
+      maxIterations: 5,
+      streaming: true,
+      onChunk: (chunk) => chunks.push(chunk),
+    });
+    return { run, chunks };
+  };
+  const plainAnswer = (text: string) => model({ chat: async () => answer(text) });
+
+  it('a failure after a delta rethrows and leaves the fallback alone', async () => {
+    const chat = vi.fn(async () => answer('Full fallback answer'));
+    const { run, chunks } = await go(failsAfter('Half of the mai'), model({ chat }));
+    await expect(run).rejects.toThrow('The stream broke');
+    expect(chat).not.toHaveBeenCalled();
+    expect(chunks).toEqual(['Half of the mai']);
+  });
+
+  it('a failure before any delta sends a fallback that cannot stream in one chunk', async () => {
+    const { run, chunks } = await go(failsAfter(), plainAnswer('Full fallback answer'));
+    expect((await run).text).toBe('Full fallback answer');
+    expect(chunks).toEqual(['Full fallback answer']);
+  });
+
+  it('a failure before any delta lets a streaming fallback stream', async () => {
+    const { run, chunks } = await go(failsAfter(), streamingAnswer('Streamed answer'));
+    expect((await run).text).toBe('Streamed answer');
+    expect(chunks).toEqual(['Streamed answer']);
+  });
+
+  it('a stream that sent no delta still gets its answer out', async () => {
+    const quiet = model({ stream: async () => answer('Quiet answer') });
+    const { run, chunks } = await go(quiet, plainAnswer('unused'));
+    expect((await run).text).toBe('Quiet answer');
+    expect(chunks).toEqual(['Quiet answer']);
+  });
+
+  it('text from an earlier turn counts: the fallback is not tried after it', async () => {
+    const chat = vi.fn(async () => answer('unused'));
+    const stream = vi
+      .fn<NonNullable<AiChatModel['stream']>>()
+      .mockImplementationOnce(async (_request, onDelta) => {
+        onDelta('Let me check. ');
+        return answer('Let me check. ', [{ id: 't1', name: 'Look', arguments: {} }]);
+      })
+      .mockRejectedValueOnce(new Error('The stream broke'));
+    const look: AiTool = {
+      kind: 'tool',
+      name: 'Look',
+      description: 'Looks',
+      parameters: { type: 'object', properties: {} },
+      invoke: async () => 'seen',
+    };
+    const { run, chunks } = await go(model({ stream }), model({ chat }), [look]);
+    await expect(run).rejects.toThrow('The stream broke');
+    expect(chat).not.toHaveBeenCalled();
+    expect(chunks).toEqual(['Let me check. ']);
+  });
+});
+
+describe('Agent parity: AI Agent Tool with a fallback model', () => {
+  it('the sub-agent falls back when its main model fails', async () => {
+    const outer = scriptModel('Outer', [toolCalls(['Researcher', { input: 'q' }, 'c1']), 'done']);
+    scriptModel('Inner', () => {
+      throw new Error('main model down');
+    });
+    const spare = scriptModel('Spare', ['from the spare']);
+    const connections: Connections = connect(
+      ['Chat', 'Agent'],
+      ['Outer', 'Agent', 'ai_languageModel'],
+      ['Researcher', 'Agent', 'ai_tool'],
+      ['Inner', 'Researcher', 'ai_languageModel'],
+    );
+    connections.Spare = { ai_languageModel: [[{ node: 'Researcher', type: 'ai_languageModel', index: 1 }]] };
+    const r = await run(
+      [
+        node('Chat', 'ai.chatTrigger'),
+        node('Agent', 'ai.agent', {}),
+        node('Outer', 'test.fakeChatModel'),
+        node('Researcher', 'ai.agentTool', {
+          text: "={{ $fromAI('input', 'The prompt') }}",
+          needsFallback: true,
+        }),
+        node('Inner', 'test.fakeChatModel'),
+        node('Spare', 'test.fakeChatModel'),
+      ],
+      connections,
+      { triggerItems: chat('Hi') },
+    );
+    expect(r.status).toBe('success');
+    expect(spare).toHaveLength(1);
+    expect(String(outer[1].messages.at(-1)?.content)).toContain('from the spare');
+  });
 });
 
 describe('Agent parity: fallback model', () => {
@@ -241,7 +375,7 @@ describe('Agent parity: force the first tool call', () => {
 
   it('sends tool_choice any to Anthropic', async () => {
     const { r, http } = await runProvider(
-      withCreds(node('Claude', 'ai.lmChatAnthropic'), 'anthropicApi'),
+      withCreds(node('Claude', 'ai.lmChatAnthropic', { model: 'claude-opus-4-8' }), 'anthropicApi'),
       ANTHROPIC,
       [
         {

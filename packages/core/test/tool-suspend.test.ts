@@ -48,6 +48,8 @@ let agentBody: (ctx: ExecuteContext, tools: AiTool[]) => Promise<NodeOutput>;
 let ran: DataObject[] = [];
 /** what the send node read when it ran */
 let sent: DataObject[] = [];
+/** sub-nodes that were closed */
+let closed: string[] = [];
 
 const passThrough = async (ctx: ExecuteContext): Promise<NodeOutput> => [ctx.getInputData()];
 
@@ -119,6 +121,27 @@ const types = new NodeTypes([
     async execute(ctx) {
       await ctx.getInputConnectionData('ai_tool', 0);
       return [[{ json: {} }]];
+    },
+  },
+  {
+    description: description('test.innerStore', [], ['ai_vectorStore']),
+    async supplyData() {
+      return {
+        response: {},
+        closeFunction: async () => {
+          closed.push('inner');
+        },
+      };
+    },
+  },
+  {
+    description: description(
+      'test.retriever',
+      [{ type: 'ai_vectorStore', displayName: 'Store', maxConnections: 1 }],
+      ['ai_tool'],
+    ),
+    async supplyData(ctx, itemIndex) {
+      return { response: await ctx.getInputConnectionData('ai_vectorStore', itemIndex) };
     },
   },
   sendType,
@@ -245,6 +268,14 @@ describe('suspend', () => {
     ]);
   });
 
+  it('an agent state over the limit fails the agent instead of waiting', async () => {
+    agentBody = callInTurn(['Wait']);
+    const result = await run(agentGraph(), { limits: { maxCheckpointBytes: 5 } });
+    expect(result.status).toBe('error');
+    expect(result.state.resultData.error?.message).toContain('over the limit of 5');
+    expect(result.state.executionData.suspended).toBeUndefined();
+  });
+
   it('a retried agent still suspends once', async () => {
     agentBody = callInTurn(['Wait']);
     const graph = agentGraph();
@@ -279,6 +310,22 @@ describe('resume', () => {
     expect(seen[0]).toMatchObject({ toolCallId: 'call-Wait' });
     expect(JSON.stringify(seen[0])).toContain('approved');
     expect(seen).toHaveLength(3);
+  });
+
+  it('a retried agent reads the answer on the first attempt only', async () => {
+    agentBody = callInTurn(['Wait']);
+    const graph = agentGraph();
+    graph.nodes[1] = { ...graph.nodes[1], retryOnFail: true, maxTries: 3, waitBetweenTries: 0 };
+    const waiting = await run(graph);
+    const reads: Array<string | undefined> = [];
+    agentBody = async (ctx) => {
+      reads.push(ctx.getResumeData()?.toolCallId);
+      if (reads.length < 3) throw new Error('The model is down');
+      return [[{ json: {} }]];
+    };
+    const result = await reload(graph, waiting).resume({ output: answer });
+    expect(result.status).toBe('success');
+    expect(reads).toEqual(['call-Wait', undefined, undefined]);
   });
 
   it('a wait that ends by itself hands the agent null', async () => {
@@ -360,6 +407,28 @@ describe('resume', () => {
     const graph = agentGraph();
     const done = await run(graph);
     await expect(reload(graph, done).resume()).rejects.toThrow('Execution is not waiting');
+  });
+});
+
+describe('sub-nodes of sub-nodes', () => {
+  it('what a nested sub-node opened is closed when the parent finishes', async () => {
+    closed = [];
+    agentBody = async (ctx) => [ctx.getInputData()];
+    const graph = definition(
+      [
+        node('Start', 'test.start', [0, 0]),
+        node('Agent', 'test.agent', [200, 0]),
+        node('Retriever', 'test.retriever', [200, 200]),
+        node('Inner', 'test.innerStore', [400, 200]),
+      ],
+      {
+        ...tool('Retriever', 'Agent'),
+        Inner: { ai_vectorStore: [[{ node: 'Retriever', type: 'ai_vectorStore', index: 0 }]] },
+      },
+    );
+    const result = await run(graph);
+    expect(result.status).toBe('success');
+    expect(closed).toEqual(['inner']);
   });
 });
 
