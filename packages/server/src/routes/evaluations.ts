@@ -2,8 +2,8 @@
  * /rest/workflows/:workflowId/test-runs (P5-02), n8n's test-runs controller: viewer reads, editor runs,
  * cancels and deletes. A run of another workflow or tenant answers 404, like one that does not exist.
  *
- * C0 STUB: lane L8 owns this file. The 7 routes, their role gates and their bodies are final; the
- * handlers call EvaluationService, whose C0 bodies throw `not implemented (L8)`.
+ * The two list routes answer the page's rows as a plain array, the shape the editor's `evaluationsApi`
+ * reads (`TestRunDto[]`, `TestCaseDto[]`, paged with `skip` and `limit`); the public API keeps the count.
  */
 import { MAX_EVALUATION_CONCURRENCY, MAX_EVALUATION_ROWS } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -47,7 +47,7 @@ export function registerEvaluationRoutes(
     const auth = requireRole(request, 'viewer');
     const { workflowId } = parse(testRunWorkflowParams, request.params);
     const query = parse(testRunListQuery, request.query);
-    return { data: await evaluations.list(auth.tenant.id, workflowId, query) };
+    return { data: (await evaluations.list(auth.tenant.id, workflowId, query)).data };
   });
 
   app.post(`${base}/new`, async (request, reply) => {
@@ -68,7 +68,7 @@ export function registerEvaluationRoutes(
     const auth = requireRole(request, 'viewer');
     const { workflowId, id } = parse(testRunParams, request.params);
     const query = parse(testCaseListQuery, request.query);
-    return { data: await evaluations.listCases(auth.tenant.id, workflowId, id, query) };
+    return { data: (await evaluations.listCases(auth.tenant.id, workflowId, id, query)).data };
   });
 
   app.delete(`${base}/:id`, async (request) => {
