@@ -15,7 +15,12 @@
  * CORS: every reply produced once the node is known (results, errors, unreadable bodies, the
  * OPTIONS preflight) carries `Access-Control-Allow-Origin` when the caller's Origin is in the
  * node's `allowedOrigins` option (trailing slashes and case ignored; an expression is evaluated the
- * way the node evaluates it).
+ * way the node evaluates it). A Chat Trigger adds two token grants (P5-56): `Origin: null` (the
+ * sandboxed hosted page) only with a valid `x-chat-page` token, and a test chat's caller origin with a
+ * valid `x-chat-test-token`; a literal `null` in its list grants nothing. Every other node keeps the list rule.
+ *
+ * Streaming chats answer NDJSON frames (`ChatFrame`): `begin`, `item` and `end` per node run that sent
+ * chunks, each with the run's metadata, and one `error` frame when the run fails or times out.
  */
 import { randomUUID } from 'node:crypto';
 import { PassThrough, type Readable } from 'node:stream';
@@ -29,6 +34,14 @@ import {
   reviewNodeKey,
 } from '@workflow/core';
 import {
+  CHAT_PAGE_HEADER,
+  CHAT_TEST_HEADER,
+  CHAT_TOKEN_KINDS,
+  CHAT_TRIGGER_TYPE,
+  type ChatChunkMeta,
+  type ChatFrame,
+  type ChatFrameMetadata,
+  type ChatTokenKind,
   type DataObject,
   type ExecutionMode,
   type ExecutionState,
@@ -149,6 +162,12 @@ const FORM_STATUS_SUFFIX = 'n8n-execution-status';
 /** the run has persisted its wait well before this; a lost worker must not hold the page */
 const FORM_PAGE_READY_MS = 10_000;
 const WAITING_MESSAGE = 'Workflow is waiting';
+/** a chat test token that does not name this registration (an earlier listen, or another chat) */
+const STALE_TEST_TOKEN =
+  "Couldn't start the test chat: its token is from an earlier listen. Send the message again.";
+/** stream error frames: fixed texts, no error detail */
+const STREAM_FAILED = 'Error in workflow';
+const STREAM_TIMED_OUT = 'The workflow did not finish in time';
 /** the link of a Send and Wait node ends in this (nodes-base send-and-wait/descriptions.ts) */
 const ANSWER_SUFFIX = 'answer';
 const ANSWER_CLOSED = {
@@ -289,6 +308,8 @@ interface RunInput {
   userId?: string;
   /** P5-59 a test chat run from the canvas stops at this node (the registration's `destinationNode`) */
   destinationNode?: string;
+  /** P5-56 the test registration's id, which a chat's `x-chat-test-token` must name */
+  listenId?: string;
   onStarted?: (executionId: string) => void;
   /** takes the test registration once the node accepted the request; a reply means another request took it */
   claim?: () => Promise<WebhookReply | undefined>;
@@ -301,6 +322,8 @@ interface CorsSource {
   workflowId?: string;
   workflow: Workflow;
   node: WorkflowNode;
+  /** a chat test registration's id: its `x-chat-test-token` must name it */
+  listenId?: string;
 }
 
 export class WebhookService {
@@ -410,7 +433,9 @@ export class WebhookService {
     if (!tenant) return notRegistered('OPTIONS', path);
     const requested = header(headers, 'access-control-request-method')?.toUpperCase();
     let methods: string[];
-    let target: { definition: WorkflowDefinition; nodeName: string; workflowId: string } | undefined;
+    let target:
+      | { definition: WorkflowDefinition; nodeName: string; workflowId: string; listenId?: string }
+      | undefined;
     if (test) {
       const registrations = (await testWebhooks.list(tenant.id)).filter((r) => r.path === path);
       methods = registrations.map((r) => r.method);
@@ -420,6 +445,7 @@ export class WebhookService {
           definition: registration.workflow,
           nodeName: registration.nodeName,
           workflowId: registration.workflowId,
+          listenId: registration.listenId,
         };
       }
     } else {
@@ -435,13 +461,18 @@ export class WebhookService {
     const nodeName = target?.nodeName;
     const node = target?.definition.nodes.find((n) => n.name === nodeName);
     if (!target || !node) return { statusCode: 204, headers: reply };
-    const allowedOrigins = await this.allowedOrigins({
+    const source: CorsSource = {
       tenant,
       mode: test ? 'manual' : 'webhook',
       workflowId: target.workflowId,
       workflow: new Workflow(target.definition, nodeTypes),
       node,
-    });
+      listenId: target.listenId,
+    };
+    const allowedOrigins = await this.allowedOrigins(source);
+    if (node.type === CHAT_TRIGGER_TYPE) {
+      return { statusCode: 204, headers: this.chatCors(reply, allowedOrigins, headers, source, true) };
+    }
     return { statusCode: 204, headers: withCors(reply, allowedOrigins, headers) };
   }
 
@@ -510,31 +541,39 @@ export class WebhookService {
       : undefined;
     // /form-test serves only form hooks, /webhook-test none
     if (!hook || webhookUrlBase(hook.description) !== kind) return missing();
+    const chat = node.type === CHAT_TRIGGER_TYPE;
+    const source: CorsSource = {
+      tenant,
+      mode: 'manual',
+      workflowId: registration.workflowId,
+      workflow: new Workflow(definition, this.deps.nodeTypes),
+      node,
+      listenId: registration.listenId,
+    };
+    // a chat test token of an earlier listen (or of another chat) is refused before the registration is
+    // used: withholding a CORS header would not stop the run
+    const testToken = header(incoming.headers, CHAT_TEST_HEADER);
+    if (chat && testToken !== undefined && !this.chatTokenValid(testToken, CHAT_TOKEN_KINDS.test, source)) {
+      return this.decorate(json(403, errorBody('forbidden', STALE_TEST_TOKEN)), source, incoming.headers);
+    }
     // a body that cannot be read (too large, malformed) leaves the registration in place
     let received: ReceivedWebhook;
     try {
       received = await receive(incoming);
     } catch (error) {
-      const workflow = new Workflow(definition, this.deps.nodeTypes);
-      const source: CorsSource = {
-        tenant,
-        mode: 'manual',
-        workflowId: registration.workflowId,
-        workflow,
-        node,
-      };
       return this.decorate(bodyErrorReply(error, kind), source, incoming.headers);
     }
-    // one-shot: the first call consumes the registration. A form uses it up only with an accepted
-    // submission, and then for both of its hooks: its page and a refused POST leave it listening.
-    if (kind !== 'form' && !(await testWebhooks.remove(registration))) return missing();
+    // one-shot: the first call consumes the registration. A form or a chat uses it up only with an accepted
+    // request, and then for all of its hooks: its page (setup) and a refused POST leave it listening.
+    const claimOnAccept = kind === 'form' || chat;
+    if (!claimOnAccept && !(await testWebhooks.remove(registration))) return missing();
     const claim = async () => {
       if (!(await testWebhooks.remove(registration))) return missing();
       await testWebhooks.removeForNode(tenant.id, registration.workflowId, registration.nodeName);
       return undefined;
     };
     return this.run({
-      claim: kind === 'form' ? claim : undefined,
+      claim: claimOnAccept ? claim : undefined,
       tenant,
       definition,
       workflowId: registration.workflowId,
@@ -545,6 +584,7 @@ export class WebhookService {
       params: found.params,
       userId: registration.userId,
       destinationNode: registration.destinationNode,
+      listenId: registration.listenId,
       onStarted: (executionId) =>
         push.send(tenant.id, 'testWebhookReceived', { workflowId: registration.workflowId, executionId }),
     });
@@ -796,7 +836,14 @@ export class WebhookService {
     const type = workflow.getNodeType(node);
     const executionId = randomUUID();
     const request: WebhookRequest = { ...incoming.request, params: { ...input.params } };
-    const source: CorsSource = { tenant, mode: input.mode, workflowId: input.workflowId, workflow, node };
+    const source: CorsSource = {
+      tenant,
+      mode: input.mode,
+      workflowId: input.workflowId,
+      workflow,
+      node,
+      listenId: input.listenId,
+    };
 
     let reply: WebhookReply;
     let executionStarted = false;
@@ -850,7 +897,7 @@ export class WebhookService {
           incoming.method === 'POST' &&
           formPageFollows(workflow, node);
         const responseMode = pagesFollow ? 'onReceived' : hook.responseMode;
-        const streaming = responseMode === 'streaming' ? this.streamHandle(tenant) : undefined;
+        const streaming = responseMode === 'streaming' ? this.streamHandle(tenant, workflow) : undefined;
         const handle = this.responseHandle(responseMode);
         let execution: StartedExecution;
         try {
@@ -920,30 +967,52 @@ export class WebhookService {
   }
 
   /**
-   * Streaming mode, the one wire protocol for streamed answers: every `ctx.sendChunk(x)` becomes
-   * the NDJSON line `{"type":"item","content":x}` (nodes send plain content, AI agents text deltas);
-   * the stream ends with `{"type":"end"}` or `{"type":"error","message":...}`. A run that succeeds
-   * without sending any chunk still answers: its last node's output becomes one item first.
+   * Streaming mode, the one wire protocol for streamed answers (`ChatFrame`, NDJSON). A node run's first
+   * `ctx.sendChunk(x)` opens its group with `begin`; each chunk is an `item` whose `content` is text (objects
+   * as JSON); the run's end writes `end`. Every frame carries the run's metadata (node id and name, run and
+   * item index, time). Groups still open (a tool's chunk and its logged run can carry different run indexes)
+   * are closed before the stream ends or an `error` frame is written. A run that succeeds without sending
+   * any chunk still answers: its last node's output becomes one group. A failure or a timeout writes one
+   * `error` frame with fixed text in `content` and `message`, never a detail of the error.
    * A client that closes the stream before the end stops the run, so no model is called for nobody.
    */
-  private streamHandle(tenant: TenantRow) {
+  private streamHandle(tenant: TenantRow, workflow: Workflow) {
     const stream = new PassThrough();
     let chunks = 0;
-    const write = (line: unknown) => {
-      if (!stream.writableEnded) stream.write(`${JSON.stringify(line)}\n`);
+    /** open groups by node run, with the meta of their last chunk */
+    const open = new Map<string, ChatChunkMeta>();
+    const write = (frame: ChatFrame) => {
+      if (!stream.writableEnded) stream.write(`${JSON.stringify(frame)}\n`);
+    };
+    const closeOpen = () => {
+      for (const meta of open.values()) write({ type: 'end', metadata: frameMetadata(meta) });
+      open.clear();
+    };
+    const fail = (message: string) => {
+      closeOpen();
+      write({ type: 'error', content: message, message });
+      stream.end();
     };
     const observer: ExecutionObserver = {
-      onChunk: (content) => {
+      onChunk: (content, meta) => {
         chunks++;
-        write({ type: 'item', content });
+        const from = meta ?? UNKNOWN_CHUNK_META;
+        const key = runKey(from);
+        if (!open.has(key)) write({ type: 'begin', metadata: frameMetadata(from) });
+        open.set(key, from);
+        write({ type: 'item', content: chunkText(content), metadata: frameMetadata(from) });
+      },
+      onNodeRunEnd: (meta) => {
+        const key = runKey(meta);
+        if (!open.delete(key)) return;
+        write({ type: 'end', metadata: frameMetadata(meta) });
       },
     };
     const attach = (execution: StartedExecution): WebhookReply => {
       const limitMs = (this.deps.config.executionTimeout.maxS + 30) * 1000;
       const timer = setTimeout(() => {
         this.deps.executions.discardWaiter(execution.executionId);
-        write({ type: 'error', message: 'The workflow did not finish in time' });
-        stream.end();
+        fail(STREAM_TIMED_OUT);
       }, limitMs);
       timer.unref();
       stream.once('close', () => {
@@ -960,12 +1029,17 @@ export class WebhookService {
       });
       void execution.finished?.then((outcome) => {
         clearTimeout(timer);
+        if (outcome.status !== 'success' && outcome.status !== 'waiting') return fail(STREAM_FAILED);
         if (outcome.status === 'success' && !chunks) {
           const answer = finalAnswer(outcome);
-          if (answer !== undefined) write({ type: 'item', content: answer });
+          if (answer !== undefined) {
+            const metadata = frameMetadata(lastNodeMeta(workflow, outcome));
+            write({ type: 'begin', metadata });
+            write({ type: 'item', content: chunkText(answer), metadata });
+            write({ type: 'end', metadata });
+          }
         }
-        if (outcome.status === 'success' || outcome.status === 'waiting') write({ type: 'end' });
-        else write({ type: 'error', message: 'Error in workflow' });
+        closeOpen();
         stream.end();
       });
       return {
@@ -1122,7 +1196,63 @@ export class WebhookService {
       }
     }
     const allowedOrigins = await this.allowedOrigins(source);
+    if (source.node.type === CHAT_TRIGGER_TYPE) {
+      return { ...reply, headers: this.chatCors(headers, allowedOrigins, requestHeaders, source, false) };
+    }
     return { ...reply, headers: withCors(headers, allowedOrigins, requestHeaders) };
+  }
+
+  /**
+   * CORS of a Chat Trigger. `Origin: null` is granted only with a valid page token, a test chat's caller
+   * origin only with a valid test token of this registration; otherwise the list applies, where a literal
+   * `null` entry grants nothing. A preflight cannot carry a header value, so it grants on the header NAME:
+   * the request itself must then show the token (the node refuses it otherwise, before any run).
+   */
+  private chatCors(
+    headers: Record<string, string>,
+    allowedOrigins: unknown,
+    requestHeaders: WebhookRequest['headers'],
+    source: CorsSource,
+    preflight: boolean,
+  ): Record<string, string> {
+    const origin = header(requestHeaders, 'origin');
+    if (!origin || allowedOrigins === false) return headers;
+    const opaque = normalizeOrigin(origin) === OPAQUE_ORIGIN;
+    const test = source.mode === 'manual';
+    let grant: string | undefined;
+    if (preflight) {
+      const named = headerNames(header(requestHeaders, 'access-control-request-headers'));
+      if (opaque && (named.includes(CHAT_PAGE_HEADER) || named.includes(CHAT_TEST_HEADER))) {
+        grant = OPAQUE_ORIGIN;
+      } else if (test && named.includes(CHAT_TEST_HEADER)) grant = origin;
+    } else if (
+      test &&
+      this.chatTokenValid(header(requestHeaders, CHAT_TEST_HEADER), CHAT_TOKEN_KINDS.test, source)
+    ) {
+      grant = origin;
+    } else if (
+      opaque &&
+      this.chatTokenValid(header(requestHeaders, CHAT_PAGE_HEADER), CHAT_TOKEN_KINDS.page, source)
+    ) {
+      grant = OPAQUE_ORIGIN;
+    }
+    if (!grant) return withCors(headers, allowedOrigins, requestHeaders, { ignoreOpaque: true });
+    const out = { ...headers };
+    out['access-control-allow-origin'] ??= grant;
+    out.vary = withVary(out.vary, 'Origin');
+    return out;
+  }
+
+  /** a signed chat token of `kind` for this tenant, workflow and node; a test token must name the registration */
+  private chatTokenValid(token: string | undefined, kind: ChatTokenKind, source: CorsSource): boolean {
+    if (!token) return false;
+    const payload = this.deps.formTokens.verify(token);
+    if (!payload || payload.kind !== kind) return false;
+    if (payload.tenantId !== source.tenant.id || payload.workflowId !== (source.workflowId ?? ''))
+      return false;
+    if (payload.node !== source.node.name) return false;
+    if (kind !== CHAT_TOKEN_KINDS.test) return true;
+    return source.listenId !== undefined && payload.listenId === source.listenId;
   }
 
   /**
@@ -1164,6 +1294,9 @@ function nodeOptions(workflow: Workflow, node: WorkflowNode): DataObject {
 /** origins compare by scheme, host and port: case and trailing slashes do not matter */
 const normalizeOrigin = (origin: string) => origin.trim().replace(/\/+$/, '').toLowerCase();
 
+/** the Origin of a sandboxed page or a data: URL; a chat grants it only with a page token */
+const OPAQUE_ORIGIN = 'null';
+
 /**
  * Adds `Access-Control-Allow-Origin` when the caller's Origin is allowed: `*` (or an empty list)
  * allows any origin, `false` none, otherwise the matching Origin is echoed. Headers the reply already set win.
@@ -1172,14 +1305,17 @@ function withCors(
   headers: Record<string, string>,
   allowedOrigins: unknown,
   requestHeaders: WebhookRequest['headers'],
+  chat: { ignoreOpaque?: boolean } = {},
 ): Record<string, string> {
   const origin = header(requestHeaders, 'origin');
   if (!origin || allowedOrigins === false) return headers;
-  const allowed = String(allowedOrigins ?? '*')
+  const listed = String(allowedOrigins ?? '*')
     .split(',')
     .map(normalizeOrigin)
     .filter(Boolean);
-  const any = !allowed.length || allowed.includes('*');
+  const any = !listed.length || listed.includes('*');
+  // a chat's list never grants the opaque origin by name: only its page token does (chatCors)
+  const allowed = chat.ignoreOpaque ? listed.filter((o) => o !== OPAQUE_ORIGIN) : listed;
   if (!any && !allowed.includes(normalizeOrigin(origin))) return headers;
   const out = { ...headers };
   out['access-control-allow-origin'] ??= any ? '*' : origin;
@@ -1211,6 +1347,34 @@ function bodyErrorReply(error: unknown, kind: WebhookKind): WebhookReply {
   if (!(error instanceof WebhookBodyError)) throw error;
   const message = kind === 'form' && error.statusCode === 413 ? FORM_TOO_LARGE : error.message;
   return json(error.statusCode, errorBody(error.code, message));
+}
+
+/** a chunk sent without metadata (a host that gives none) still gets a group of its own */
+const UNKNOWN_CHUNK_META: ChatChunkMeta = { nodeId: '', nodeName: '', runIndex: 0, itemIndex: 0 };
+
+/** one group per node run: the key `executions.ts` uses for `onNodeRunEnd` */
+const runKey = (meta: ChatChunkMeta) => `${meta.nodeName}:${meta.runIndex}`;
+
+const frameMetadata = (meta: ChatChunkMeta): ChatFrameMetadata => ({
+  nodeId: meta.nodeId,
+  nodeName: meta.nodeName,
+  runIndex: meta.runIndex,
+  itemIndex: meta.itemIndex,
+  timestamp: Date.now(),
+});
+
+/** frame content is text: strings as they are, anything else as JSON */
+function chunkText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (content === undefined || content === null) return '';
+  return JSON.stringify(content) ?? String(content);
+}
+
+/** the metadata of the answer of a run that streamed nothing: its last node */
+function lastNodeMeta(workflow: Workflow, outcome: ExecutionOutcome): ChatChunkMeta {
+  const name = outcome.lastNodeExecuted ?? '';
+  const node = name ? workflow.getNode(name) : undefined;
+  return { nodeId: node?.id ?? '', nodeName: name, runIndex: 0, itemIndex: 0 };
 }
 
 /**

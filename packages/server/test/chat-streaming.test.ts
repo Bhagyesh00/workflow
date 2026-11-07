@@ -134,6 +134,23 @@ const lines = (body: string) =>
     .split('\n')
     .map((l) => JSON.parse(l) as DataObject);
 
+/**
+ * P5-56 frames: every begin, item and end carries the node run's metadata. Checks the id and the time are
+ * there, then drops them so a case can compare the rest.
+ */
+const frames = (body: string) =>
+  lines(body).map((line) => {
+    const metadata = line.metadata as DataObject | undefined;
+    if (!metadata) return line;
+    expect(typeof metadata.nodeId).toBe('string');
+    expect(typeof metadata.timestamp).toBe('number');
+    const { nodeId: _id, timestamp: _time, ...rest } = metadata;
+    return { ...line, metadata: rest };
+  });
+
+/** the metadata of a node's first run, item 0, as `frames` leaves it */
+const run = (nodeName: string, runIndex = 0) => ({ nodeName, runIndex, itemIndex: 0 });
+
 const send = (url: string) =>
   app.inject({
     method: 'POST',
@@ -148,7 +165,7 @@ function expectSandboxed(headers: Record<string, unknown>) {
 }
 
 describe('chat streaming protocol', () => {
-  it('writes each agent delta as one item line with text content, then one end line', async () => {
+  it('writes each agent delta as one item line with text content, inside one begin..end group', async () => {
     const { url } = await agentChat(
       { responseMode: 'streaming' },
       { text: 'Streaming works fine', streaming: true },
@@ -156,18 +173,25 @@ describe('chat streaming protocol', () => {
     const res = await send(url);
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('application/x-ndjson');
-    expect(lines(res.body)).toEqual([
-      { type: 'item', content: 'Streaming ' },
-      { type: 'item', content: 'works ' },
-      { type: 'item', content: 'fine' },
-      { type: 'end' },
+    const agent = run('Agent');
+    expect(frames(res.body)).toEqual([
+      { type: 'begin', metadata: agent },
+      { type: 'item', content: 'Streaming ', metadata: agent },
+      { type: 'item', content: 'works ', metadata: agent },
+      { type: 'item', content: 'fine', metadata: agent },
+      { type: 'end', metadata: agent },
     ]);
   });
 
   it('delivers the answer of a model that cannot stream', async () => {
     const { url } = await agentChat({ responseMode: 'streaming' }, { text: 'The answer is 42' });
     const res = await send(url);
-    expect(lines(res.body)).toEqual([{ type: 'item', content: 'The answer is 42' }, { type: 'end' }]);
+    const agent = run('Agent');
+    expect(frames(res.body)).toEqual([
+      { type: 'begin', metadata: agent },
+      { type: 'item', content: 'The answer is 42', metadata: agent },
+      { type: 'end', metadata: agent },
+    ]);
   });
 
   it('delivers the answer of an agent with streaming turned off', async () => {
@@ -177,19 +201,27 @@ describe('chat streaming protocol', () => {
       { options: { enableStreaming: false } },
     );
     const res = await send(url);
-    expect(lines(res.body)).toEqual([{ type: 'item', content: 'Quiet answer' }, { type: 'end' }]);
+    const agent = run('Agent');
+    expect(frames(res.body)).toEqual([
+      { type: 'begin', metadata: agent },
+      { type: 'item', content: 'Quiet answer', metadata: agent },
+      { type: 'end', metadata: agent },
+    ]);
   });
 
-  it('delivers the last node output when no node streamed', async () => {
+  it('delivers the last node output when no node streamed, as JSON text in one group of that node', async () => {
     const { url } = await chatWorkflow(
       [chatTrigger({ responseMode: 'streaming' }), setNode('Set', 'total', 7)],
       link('Chat', 'Set'),
     );
     const res = await send(url);
-    const [first, last] = lines(res.body);
-    expect(first.type).toBe('item');
-    expect(first.content).toMatchObject({ total: 7 });
-    expect(last).toEqual({ type: 'end' });
+    const [begin, item, end, ...rest] = frames(res.body);
+    expect(begin).toEqual({ type: 'begin', metadata: run('Set') });
+    expect(item.type).toBe('item');
+    expect(typeof item.content).toBe('string');
+    expect(JSON.parse(String(item.content))).toMatchObject({ total: 7 });
+    expect(end).toEqual({ type: 'end', metadata: run('Set') });
+    expect(rest).toEqual([]);
   });
 
   it('stops the run when the client closes the stream before the answer ends', async () => {
@@ -221,7 +253,9 @@ describe('chat streaming protocol', () => {
   it('ends with an error line when the workflow fails', async () => {
     const { url } = await agentChat({ responseMode: 'streaming' }, { fail: true });
     const res = await send(url);
-    expect(lines(res.body)).toEqual([{ type: 'error', message: 'Error in workflow' }]);
+    expect(lines(res.body)).toEqual([
+      { type: 'error', content: 'Error in workflow', message: 'Error in workflow' },
+    ]);
     expect(res.headers['access-control-allow-origin']).toBe('*');
   });
 });
