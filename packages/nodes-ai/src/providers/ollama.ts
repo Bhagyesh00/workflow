@@ -25,6 +25,23 @@ export interface OllamaChatConfig {
   maxTokens?: number;
   numCtx?: number;
   keepAlive?: string;
+  topK?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  repeatPenalty?: number;
+  penalizeNewline?: boolean;
+  lowVram?: boolean;
+  mainGpu?: number;
+  numBatch?: number;
+  numGpu?: number;
+  numThread?: number;
+  useMLock?: boolean;
+  useMMap?: boolean;
+  vocabOnly?: boolean;
+  /** 'json' asks for any JSON object; a response format on the request wins */
+  format?: string;
+  /** thinking on or off for models that think */
+  think?: boolean;
   credentialType?: string;
 }
 
@@ -61,6 +78,8 @@ export function ollamaRequestBody(request: AiChatRequest, config: OllamaChatConf
     }));
   }
   if (request.responseFormat?.type === 'json') body.format = request.responseFormat.schema ?? 'json';
+  else if (config.format === 'json') body.format = 'json';
+  if (config.think !== undefined) body.think = config.think;
   const options: DataObject = {};
   const temperature = request.temperature ?? config.temperature;
   if (temperature !== undefined) options.temperature = temperature;
@@ -68,6 +87,22 @@ export function ollamaRequestBody(request: AiChatRequest, config: OllamaChatConf
   const maxTokens = request.maxTokens ?? config.maxTokens;
   if (maxTokens !== undefined) options.num_predict = maxTokens;
   if (config.numCtx !== undefined) options.num_ctx = config.numCtx;
+  const extra: Array<[string, unknown]> = [
+    ['top_k', config.topK],
+    ['frequency_penalty', config.frequencyPenalty],
+    ['presence_penalty', config.presencePenalty],
+    ['repeat_penalty', config.repeatPenalty],
+    ['penalize_newline', config.penalizeNewline],
+    ['low_vram', config.lowVram],
+    ['main_gpu', config.mainGpu],
+    ['num_batch', config.numBatch],
+    ['num_gpu', config.numGpu],
+    ['num_thread', config.numThread],
+    ['use_mlock', config.useMLock],
+    ['use_mmap', config.useMMap],
+    ['vocab_only', config.vocabOnly],
+  ];
+  for (const [key, value] of extra) if (value !== undefined) options[key] = value as never;
   if (Object.keys(options).length) body.options = options;
   if (config.keepAlive) body.keep_alive = config.keepAlive;
   return body;

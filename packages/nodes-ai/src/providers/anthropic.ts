@@ -6,8 +6,11 @@
  * - Assistant turns produced in this run are replayed with their original content blocks
  *   (thinking blocks and signatures included), as the API requires inside a tool loop.
  * - Structured output uses `output_config.format` (`json_schema`).
- * - Sampling parameters (`temperature`, `top_p`, `top_k`) are not sent: API version 2026-10-21
- *   rejects them on every model. Depth is controlled with `output_config.effort`.
+ * - `temperature` is not sent: API version 2026-10-21 rejects it. `top_p` and `top_k` are sent only
+ *   when the user sets them on the node. Depth is controlled with `output_config.effort`.
+ * - Extended thinking (`thinking: { type: 'enabled', budget_tokens }` or `{ type: 'adaptive' }`) is
+ *   sent only when switched on. The API refuses a forced tool choice and a `max_tokens` at or below
+ *   the budget with thinking on, so the forced choice is left out and `max_tokens` is lifted above it.
  */
 import type {
   AiChatMessage,
@@ -56,6 +59,12 @@ export interface AnthropicChatConfig {
   model: string;
   maxTokens: number;
   effort?: string;
+  /** extended thinking on; 'adaptive' lets the model size it, 'budget' uses `thinkingBudget` */
+  thinking?: boolean;
+  thinkingMode?: 'budget' | 'adaptive';
+  thinkingBudget?: number;
+  topK?: number;
+  topP?: number;
   /** top-level automatic prompt caching (cheaper repeated prefixes in agent loops) */
   promptCaching: boolean;
   /** retry policy declines on the model Anthropic recommends (Claude API only) */
@@ -140,9 +149,14 @@ export function anthropicRequestBody(
     .map((m) => messageText(m.content))
     .filter(Boolean)
     .join('\n\n');
+  const thinkingOn = config.thinking === true;
+  const budget = Math.max(1024, Math.floor(config.thinkingBudget ?? 1024));
+  const adaptive = thinkingOn && config.thinkingMode === 'adaptive';
+  let maxTokens = request.maxTokens ?? config.maxTokens;
+  if (thinkingOn && !adaptive && maxTokens <= budget) maxTokens = budget + 1024;
   const body: DataObject = {
     model: config.model,
-    max_tokens: request.maxTokens ?? config.maxTokens,
+    max_tokens: maxTokens,
     messages: toAnthropicMessages(request.messages, cache),
   };
   const headers: Record<string, string> = { 'anthropic-version': ANTHROPIC_API_VERSION };
@@ -153,8 +167,11 @@ export function anthropicRequestBody(
       description: t.description,
       input_schema: { type: 'object', ...t.parameters },
     }));
-    if (request.toolChoice === 'any') body.tool_choice = { type: 'any' };
+    if (request.toolChoice === 'any' && !thinkingOn) body.tool_choice = { type: 'any' };
   }
+  if (thinkingOn) body.thinking = adaptive ? { type: 'adaptive' } : { type: 'enabled', budget_tokens: budget };
+  if (config.topP !== undefined) body.top_p = config.topP;
+  if (config.topK !== undefined && config.topK >= 0) body.top_k = Math.floor(config.topK);
   const outputConfig: DataObject = {};
   if (request.responseFormat?.type === 'json' && request.responseFormat.schema) {
     const schema = toAnthropicSchema(request.responseFormat.schema);
