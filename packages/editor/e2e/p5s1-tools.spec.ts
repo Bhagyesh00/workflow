@@ -1,8 +1,8 @@
 /**
  * P5-75 in a real browser against a live server (written by the lane, run once by the main session at
  * the end of S1): an app node used as an agent tool gets "Let the model define this parameter", the
- * panel "Defined by agent" and its value survive a save and a reload, and the node picker lists tool
- * variants only under the tool slot. Run with `pnpm --filter @workflow/editor e2e` (E2E_BASE_URL
+ * panel "Defined by agent" and its value survive a save and a reload, and the main node list hides
+ * tool variants (the tool slot list is not opened here). Run with `pnpm --filter @workflow/editor e2e` (E2E_BASE_URL
  * overrides the URL).
  */
 import { expect, type Page, test } from '@playwright/test';
@@ -97,7 +97,7 @@ test('a person lets the model define a tool parameter and it survives a reload',
   await expect(again.getByRole('button', { name: 'Let the model define this parameter' })).toBeVisible();
 });
 
-test('the node picker lists tool variants only under the tool slot', async ({ page }) => {
+test('the main node list hides tool variants', async ({ page }) => {
   await signUp(page);
   const id = await createToolWorkflow(page);
   await page.goto(`/workflow/${id}`);
