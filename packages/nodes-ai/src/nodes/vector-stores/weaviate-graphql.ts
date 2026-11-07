@@ -63,6 +63,11 @@ const OPERATOR_LABEL: Record<UnitOperator, string> = {
   WithinGeoRange: 'withinGeoRange',
 };
 
+/** Whether a value is one of the unit operators we write (the enum names above). */
+export function isUnitOperator(value: unknown): value is UnitOperator {
+  return typeof value === 'string' && Object.hasOwn(OPERATOR_LABEL, value);
+}
+
 export type WhereValue =
   | { kind: 'valueText'; value: string | string[] }
   | { kind: 'valueNumber'; value: number }
@@ -176,7 +181,7 @@ export function parseWhereFilter(raw: unknown): WeaviateWhere {
   return parseNode(raw, 0);
 }
 
-function literal(value: string | number | boolean | string[]): string {
+function literal(value: string | number | boolean | string[] | number[]): string {
   if (typeof value === 'number' && !Number.isFinite(value)) {
     throw new WeaviateQueryError('Numbers in a Weaviate query must be finite');
   }
@@ -226,7 +231,7 @@ export interface HybridSearch {
 
 /** `_additional` fields a query may ask for */
 export type AdditionalField = 'id' | 'distance' | 'score' | 'explainScore';
-const ADDITIONAL_FIELDS = new Set<string>(['id', 'distance', 'score', 'explainScore']);
+export const ADDITIONAL_FIELDS = new Set<string>(['id', 'distance', 'score', 'explainScore']);
 
 /** A weighted query property: a property name and an optional `^<number>` boost. */
 export const WEAVIATE_QUERY_PROPERTY = /^[_A-Za-z][_0-9A-Za-z]*(\^\d+(\.\d+)?)?$/;
@@ -245,14 +250,19 @@ export interface GetQuery {
   where?: WeaviateWhere;
 }
 
-function vectorLiteral(vector: number[]): string {
+/** Checks a query vector: a non-empty list of finite numbers. */
+export function assertVector(vector: number[]): number[] {
   if (!Array.isArray(vector) || !vector.length || vector.some((v) => !finite(v))) {
     throw new WeaviateQueryError('The query vector must be a non-empty list of finite numbers');
   }
-  return literal(vector as unknown as string[]);
+  return vector;
 }
 
-function positiveInteger(value: number, label: string): number {
+function vectorLiteral(vector: number[]): string {
+  return literal(assertVector(vector));
+}
+
+export function positiveInteger(value: number, label: string): number {
   if (!Number.isInteger(value) || value < 1)
     throw new WeaviateQueryError(`${label} must be a whole number of 1 or more`);
   return value;

@@ -4,9 +4,13 @@
  * and proxy fields are not built. Every call goes through the credential helper.
  * - insert: `POST /v1/batch/objects` (per-object `result.errors` checked); the collection is created on
  *   first insert (`vectorizer: none`, multi-tenancy on when a tenant is set) and the tenant too;
- * - search: GraphQL `Get` with `nearVector`, or `hybrid` when a hybrid option is set (weaviate-graphql.ts
- *   builds it from validated parts); the score is Weaviate's distance on a vector search (lower is
- *   closer) and the fused score on a hybrid search (higher is better), as in n8n;
+ * - search: the REST Search API, `near-vector`, or `hybrid` when a hybrid option is set (weaviate-rest.ts);
+ *   GraphQL `Get` (weaviate-graphql.ts) on a server without it: a 404 or 405 on the search route, or a
+ *   version from `/v1/meta` before v1.39.7 (and, for hybrid, before the version that takes our vector).
+ *   The choice is kept for the run. Both build from the same validated parts. The score is Weaviate's
+ *   raw distance on a vector search (lower is closer) and the fused score on a hybrid search (higher
+ *   is better), as in n8n;
+ * - every call carries the API key, so none follows a redirect;
  * - Clear Data deletes the collection, or only the tenant when one is set.
  */
 import type {
@@ -32,6 +36,7 @@ import {
   type AdditionalField,
   buildGetQuery,
   type FusionType,
+  type GetQuery,
   type HybridSearch,
   isFusionType,
   parseWhereFilter,
@@ -41,6 +46,14 @@ import {
   WeaviateQueryError,
   type WeaviateWhere,
 } from './weaviate-graphql';
+import {
+  buildRestSearch,
+  hasRestHybridVector,
+  hasRestSearch,
+  parseWeaviateVersion,
+  restRows,
+  type WeaviateVersion,
+} from './weaviate-rest';
 
 /** Weaviate tenant names */
 const TENANT_NAME = /^[A-Za-z0-9_-]{1,64}$/;
@@ -303,7 +316,7 @@ async function weaviateCollectionsSearch(
   const credentials = await ctx.getCredentials('weaviateApi', 0);
   const response = (await ctx.helpers.httpRequestWithAuthentication(
     'weaviateApi',
-    { url: `${weaviateBaseUrl(credentials)}/v1/schema` },
+    { url: `${weaviateBaseUrl(credentials)}/v1/schema`, followRedirects: false },
     0,
   )) as { classes?: Array<{ class?: unknown }> };
   const needle = (filter ?? '').trim().toLowerCase();
@@ -505,13 +518,17 @@ function weaviateBackend(
   let ready = opts.skipInitChecks;
   let collection: CollectionInfo | null | undefined;
   let prepared = false;
+  /** the server version from `/v1/meta`; null when unreadable */
+  let version: WeaviateVersion | null | undefined;
+  /** false once the server showed it has no REST search: GraphQL for the rest of the run */
+  let restSearch = true;
 
   /** One request; any status comes back, so Weaviate's own message can be shown. */
   const call = async (options: HttpRequestOptions, action: string): Promise<HttpFullResponse<unknown>> => {
     try {
       return (await ctx.helpers.httpRequestWithAuthentication(
         'weaviateApi',
-        { ...options, ignoreHttpStatusErrors: true, returnFullResponse: true },
+        { ...options, followRedirects: false, ignoreHttpStatusErrors: true, returnFullResponse: true },
         itemIndex,
       )) as HttpFullResponse<unknown>;
     } catch (error) {
@@ -554,6 +571,31 @@ function weaviateBackend(
       multiTenancy: body.multiTenancyConfig?.enabled === true,
     };
     return collection;
+  };
+
+  /** The server version, read once per run; a failed read leaves it unknown. */
+  const readVersion = async (): Promise<WeaviateVersion | null> => {
+    if (version !== undefined) return version;
+    const response = await call(
+      { url: `${base}/v1/meta`, timeout: opts.queryTimeout },
+      'read the Weaviate version',
+    );
+    version = ok(response)
+      ? parseWeaviateVersion((response.body as { version?: unknown } | null)?.version)
+      : null;
+    return version;
+  };
+
+  /** Whether this search goes over REST: decided from the version, kept for the run. */
+  const useRest = async (hybrid: HybridSearch | undefined): Promise<boolean> => {
+    if (!restSearch) return false;
+    const known = await readVersion();
+    if (known && !hasRestSearch(known)) {
+      restSearch = false;
+      return false;
+    }
+    // before our vector is taken, Weaviate would vectorize the hybrid query itself
+    return !hybrid || hybrid.alpha === 0 || hasRestHybridVector(known);
   };
 
   const ensureTenant = async (tenant: string) => {
@@ -678,31 +720,51 @@ function weaviateBackend(
       const additional: AdditionalField[] = hybrid
         ? ['score', ...(explain ? (['explainScore'] as const) : [])]
         : ['distance'];
-      let query: string;
-      try {
-        query = buildGetQuery({
-          className: opts.className,
-          limit: k,
-          properties: [opts.textKey, ...metadataKeys],
-          additional,
-          ...(hybrid ? { hybrid, autocut: opts.hybrid?.autocut } : { nearVector: vector }),
-          tenant: opts.tenant,
-          where,
-        });
-      } catch (error) {
-        if (error instanceof WeaviateQueryError) throw fail(error.message);
-        throw error;
+      const getQuery: GetQuery = {
+        className: opts.className,
+        limit: k,
+        properties: [opts.textKey, ...metadataKeys],
+        additional,
+        ...(hybrid ? { hybrid, autocut: opts.hybrid?.autocut } : { nearVector: vector }),
+        tenant: opts.tenant,
+        where,
+      };
+      const built = <T>(build: () => T): T => {
+        try {
+          return build();
+        } catch (error) {
+          if (error instanceof WeaviateQueryError) throw fail(error.message);
+          throw error;
+        }
+      };
+      let rows: unknown;
+      let rest = await useRest(hybrid);
+      if (rest) {
+        const request = built(() => buildRestSearch(getQuery));
+        const response = await call(
+          { url: `${base}${request.path}`, method: 'POST', body: request.body, timeout: opts.queryTimeout },
+          'query Weaviate',
+        );
+        if (response.statusCode === 404 || response.statusCode === 405) {
+          // no REST search on this server: GraphQL from now on
+          restSearch = false;
+          rest = false;
+        } else if (!ok(response)) throw refused(response, 'query Weaviate');
+        else rows = restRows(response.body);
       }
-      const response = await call(
-        { url: `${base}/v1/graphql`, method: 'POST', body: { query }, timeout: opts.queryTimeout },
-        'query Weaviate',
-      );
-      if (!ok(response)) throw refused(response, 'query Weaviate');
-      const body = response.body as { data?: { Get?: Record<string, unknown> }; errors?: unknown };
-      if (Array.isArray(body?.errors) && body.errors.length) {
-        throw fail(`Weaviate query failed: ${clip(weaviateMessage(body))}`);
+      if (!rest) {
+        const query = built(() => buildGetQuery(getQuery));
+        const response = await call(
+          { url: `${base}/v1/graphql`, method: 'POST', body: { query }, timeout: opts.queryTimeout },
+          'query Weaviate',
+        );
+        if (!ok(response)) throw refused(response, 'query Weaviate');
+        const body = response.body as { data?: { Get?: Record<string, unknown> }; errors?: unknown };
+        if (Array.isArray(body?.errors) && body.errors.length) {
+          throw fail(`Weaviate query failed: ${clip(weaviateMessage(body))}`);
+        }
+        rows = body?.data?.Get?.[opts.className];
       }
-      const rows = body?.data?.Get?.[opts.className];
       if (!Array.isArray(rows)) return [];
       return rows.map((row): ScoredDocument => {
         const object = (row ?? {}) as DataObject & { _additional?: DataObject };
