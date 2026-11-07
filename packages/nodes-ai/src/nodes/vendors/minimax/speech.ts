@@ -30,13 +30,13 @@ export const speechProperties: NodeProperty[] = [
     default: 'speech-2.8-hd',
     displayOptions: shown,
     options: [
-      'speech-2.8-hd',
-      'speech-2.8-turbo',
-      'speech-2.6-hd',
-      'speech-2.6-turbo',
-      'speech-02-hd',
-      'speech-02-turbo',
-    ].map((v) => ({ name: v, value: v })),
+      { name: 'Speech 02 HD', value: 'speech-02-hd' },
+      { name: 'Speech 02 Turbo', value: 'speech-02-turbo' },
+      { name: 'Speech 2.6 HD', value: 'speech-2.6-hd' },
+      { name: 'Speech 2.6 Turbo', value: 'speech-2.6-turbo' },
+      { name: 'Speech 2.8 HD', value: 'speech-2.8-hd' },
+      { name: 'Speech 2.8 Turbo', value: 'speech-2.8-turbo' },
+    ],
   },
   {
     displayName: 'Text',
@@ -44,8 +44,27 @@ export const speechProperties: NodeProperty[] = [
     type: 'string',
     default: '',
     required: true,
-    typeOptions: { rows: 3 },
+    typeOptions: { rows: 4 },
+    placeholder: 'e.g. Hello, welcome to our service!',
     description: 'The text to speak (up to 10000 characters)',
+    displayOptions: shown,
+  },
+  {
+    displayName: 'Voice ID',
+    name: 'voiceId',
+    type: 'string',
+    default: 'English_Graceful_Lady',
+    required: true,
+    placeholder: 'e.g. English_Graceful_Lady',
+    description: 'The voice to speak with. The MiniMax documentation lists the system voices.',
+    displayOptions: shown,
+  },
+  {
+    displayName: 'Download Audio',
+    name: 'downloadAudio',
+    type: 'boolean',
+    default: true,
+    description: 'Whether to put the audio into a binary field. When off, only a link to it is returned.',
     displayOptions: shown,
   },
   {
@@ -57,35 +76,56 @@ export const speechProperties: NodeProperty[] = [
     displayOptions: shown,
     options: [
       {
-        displayName: 'Download Audio',
-        name: 'downloadAudio',
-        type: 'boolean',
-        default: true,
-        description: 'Whether to put the audio into a binary field instead of only returning a link to it',
+        displayName: 'Audio Format',
+        name: 'audioFormat',
+        type: 'options',
+        default: 'mp3',
+        options: [
+          { name: 'MP3', value: 'mp3' },
+          { name: 'PCM', value: 'pcm' },
+          { name: 'FLAC', value: 'flac' },
+          { name: 'WAV', value: 'wav' },
+        ],
       },
       {
         displayName: 'Emotion',
         name: 'emotion',
         type: 'options',
-        default: 'happy',
-        options: ['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'calm', 'fluent', 'whisper'].map(
-          (v) => ({ name: v.charAt(0).toUpperCase() + v.slice(1), value: v }),
-        ),
-      },
-      {
-        displayName: 'Format',
-        name: 'format',
-        type: 'options',
-        default: 'mp3',
-        options: Object.keys(FORMATS).map((v) => ({ name: v.toUpperCase(), value: v })),
+        default: 'calm',
+        description: 'The emotion of the speech. Without it the model picks the most natural one.',
+        options: [
+          { name: 'Angry', value: 'angry' },
+          { name: 'Calm', value: 'calm' },
+          { name: 'Disgusted', value: 'disgusted' },
+          { name: 'Fearful', value: 'fearful' },
+          { name: 'Happy', value: 'happy' },
+          { name: 'Sad', value: 'sad' },
+          { name: 'Surprised', value: 'surprised' },
+        ],
       },
       {
         displayName: 'Language Boost',
         name: 'languageBoost',
-        type: 'string',
-        default: '',
-        placeholder: 'English',
-        description: 'A language to favour, such as English, Chinese or auto',
+        type: 'options',
+        default: 'auto',
+        options: [
+          { name: 'Arabic', value: 'Arabic' },
+          { name: 'Auto Detect', value: 'auto' },
+          { name: 'Chinese', value: 'Chinese' },
+          { name: 'English', value: 'English' },
+          { name: 'French', value: 'French' },
+          { name: 'German', value: 'German' },
+          { name: 'Indonesian', value: 'Indonesian' },
+          { name: 'Italian', value: 'Italian' },
+          { name: 'Japanese', value: 'Japanese' },
+          { name: 'Korean', value: 'Korean' },
+          { name: 'Portuguese', value: 'Portuguese' },
+          { name: 'Russian', value: 'Russian' },
+          { name: 'Spanish', value: 'Spanish' },
+          { name: 'Thai', value: 'Thai' },
+          { name: 'Turkish', value: 'Turkish' },
+          { name: 'Vietnamese', value: 'Vietnamese' },
+        ],
       },
       {
         displayName: 'Pitch',
@@ -99,20 +139,14 @@ export const speechProperties: NodeProperty[] = [
         name: 'speed',
         type: 'number',
         default: 1,
-        typeOptions: { minValue: 0.5, maxValue: 2, numberPrecision: 2 },
-      },
-      {
-        displayName: 'Voice ID',
-        name: 'voiceId',
-        type: 'string',
-        default: 'English_Graceful_Lady',
+        typeOptions: { minValue: 0.5, maxValue: 2, numberPrecision: 1 },
       },
       {
         displayName: 'Volume',
         name: 'volume',
         type: 'number',
         default: 1,
-        typeOptions: { minValue: 0.1, maxValue: 10, numberPrecision: 2 },
+        typeOptions: { minValue: 0.1, maxValue: 10, numberPrecision: 1 },
       },
     ],
   },
@@ -129,11 +163,12 @@ export async function speechTextToSpeech(ctx: ExecuteContext, itemIndex: number)
     throw new NodeOperationError(ctx.getNode(), 'The text is longer than 10000 characters', { itemIndex });
   }
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
-  const format = typeof options.format === 'string' && FORMATS[options.format] ? options.format : 'mp3';
-  const download = options.downloadAudio !== false;
+  const format =
+    typeof options.audioFormat === 'string' && FORMATS[options.audioFormat] ? options.audioFormat : 'mp3';
+  const download = ctx.getNodeParameter('downloadAudio', itemIndex, true) !== false;
 
   const voice: DataObject = {
-    voice_id: String(options.voiceId ?? '').trim() || 'English_Graceful_Lady',
+    voice_id: String(ctx.getNodeParameter('voiceId', itemIndex, '') ?? '').trim() || 'English_Graceful_Lady',
   };
   const speed = num(options.speed);
   if (speed !== undefined) voice.speed = clamp(speed, 0.5, 2);
@@ -155,23 +190,36 @@ export async function speechTextToSpeech(ctx: ExecuteContext, itemIndex: number)
   const boost = String(options.languageBoost ?? '').trim();
   if (boost) body.language_boost = boost;
 
-  const reply = await minimaxCall<{ data?: { audio?: unknown } }>(ctx, itemIndex, '/t2a_v2', {
-    method: 'POST',
-    body,
-  });
+  const reply = await minimaxCall<{
+    data?: { audio?: unknown };
+    extra_info?: {
+      audio_length?: number;
+      audio_format?: string;
+      audio_size?: number;
+      word_count?: number;
+      usage_characters?: number;
+    };
+  }>(ctx, itemIndex, '/t2a_v2', { method: 'POST', body });
   const audio = typeof reply.data?.audio === 'string' ? reply.data.audio.trim() : '';
   if (!audio) throw new NodeOperationError(ctx.getNode(), 'MiniMax returned no audio', { itemIndex });
   const paired = { item: itemIndex };
+  const info = reply.extra_info;
+  const details: DataObject = {
+    audioLength: info?.audio_length,
+    audioFormat: info?.audio_format,
+    audioSize: info?.audio_size,
+    wordCount: info?.word_count,
+    usageCharacters: info?.usage_characters,
+  };
   const isLink = /^https?:\/\//i.test(audio);
   if (!download) {
     if (!isLink) {
       throw new NodeOperationError(ctx.getNode(), 'MiniMax returned audio data instead of a link', { itemIndex });
     }
-    return { json: { url: audio }, pairedItem: paired };
+    return { json: { ...details, audioUrl: audio }, pairedItem: paired };
   }
 
   const { mime, ext } = FORMATS[format]!;
-  const json: DataObject = isLink ? { url: audio } : {};
   let bytes: Uint8Array;
   if (isLink) {
     try {
@@ -185,5 +233,5 @@ export async function speechTextToSpeech(ctx: ExecuteContext, itemIndex: number)
     }
     bytes = new Uint8Array(Buffer.from(audio, 'hex'));
   }
-  return fileToItem(ctx, itemIndex, { bytes, mimeType: mime, fileName: `speech.${ext}` }, 'data', json);
+  return fileToItem(ctx, itemIndex, { bytes, mimeType: mime, fileName: `speech.${ext}` }, 'data', details);
 }

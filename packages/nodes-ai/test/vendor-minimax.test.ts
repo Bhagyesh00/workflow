@@ -149,11 +149,11 @@ describe('text.message', () => {
             { role: 'user', content: 'third' },
           ],
         },
-        options: { systemMessage: 'be brief', temperature: 0.4, maxTokens: 50 },
+        options: { system: 'be brief', temperature: 0.4, topP: 0.8, maxTokens: 50 },
       },
       { handler: () => answer('<think>hmm, let me see</think>\n\nhello') },
     );
-    expect(out[0]).toEqual({ output: 'hello' });
+    expect(out[0]).toEqual({ content: 'hello' });
     const req = fake.requests[0]!;
     expect(req.url).toBe(`${HOST}/chat/completions`);
     expect(req.method).toBe('POST');
@@ -167,6 +167,7 @@ describe('text.message', () => {
       { role: 'user', content: 'third' },
     ]);
     expect(body.temperature).toBe(0.4);
+    expect(body.top_p).toBe(0.8);
     expect(body.max_tokens).toBe(50);
   });
 
@@ -175,8 +176,58 @@ describe('text.message', () => {
       { resource: 'text', operation: 'message', ...msg('hi'), options: { hideThinking: false } },
       { handler: () => answer('<think>idea</think>done') },
     );
-    expect(out[0]).toEqual({ output: '<think>idea</think>done' });
+    expect(out[0]).toEqual({ content: '<think>idea</think>done' });
     expect((fake.requests[0]!.body as any).max_tokens).toBe(1024);
+  });
+
+  it('adds reasoning_content to the output only when Hide Thinking is off', async () => {
+    const withReasoning = () => ({
+      body: {
+        id: 'c1',
+        choices: [
+          {
+            finish_reason: 'stop',
+            message: { role: 'assistant', content: 'done', reasoning_content: 'because' },
+          },
+        ],
+        base_resp: ok,
+      },
+    });
+    const shown = await minimax(
+      { resource: 'text', operation: 'message', ...msg('hi'), options: { hideThinking: false } },
+      { handler: withReasoning },
+    );
+    expect(shown.out[0]).toEqual({ content: 'done', reasoning_content: 'because' });
+    const hidden = await minimax(
+      { resource: 'text', operation: 'message', ...msg('hi') },
+      { handler: withReasoning },
+    );
+    expect(hidden.out[0]).toEqual({ content: 'done' });
+  });
+
+  it('has the n8n models, options, defaults and ranges', () => {
+    const props = MinimaxNode.description.properties as any[];
+    const model = props.find((p) => p.name === 'modelId' && p.displayOptions?.show?.resource?.[0] === 'text');
+    expect(model.options.map((o: any) => o.value)).toEqual([
+      'MiniMax-M2',
+      'MiniMax-M2.1',
+      'MiniMax-M2.1-highspeed',
+      'MiniMax-M2.5',
+      'MiniMax-M2.5-highspeed',
+      'MiniMax-M2.7',
+      'MiniMax-M2.7-highspeed',
+      'MiniMax-M3',
+    ]);
+    const options = props.find(
+      (p) => p.name === 'options' && p.displayOptions?.show?.resource?.[0] === 'text',
+    );
+    const byName = (name: string) => options.options.find((o: any) => o.name === name);
+    expect(byName('temperature')).toMatchObject({ default: 0.7, typeOptions: { minValue: 0, maxValue: 1 } });
+    expect(byName('topP')).toMatchObject({ default: 0.95, typeOptions: { minValue: 0, maxValue: 1 } });
+    expect(byName('hideThinking').default).toBe(true);
+    expect(byName('maxTokens').default).toBe(1024);
+    expect(byName('maxToolsIterations').default).toBe(15);
+    expect(byName('system')).toBeTruthy();
   });
 
   it('cuts a thinking block that was never closed', async () => {
@@ -184,7 +235,7 @@ describe('text.message', () => {
       { resource: 'text', operation: 'message', ...msg('hi') },
       { handler: () => answer('visible<think>cut off by the token limit') },
     );
-    expect(out[0]).toEqual({ output: 'visible' });
+    expect(out[0]).toEqual({ content: 'visible' });
   });
 
   it('returns the raw reply with Simplify off', async () => {
@@ -227,7 +278,7 @@ describe('text.message', () => {
         },
       },
     );
-    expect(out[0]).toEqual({ output: 'it is found x' });
+    expect(out[0]).toEqual({ content: 'it is found x' });
     expect(calls).toEqual([{ q: 'x' }]);
     expect(fake.requests).toHaveLength(2);
     expect(JSON.stringify((fake.requests[1]!.body as any).messages)).toContain('found x');
@@ -266,7 +317,9 @@ describe('image.generate', () => {
         resource: 'image',
         operation: 'generate',
         prompt: 'a red fox',
-        options: { aspectRatio: '16:9', n: 2, promptOptimizer: true, seed: 3 },
+        aspectRatio: '16:9',
+        numberOfImages: 2,
+        options: { promptOptimizer: true, seed: 3 },
       },
       {
         handler: (req) =>
@@ -294,19 +347,42 @@ describe('image.generate', () => {
       expect(JSON.stringify(request.headers ?? {})).not.toContain(KEY);
     }
     expect(items).toHaveLength(2);
-    expect(items[0]!.json).toEqual({ url: `${MEDIA}/a.jpg`, id: 'img-1' });
+    expect(items[0]!.json).toEqual({ imageUrl: `${MEDIA}/a.jpg` });
     expect(items[0]!.binary?.data?.mimeType).toBe('image/jpeg');
     expect(items[1]!.binary?.data?.fileName).toBe('image-2.jpg');
   });
 
   it('returns only the links with Download Image off', async () => {
     const { fake, items } = await minimax(
-      { resource: 'image', operation: 'generate', prompt: 'p', options: { downloadImage: false } },
+      { resource: 'image', operation: 'generate', prompt: 'p', downloadImage: false },
       { handler: () => images([`${MEDIA}/a.jpg`]) },
     );
     expect(fake.requests).toHaveLength(1);
-    expect(items[0]!.json).toMatchObject({ url: `${MEDIA}/a.jpg` });
+    expect(items[0]!.json).toEqual({ imageUrl: `${MEDIA}/a.jpg` });
     expect(items[0]!.binary).toBeUndefined();
+  });
+
+  it('has image-01 only, with aspect ratio, number of images and download on top', () => {
+    const props = MinimaxNode.description.properties as any[];
+    const forImage = (name: string) =>
+      props.find((p) => p.name === name && p.displayOptions?.show?.resource?.[0] === 'image');
+    expect(forImage('modelId').options.map((o: any) => o.value)).toEqual(['image-01']);
+    expect(forImage('aspectRatio').options.map((o: any) => o.value)).toEqual([
+      '1:1',
+      '16:9',
+      '2:3',
+      '21:9',
+      '3:2',
+      '3:4',
+      '4:3',
+      '9:16',
+    ]);
+    expect(forImage('numberOfImages')).toMatchObject({
+      default: 1,
+      typeOptions: { minValue: 1, maxValue: 9 },
+    });
+    expect(forImage('downloadImage').default).toBe(true);
+    expect(forImage('options').options.map((o: any) => o.name)).toEqual(['promptOptimizer', 'seed']);
   });
 
   it('refuses an empty prompt and a reply with no image', async () => {
@@ -329,8 +405,19 @@ describe('image.generate', () => {
 describe('audio.textToSpeech', () => {
   const hex = Buffer.from('MP3BYTES').toString('hex');
   const speech = (audio: string) => ({
-    body: { data: { audio, status: 2 }, extra_info: { audio_format: 'mp3' }, base_resp: ok },
+    body: {
+      data: { audio, status: 2 },
+      extra_info: {
+        audio_length: 1500,
+        audio_format: 'mp3',
+        audio_size: 8,
+        word_count: 2,
+        usage_characters: 11,
+      },
+      base_resp: ok,
+    },
   });
+  const details = { audioLength: 1500, audioFormat: 'mp3', audioSize: 8, wordCount: 2, usageCharacters: 11 };
 
   it('sends the call and turns the hex reply into a binary field', async () => {
     const { fake, items } = await minimax(
@@ -338,8 +425,8 @@ describe('audio.textToSpeech', () => {
         resource: 'audio',
         operation: 'textToSpeech',
         text: 'hello there',
+        voiceId: 'Calm_Woman',
         options: {
-          voiceId: 'Calm_Woman',
           speed: 1.5,
           volume: 2,
           pitch: 3,
@@ -362,6 +449,7 @@ describe('audio.textToSpeech', () => {
       language_boost: 'English',
     });
     expect(fake.requests).toHaveLength(1);
+    expect(items[0]!.json).toEqual(details);
     expect(items[0]!.binary?.data?.mimeType).toBe('audio/mpeg');
     expect(items[0]!.binary?.data?.fileName).toBe('speech.mp3');
     expect(Buffer.from(items[0]!.binary!.data!.data, 'base64').toString()).toBe('MP3BYTES');
@@ -369,7 +457,7 @@ describe('audio.textToSpeech', () => {
 
   it('downloads a link reply with no key', async () => {
     const { fake, items } = await minimax(
-      { resource: 'audio', operation: 'textToSpeech', text: 'hi', options: { format: 'wav' } },
+      { resource: 'audio', operation: 'textToSpeech', text: 'hi', options: { audioFormat: 'wav' } },
       {
         handler: (req) =>
           req.url.startsWith(MEDIA)
@@ -379,19 +467,62 @@ describe('audio.textToSpeech', () => {
     );
     const media = fake.requests.find((r) => r.url.startsWith(MEDIA))!;
     expect(header(media, 'authorization')).toBeUndefined();
-    expect(items[0]!.json).toEqual({ url: `${MEDIA}/voice.wav` });
+    expect(items[0]!.json).toEqual(details);
     expect(items[0]!.binary?.data?.mimeType).toBe('audio/wav');
     expect(items[0]!.binary?.data?.fileName).toBe('speech.wav');
   });
 
   it('asks for a link and keeps it with Download Audio off', async () => {
     const { fake, items } = await minimax(
-      { resource: 'audio', operation: 'textToSpeech', text: 'hi', options: { downloadAudio: false } },
+      { resource: 'audio', operation: 'textToSpeech', text: 'hi', downloadAudio: false },
       { handler: () => speech(`${MEDIA}/voice.mp3`) },
     );
     expect((fake.requests[0]!.body as any).output_format).toBe('url');
     expect(fake.requests).toHaveLength(1);
-    expect(items[0]!.json).toEqual({ url: `${MEDIA}/voice.mp3` });
+    expect(items[0]!.json).toEqual({ ...details, audioUrl: `${MEDIA}/voice.mp3` });
+  });
+
+  it('has the n8n models, voice, emotion and language boost defaults and ranges', () => {
+    const props = MinimaxNode.description.properties as any[];
+    const forAudio = (name: string) =>
+      props.find((p) => p.name === name && p.displayOptions?.show?.resource?.[0] === 'audio');
+    expect(forAudio('modelId').options.map((o: any) => o.value)).toEqual([
+      'speech-02-hd',
+      'speech-02-turbo',
+      'speech-2.6-hd',
+      'speech-2.6-turbo',
+      'speech-2.8-hd',
+      'speech-2.8-turbo',
+    ]);
+    expect(forAudio('modelId').default).toBe('speech-2.8-hd');
+    expect(forAudio('voiceId').default).toBe('English_Graceful_Lady');
+    expect(forAudio('downloadAudio').default).toBe(true);
+    const options = forAudio('options').options;
+    const byName = (name: string) => options.find((o: any) => o.name === name);
+    expect(options.map((o: any) => o.name)).toEqual([
+      'audioFormat',
+      'emotion',
+      'languageBoost',
+      'pitch',
+      'speed',
+      'volume',
+    ]);
+    expect(byName('audioFormat').options.map((o: any) => o.value)).toEqual(['mp3', 'pcm', 'flac', 'wav']);
+    expect(byName('emotion').default).toBe('calm');
+    expect(byName('emotion').options.map((o: any) => o.value)).toEqual([
+      'angry',
+      'calm',
+      'disgusted',
+      'fearful',
+      'happy',
+      'sad',
+      'surprised',
+    ]);
+    expect(byName('languageBoost').default).toBe('auto');
+    expect(byName('languageBoost').options).toHaveLength(16);
+    expect(byName('pitch')).toMatchObject({ default: 0, typeOptions: { minValue: -12, maxValue: 12 } });
+    expect(byName('speed')).toMatchObject({ default: 1, typeOptions: { minValue: 0.5, maxValue: 2 } });
+    expect(byName('volume')).toMatchObject({ default: 1, typeOptions: { minValue: 0.1, maxValue: 10 } });
   });
 
   it('refuses empty text, text that is too long and audio that is not hex', async () => {
@@ -423,7 +554,9 @@ describe('video', () => {
         operation: 'textToVideo',
         modelId: 'MiniMax-Hailuo-2.3',
         prompt: 'waves',
-        options: { duration: 10, resolution: '1080P', promptOptimizer: false },
+        duration: 10,
+        resolution: '1080P',
+        options: { promptOptimizer: false },
       },
       {
         handler: (req) => {
@@ -456,7 +589,7 @@ describe('video', () => {
     const media = fake.requests.find((r) => r.url.startsWith(MEDIA))!;
     expect(header(media, 'authorization')).toBeUndefined();
     expect(JSON.stringify(media.headers ?? {})).not.toContain(KEY);
-    expect(items[0]!.json).toEqual({ url: `${MEDIA}/clip.mp4`, taskId: 'task-1', fileId: 'f-9' });
+    expect(items[0]!.json).toEqual({ videoUrl: `${MEDIA}/clip.mp4`, taskId: 'task-1', fileId: 'f-9' });
     expect(items[0]!.binary?.data?.mimeType).toBe('video/mp4');
   });
 
@@ -471,18 +604,25 @@ describe('video', () => {
         resource: 'video',
         operation: 'imageToVideo',
         prompt: 'zoom',
-        inputType: 'url',
+        imageInputType: 'url',
         imageUrl: `${MEDIA}/first.png`,
-        options: { downloadVideo: false, lastFrameUrl: `${MEDIA}/last.png` },
+        downloadVideo: false,
+        options: {
+          lastFrameInputType: 'url',
+          lastFrameImageUrl: `${MEDIA}/last.png`,
+          subjectReferenceInputType: 'url',
+          subjectReferenceImageUrl: `${MEDIA}/face.png`,
+        },
       },
       { handler },
     );
     expect(link.fake.requests[0]!.body).toMatchObject({
       first_frame_image: `${MEDIA}/first.png`,
       last_frame_image: `${MEDIA}/last.png`,
+      subject_reference: [{ image: `${MEDIA}/face.png` }],
     });
     expect(link.fake.requests.some((r) => r.url.startsWith(MEDIA))).toBe(false);
-    expect(link.items[0]!.json).toMatchObject({ url: `${MEDIA}/clip.mp4` });
+    expect(link.items[0]!.json).toMatchObject({ videoUrl: `${MEDIA}/clip.mp4` });
     expect(link.items[0]!.binary).toBeUndefined();
 
     const inline = await minimax(
@@ -490,9 +630,10 @@ describe('video', () => {
         resource: 'video',
         operation: 'imageToVideo',
         prompt: 'zoom',
-        inputType: 'binary',
+        imageInputType: 'binary',
         binaryPropertyName: 'data',
-        options: { downloadVideo: false, lastFrameField: 'end' },
+        downloadVideo: false,
+        options: { lastFrameInputType: 'binary', lastFrameBinaryPropertyName: 'end' },
       },
       {
         handler,
@@ -503,6 +644,39 @@ describe('video', () => {
       first_frame_image: `data:image/png;base64,${b64('IMG')}`,
       last_frame_image: `data:image/jpeg;base64,${b64('END')}`,
     });
+  });
+
+  it('lets Image to Video go without a prompt, and has the n8n resolutions', async () => {
+    const { fake } = await minimax(
+      {
+        resource: 'video',
+        operation: 'imageToVideo',
+        imageInputType: 'url',
+        imageUrl: `${MEDIA}/first.png`,
+        resolution: '512P',
+        downloadVideo: false,
+      },
+      {
+        handler: (req) => {
+          if (req.method === 'POST') return created('task-3');
+          if (req.url.includes('/files/retrieve')) return file;
+          return state('Success', { file_id: 'f-9' });
+        },
+      },
+    );
+    expect(fake.requests[0]!.body).toEqual({
+      model: 'MiniMax-Hailuo-2.3',
+      first_frame_image: `${MEDIA}/first.png`,
+      duration: 6,
+      resolution: '512P',
+    });
+    const props = MinimaxNode.description.properties as any[];
+    const resolution = (op: string) =>
+      props
+        .find((p) => p.name === 'resolution' && p.displayOptions?.show?.operation?.includes(op))
+        .options.map((o: any) => o.value);
+    expect(resolution('textToVideo')).toEqual(['720P', '768P', '1080P']);
+    expect(resolution('imageToVideo')).toEqual(['512P', '720P', '768P', '1080P']);
   });
 
   it('fails with a fixed text when the task fails, and when it never finishes', async () => {
@@ -529,7 +703,7 @@ describe('video', () => {
       resource: 'video',
       operation: 'imageToVideo',
       prompt: 'p',
-      inputType: 'url',
+      imageInputType: 'url',
       imageUrl: 'file:///etc/passwd',
     });
     expect(bad.result.status).toBe('error');

@@ -22,10 +22,7 @@ export const imageProperties: NodeProperty[] = [
     type: 'options',
     default: 'image-01',
     displayOptions: shown,
-    options: [
-      { name: 'Image-01', value: 'image-01' },
-      { name: 'Image-01 Live', value: 'image-01-live' },
-    ],
+    options: [{ name: 'Image-01', value: 'image-01' }],
   },
   {
     displayName: 'Prompt',
@@ -33,8 +30,43 @@ export const imageProperties: NodeProperty[] = [
     type: 'string',
     default: '',
     required: true,
-    typeOptions: { rows: 3 },
+    typeOptions: { rows: 4 },
+    placeholder: 'e.g. A serene mountain landscape at sunset with reflections in a lake',
     description: 'What the image should show',
+    displayOptions: shown,
+  },
+  {
+    displayName: 'Aspect Ratio',
+    name: 'aspectRatio',
+    type: 'options',
+    default: '1:1',
+    displayOptions: shown,
+    options: [
+      { name: '1:1 (1024x1024)', value: '1:1' },
+      { name: '16:9 (1280x720)', value: '16:9' },
+      { name: '2:3 (832x1248)', value: '2:3' },
+      { name: '21:9 (1344x576)', value: '21:9' },
+      { name: '3:2 (1248x832)', value: '3:2' },
+      { name: '3:4 (864x1152)', value: '3:4' },
+      { name: '4:3 (1152x864)', value: '4:3' },
+      { name: '9:16 (720x1280)', value: '9:16' },
+    ],
+  },
+  {
+    displayName: 'Number of Images',
+    name: 'numberOfImages',
+    type: 'number',
+    default: 1,
+    typeOptions: { minValue: 1, maxValue: 9 },
+    displayOptions: shown,
+  },
+  {
+    displayName: 'Download Image',
+    name: 'downloadImage',
+    type: 'boolean',
+    default: true,
+    description:
+      'Whether to download the images into binary fields. When off, only their links are returned.',
     displayOptions: shown,
   },
   {
@@ -45,29 +77,14 @@ export const imageProperties: NodeProperty[] = [
     default: {},
     displayOptions: shown,
     options: [
-      {
-        displayName: 'Aspect Ratio',
-        name: 'aspectRatio',
-        type: 'options',
-        default: '1:1',
-        options: ['1:1', '16:9', '4:3', '3:2', '2:3', '3:4', '9:16', '21:9'].map((v) => ({ name: v, value: v })),
-      },
-      {
-        displayName: 'Download Image',
-        name: 'downloadImage',
-        type: 'boolean',
-        default: true,
-        description: 'Whether to download the images into binary fields instead of only returning their links',
-      },
-      {
-        displayName: 'Number of Images',
-        name: 'n',
-        type: 'number',
-        default: 1,
-        typeOptions: { minValue: 1, maxValue: 9 },
-      },
       { displayName: 'Prompt Optimizer', name: 'promptOptimizer', type: 'boolean', default: false },
-      { displayName: 'Seed', name: 'seed', type: 'number', default: 0 },
+      {
+        displayName: 'Seed',
+        name: 'seed',
+        type: 'number',
+        default: 0,
+        description: 'The same seed and settings give the same image',
+      },
     ],
   },
 ];
@@ -86,19 +103,18 @@ export async function imageGenerate(ctx: ExecuteContext, itemIndex: number): Pro
   const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
 
   const body: DataObject = { model, prompt, response_format: 'url' };
-  if (typeof options.aspectRatio === 'string') body.aspect_ratio = options.aspectRatio;
-  const n = num(options.n);
+  const aspectRatio = ctx.getNodeParameter('aspectRatio', itemIndex, '1:1');
+  if (typeof aspectRatio === 'string' && aspectRatio) body.aspect_ratio = aspectRatio;
+  const n = num(ctx.getNodeParameter('numberOfImages', itemIndex, 1));
   if (n !== undefined) body.n = Math.min(9, Math.max(1, Math.floor(n)));
   if (options.promptOptimizer !== undefined) body.prompt_optimizer = options.promptOptimizer === true;
   const seed = num(options.seed);
   if (seed !== undefined && seed !== 0) body.seed = seed;
 
-  const reply = await minimaxCall<{ data?: { image_urls?: unknown }; id?: unknown }>(
-    ctx,
-    itemIndex,
-    '/image_generation',
-    { method: 'POST', body },
-  );
+  const reply = await minimaxCall<{ data?: { image_urls?: unknown } }>(ctx, itemIndex, '/image_generation', {
+    method: 'POST',
+    body,
+  });
   const urls = Array.isArray(reply.data?.image_urls)
     ? (reply.data.image_urls as unknown[]).filter((u): u is string => typeof u === 'string' && u !== '')
     : [];
@@ -106,8 +122,8 @@ export async function imageGenerate(ctx: ExecuteContext, itemIndex: number): Pro
 
   const items: Item[] = [];
   for (const [index, url] of urls.entries()) {
-    const json: DataObject = { url, ...(typeof reply.id === 'string' ? { id: reply.id } : {}) };
-    if (options.downloadImage === false) {
+    const json: DataObject = { imageUrl: url };
+    if (ctx.getNodeParameter('downloadImage', itemIndex, true) === false) {
       items.push({ json, pairedItem: { item: itemIndex } });
       continue;
     }

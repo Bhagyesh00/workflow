@@ -81,6 +81,7 @@ export function minimaxAdapter(config: {
   baseUrl: string;
   model: string;
   temperature?: number;
+  topP?: number;
   maxTokens?: number;
   hideThinking: boolean;
 }): ChatAdapter {
@@ -92,6 +93,7 @@ export function minimaxAdapter(config: {
     maxTokensField: 'max_tokens',
     responseFormatMode: 'none',
     temperature: config.temperature,
+    topP: config.topP,
     maxTokens: config.maxTokens,
     streamUsage: false,
   });
@@ -125,10 +127,14 @@ export const textProperties: NodeProperty[] = [
     displayOptions: shown,
     description: 'The model to message. Choose from the list, or use an expression for another model id.',
     options: [
-      { name: 'MiniMax-M3', value: 'MiniMax-M3' },
-      { name: 'MiniMax-M2.5', value: 'MiniMax-M2.5' },
-      { name: 'MiniMax-M2.1', value: 'MiniMax-M2.1' },
       { name: 'MiniMax-M2', value: 'MiniMax-M2' },
+      { name: 'MiniMax-M2.1', value: 'MiniMax-M2.1' },
+      { name: 'MiniMax-M2.1-Highspeed', value: 'MiniMax-M2.1-highspeed' },
+      { name: 'MiniMax-M2.5', value: 'MiniMax-M2.5' },
+      { name: 'MiniMax-M2.5-Highspeed', value: 'MiniMax-M2.5-highspeed' },
+      { name: 'MiniMax-M2.7', value: 'MiniMax-M2.7' },
+      { name: 'MiniMax-M2.7-Highspeed', value: 'MiniMax-M2.7-highspeed' },
+      { name: 'MiniMax-M3', value: 'MiniMax-M3' },
     ],
   },
   { ...messagesProperty({ roles: ['user', 'assistant'] }), displayOptions: shown },
@@ -149,26 +155,36 @@ export const textProperties: NodeProperty[] = [
         description: "Whether to cut the model's thinking (the text between think tags) out of the answer",
       },
       {
-        displayName: 'Max Tokens',
+        displayName: 'Maximum Number of Tokens',
         name: 'maxTokens',
         type: 'number',
         default: 1024,
-        typeOptions: { minValue: 1 },
+        typeOptions: { minValue: 1, numberPrecision: 0 },
       },
       maxToolIterationsOption,
       {
-        displayName: 'System Message',
-        name: 'systemMessage',
-        type: 'string',
-        default: '',
-        typeOptions: { rows: 2 },
-      },
-      {
-        displayName: 'Temperature',
+        displayName: 'Output Randomness (Temperature)',
         name: 'temperature',
         type: 'number',
-        default: 1,
-        typeOptions: { minValue: 0.01, maxValue: 1, numberPrecision: 2 },
+        default: 0.7,
+        typeOptions: { minValue: 0, maxValue: 1, numberPrecision: 1 },
+        description: 'Lower values make the answer less random',
+      },
+      {
+        displayName: 'Output Randomness (Top P)',
+        name: 'topP',
+        type: 'number',
+        default: 0.95,
+        typeOptions: { minValue: 0, maxValue: 1, numberPrecision: 2 },
+        description: 'Nucleus sampling. Lower values make the answer more focused.',
+      },
+      {
+        displayName: 'System Message',
+        name: 'system',
+        type: 'string',
+        default: '',
+        placeholder: 'e.g. You are a helpful assistant',
+        typeOptions: { rows: 2 },
       },
     ],
   },
@@ -186,10 +202,11 @@ export async function textMessage(ctx: ExecuteContext, itemIndex: number): Promi
     baseUrl: await minimaxBase(ctx, itemIndex),
     model,
     temperature: num(options.temperature),
+    topP: num(options.topP),
     maxTokens: num(options.maxTokens) ?? 1024,
     hideThinking: options.hideThinking !== false,
   });
-  const system = String(options.systemMessage ?? '').trim();
+  const system = String(options.system ?? '').trim();
   let result: Awaited<ReturnType<typeof runVendorChat>>;
   try {
     result = await runVendorChat(ctx, itemIndex, adapter, {
@@ -203,9 +220,13 @@ export async function textMessage(ctx: ExecuteContext, itemIndex: number): Promi
     throw vendorError(ctx, error, itemIndex);
   }
   const paired = { item: itemIndex };
-  if (ctx.getNodeParameter('simplify', itemIndex, true) === false) {
-    const raw = (result.raw && typeof result.raw === 'object' ? result.raw : {}) as DataObject;
-    return { json: raw, pairedItem: paired };
+  const raw = (result.raw && typeof result.raw === 'object' ? result.raw : {}) as DataObject;
+  if (ctx.getNodeParameter('simplify', itemIndex, true) === false) return { json: raw, pairedItem: paired };
+  const json: DataObject = { content: result.text };
+  const reasoning = (raw.choices as Array<{ message?: { reasoning_content?: unknown } }> | undefined)?.[0]
+    ?.message?.reasoning_content;
+  if (options.hideThinking === false && typeof reasoning === 'string' && reasoning) {
+    json.reasoning_content = reasoning;
   }
-  return { json: { output: result.text }, pairedItem: paired };
+  return { json, pairedItem: paired };
 }
