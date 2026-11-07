@@ -74,7 +74,7 @@ describe('Postgres chat memory', () => {
     expect(rows.rowCount).toBe(8);
     expect(rows.rows[0]).toEqual({
       tenant_id: 't1',
-      session_id: 's1',
+      session_id: 's1__Memory',
       message: { role: 'user', content: 'I like green' },
     });
     // AI logs record loads and saves
@@ -158,7 +158,7 @@ describe('Redis chat memory', () => {
 
   beforeAll(() => redis.connect());
   afterAll(async () => {
-    const keys = await redis.keys(`wf:ai:chat:*:${session}`);
+    const keys = await redis.keys(`wf:ai:chat:*:${session}__Memory`);
     if (keys.length) await redis.del(...keys);
     await redis.quit();
   });
@@ -170,7 +170,7 @@ describe('Redis chat memory', () => {
       ['user', 'Remember 42'],
       ['assistant', 'Remembered.'],
     ]);
-    const key = `wf:ai:chat:t1:${session}`;
+    const key = `wf:ai:chat:t1:${session}__Memory`;
     expect(await redis.llen(key)).toBe(4);
     const ttl = await redis.ttl(key);
     expect(ttl).toBeGreaterThan(500);

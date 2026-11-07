@@ -5,6 +5,7 @@
  * cannot redirect it.
  */
 import net from 'node:net';
+import { openSshTunnel, type SshTunnel, sshTunnelEnabled } from '@workflow/nodes-base/utils/ssh-tunnel';
 import type { DataObject } from '@workflow/workflow';
 import { Redis } from 'ioredis';
 import pg from 'pg';
@@ -50,9 +51,26 @@ export function postgresTlsOptions(creds: PostgresCredentials): pg.ClientConfig[
   return false;
 }
 
-async function openPostgres(ctx: ConnectionContext, creds: PostgresCredentials): Promise<pg.Client> {
+/**
+ * Opens the client. With the credential's SSH tunnel on, the SSH host is checked by `openSshTunnel`
+ * and the SSH server resolves the database host, so no address check runs on the database host
+ * (as the Postgres node); the stream connects to the tunnel's loopback listener and `host` stays the
+ * credential's for TLS. The tunnel closes with the client.
+ */
+async function openPostgres(
+  ctx: ConnectionContext,
+  creds: PostgresCredentials,
+  raw: DataObject,
+): Promise<pg.Client> {
   const host = creds.host.trim();
-  const allowed = await ctx.helpers.resolveAllowedHost(host);
+  let tunnel: SshTunnel | undefined;
+  let allowed: Awaited<ReturnType<ConnectionContext['helpers']['resolveAllowedHost']>> | undefined;
+  if (sshTunnelEnabled(raw)) {
+    tunnel = await openSshTunnel(ctx, raw, { host, port: creds.port });
+  } else {
+    allowed = await ctx.helpers.resolveAllowedHost(host);
+  }
+  const target = tunnel ? { port: tunnel.port, host: tunnel.host } : undefined;
   const client = new pg.Client({
     // pg takes the TLS server name from `host`, so it stays the name the user entered
     host,
@@ -62,12 +80,11 @@ async function openPostgres(ctx: ConnectionContext, creds: PostgresCredentials):
       const socket = new net.Socket();
       const connect = socket.connect.bind(socket);
       socket.connect = ((port: number, name: string) =>
-        connect({
-          port,
-          host: name,
-          lookup: allowed.lookup,
-          autoSelectFamily: true,
-        })) as typeof socket.connect;
+        connect(
+          target
+            ? { port: target.port, host: target.host }
+            : { port, host: name, lookup: allowed?.lookup, autoSelectFamily: true },
+        )) as typeof socket.connect;
       return socket;
     },
     database: creds.database,
@@ -80,13 +97,38 @@ async function openPostgres(ctx: ConnectionContext, creds: PostgresCredentials):
   });
   // connection-level errors after connect must not crash the process
   client.on('error', (error) => ctx.logger.warn('Postgres connection error', { error: error.message }));
+  if (tunnel) {
+    const open = tunnel;
+    const end = client.end.bind(client) as () => Promise<void>;
+    client.end = (async () => {
+      try {
+        await end();
+      } finally {
+        await open.close();
+      }
+    }) as typeof client.end;
+  }
   try {
     await client.connect();
   } catch (error) {
     await client.end().catch(() => {});
+    await tunnel?.close();
     throw error;
   }
   return client;
+}
+
+/** the credential fields that decide which tunnel is opened, so two credentials never share a client */
+function sshSettings(raw: DataObject): DataObject {
+  return {
+    sshHost: raw.sshHost ?? null,
+    sshPort: raw.sshPort ?? null,
+    sshUser: raw.sshUser ?? null,
+    sshPassword: raw.sshPassword ?? null,
+    sshAuthenticateWith: raw.sshAuthenticateWith ?? null,
+    privateKey: raw.privateKey ?? null,
+    passphrase: raw.passphrase ?? null,
+  };
 }
 
 /**
@@ -98,10 +140,12 @@ export async function sharedPostgres(
   itemIndex: number,
   credentialType = 'postgres',
 ): Promise<Shared<pg.Client>> {
-  const creds = postgresCredentials(await ctx.getCredentials(credentialType, itemIndex));
+  const raw = await ctx.getCredentials(credentialType, itemIndex);
+  const creds = postgresCredentials(raw);
+  const tunnel = sshTunnelEnabled(raw) ? sshSettings(raw) : undefined;
   return acquireShared(
-    sharedKey(ctx, 'postgres', creds),
-    () => openPostgres(ctx, creds),
+    sharedKey(ctx, 'postgres', creds, tunnel),
+    () => openPostgres(ctx, creds, raw),
     (client) => client.end(),
   );
 }
