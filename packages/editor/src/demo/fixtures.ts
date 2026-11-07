@@ -1063,6 +1063,19 @@ const slackHitlTool: NodeTypeDescription = {
   ],
 };
 
+/** The demo mapper starts with the required fields and lets the user add the rest (`addAllFields: false`). */
+const demoMapperOptions: NonNullable<NonNullable<NodeProperty['typeOptions']>['resourceMapper']> = {
+  resourceMapperMethod: 'getMappingFields',
+  mode: 'upsert',
+  valuesLabel: 'Values to send',
+  fieldWords: { singular: 'column', plural: 'columns' },
+  addAllFields: false,
+  multiKeyMatch: true,
+  supportAutoMap: true,
+  noFieldsError: 'This table has no columns',
+  showTypeConversionOptions: true,
+};
+
 /** P5-80: the resource mapper control's demo. `demoResourceMapping` answers its method. */
 const resourceMapperDemo: NodeTypeDescription = {
   name: 'demo.resourceMapper',
@@ -1101,16 +1114,7 @@ const resourceMapperDemo: NodeTypeDescription = {
       },
       typeOptions: {
         loadOptionsDependsOn: ['table'],
-        resourceMapper: {
-          resourceMapperMethod: 'getMappingFields',
-          mode: 'upsert',
-          valuesLabel: 'Values to send',
-          fieldWords: { singular: 'column', plural: 'columns' },
-          addAllFields: true,
-          multiKeyMatch: true,
-          supportAutoMap: true,
-          noFieldsError: 'This table has no columns',
-        },
+        resourceMapper: demoMapperOptions,
       },
     },
   ],

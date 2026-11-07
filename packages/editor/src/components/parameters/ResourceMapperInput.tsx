@@ -40,7 +40,7 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
   const mode = options?.mode ?? 'add';
   const words = options?.fieldWords ?? { singular: 'column', plural: 'columns' };
   const current = normalizeMapperValue(value);
-  const { data, isLoading, error, refetch } = useMapperFields(prop);
+  const { data, isFetching, error, refetch } = useMapperFields(prop);
 
   // the loaded fields become the stored schema; `removed` and the matching columns stay as chosen
   useEffect(() => {
@@ -52,9 +52,14 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
   const schema: ResourceMapperField[] = data ? mergeSchema(data.fields, current.schema) : current.schema;
   const values = current.value;
   const matching = mode === 'update' || mode === 'upsert' ? current.matchingColumns : [];
+  // every displayed field is a row, as in n8n; `addAllFields: false` starts with the required ones and
+  // the fields the user adds
+  const showAll = options?.addAllFields !== false;
   const shown = schema.filter(
     (f) =>
-      f.display && !f.removed && (f.required || matching.includes(f.id) || hasValue(values, f.id)),
+      f.display &&
+      !f.removed &&
+      (showAll || f.required || matching.includes(f.id) || hasValue(values, f.id)),
   );
   const addable = schema.filter((f) => f.display && !f.removed && !shown.includes(f));
   const removed = schema.filter((f) => f.display && f.removed);
@@ -87,6 +92,8 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
   const auto = supportAutoMap && current.mappingMode === 'autoMapInputData';
   const readOnly = ctx.readOnly;
   const emptyLoaded = Boolean(data) && schema.every((f) => !f.display);
+  // the switches show only for a node that reads them, as n8n's `showTypeConversionOptions`
+  const showConversion = options?.showTypeConversionOptions === true && schema.length > 0;
 
   return (
     <div className="space-y-3 rounded-lg border border-line p-3" data-resource-mapper>
@@ -116,15 +123,15 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
         ) : (
           <div className="flex-1" />
         )}
-        <IconButton label={`Refresh ${words.plural}`} onClick={refetch} disabled={!options}>
-          <RefreshCw size={14} className={isLoading ? 'wf-spinner' : undefined} />
+        <IconButton label={`Refresh ${words.plural}`} onClick={refetch} disabled={!options || readOnly}>
+          <RefreshCw size={14} className={isFetching ? 'wf-spinner' : undefined} />
         </IconButton>
       </div>
 
       {!options && (
         <Callout tone="warn">This parameter has no resource mapper settings.</Callout>
       )}
-      {isLoading && <p className="text-xs text-ink-3">Loading {words.plural}…</p>}
+      {isFetching && <p className="text-xs text-ink-3">Loading {words.plural}…</p>}
       {error && (
         <Callout tone="err" title={`Could not load ${words.plural}`}>
           {error}
@@ -186,7 +193,7 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
               </option>
             ))}
           </Select>
-          {options?.addAllFields && (
+          {!showAll && (
             <Button size="sm" onClick={() => addFields(schema.filter((f) => f.display && !f.removed).map((f) => f.id))}>
               Add all {words.plural}
             </Button>
@@ -212,28 +219,30 @@ export function ResourceMapperInput({ prop, value, onChange, id, path }: Resourc
         </div>
       )}
 
-      <div className="space-y-2">
-        <div className="flex items-center justify-between gap-2 text-sm">
-          <span>Attempt to convert types</span>
-          <Switch
-            label="Attempt to convert types"
-            size="sm"
-            checked={current.attemptToConvertTypes}
-            disabled={readOnly}
-            onChange={(attemptToConvertTypes) => save({ attemptToConvertTypes })}
-          />
+      {showConversion && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2 text-sm">
+            <span>Attempt to convert types</span>
+            <Switch
+              label="Attempt to convert types"
+              size="sm"
+              checked={current.attemptToConvertTypes}
+              disabled={readOnly}
+              onChange={(attemptToConvertTypes) => save({ attemptToConvertTypes })}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-2 text-sm">
+            <span>Convert all fields to string</span>
+            <Switch
+              label="Convert all fields to string"
+              size="sm"
+              checked={current.convertFieldsToString}
+              disabled={readOnly}
+              onChange={(convertFieldsToString) => save({ convertFieldsToString })}
+            />
+          </div>
         </div>
-        <div className="flex items-center justify-between gap-2 text-sm">
-          <span>Convert all fields to string</span>
-          <Switch
-            label="Convert all fields to string"
-            size="sm"
-            checked={current.convertFieldsToString}
-            disabled={readOnly}
-            onChange={(convertFieldsToString) => save({ convertFieldsToString })}
-          />
-        </div>
-      </div>
+      )}
     </div>
   );
 }

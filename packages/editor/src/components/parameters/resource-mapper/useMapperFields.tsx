@@ -89,16 +89,26 @@ export function syncWithFields(
   };
 }
 
+/** JSON text with object keys sorted: the stored jsonb and the loader give the same fields in another key order */
+function stableText(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : item,
+  );
+}
+
 export function sameSync(a: ResourceMapperValue, b: ResourceMapperValue): boolean {
   return (
-    JSON.stringify([a.schema, a.matchingColumns, a.value]) ===
-    JSON.stringify([b.schema, b.matchingColumns, b.value])
+    stableText([a.schema, a.matchingColumns, a.value]) === stableText([b.schema, b.matchingColumns, b.value])
   );
 }
 
 export interface MapperFieldsState {
   data: ResourceMapperFields | undefined;
   isLoading: boolean;
+  /** true for every load, a refresh included */
+  isFetching: boolean;
   error: string | null;
   refetch: () => void;
 }
@@ -129,7 +139,8 @@ export function useMapperFields(prop: NodeProperty): MapperFieldsState {
       JSON.stringify(dependsOn),
       JSON.stringify(ctx.node.credentials ?? {}),
     ],
-    enabled: Boolean(method && ctx.description),
+    // the options route needs the editor role: a viewer sees the stored fields and no error
+    enabled: Boolean(method && ctx.description) && !ctx.readOnly,
     staleTime: 60_000,
     retry: false,
     queryFn: () =>
@@ -144,6 +155,7 @@ export function useMapperFields(prop: NodeProperty): MapperFieldsState {
   return {
     data: query.data,
     isLoading: query.isLoading,
+    isFetching: query.isFetching,
     error: query.error ? errorMessage(query.error) : null,
     refetch: () => void query.refetch(),
   };

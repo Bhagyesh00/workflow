@@ -2,12 +2,14 @@
 import type { NodeProperty, ResourceMapperField } from '@workflow/workflow';
 import { Braces, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { parseFromAiOverride } from '../../../lib/from-ai-override';
 import type { ParameterPath } from '../../../lib/workflow-ops';
 import { IconButton } from '../../ui/Button';
 import { Select, Switch } from '../../ui/Field';
 import { isExpressionValue, useParameterContext } from '../context';
 import { ExpressionInput } from '../ExpressionInput';
 import { FromAiOverride } from '../FromAiOverride';
+import { fromExpression, toExpression } from '../ParameterForm';
 
 const PROPERTY_TYPE: Record<NonNullable<ResourceMapperField['type']>, NodeProperty['type']> = {
   string: 'string',
@@ -28,6 +30,20 @@ export function fieldProperty(field: ResourceMapperField): NodeProperty {
     default: '',
     ...(field.options ? { options: field.options } : {}),
   };
+}
+
+/** the fixed value an expression goes back to, typed like the field (the same rule as every other parameter) */
+export function fixedFromExpression(field: ResourceMapperField, expression: string): unknown {
+  const blank = field.type === 'boolean' ? false : field.type === 'number' ? null : '';
+  const back = fromExpression(expression, { ...fieldProperty(field), default: blank });
+  if ((field.type === 'array' || field.type === 'object') && typeof back === 'string' && back !== '') {
+    try {
+      return JSON.parse(back);
+    } catch {
+      return back;
+    }
+  }
+  return back;
 }
 
 function JsonField({
@@ -167,6 +183,8 @@ export function FieldRow({ field, id, value, path, onChange, onRemove, isMatch }
     ? `Use a fixed value for ${field.displayName}`
     : `Use an expression for ${field.displayName}`;
   const prop = fieldProperty(field);
+  // a value the model defines is an expression too, but the panel owns it: no toggle while it shows
+  const modelFills = parseFromAiOverride(value) !== null;
   return (
     <div className="space-y-1" data-mapper-field={field.id}>
       <div className="flex items-center gap-2">
@@ -176,17 +194,13 @@ export function FieldRow({ field, id, value, path, onChange, onRemove, isMatch }
           {isMatch && <span className="ml-1 font-normal text-ink-3">(match)</span>}
           {field.readOnly && <span className="ml-1 font-normal text-ink-3">(read only)</span>}
         </label>
-        {ctx.allowExpressions && !ctx.readOnly && (
+        {ctx.allowExpressions && !ctx.readOnly && !modelFills && (
           <IconButton
             label={toggleLabel}
             size="sm"
             active={expression}
             onClick={() =>
-              onChange(
-                isExpressionValue(value)
-                  ? value.slice(1)
-                  : `=${value === null || value === undefined ? '' : String(value)}`,
-              )
+              onChange(isExpressionValue(value) ? fixedFromExpression(field, value) : toExpression(value))
             }
           >
             <Braces size={12} />
