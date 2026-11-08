@@ -130,7 +130,8 @@ describe('queue mode', () => {
     expect(pong.body).toBe('pong');
     expect(pong.headers['content-type']).toContain('text/plain');
 
-    // chunks travel from the worker to the main over Redis, in order
+    // chunks travel from the worker to the main over Redis, in order, each with its node run's metadata
+    const streamNode = node('Stream', 'test.chunks', { text: 'a b c d' }, [200, 0]);
     const streaming = await createWorkflow(client, {
       nodes: [
         node(
@@ -142,23 +143,31 @@ describe('queue mode', () => {
             webhookId: 'c',
           },
         ),
-        node('Stream', 'test.chunks', { text: 'a b c d' }, [200, 0]),
+        streamNode,
       ],
       connections: chain('Webhook', 'Stream'),
     });
     await client.data(client.post(`/rest/workflows/${streaming.id}/activate`));
     const stream = await main.app.inject({ method: 'POST', url: `/webhook/${tenant.slug}/q-stream` });
+    const metadata = {
+      nodeId: streamNode.id,
+      nodeName: 'Stream',
+      runIndex: 0,
+      itemIndex: 0,
+      timestamp: expect.any(Number),
+    };
     expect(
       stream.body
         .trim()
         .split('\n')
         .map((l) => JSON.parse(l)),
     ).toEqual([
-      { type: 'item', content: 'a' },
-      { type: 'item', content: 'b' },
-      { type: 'item', content: 'c' },
-      { type: 'item', content: 'd' },
-      { type: 'end' },
+      { type: 'begin', metadata },
+      { type: 'item', content: 'a', metadata },
+      { type: 'item', content: 'b', metadata },
+      { type: 'item', content: 'c', metadata },
+      { type: 'item', content: 'd', metadata },
+      { type: 'end', metadata },
     ]);
   });
 

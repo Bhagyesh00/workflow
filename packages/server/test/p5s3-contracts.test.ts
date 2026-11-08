@@ -417,10 +417,18 @@ describe('data tables', () => {
 
 describe('routes', () => {
   it('never answers /chat-widget with the SPA fallback', async () => {
-    for (const url of ['/chat-widget/chat.js', '/chat-widget/chat.css', '/chat-widget']) {
+    // the bundle holds "<!doctype html>" as text (its markdown library), so the body's start is what counts
+    for (const [url, type] of [
+      ['/chat-widget/chat.js', 'javascript'],
+      ['/chat-widget/chat.css', 'text/css'],
+      ['/chat-widget', undefined],
+    ] as const) {
       const res = await server.app.inject({ method: 'GET', url, headers: { accept: 'text/html,*/*' } });
-      expect(String(res.headers['content-type'] ?? ''), url).not.toContain('text/html');
-      expect(res.body.toLowerCase(), url).not.toContain('<!doctype html>');
+      const contentType = String(res.headers['content-type'] ?? '');
+      expect(contentType, url).not.toContain('text/html');
+      // a file is served with its own type; a missing build answers the JSON "not available"
+      if (type) expect(contentType, url).toContain(res.statusCode === 200 ? type : 'application/json');
+      expect(res.body.trim().toLowerCase().startsWith('<!doctype'), url).toBe(false);
     }
   });
 

@@ -175,11 +175,9 @@ describe('production webhooks', () => {
 
   it('streams chunks sent by nodes as NDJSON in streaming mode', async () => {
     const { client, tenant } = await signup(server.app);
+    const stream = node('Stream', 'test.chunks', { text: '={{ $json.body.text }}' }, [200, 0]);
     await activeWorkflow(client, {
-      nodes: [
-        webhook({ path: 'chat', responseMode: 'streaming' }),
-        node('Stream', 'test.chunks', { text: '={{ $json.body.text }}' }, [200, 0]),
-      ],
+      nodes: [webhook({ path: 'chat', responseMode: 'streaming' }), stream],
       connections: chain('Webhook', 'Stream'),
     });
     const res = await server.app.inject({
@@ -193,11 +191,20 @@ describe('production webhooks', () => {
       .trim()
       .split('\n')
       .map((l) => JSON.parse(l));
+    // every frame names the node run that sent it (n8n's chunk metadata)
+    const metadata = {
+      nodeId: stream.id,
+      nodeName: 'Stream',
+      runIndex: 0,
+      itemIndex: 0,
+      timestamp: expect.any(Number),
+    };
     expect(lines).toEqual([
-      { type: 'item', content: 'one' },
-      { type: 'item', content: 'two' },
-      { type: 'item', content: 'three' },
-      { type: 'end' },
+      { type: 'begin', metadata },
+      { type: 'item', content: 'one', metadata },
+      { type: 'item', content: 'two', metadata },
+      { type: 'item', content: 'three', metadata },
+      { type: 'end', metadata },
     ]);
   });
 
