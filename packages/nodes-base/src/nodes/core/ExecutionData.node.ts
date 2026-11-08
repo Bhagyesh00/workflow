@@ -1,7 +1,7 @@
 /**
  * Execution Data (P5-61, n8n "Execution Data"): saves key and value pairs of each item as the execution's
  * highlighted data (`ctx.setCustomData`, the engine's caps), so executions can be filtered by them, and
- * passes its input through. Stub from C0: lane L6 writes it.
+ * passes its input through.
  */
 import type { Item, NodeType } from '@workflow/workflow';
 
@@ -66,7 +66,7 @@ export const ExecutionDataNode: NodeType = {
         if (!key) continue;
         const value = row.value === undefined || row.value === null ? '' : String(row.value);
         try {
-          ctx.setCustomData(key, value);
+          ctx.setCustomData(key.slice(0, MAX_KEY_LENGTH), value);
         } catch {
           skipped.add(key.slice(0, MAX_KEY_LENGTH));
           continue;

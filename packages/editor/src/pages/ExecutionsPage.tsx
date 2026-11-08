@@ -60,7 +60,16 @@ export function ExecutionsPage() {
   const query = useInfiniteQuery({
     queryKey: [
       'executions',
-      { workflowId, status, annotationTags, vote, workflowVersionId, customDataKey, customDataValue, customDataExact },
+      {
+        workflowId,
+        status,
+        annotationTags,
+        vote,
+        workflowVersionId,
+        customDataKey,
+        customDataValue,
+        customDataExact,
+      },
     ],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
@@ -155,7 +164,10 @@ export function ExecutionsPage() {
           />
         )}
         <AnnotationFilters value={{ tags: annotationTags, vote }} onChange={setAnnotationFilter} />
-        <div role="group" aria-label="Highlighted data" className="flex flex-wrap items-center gap-2">
+        <fieldset
+          aria-label="Highlighted data"
+          className="m-0 flex min-w-0 flex-wrap items-center gap-2 border-0 p-0"
+        >
           <TextInput
             aria-label="Highlighted data key"
             className="w-36"
@@ -183,7 +195,7 @@ export function ExecutionsPage() {
             />
             <span aria-hidden="true">Exact</span>
           </span>
-        </div>
+        </fieldset>
       </div>
       <section
         className="overflow-hidden rounded-2xl border border-line bg-surface shadow-card"

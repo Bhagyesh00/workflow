@@ -53,4 +53,22 @@ describe('Execution Data (P5-61)', () => {
     expect(hints.map((h) => h.message).join('\n')).toMatch(/key10.*at most 10 keys/s);
     expect(r.outputs[0]).toHaveLength(1);
   });
+
+  it('updates a long key on the next item once ten keys exist, with no false warning', async () => {
+    const longKey = 'k'.repeat(60);
+    const list = [
+      ...Array.from({ length: 9 }, (_, n) => [`key${n}`, '={{ $json.n }}'] as [string, unknown]),
+      [longKey, '={{ $json.n }}'] as [string, unknown],
+    ];
+    const r = await runNode('core.executionData', { operation: 'save', dataToSave: rows(...list) }, [
+      { json: { n: 1 } },
+      { json: { n: 2 } },
+    ]);
+    expect(r.status).toBe('success');
+    const data = r.result.state.resultData.customData!;
+    expect(Object.keys(data)).toHaveLength(10);
+    expect(data['k'.repeat(50)]).toBe('2');
+    const hints = r.result.state.resultData.runData.Node[0].hints ?? [];
+    expect(hints.map((h) => h.message).join(' | ')).not.toMatch(/was not saved/);
+  });
 });
