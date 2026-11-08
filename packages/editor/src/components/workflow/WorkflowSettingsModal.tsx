@@ -177,6 +177,20 @@ export function WorkflowSettingsModal({
             />
           </div>
         </fieldset>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold">Available in MCP</p>
+            <p className="text-xs text-ink-2">
+              MCP clients of this workspace can find, read and run this workflow, once an admin turns MCP on.
+            </p>
+          </div>
+          <Switch
+            label="Available in MCP"
+            checked={draft.availableInMCP === true}
+            disabled={readOnly}
+            onChange={(v) => set({ availableInMCP: v })}
+          />
+        </div>
         <FormField
           label="Who can call this workflow"
           hint="Applies to other workflows that run it as a sub-workflow."
