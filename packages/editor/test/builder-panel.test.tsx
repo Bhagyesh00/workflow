@@ -19,6 +19,7 @@ import type { ApiRequest } from '../src/api/client';
 import { demoBuildChunks, seedDemoAiSession } from '../src/demo/mock-ai';
 import { newId } from '../src/lib/ids';
 import { useBuilderStore } from '../src/stores/builder-store';
+import { useUiStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
 import { backend, signedIn } from './backend';
 import { server } from './setup';
@@ -149,6 +150,55 @@ describe('builder panel (P5-62)', () => {
     expect((bodies[0].workflowData as { id: string; nodes: unknown[] }).id).toBe(wf.id);
     expect((bodies[0].workflowData as { nodes: unknown[] }).nodes).toHaveLength(2);
     expect(writes()).toHaveLength(0);
+  }, 60_000);
+
+  it('while a turn streams no canvas edit path changes the workflow or runs it', async () => {
+    const wf = backend().seedWorkflow({ name: 'Leads', nodes: NODES, connections: CONNECTIONS });
+    await openEditor(`/workflow/${wf.id}`);
+    const { user, panel } = await openPanel();
+    const gate = deferred();
+    scripted([DRAFT], gate.promise);
+    await sendText(user, panel, 'Call the leads API');
+    const names = () => useWorkflowStore.getState().nodes.map((n) => n.name);
+    await waitFor(() => expect(names()).toEqual(['Start', 'Shape', 'Call API']));
+    expect(useBuilderStore.getState().streaming).toBe(true);
+    backend().requests.length = 0;
+
+    // the add buttons and the run button wait
+    expect(screen.queryByRole('button', { name: 'Add node' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Tidy up' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Execute workflow' })).toHaveProperty('disabled', true);
+    // the shortcuts that edit or run do nothing; copy still works, paste waits
+    act(() => useWorkflowStore.getState().select({ nodes: ['Call API'], stickies: [], edges: [] }));
+    for (const init of [
+      { key: 'Delete' },
+      { key: 'Backspace' },
+      { key: 'd' },
+      { key: 'd', ctrlKey: true },
+      { key: 'z', ctrlKey: true },
+      { key: 'Enter', ctrlKey: true },
+      { key: 'c', ctrlKey: true },
+    ]) {
+      fireEvent.keyDown(window, init);
+      expect(names(), init.key).toEqual(['Start', 'Shape', 'Call API']);
+      expect(useWorkflowStore.getState().nodes.some((n) => n.disabled)).toBe(false);
+    }
+    fireEvent.paste(document);
+    expect(names()).toEqual(['Start', 'Shape', 'Call API']);
+    expect(backend().requests.some((r) => /\/run$/.test(r.path))).toBe(false);
+    // the node details open read-only, without a run
+    act(() => useUiStore.getState().openNdv('Call API'));
+    const ndv = await screen.findByRole('dialog', { name: 'Call API details' });
+    expect(within(ndv).getByRole('textbox', { name: 'Node name' })).toHaveProperty('readOnly', true);
+    expect(within(ndv).queryByRole('button', { name: 'Execute step' })).toBeNull();
+    act(() => useUiStore.getState().openNdv(null));
+
+    await act(async () => gate.resolve());
+    await waitFor(() => expect(useBuilderStore.getState().streaming).toBe(false));
+    // after the turn the same key edits the draft again
+    fireEvent.keyDown(window, { key: 'Delete' });
+    expect(names()).toEqual(['Start', 'Shape']);
+    expect(screen.getByRole('button', { name: 'Add node' })).toBeTruthy();
   }, 60_000);
 
   it('Stop ends the turn and keeps the draft under review', async () => {

@@ -92,6 +92,8 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
   const aiBuilder = useAiBuilderFeature();
   const canWrite = useMe().data?.role !== 'viewer';
   const builderStreaming = useBuilderStore((s) => s.streaming);
+  // every canvas edit path (and a run of the half-built draft) waits while a builder turn streams
+  const locked = readOnly || builderStreaming;
   useEffect(() => {
     useBuilderStore.getState().setDeps({ ...deps, flow });
     return () => useBuilderStore.getState().setDeps(null);
@@ -119,9 +121,13 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
     await saveWorkflow(deps);
     setSaving(false);
   }, [deps]);
-  const execute = useCallback(() => void runWorkflow(deps), [deps]);
+  const execute = useCallback(() => {
+    if (!useBuilderStore.getState().streaming) void runWorkflow(deps);
+  }, [deps]);
   const executeNode = useCallback(
-    (name: string) => void runWorkflow(deps, { destinationNode: name }),
+    (name: string) => {
+      if (!useBuilderStore.getState().streaming) void runWorkflow(deps, { destinationNode: name });
+    },
     [deps],
   );
 
@@ -181,6 +187,7 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
       updateSticky: (id, patch, history) => store().updateSticky(id, patch, { history }),
       removeSticky: (id) => store().removeStickies([id]),
       openContextMenu: (name, at) => {
+        if (useBuilderStore.getState().streaming) return;
         if (!store().selection.nodes.includes(name))
           store().select({ nodes: [name], stickies: [], edges: [] });
         useUiStore.getState().openContextMenu({ ...at, target: { type: 'node', nodeName: name } });
@@ -235,11 +242,13 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
             runningNodes={runningNodes}
             selection={selection}
             issues={issueMap}
-            readOnly={readOnly || builderStreaming}
+            readOnly={locked}
             actions={actions}
             fitKey={loadCount}
             onSelectionChange={(sel) => store().select(sel)}
-            onContextMenu={(menu) => useUiStore.getState().openContextMenu(menu)}
+            onContextMenu={(menu) => {
+              if (!useBuilderStore.getState().streaming) useUiStore.getState().openContextMenu(menu);
+            }}
             dirtyNodes={dirtyNodes}
             onDragStart={() => store().checkpoint()}
             onMove={(positions, stickies) => {
@@ -260,7 +269,7 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
               });
             }}
           >
-            {nodes.length === 0 && stickyNotes.length === 0 && !readOnly && (
+            {nodes.length === 0 && stickyNotes.length === 0 && !locked && (
               <div className="pointer-events-none absolute inset-0 z-[5] grid place-items-center">
                 <div className="pointer-events-auto flex flex-col items-center gap-3 text-center">
                   <button
@@ -289,10 +298,10 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
             <ExecuteBar
               onExecute={execute}
               onStop={() => void stopExecution()}
-              readOnly={readOnly}
+              readOnly={locked}
               listenNode={listenNode}
             />
-            {!readOnly && (
+            {!locked && (
               <div className="absolute top-3 right-3 z-10 flex flex-col gap-1.5">
                 <Button variant="primary" icon={<Plus size={15} />} onClick={() => ui.openCreator()}>
                   Add node
@@ -321,7 +330,7 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
                 </IconButton>
               </div>
             )}
-            <SelectionToolbar />
+            {!builderStreaming && <SelectionToolbar />}
             <CanvasContextMenu deps={deps} execute={execute} />
           </FlowCanvas>
         </div>
@@ -382,10 +391,10 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
       {ui.ndvNode && (
         <NodeDetailsView
           nodeName={ui.ndvNode}
-          readOnly={readOnly}
+          readOnly={locked}
           onClose={() => ui.openNdv(null)}
-          onExecuteNode={readOnly ? undefined : executeNode}
-          onListen={readOnly ? undefined : (name) => void listenForTestEvent(deps, name)}
+          onExecuteNode={locked ? undefined : executeNode}
+          onListen={locked ? undefined : (name) => void listenForTestEvent(deps, name)}
           dirtyNodes={dirtyNodes}
         />
       )}

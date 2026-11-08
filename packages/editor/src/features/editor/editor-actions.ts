@@ -24,6 +24,7 @@ import { refuseWhileReviewing, useBuilderStore } from '../../stores/builder-stor
 import { type RanDefinition, useRunStore } from '../../stores/run-store';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { toWorkflowBody, useWorkflowStore, type WorkflowState } from '../../stores/workflow-store';
+import { onDraftAccepted } from '../builder/session-actions';
 import { chatTriggerBelow, openChat } from './chat-actions';
 import { openTestForm } from './form-popup';
 
@@ -144,10 +145,12 @@ export async function overwriteLatest(deps: EditorDeps): Promise<WorkflowDTO | n
     const latest = await workflowsApi.get(store.meta.id);
     useWorkflowStore.setState((s) => ({ meta: { ...s.meta, versionId: latest.versionId } }));
     useUiStore.getState().setSaveConflict(false);
-    // during a review "Keep mine" accepts the draft
-    const saved = await saveWorkflow(deps, { builderAccept: useBuilderStore.getState().reviewing });
+    // during a review "Keep mine" accepts the draft, so the chat gets the saved version as Accept does
+    const accepting = useBuilderStore.getState().reviewing;
+    const saved = await saveWorkflow(deps, { builderAccept: accepting });
     if (saved) {
       useBuilderStore.getState().clearReview();
+      if (accepting) await onDraftAccepted(saved.id, saved.versionId).catch(() => undefined);
       toast.success('Saved your version');
     }
     return saved;

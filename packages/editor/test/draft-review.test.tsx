@@ -154,6 +154,24 @@ describe('draft review (P5-62)', () => {
     expect(await screen.findByRole('dialog')).toBeTruthy();
   }, 60_000);
 
+  it('"Keep mine" in the conflict dialog accepts the draft and tags the chat with the saved version', async () => {
+    const { wf } = await openEditor();
+    const { user, bar } = await buildDraft();
+    await backend().handle({
+      method: 'PATCH',
+      path: `/workflows/${wf.id}`,
+      body: { versionId: wf.versionId, nodes: NODES, name: 'Leads elsewhere' },
+    });
+    await user.click(within(bar).getByRole('button', { name: 'Accept' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Keep mine and overwrite' }));
+    await waitFor(() => expect(useBuilderStore.getState().reviewing).toBe(false));
+    const saved = useWorkflowStore.getState().meta.versionId!;
+    expect(onDraftAccepted).toHaveBeenCalledTimes(1);
+    expect(onDraftAccepted).toHaveBeenCalledWith(wf.id, saved);
+    expect(useWorkflowStore.getState().nodes.map((n) => n.name)).toEqual(['Start', 'Call API', 'Shape']);
+  }, 60_000);
+
   it('Discard loads the snapshot back, ends the review and sends nothing', async () => {
     await openEditor();
     const { user, bar } = await buildDraft();
@@ -206,6 +224,9 @@ describe('draft review (P5-62)', () => {
     // the new node is listed with its values too
     expect(within(bar).getByRole('group', { name: 'Changes to Shape' })).toBeTruthy();
     expect(within(bar).getByText(/Adds/)).toBeTruthy();
+    // the list names the draft's changes, not a version restore
+    expect(within(bar).getByRole('list', { name: 'Changes in the draft' })).toBeTruthy();
+    expect(within(bar).queryByRole('list', { name: 'Changes if restored' })).toBeNull();
   }, 60_000);
 });
 

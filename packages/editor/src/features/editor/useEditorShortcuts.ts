@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { setGroupsExpanded } from '../../lib/group-view';
 import { groupsOfNodes } from '../../lib/node-groups';
 import { parseClipboard } from '../../lib/workflow-ops';
+import { useBuilderStore } from '../../stores/builder-store';
 import { useRunStore } from '../../stores/run-store';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
@@ -61,6 +62,15 @@ function overlayOpen(): boolean {
   return Boolean(document.querySelector('[role="dialog"][aria-modal="true"]'));
 }
 
+/** P5-62: the keys below that change the workflow or run it; they wait while a builder turn streams */
+function changesWorkflow(event: KeyboardEvent, key: string, mod: boolean): boolean {
+  const code = event.code;
+  if (mod) return code === 'KeyG' || ['enter', 'z', 'y', 'x', 'd'].includes(key);
+  if (event.altKey && ((event.shiftKey && code === 'KeyT') || code === 'KeyX')) return true;
+  if (['delete', 'backspace', 'f2', 'r', 'p', 'n', 'tab', 'd'].includes(key)) return true;
+  return key === 's' && event.shiftKey;
+}
+
 export function useEditorShortcuts(handlers: {
   onSave: () => void;
   onExecute: () => void;
@@ -80,6 +90,10 @@ export function useEditorShortcuts(handlers: {
         return;
       }
       if (isEditable(event.target) || overlayOpen()) return;
+      if (useBuilderStore.getState().streaming && changesWorkflow(event, key, mod)) {
+        event.preventDefault();
+        return;
+      }
       const store = useWorkflowStore.getState();
       const ui = useUiStore.getState();
       const selected = store.selection.nodes;
@@ -187,7 +201,7 @@ export function useEditorShortcuts(handlers: {
       if (!payload) return;
       event.preventDefault();
       const store = useWorkflowStore.getState();
-      if (store.readOnly) return;
+      if (store.readOnly || useBuilderStore.getState().streaming) return;
       // drop the pasted block around the centre of the visible canvas
       const xs = [
         ...payload.nodes.map((n) => n.position[0]),

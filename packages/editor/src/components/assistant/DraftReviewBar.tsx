@@ -107,7 +107,7 @@ export function DraftReviewBar() {
       </div>
       {open && (
         <div className="wf-scroll flex max-h-72 flex-col gap-2 overflow-y-auto">
-          <WorkflowDiffSummary diff={diff} />
+          <WorkflowDiffSummary diff={diff} label="Changes in the draft" />
           {valueChanges.map((change) => (
             <ParameterDiff key={change.id} change={change} />
           ))}

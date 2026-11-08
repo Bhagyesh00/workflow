@@ -29,14 +29,21 @@ function paths(changes: Array<{ path: string }>): string {
   return shown.join(', ') + (changes.length > 3 ? ` and ${changes.length - 3} more` : '');
 }
 
-export function WorkflowDiffSummary({ diff }: { diff: WorkflowDiff }) {
+export function WorkflowDiffSummary({
+  diff,
+  label = 'Changes if restored',
+}: {
+  diff: WorkflowDiff;
+  /** the list's accessible name; the builder's draft review passes its own */
+  label?: string;
+}) {
   if (diff.isEmpty) {
     return (
       <p className="text-sm text-ink-2">Same logic as the canvas. Only positions differ, if anything.</p>
     );
   }
   return (
-    <ul className="flex flex-col gap-1.5" aria-label="Changes if restored">
+    <ul className="flex flex-col gap-1.5" aria-label={label}>
       {diff.nodes.added.map((n) => (
         <Row key={`a-${n.id}`} icon={<Plus size={14} />} tone="add">
           Adds <strong>{n.name}</strong>

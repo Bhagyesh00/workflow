@@ -161,6 +161,9 @@ export const BUILDER_REQUEST_FAILED = "Couldn't build the workflow";
 /** title of a chat history that did not load */
 export const BUILDER_HISTORY_FAILED = "Couldn't load the chat";
 
+/** bumped by `reset`; a `loadHistory` started before it is stale (editor-3 of the S4 review) */
+let historyGeneration = 0;
+
 const isAbort = (error: unknown): boolean => (error as { name?: unknown } | null)?.name === 'AbortError';
 
 /** the user's credentials for the client-side assignment; none when they cannot be read */
@@ -262,6 +265,7 @@ export const useBuilderStore = create<BuilderState>()((set, get) => ({
     set({ abortController: null, streaming: false, reviewing: false, snapshot: null });
   },
   reset() {
+    historyGeneration += 1;
     get().clearReview();
     set(builderInitialState());
   },
@@ -412,10 +416,14 @@ export const useBuilderStore = create<BuilderState>()((set, get) => ({
   },
 
   async loadHistory(workflowId) {
+    const generation = historyGeneration;
+    // a `reset` since the call (another workflow opened, even before its meta.id loads) drops the answer
+    const stale = () =>
+      generation !== historyGeneration || useWorkflowStore.getState().meta.id !== workflowId;
     try {
       const session = await aiApi.sessions(workflowId);
       // a turn started meanwhile, or another workflow is open: its chat wins
-      if (get().streaming || useWorkflowStore.getState().meta.id !== workflowId) return;
+      if (get().streaming || stale()) return;
       const messages = session.messages ?? [];
       const last = messages.at(-1);
       const waiting = last?.role === 'assistant' ? last : undefined;
@@ -426,7 +434,7 @@ export const useBuilderStore = create<BuilderState>()((set, get) => ({
         plan: waiting?.plan && !waiting.questions?.length ? waiting.plan : null,
       });
     } catch (error) {
-      if (useWorkflowStore.getState().meta.id !== workflowId) return;
+      if (stale()) return;
       set({ error: { title: BUILDER_HISTORY_FAILED, message: errorMessage(error) } });
     }
   },
