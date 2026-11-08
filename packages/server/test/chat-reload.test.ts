@@ -164,8 +164,8 @@ describe('loadPreviousSession from memory', () => {
 });
 
 describe('Auto-save Highlighted Data', () => {
-  it('stores the message and the session id as custom data, capped at 255', async () => {
-    const { client, workflowId, url } = await reloadChat({ autoSaveHighlightedData: true });
+  it('stores the message and the session id as custom data by default, capped at 255 (n8n: on unless off)', async () => {
+    const { client, workflowId, url } = await reloadChat({});
     const long = 'x'.repeat(1000);
     expect((await send(url, { sessionId: 's1', chatInput: long })).status).toBe(200);
     const [row] = (await client.data(client.get(`/rest/executions?workflowId=${workflowId}`))) as Array<{
@@ -179,7 +179,7 @@ describe('Auto-save Highlighted Data', () => {
   });
 
   it('stores nothing when it is off', async () => {
-    const { client, workflowId, url } = await reloadChat({});
+    const { client, workflowId, url } = await reloadChat({ autoSaveHighlightedData: false });
     expect((await send(url, { sessionId: 's1', chatInput: 'hello' })).status).toBe(200);
     const [row] = (await client.data(client.get(`/rest/executions?workflowId=${workflowId}`))) as Array<{
       id: string;

@@ -257,7 +257,7 @@ export const ChatTriggerNode: NodeType = {
             displayName: 'Auto-save Highlighted Data',
             name: 'autoSaveHighlightedData',
             type: 'boolean',
-            default: false,
+            default: true,
             description:
               'Whether the message and the session ID are saved on the execution as data you can filter by',
           },
@@ -269,11 +269,11 @@ export const ChatTriggerNode: NodeType = {
   async webhook(ctx) {
     const options = ctx.getNodeParameter('options', 0, {}) as DataObject;
     const origin = chatOriginAllowed(ctx, String(options.allowedOrigins ?? '*'), headerValue(ctx, 'origin'));
-    if (origin === false) return respond(403, { message: 'Origin not allowed' });
-    const corsOrigin = origin ?? undefined;
+    const corsOrigin = origin || undefined;
 
     const isSetup = ctx.getWebhookName() === 'setup';
-    const access = await checkChatAccess(ctx, corsOrigin, !isSetup);
+    // the access check answers a refused Origin only after the off switch and the test-only rule
+    const access = await checkChatAccess(ctx, corsOrigin, !isSetup, origin === false);
     if (access.refusal) return access.refusal;
 
     if (isSetup) {
@@ -311,8 +311,12 @@ export const ChatTriggerNode: NodeType = {
       if (mode === 'manually') {
         return { workflowData: [[{ json: { sessionId, action: 'loadPreviousSession', ...user } }]] };
       }
-      const data = mode === 'memory' ? await loadChatHistory(ctx, sessionId) : [];
-      return respond(200, { data }, corsOrigin);
+      if (mode !== 'memory') return respond(200, { data: [] }, corsOrigin);
+      // the memory reads this same body as its item: give it what a run's item holds, never the caller's
+      // `user`, and the signed-in user when Include User is on (a `$json.user.email` key then works)
+      delete body.user;
+      if (user.user) body.user = user.user;
+      return respond(200, { data: await loadChatHistory(ctx, sessionId) }, corsOrigin);
     }
 
     if (typeof chatInput !== 'string' || !chatInput.trim()) {
@@ -360,7 +364,8 @@ export const ChatTriggerNode: NodeType = {
       });
     }
     const result: WebhookResponseData = { workflowData: [[item]] };
-    if (options.autoSaveHighlightedData === true) {
+    // on unless turned off, as n8n; chatInput and sessionId are checked strings here
+    if (options.autoSaveHighlightedData !== false) {
       result.customData = {
         [highlightedInputKey(ctx.getNode().name)]: chatInput.slice(0, MAX_HIGHLIGHTED_VALUE),
         [HIGHLIGHTED_SESSION_KEY]: sessionId.slice(0, MAX_HIGHLIGHTED_VALUE),

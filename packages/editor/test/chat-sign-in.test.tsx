@@ -121,3 +121,27 @@ describe('isChatPath and isFormReturnPath', () => {
     expect(isFormReturnPath('/webhook/acme/a/b')).toBe(false);
   });
 });
+
+describe('the demo route', () => {
+  const ask = (returnTo: string) =>
+    backend().handle({ method: 'POST', path: '/form-auth/code', body: { returnTo } });
+
+  it('answers a code for a chat path, as the server', async () => {
+    signedIn();
+    for (const path of [CHAT, '/webhook-test/acme/a/b/chat', `${CHAT}?ref=1`, '/form/acme/survey']) {
+      expect((await ask(path)).status).toBe(200);
+    }
+  });
+
+  it('answers 400 to a path the server refuses', async () => {
+    signedIn();
+    for (const path of [
+      '/webhook/acme/chat',
+      '/webhook-waiting/e1/a/chat',
+      '/webhook/acme/../../rest/chat',
+      '/rest/me',
+    ]) {
+      expect((await ask(path)).status).toBe(400);
+    }
+  });
+});

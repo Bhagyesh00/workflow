@@ -109,9 +109,10 @@ async function basicAccess(
     node: ctx.getNode().name,
     credential: credentialDigest(user, password),
   };
-  const auth = headerValue(ctx, 'authorization');
-  if (auth !== undefined) {
-    const decoded = auth.startsWith('Basic ') ? Buffer.from(auth.slice(6), 'base64').toString() : '';
+  // the scheme is case-insensitive; a header of another scheme counts as no login
+  const login = /^\s*basic\s+(\S+)\s*$/i.exec(headerValue(ctx, 'authorization') ?? '')?.[1];
+  if (login !== undefined) {
+    const decoded = Buffer.from(login, 'base64').toString();
     const separator = decoded.indexOf(':');
     const userOk = separator >= 0 && safeEqual(decoded.slice(0, separator), user);
     const passOk = separator >= 0 && safeEqual(decoded.slice(separator + 1), password);
@@ -168,20 +169,27 @@ async function userAccess(
 /**
  * The gate of a chat request. A chat that is not public answers only a test run from the editor that holds
  * its test token; with `DISABLE_PUBLIC_CHAT_TRIGGER` on, a public URL answers 404 and test runs still work.
- * A public chat then checks its Authentication option. `allowToken` is false for the page's GET, which asks
- * for the login (or the sign-in) every time.
+ * A refused Origin (`originRefused`) answers 403 only after these two rules, so it never tells a caller that
+ * a closed chat exists. An editor's test run with its test token then passes, as n8n's canvas chat is never
+ * stopped by the login; every other caller of a public chat meets its Authentication option. `allowToken`
+ * is false for the page's GET, which asks for the login (or the sign-in) every time.
  */
 export async function checkChatAccess(
   ctx: WebhookContext,
   corsOrigin: string | undefined,
   allowToken: boolean,
+  originRefused = false,
 ): Promise<ChatAccess> {
   const notAvailable = () => refuse(chatResponse(404, { message: NOT_AVAILABLE }, corsOrigin));
   const manual = ctx.getMode() === 'manual';
+  const testRun = manual && holdsToken(ctx, CHAT_TEST_HEADER, CHAT_TOKEN_KINDS.test);
   if (!ctx.getNodeParameter('public', 0, false)) {
-    return manual && holdsToken(ctx, CHAT_TEST_HEADER, CHAT_TOKEN_KINDS.test) ? allow() : notAvailable();
+    if (!testRun) return notAvailable();
+  } else if (!manual && ctx.isPublicChatDisabled()) {
+    return notAvailable();
   }
-  if (!manual && ctx.isPublicChatDisabled()) return notAvailable();
+  if (originRefused) return refuse(chatResponse(403, { message: 'Origin not allowed' }));
+  if (testRun) return allow();
 
   const authentication = ctx.getNodeParameter('authentication', 0, 'none');
   if (authentication === 'basicAuth') return basicAccess(ctx, corsOrigin, allowToken);

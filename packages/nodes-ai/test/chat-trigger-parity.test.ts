@@ -1,5 +1,5 @@
 /** P5-57: Chat Trigger parity: authentication, availability, user key, files, history and highlighted data. */
-import { createWebhookContext, type ExecutionServices } from '@workflow/core';
+import { createWebhookContext, createWebhookSubNodes, type ExecutionServices } from '@workflow/core';
 import {
   type AiChatMessage,
   type AiMemory,
@@ -17,8 +17,9 @@ import {
   Workflow,
 } from '@workflow/workflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearBufferMemory } from '../src/nodes/memory/memory.nodes';
 import { ChatTriggerNode } from '../src/nodes/trigger/ChatTrigger.node';
-import { node, nodeTypes, services } from './harness';
+import { connect, node, nodeTypes, services } from './harness';
 
 const USER = { id: 'u1', email: 'ann@example.com', firstName: 'Ann', lastName: 'Lee' };
 const CHAT_URL = '/webhook/acme/hook-1/chat';
@@ -127,7 +128,8 @@ describe('parameters', () => {
     expect(optionOf('showWelcomeScreen')?.default).toBe(false);
     expect(optionOf('getStarted')?.default).toBe('New Conversation');
     expect(optionOf('customCss')?.default).toBe('');
-    expect(optionOf('autoSaveHighlightedData')?.default).toBe(false);
+    // n8n: on unless turned off
+    expect(optionOf('autoSaveHighlightedData')?.default).toBe(true);
     expect(optionOf('loadPreviousSession')?.default).toBe('notSupported');
     expect(values(optionOf('loadPreviousSession'))).toEqual(['notSupported', 'memory', 'manually']);
   });
@@ -187,11 +189,40 @@ describe('Basic auth', () => {
   });
 
   it('answers 403 for a wrong Basic login', async () => {
-    for (const authorization of [basic('ada:wrong'), basic('eve:s3cret'), 'Bearer abc', basic('nocolon')]) {
+    for (const authorization of [basic('ada:wrong'), basic('eve:s3cret'), basic('nocolon')]) {
       const r = await call(params, { body: message, headers: { authorization } });
       expect(statusOf(r)).toBe(403);
       expect(messageOf(r)).toBe('Authorization data is wrong!');
     }
+  });
+
+  it('reads the Basic scheme in any case', async () => {
+    const login = Buffer.from('ada:s3cret').toString('base64');
+    for (const authorization of [`basic ${login}`, `BASIC ${login}`, `  Basic   ${login} `]) {
+      const r = await call(params, { body: message, headers: { authorization } });
+      expect(itemOf(r)?.json.chatInput).toBe('Hello bot');
+    }
+  });
+
+  it('takes a header of another scheme as no login: 401 with the browser login', async () => {
+    for (const authorization of ['Bearer abc', 'Digest x', '']) {
+      const r = await call(params, { body: message, headers: { authorization } });
+      expect(statusOf(r)).toBe(401);
+      expect(messageOf(r)).toBe('Authorization is required!');
+      expect(r.webhookResponse?.headers?.['www-authenticate']).toContain('Basic');
+    }
+    // the page's token still works beside it
+    const page = await call(
+      params,
+      { method: 'GET', headers: { authorization: basic('ada:s3cret') } },
+      { webhookName: 'setup' },
+    );
+    const token = String(configOf(page).authToken);
+    const r = await call(params, {
+      body: message,
+      headers: { authorization: 'Bearer abc', 'x-auth-token': token },
+    });
+    expect(itemOf(r)).toBeDefined();
   });
 
   it('answers 403 for a token that fails: another kind, node, workflow or credential', async () => {
@@ -269,6 +300,35 @@ describe('availability', () => {
     // the token does not open a production URL
     expect(statusOf(await hit({ 'x-chat-test-token': claims('chat-test') }, 'webhook'))).toBe(404);
   });
+
+  it('answers 404 before a refused Origin, so a closed chat never shows it exists', async () => {
+    const params = { public: true, options: { allowedOrigins: 'https://a.example' } };
+    const headers = { origin: 'https://b.example' };
+    const off = { disablePublicChatTrigger: true };
+    const closed = await call(params, { body: message, headers }, { services: off });
+    expect(statusOf(closed)).toBe(404);
+    expect(messageOf(closed)).toBe('This chat is not available');
+    const notPublic = await call({ options: params.options }, { body: message, headers }, { mode: 'manual' });
+    expect(statusOf(notPublic)).toBe(404);
+    // an open chat still refuses the Origin, before any login
+    const open = await call({ ...params, authentication: 'basicAuth' }, { body: message, headers });
+    expect(statusOf(open)).toBe(403);
+    expect(messageOf(open)).toBe('Origin not allowed');
+  });
+
+  it('lets an editor test a public chat with a login through its test token, as the canvas chat', async () => {
+    const test = { 'x-chat-test-token': claims('chat-test') };
+    for (const authentication of ['basicAuth', 'n8nUserAuth']) {
+      const params = { public: true, authentication };
+      const r = await call(params, { body: message, headers: test }, { mode: 'manual' });
+      expect(itemOf(r)?.json).toEqual({ sessionId: 'abc', action: 'sendMessage', chatInput: 'Hello bot' });
+      // without the token, or on the production URL, the login still applies
+      expect(statusOf(await call(params, { body: message }, { mode: 'manual' }))).toBe(401);
+      expect(statusOf(await call(params, { body: message, headers: test }))).toBe(401);
+      const forged = { 'x-chat-test-token': claims('chat-test', { node: 'Other' }) };
+      expect(statusOf(await call(params, { body: message, headers: forged }, { mode: 'manual' }))).toBe(401);
+    }
+  });
 });
 
 describe('the item', () => {
@@ -312,13 +372,15 @@ describe('the item', () => {
     expect(itemOf(await call({ public: true }, { body: message }))?.json).not.toHaveProperty('files');
   });
 
-  it('keeps the message and session id as highlighted data when auto-save is on', async () => {
-    const on = await call({ public: true, options: { autoSaveHighlightedData: true } }, { body: message });
-    expect(on.customData).toEqual({
+  it('keeps the message and session id as highlighted data unless auto-save is off, as n8n', async () => {
+    const saved = {
       [highlightedInputKey('Chat')]: 'Hello bot',
       [HIGHLIGHTED_SESSION_KEY]: 'abc',
-    });
-    const off = await call({ public: true }, { body: message });
+    };
+    const on = await call({ public: true, options: { autoSaveHighlightedData: true } }, { body: message });
+    expect(on.customData).toEqual(saved);
+    expect((await call({ public: true }, { body: message })).customData).toEqual(saved);
+    const off = await call({ public: true, options: { autoSaveHighlightedData: false } }, { body: message });
     expect(off.customData).toBeUndefined();
     const long = await call(
       { public: true, options: { autoSaveHighlightedData: true } },
@@ -409,6 +471,80 @@ describe('loadPreviousSession', () => {
     const r = await call({ public: true, options: { loadPreviousSession: 'manually' } }, { body: ask });
     expect(itemOf(r)?.json).toEqual({ sessionId: 'abc', action: 'loadPreviousSession' });
     expect(r.webhookResponse).toBeUndefined();
+  });
+
+  it('gives a memory keyed on $json.user.email the signed-in user, never the caller-sent one', async () => {
+    clearBufferMemory();
+    const trigger = node(
+      'Chat',
+      'ai.chatTrigger',
+      { public: true, authentication: 'n8nUserAuth', options: { loadPreviousSession: 'memory' } },
+      { webhookId: 'hook-1' },
+    );
+    const keyedMemory = node('Memory', 'ai.memoryBufferWindow', {
+      sessionIdType: 'customKey',
+      sessionKey: '={{ $json.user.email }}',
+    });
+    const workflow = new Workflow(
+      {
+        id: 'wf-1',
+        name: 'chat',
+        nodes: [trigger, keyedMemory],
+        connections: connect(['Memory', 'Chat', 'ai_memory']),
+      },
+      nodeTypes,
+    );
+    const deps = {
+      workflow,
+      node: trigger,
+      services: services({ mode: 'webhook', formTokens, formAuth }),
+      evaluator: new ExpressionEvaluator(),
+      signal: new AbortController().signal,
+    };
+    const memoryOf = (raw: unknown) => {
+      const first = Array.isArray(raw) ? raw[0] : raw;
+      return (Array.isArray(first) ? first[0] : first) as AiMemory & { sessionId: string };
+    };
+    // each member's history, written through the memory itself
+    for (const [email, text] of [
+      [USER.email, 'mine'],
+      ['b@corp', 'theirs'],
+    ]) {
+      const subNodes = createWebhookSubNodes(deps, { json: { user: { email } } });
+      const memory = memoryOf(await subNodes.callbacks.getInputConnectionData('ai_memory', 0));
+      await memory.append(memory.sessionId, [{ role: 'user', content: text }]);
+      await subNodes.close();
+    }
+    // as the server: the sub-nodes' item wraps the same body the node reads
+    const reload = async (body: DataObject) => {
+      const request: WebhookRequest = {
+        method: 'POST',
+        url: CHAT_URL,
+        headers: { 'x-auth-token': claims('chat-user', { node: undefined, userId: 'u1' }) },
+        query: {},
+        params: {},
+        body,
+      };
+      const subNodes = createWebhookSubNodes(deps, { json: body });
+      try {
+        return await ChatTriggerNode.webhook!(
+          createWebhookContext(deps, request, 'default', subNodes.callbacks),
+        );
+      } finally {
+        await subNodes.close();
+      }
+    };
+    const texts = (r: WebhookResponseData) =>
+      ((r.webhookResponse?.body as { data?: DataObject[] })?.data ?? []).map(
+        (m) => (m.kwargs as DataObject).content,
+      );
+    const ask = { sessionId: 'x', action: 'loadPreviousSession' };
+    const forged = await reload({ ...ask, user: { email: 'b@corp' } });
+    expect(statusOf(forged)).toBe(200);
+    expect(texts(forged)).toEqual(['mine']);
+    const real = await reload({ ...ask });
+    expect(statusOf(real)).toBe(200);
+    expect(texts(real)).toEqual(['mine']);
   });
 
   it('is behind the same authentication as a message', async () => {
