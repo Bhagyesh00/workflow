@@ -189,7 +189,10 @@ describe('server address', () => {
 
   it('takes https', () => {
     expect(ok('https://mcp.example.com/mcp')).toBe(true);
-    expect(ok('https://example.com:8443/path?x=1')).toBe(true);
+    expect(ok('https://example.com:8443/path')).toBe(true);
+    // every member reads the address, so it holds no query string or fragment (a key goes in a header)
+    expect(ok('https://example.com:8443/path?x=1')).toBe(false);
+    expect(ok('https://example.com/path#x')).toBe(false);
   });
 
   it('takes http on a loopback host only', () => {

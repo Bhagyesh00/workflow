@@ -41,7 +41,7 @@ import { hasRole } from '../auth';
 import type { Actor } from '../workflows';
 import { redactDeep } from './events';
 import { ASSISTANT_STALE_RUN_MS } from './sweep';
-import { ASSISTANT_TOOL_NO_ACCESS, shapeToolResult } from './tool-adapter';
+import { ASSISTANT_TOOL_NO_ACCESS, shapeToolError, shapeToolResult } from './tool-adapter';
 import { assistantTools, builtInAssistantTools, resolveDynamicTool } from './tools';
 import type {
   ApprovalCopy,
@@ -170,11 +170,6 @@ function statusOf(answer: AssistantConfirmAnswer): 'approved' | 'denied' {
   if (answer.kind === 'approval') return answer.approved === true ? 'approved' : 'denied';
   if (answer.kind === 'domain') return answer.action === 'deny' ? 'denied' : 'approved';
   return 'approved';
-}
-
-function errorText(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error);
-  return redactSecrets(text || 'The tool failed');
 }
 
 interface CardInput {
@@ -329,7 +324,9 @@ export class AssistantApprovals {
     await this.resolved(claimed, status);
 
     // the last answer of the turn settles it; two answers at once both see none left, and the run lock
-    // lets one of them settle
+    // lets one of them settle. A sibling past its time is expired first, so the settle reads its
+    // timeout text, not the placeholder.
+    await this.sweepExpired(new Date(), claimed.threadId);
     const left = await this.cards.listPending(tenantId, userId, claimed.threadId);
     if (!left.length) {
       void ctx.assistant
@@ -409,7 +406,7 @@ export class AssistantApprovals {
         (candidate) => candidate.name === current.toolName,
       );
       if (!def) {
-        dynamic = await resolveDynamicTool(ctx, run, current.toolName);
+        dynamic = await resolveDynamicTool(ctx, run, current.toolName, current.grantKey);
         def = dynamic?.tool;
       }
       if (!def) {
@@ -452,7 +449,7 @@ export class AssistantApprovals {
           : await def.handler(ctx, scope, parsed.data);
       } catch (error) {
         // it ran (perhaps in part): never again
-        const text = run.signal.aborted ? ASSISTANT_APPROVED_RUN_STOPPED : errorText(error);
+        const text = run.signal.aborted ? ASSISTANT_APPROVED_RUN_STOPPED : shapeToolError(def, error);
         await this.writeResult(current, run.runId, `Error: ${text}`);
         await this.cards.markExecuted(tenantId, current.id, current.userId);
         run.emit({

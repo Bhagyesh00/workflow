@@ -603,6 +603,75 @@ describe('Assistant approvals (P5-68)', () => {
     expect(lastToolResult(h, 'm2')).toBe('{"deleted":"Old"}');
   });
 
+  it('an approved card waits for its pending sibling past the orphan sweep; both run', async () => {
+    const { threadId, status } = await cardTurn(
+      h,
+      h.owner,
+      [
+        {
+          toolCalls: [
+            call('w1', 'write_row', { table: 'Leads', name: 'Max' }),
+            call('w2', 'drop_table', { table: 'Old' }),
+          ],
+        },
+        { text: 'Both done.' },
+      ],
+      2,
+    );
+    const byCall = new Map(status.pending.map((c) => [c.toolCallId, c.requestId]));
+    expect((await h.confirm(h.owner, byCall.get('w2') as string, approve)).statusCode).toBe(200);
+    // the person reads the other card for 3 minutes; the timer's orphan sweep leaves the approved one
+    await h.ctx.assistantApprovals.sweepExpired(new Date(Date.now() + 3 * 60_000));
+    const row = await h.ctx.repos.assistantConfirmations.get(
+      h.tenantId,
+      h.owner.userId,
+      byCall.get('w2') as string,
+    );
+    expect(row?.status).toBe('approved');
+
+    const requests = h.fake.requests.length;
+    expect((await h.confirm(h.owner, byCall.get('w1') as string, approve)).statusCode).toBe(200);
+    await settled(h, h.owner, threadId, requests);
+    expect(calls.map((c) => c.tool)).toEqual(['write_row', 'drop_table']);
+    expect(lastToolResult(h, 'w1')).toBe('{"ok":true,"name":"Max"}');
+    expect(lastToolResult(h, 'w2')).toBe('{"deleted":"Old"}');
+  });
+
+  it('a sibling past its time is expired before the settle, so the model reads the timeout', async () => {
+    const { threadId, status } = await cardTurn(
+      h,
+      h.owner,
+      [
+        {
+          toolCalls: [
+            call('x1', 'write_row', { table: 'Leads', name: 'Ida' }),
+            call('x2', 'drop_table', { table: 'Stale' }),
+          ],
+        },
+        { text: 'One timed out.' },
+      ],
+      2,
+    );
+    const byCall = new Map(status.pending.map((c) => [c.toolCallId, c.requestId]));
+    await h.ctx.database.pool.query(
+      `update assistant_pending_confirmations set expires_at = now() - interval '1 minute' where id = $1`,
+      [byCall.get('x1')],
+    );
+    const requests = h.fake.requests.length;
+    expect((await h.confirm(h.owner, byCall.get('x2') as string, approve)).statusCode).toBe(200);
+    await settled(h, h.owner, threadId, requests);
+    expect(h.fake.requests.length).toBe(requests + 1);
+    expect(calls.map((c) => c.tool)).toEqual(['drop_table']);
+    expect(lastToolResult(h, 'x1')).toBe(ASSISTANT_APPROVAL_TEXTS.timedOut);
+    expect(lastToolResult(h, 'x2')).toBe('{"deleted":"Stale"}');
+    const row = await h.ctx.repos.assistantConfirmations.get(
+      h.tenantId,
+      h.owner.userId,
+      byCall.get('x1') as string,
+    );
+    expect(row?.status).toBe('expired');
+  });
+
   it('two approvals sent at once run each tool exactly once, in call order', async () => {
     const { threadId, status } = await cardTurn(
       h,

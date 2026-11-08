@@ -29,6 +29,7 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import type { DbOrTx } from '../db/client';
 import {
   type AssistantSystemAnswer,
@@ -339,11 +340,14 @@ export class AssistantConfirmationRepository {
   }
 
   /**
-   * Cross-tenant: `approved` cards resolved before `before` whose thread has no live run become
-   * `expired` (never rerun: the write may have happened). Returns them.
+   * Cross-tenant: `approved` cards resolved before `before` whose thread has no live run and no
+   * `pending` card become `expired` (never rerun: the write may have happened). Returns them. A
+   * pending sibling means the turn still waits for its last answer, which settles the approved card
+   * (the caller sweeps cards past their time first).
    */
   async sweepOrphanApproved(before: Date): Promise<AssistantConfirmationRow[]> {
     const answer: AssistantSystemAnswer = { kind: 'system', reason: 'run stopped' };
+    const sibling = alias(cards, 'sibling');
     return this.db
       .update(cards)
       .set({ status: 'expired', answer })
@@ -361,6 +365,18 @@ export class AssistantConfirmationRepository {
                   eq(assistantThreads.id, cards.threadId),
                   eq(assistantThreads.tenantId, cards.tenantId),
                   isNotNull(assistantThreads.activeRunId),
+                ),
+              ),
+          ),
+          notExists(
+            this.db
+              .select({ one: sql`1` })
+              .from(sibling)
+              .where(
+                and(
+                  eq(sibling.threadId, cards.threadId),
+                  eq(sibling.tenantId, cards.tenantId),
+                  eq(sibling.status, 'pending'),
                 ),
               ),
           ),

@@ -69,6 +69,7 @@ export async function resolveDynamicTool(
   ctx: ServerContext,
   run: AssistantRunScope,
   name: string,
+  grantKey?: string | null,
 ): Promise<{ tool: AssistantToolDefinition; close(): Promise<void> } | undefined> {
-  return resolveMcpTool(ctx, run, name);
+  return resolveMcpTool(ctx, run, name, grantKey);
 }

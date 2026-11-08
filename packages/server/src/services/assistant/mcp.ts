@@ -13,6 +13,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   type AiTool,
+  ASSISTANT_RESULT_CHARS,
   type AssistantPermissionKey,
   type AssistantPermissionMode,
   type DataObject,
@@ -49,6 +50,8 @@ const PARENT_NAME = 'Assistant MCP';
 const SERVER_NAME = 'MCP server';
 /** connect and call timeout of one server, in milliseconds */
 const MCP_TIMEOUT_MS = 30_000;
+/** arguments one call may send: each is shown on the approval card */
+export const MCP_MAX_ARGUMENTS = 50;
 
 /** `authentication` (the MCP Client node's value) to the credential type that fills its slot */
 export const MCP_CREDENTIAL_TYPES: Record<AssistantMcpConnectionRow['authentication'], string | null> = {
@@ -69,6 +72,13 @@ export function validateMcpUrl(raw: string): { ok: true; url: URL } | { ok: fals
   }
   if (url.username || url.password)
     return { ok: false, reason: 'The address must not hold a user name or password' };
+  // every member can read the address, so a key in it would be shown to all of them
+  if (url.search || url.hash) {
+    return {
+      ok: false,
+      reason: 'The address must not hold a query string or a fragment. Put a key in a header credential',
+    };
+  }
   if (url.protocol === 'https:') return { ok: true, url };
   if (url.protocol === 'http:') {
     const host = url.hostname;
@@ -143,15 +153,20 @@ function permissionFor(
   return key;
 }
 
-/** the per-tool mode saved for `toolName` (the saved key may be the server's own name) */
+/**
+ * The per-tool mode saved for `toolName`: the saved key may be the server's own name or the name the chat
+ * shows (`mcp_<connection>_<tool>`).
+ */
 function savedToolPermission(
   row: AssistantMcpConnectionRow,
   toolName: string,
 ): AssistantPermissionMode | undefined {
   const saved = row.toolPermissions ?? {};
+  const shown = mcpToolName(row.name, toolName);
   let found: AssistantPermissionMode | undefined = saved[toolName];
   for (const [key, mode] of Object.entries(saved)) {
-    if (nameToken(key) === toolName) {
+    const token = nameToken(key);
+    if (token === toolName || (shown !== null && token === shown)) {
       // blocked wins over a looser mode saved under two spellings of one name
       if (mode === 'blocked' || found === undefined) found = mode;
     }
@@ -166,12 +181,13 @@ function approvalCopy(row: AssistantMcpConnectionRow, toolName: string, input: D
   } catch {
     host = '';
   }
-  const args = Object.entries(input ?? {})
-    .slice(0, 20)
-    .map(([label, value]) => ({
-      label: cut(stripInvisible(label), 100),
-      value: cut(typeof value === 'string' ? value : (JSON.stringify(value) ?? ''), 500),
-    }));
+  // every argument the server will get is on the card (the input allows at most MCP_MAX_ARGUMENTS)
+  const entries = Object.entries(input ?? {});
+  const args = entries.slice(0, MCP_MAX_ARGUMENTS).map(([label, value]) => ({
+    label: cut(stripInvisible(label), 100),
+    value: cut(stripInvisible(typeof value === 'string' ? value : (JSON.stringify(value) ?? '')), 500),
+  }));
+  const hidden = entries.length - args.length;
   return {
     title: `Run ${toolName} on ${row.name}`,
     resourceName: row.name,
@@ -181,9 +197,26 @@ function approvalCopy(row: AssistantMcpConnectionRow, toolName: string, input: D
         { label: 'Address', value: host },
         { label: 'Tool', value: toolName },
         ...args,
+        ...(hidden > 0 ? [{ label: 'More arguments not shown', value: String(hidden) }] : []),
       ],
     },
   };
+}
+
+/**
+ * The card's grant key of a server's tool: the connection id and the server's own tool name. A reopened
+ * approved call runs only on that connection and that tool (`resolveMcpTool`), and an "always allow" for
+ * one connection never covers another connection's tool of the same chat name.
+ */
+export function mcpGrantKey(connectionId: string, toolName: string): string {
+  return `mcp:${connectionId}:${toolName}`;
+}
+
+/** the connection id held by an `mcpGrantKey`, or null for any other key */
+function grantConnectionId(grantKey: string | null | undefined): string | null {
+  if (typeof grantKey !== 'string' || !grantKey.startsWith('mcp:')) return null;
+  const end = grantKey.indexOf(':', 4);
+  return end > 4 ? grantKey.slice(4, end) : null;
 }
 
 /** the definition for the one-parent run: the Agent node and the MCP Client Tool wired to it */
@@ -314,9 +347,15 @@ function toDefinition(
   permission: AssistantPermissionKey,
   schema: unknown,
 ): AssistantToolDefinition<DataObject> {
-  const input = z.record(z.string(), z.unknown());
-  // the model reads the sanitized schema (`toolParameters` calls `z.toJSONSchema`, which asks the schema)
-  (input._zod as unknown as { toJSONSchema?: () => unknown }).toJSONSchema = () => schema;
+  const shaped = z.record(z.string(), z.unknown());
+  // the model reads the sanitized schema (`toolParameters` calls `z.toJSONSchema`, which asks the schema;
+  // a pipe's input side is `shaped`, since a refined schema cannot carry this override)
+  (shaped._zod as unknown as { toJSONSchema?: () => unknown }).toJSONSchema = () => schema;
+  const input = shaped.pipe(
+    z.record(z.string(), z.unknown()).refine((value) => Object.keys(value).length <= MCP_MAX_ARGUMENTS, {
+      message: `Send at most ${MCP_MAX_ARGUMENTS} arguments`,
+    }),
+  );
   const description = sanitizeToolDescription(aiTool.description) || toolName;
   return {
     name,
@@ -326,20 +365,31 @@ function toDefinition(
     minRole: 'editor',
     permission,
     untrusted: `mcp:${row.name}`,
-    grantKey: () => name,
+    grantKey: () => mcpGrantKey(row.id, toolName),
     approval: async (_ctx, _caller, args) => approvalCopy(row, toolName, args),
     async handler(_ctx, run, args) {
       const options = { signal: run.signal };
-      if (aiTool.invokeRaw) {
+      let failure: string;
+      try {
+        if (!aiTool.invokeRaw) {
+          return resultText(
+            [{ type: 'text', text: String(await aiTool.invoke(args ?? {}, options)) }],
+            undefined,
+          );
+        }
         const result = await aiTool.invokeRaw(args ?? {}, options);
         const text = resultText(result.content, result.structuredContent);
-        if (result.isError) throw new Error(text || `The tool "${toolName}" failed`);
-        return text;
+        if (!result.isError) return text;
+        failure = text;
+      } catch (error) {
+        if (run.signal.aborted) throw error;
+        // a JSON-RPC or transport error carries the server's own text
+        const message = error instanceof Error ? error.message : String(error);
+        failure = resultText([{ type: 'text', text: message }], undefined);
       }
-      return resultText(
-        [{ type: 'text', text: String(await aiTool.invoke(args ?? {}, options)) }],
-        undefined,
-      );
+      // the server's error text is cleaned and capped like a result; the caller wraps it as untrusted
+      // (`shapeToolError`) with this definition's `untrusted` source
+      throw new Error(cut(failure || `The tool "${toolName}" failed`, ASSISTANT_RESULT_CHARS));
     },
   };
 }
@@ -418,11 +468,17 @@ export async function openMcpTools(
  * Reopens the connection of the MCP tool `name` for an approved call after a stop, under the same role
  * and access rules read again now; undefined when it is not an MCP tool, access is off or the role is
  * too low, or the connection or the tool no longer exists. The caller closes the connection.
+ *
+ * `grantKey` is the card's stored key (`mcpGrantKey`): then only that connection is opened, and its tool
+ * must still have the server name the card showed, so the call runs on the server and tool the person
+ * approved. With no such key the connections are tried in list order and the first match wins, the rule
+ * `openMcpTools` names tools by.
  */
 export async function resolveMcpTool(
   ctx: ServerContext,
   run: AssistantRunScope,
   name: string,
+  grantKey?: string | null,
 ): Promise<{ tool: AssistantToolDefinition; close(): Promise<void> } | undefined> {
   if (typeof name !== 'string' || !name.startsWith('mcp_')) return undefined;
   const tenant = (await ctx.repos.tenants.get(run.tenant.id)) ?? run.tenant;
@@ -432,22 +488,22 @@ export async function resolveMcpTool(
   if (!mayUse(settings, membership.role)) return undefined;
 
   const rows = (await ctx.repos.assistantMcp.list(tenant.id)).filter((row) => row.enabled);
-  // the connection whose prefix matches; with two matches the longer connection name is the better fit
-  const candidates = rows
-    .map((row) => ({ row, prefix: mcpToolPrefix(row.name) }))
-    .filter(
-      (entry): entry is { row: AssistantMcpConnectionRow; prefix: string } =>
-        entry.prefix !== null && name.startsWith(entry.prefix),
-    )
-    .sort((a, b) => b.prefix.length - a.prefix.length);
-  for (const { row } of candidates) {
+  const pinned = grantConnectionId(grantKey);
+  // the card's connection only; else every connection whose prefix matches, in list order
+  const candidates = pinned
+    ? rows.filter((row) => row.id === pinned)
+    : rows.filter((row) => {
+        const prefix = mcpToolPrefix(row.name);
+        return prefix !== null && name.startsWith(prefix);
+      });
+  for (const row of candidates) {
     let opened: OpenedServer;
     try {
       opened = await openConnection(ctx, tenant, run.signal, row, { settings }, new Set(), false);
     } catch {
       continue;
     }
-    const tool = opened.defs.find((def) => def.name === name);
+    const tool = opened.defs.find((def) => def.name === name && (!pinned || def.grantKey?.({}) === grantKey));
     if (tool) return { tool, close: opened.close };
     await opened.close();
   }
