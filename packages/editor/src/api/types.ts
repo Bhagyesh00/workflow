@@ -72,6 +72,8 @@ export interface Settings {
   autosaveEnabled: boolean;
   /** tenant setting, off by default; admins change it in Settings > Security (P3-19) */
   workflowReviews: { enabled: boolean };
+  /** read only (P5-11): how many evaluation cases run at once at most; the server caps a run to it */
+  evaluationConcurrencyLimit?: number;
 }
 
 /** body of PATCH /settings (admin) */

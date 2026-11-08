@@ -227,6 +227,24 @@ describe('system endpoints', () => {
     expect((await client.patch('/rest/settings', { timezone: 'Mars/Base' })).statusCode).toBe(400);
   });
 
+  it('shows the evaluation concurrency limit in /rest/settings and never takes it from a PATCH', async () => {
+    const { client } = await signup(server.app);
+    expect((await client.data(client.get('/rest/settings'))).evaluationConcurrencyLimit).toBe(5);
+    await client.data(client.patch('/rest/settings', { timezone: 'UTC', evaluationConcurrencyLimit: 1 }));
+    expect((await client.data(client.get('/rest/settings'))).evaluationConcurrencyLimit).toBe(5);
+
+    const small = await createTestServer(
+      { CONCURRENCY_EVALUATION_LIMIT: '2' },
+      { startMain: false, reset: false },
+    );
+    try {
+      const body = (await small.app.inject({ url: '/rest/settings' })).json();
+      expect(body.data.evaluationConcurrencyLimit).toBe(2);
+    } finally {
+      await small.close();
+    }
+  });
+
   it('lets owners (only) delete their workspace with everything in it', async () => {
     const owner = await signup(server.app);
     const other = await signup(server.app);

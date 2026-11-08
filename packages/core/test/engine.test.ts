@@ -234,9 +234,12 @@ describe('WorkflowExecute', () => {
     const { nodeTypes, services } = await import('./helpers');
     const resumed = await new WorkflowExecute(new Workflow(def, nodeTypes), services(), serialized).resume({
       output: [[{ json: { step: 2 } }]],
+      customData: { input_wait: 'Ada' },
     });
     expect(resumed.status).toBe('success');
     expect(json(resumed, 'After')).toEqual([{ step: 2, value: '' }]);
+    // the resume's custom data (a chat reply's highlighted data) is kept on the run
+    expect(resumed.state.resultData.customData).toEqual({ input_wait: 'Ada' });
   });
 
   it('loops with per-node context until done', async () => {

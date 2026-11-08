@@ -38,6 +38,9 @@ export default defineConfig(({ mode }) => ({
     port: PORT,
     // the server's BASE_URL and the Origin rewrite name this port, so never move to another one
     strictPort: true,
+    // Vite's own CORS layer answers every preflight before the proxy runs, so the server never sees the
+    // hosted chat page's preflight (Origin null) and never grants it; off, Vite sends no CORS headers itself
+    cors: false,
     proxy: {
       '/rest': proxyTarget,
       '/api': proxyTarget,

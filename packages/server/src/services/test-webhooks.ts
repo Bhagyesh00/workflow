@@ -30,14 +30,36 @@ export interface TestWebhookRegistration {
 export interface TestWebhookStore {
   add(registration: TestWebhookRegistration): Promise<void>;
   list(tenantId: string): Promise<TestWebhookRegistration[]>;
-  /** remove; returns false when it was already consumed (another request won) */
+  /**
+   * remove this registration; returns false when it was already consumed (another request won) or a newer
+   * listen replaced it (the newer one stays)
+   */
   remove(registration: TestWebhookRegistration): Promise<boolean>;
-  /** remove every registration of one node of one workflow; returns how many were removed */
-  removeForNode(tenantId: string, workflowId: string, nodeName: string): Promise<number>;
+  /**
+   * remove every registration of one node of one workflow, or with `listen` only those of that listen;
+   * returns how many were removed
+   */
+  removeForNode(tenantId: string, workflowId: string, nodeName: string, listen?: ListenRef): Promise<number>;
   close(): Promise<void>;
 }
 
 const keyOf = (r: { method: string; path: string }) => `${r.method} ${r.path}`;
+
+/** one listen: its registrations share the chat's `listenId` and the time they expire */
+export type ListenRef = Pick<TestWebhookRegistration, 'listenId' | 'expiresAt'>;
+
+const sameListen = (a: ListenRef, b: ListenRef) => a.listenId === b.listenId && a.expiresAt === b.expiresAt;
+
+/** HDEL a field only while it holds a registration of the same listen (KEYS[1] hash; ARGV field, listenId, expiresAt) */
+const REMOVE_SAME_LISTEN = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then return 0 end
+local r = cjson.decode(raw)
+local id = r.listenId
+if type(id) ~= 'string' then id = '' end
+if id ~= ARGV[2] or tonumber(r.expiresAt) ~= tonumber(ARGV[3]) then return 0 end
+return redis.call('HDEL', KEYS[1], ARGV[1])
+`;
 
 export class MemoryTestWebhookStore implements TestWebhookStore {
   private readonly byTenant = new Map<string, Map<string, TestWebhookRegistration>>();
@@ -57,15 +79,24 @@ export class MemoryTestWebhookStore implements TestWebhookStore {
   }
 
   async remove(registration: TestWebhookRegistration): Promise<boolean> {
-    return this.byTenant.get(registration.tenantId)?.delete(keyOf(registration)) ?? false;
+    const map = this.byTenant.get(registration.tenantId);
+    const stored = map?.get(keyOf(registration));
+    if (!map || !stored || !sameListen(stored, registration)) return false;
+    return map.delete(keyOf(registration));
   }
 
-  async removeForNode(tenantId: string, workflowId: string, nodeName: string): Promise<number> {
+  async removeForNode(
+    tenantId: string,
+    workflowId: string,
+    nodeName: string,
+    listen?: ListenRef,
+  ): Promise<number> {
     const map = this.byTenant.get(tenantId);
     if (!map) return 0;
     let removed = 0;
     for (const [k, r] of map) {
       if (r.workflowId !== workflowId || r.nodeName !== nodeName) continue;
+      if (listen && !sameListen(r, listen)) continue;
       map.delete(k);
       removed++;
     }
@@ -111,19 +142,47 @@ export class RedisTestWebhookStore implements TestWebhookStore {
   }
 
   async remove(registration: TestWebhookRegistration): Promise<boolean> {
-    return (await this.redis.hdel(this.key(registration.tenantId), keyOf(registration))) > 0;
+    const removed = await this.redis.eval(
+      REMOVE_SAME_LISTEN,
+      1,
+      this.key(registration.tenantId),
+      keyOf(registration),
+      registration.listenId ?? '',
+      String(registration.expiresAt),
+    );
+    return Number(removed) > 0;
   }
 
-  async removeForNode(tenantId: string, workflowId: string, nodeName: string): Promise<number> {
+  async removeForNode(
+    tenantId: string,
+    workflowId: string,
+    nodeName: string,
+    listen?: ListenRef,
+  ): Promise<number> {
     const key = this.key(tenantId);
     const entries = await this.redis.hgetall(key);
-    const fields = Object.entries(entries)
-      .filter(([, raw]) => {
-        const r = JSON.parse(raw) as TestWebhookRegistration;
-        return r.workflowId === workflowId && r.nodeName === nodeName;
-      })
-      .map(([field]) => field);
-    return fields.length ? await this.redis.hdel(key, ...fields) : 0;
+    const matches = Object.entries(entries).filter(([, raw]) => {
+      const r = JSON.parse(raw) as TestWebhookRegistration;
+      return r.workflowId === workflowId && r.nodeName === nodeName && (!listen || sameListen(r, listen));
+    });
+    if (!listen) {
+      const fields = matches.map(([field]) => field);
+      return fields.length ? await this.redis.hdel(key, ...fields) : 0;
+    }
+    // each field only while it still holds this listen: a newer listen may have replaced it meanwhile
+    let removed = 0;
+    for (const [field] of matches) {
+      const done = await this.redis.eval(
+        REMOVE_SAME_LISTEN,
+        1,
+        key,
+        field,
+        listen.listenId ?? '',
+        String(listen.expiresAt),
+      );
+      removed += Number(done);
+    }
+    return removed;
   }
 
   async close(): Promise<void> {

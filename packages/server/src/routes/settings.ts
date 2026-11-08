@@ -118,6 +118,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
           : {}),
         autosaveEnabled: !config.autosaveDisabled,
         workflowReviews: { enabled: tenantSettings.workflowReviews?.enabled === true },
+        /** P5-11: read only, the editor caps the "run in parallel" slider with it; PATCH never takes it */
+        evaluationConcurrencyLimit: config.evaluationConcurrencyLimit,
       },
     };
   });

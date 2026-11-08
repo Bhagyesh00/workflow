@@ -45,10 +45,13 @@ const SECRET_PATHS: RegExp[] = [
   /^(\/+form-waiting\/+).+/,
 ];
 
-/** a form's address carries the sign-in's one-time code in its query when the visitor comes back */
-const FORM_PATH = /^\/+form(?:-test|-waiting)?\//;
+/**
+ * A form's address, and a Chat Trigger's (production or test, ending in /chat), carries the sign-in's
+ * one-time code in its query when the visitor comes back.
+ */
+const SIGN_IN_PATHS: RegExp[] = [/^\/+form(?:-test|-waiting)?\//, /^\/+webhook(?:-test)?\/.+\/chat\/*$/];
 
-/** the request URL with every token-bearing path segment and form sign-in code replaced; the rest of the query is kept */
+/** the request URL with every token-bearing path segment and form or chat sign-in code replaced; the rest of the query is kept */
 export function redactUrl(url: string): string {
   const queryAt = url.indexOf('?');
   const rawPath = queryAt === -1 ? url : url.slice(0, queryAt);
@@ -60,7 +63,8 @@ export function redactUrl(url: string): string {
   } catch {
     // an invalid escape never matches a route; the raw path is checked as is
   }
-  const query = FORM_PATH.test(decoded) ? rawQuery.replace(/([?&]code=)[^&]*/g, '$1[redacted]') : rawQuery;
+  const signIn = SIGN_IN_PATHS.some((pattern) => pattern.test(decoded));
+  const query = signIn ? rawQuery.replace(/([?&]code=)[^&]*/g, '$1[redacted]') : rawQuery;
   for (const pattern of SECRET_PATHS) {
     if (pattern.test(decoded)) return `${decoded.replace(pattern, '$1[redacted]')}${query}`;
   }

@@ -109,6 +109,8 @@ export interface RunOptions {
 export interface ResumeOptions {
   /** replaces the output of the node that was waiting (e.g. data received by a resume webhook) */
   output?: Item[][];
+  /** custom data the resume adds (a chat reply's highlighted data), through the caps of `setCustomData` */
+  customData?: Record<string, string>;
   timeoutMs?: number;
   signal?: AbortSignal;
 }
@@ -445,6 +447,8 @@ export class WorkflowExecute {
     if (!nodeName || !task || task.executionStatus !== 'waiting') {
       throw new WorkflowOperationError('Execution is not waiting');
     }
+    // before the tool-wait branch, so a reply that ends a tool's wait is kept too
+    if (options.customData) this.seedCustomData(options.customData);
     const suspended = this.state.executionData.suspended;
     if (suspended) return this.resumeToolWait(suspended, options);
     const output = options.output

@@ -82,6 +82,8 @@ export interface StoredRunOptions {
   rootMode?: ExecutionMode;
   /** output of the waiting node for the next resume (null = keep its own output) */
   resumeOutput?: Item[][] | null;
+  /** custom data the next resume adds (a chat reply's highlighted data; null = none) */
+  resumeCustomData?: Record<string, string> | null;
   depth?: number;
   userId?: string;
   /** the execution is an error workflow or runs below one: its failure never starts another error workflow */
@@ -608,7 +610,12 @@ export class ExecutionService {
           // the engine holds the request in the run that started it: resumed, the root would run as a node
           throw new WorkflowOperationError(TOOL_TEST_AFTER_WAIT);
         } else {
-          result = await engine.resume({ output: options.resumeOutput ?? undefined, timeoutMs, signal });
+          result = await engine.resume({
+            output: options.resumeOutput ?? undefined,
+            customData: options.resumeCustomData ?? undefined,
+            timeoutMs,
+            signal,
+          });
         }
       } catch (error) {
         // run()/resume() reject only before processing starts (no start node, not waiting...)
@@ -1198,6 +1205,8 @@ export class ExecutionService {
       wait?: boolean;
       observer?: ExecutionObserver;
       atWait?: { toolNode: string; toolRunIndex: number };
+      /** custom data the resume adds (a chat reply's highlighted data) */
+      customData?: Record<string, string>;
     } = {},
   ): Promise<StartedExecution | undefined> {
     const { repos, queue } = this.deps;
@@ -1211,6 +1220,7 @@ export class ExecutionService {
     await repos.executions.updateRunOptions(tenantId, executionId, {
       ...(data.runOptions ?? {}),
       resumeOutput: output ? JSON.parse(JSON.stringify(output)) : null,
+      resumeCustomData: opts.customData ?? null,
     });
     const finished = opts.wait || opts.observer ? this.addWaiter(executionId, opts.observer) : undefined;
     if (queue) await queue.enqueue({ executionId, tenantId, kind: 'resume', notify: Boolean(finished) });

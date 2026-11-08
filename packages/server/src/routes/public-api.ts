@@ -760,7 +760,8 @@ const COMPONENTS: Record<string, unknown> = {
       completedAt: { type: ['string', 'null'], format: 'date-time' },
       metrics: {
         type: ['object', 'null'],
-        description: 'The mean of each metric over the successful cases',
+        description:
+          'The mean of each metric over the cases that have it (failed cases still add the predefined metrics)',
         additionalProperties: { type: 'number' },
       },
       errorCode: { type: ['string', 'null'] },

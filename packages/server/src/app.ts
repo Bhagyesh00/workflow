@@ -142,7 +142,7 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerDataTableRoutes(rest, ctx);
       registerSecretConnectionRoutes(rest, ctx);
       registerFormAuthRoutes(rest, ctx);
-      // Phase 5 (filled by L8)
+      // Phase 5: evaluation test runs (P5-02)
       registerEvaluationRoutes(rest, ctx);
     },
     { prefix: '/rest' },

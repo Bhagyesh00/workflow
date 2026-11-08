@@ -199,6 +199,8 @@ describe('subpath exports', () => {
       './utils/archive': './src/utils/archive.ts',
       './extract/pdf': './src/nodes/core/extract/pdf.ts',
       './utils/databricks-lakebase': './src/utils/databricks-lakebase.ts',
+      './utils/send-and-wait': './src/utils/send-and-wait/index.ts',
+      './utils/user-auth': './src/utils/user-auth.ts',
     });
     for (const file of Object.values(pkg.exports)) expect(existsSync(resolve(root, file)), file).toBe(true);
   });
