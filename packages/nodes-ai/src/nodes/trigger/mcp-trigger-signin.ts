@@ -2,6 +2,8 @@
  * "Workspace sign-in" (OAuth) for the MCP Server Trigger: checks the Bearer token of an MCP request
  * against `ctx.getMcpAuth()` for the trigger's URL (`resource`) and, when asked ("Require Workflow
  * Execute Permission"), the user's right to run the workflow (editor or above in its workspace).
+ * Only the request path goes to the helper, which builds the resource on the configured MCP base URL:
+ * the Host header and the scheme the server saw never shape the resource (behind a proxy they differ).
  * A missing or refused token is 401 with `WWW-Authenticate` (Bearer, `resource_metadata`), so an MCP
  * client starts the OAuth flow; a signed-in user without the right is 403.
  */
@@ -29,6 +31,16 @@ function refuse(statusCode: number, error: string, description: string, challeng
   };
 }
 
+/** the path of the request URL (`/<endpoint>/<slug>/<path>`), without scheme, host and query */
+export function resourcePath(resource: string): string {
+  try {
+    // a path resolves on a placeholder origin that is never used; a full URL keeps its own path
+    return new URL(resource, 'http://localhost').pathname;
+  } catch {
+    return '';
+  }
+}
+
 function authorizationHeader(ctx: WebhookContext): string | undefined {
   const value = ctx.getHeaderData().authorization;
   return Array.isArray(value) ? value[0] : value;
@@ -41,11 +53,12 @@ export async function checkWorkspaceSignIn(
 ): Promise<McpSignInResult> {
   const auth = ctx.getMcpAuth?.();
   if (!auth) return refuse(500, 'server_error', MCP_SIGNIN_TEXTS.unavailable);
-  const challenge = auth.challenge(resource);
+  const path = resourcePath(resource);
+  const challenge = auth.challenge(path);
   const header = authorizationHeader(ctx);
   const token = typeof header === 'string' ? BEARER.exec(header)?.[1] : undefined;
   if (!token) return refuse(401, 'invalid_token', MCP_SIGNIN_TEXTS.required, challenge);
-  const verified = await auth.verifyAccessToken(token, resource);
+  const verified = await auth.verifyAccessToken(token, path);
   if (!verified) {
     return refuse(401, 'invalid_token', MCP_SIGNIN_TEXTS.invalid, `${challenge}, error="invalid_token"`);
   }

@@ -336,7 +336,7 @@ describe('registration', () => {
       ['GET', '/mcp-oauth/:tenantSlug/authorize'],
       ['POST', '/mcp-oauth/:tenantSlug/token'],
       ['POST', '/mcp-oauth/:tenantSlug/revoke'],
-      ['GET', '/.well-known/oauth-authorization-server/mcp-oauth/:tenantSlug'],
+      ['GET', '/.well-known/oauth-authorization-server/*'],
       ['GET', '/mcp/:tenantSlug/*'],
       ['POST', '/mcp/:tenantSlug/*'],
       ['DELETE', '/mcp-test/:tenantSlug/*'],

@@ -27,7 +27,14 @@ const TRIGGER = 'MCP Server Trigger';
 let server: TestServer & { url: string; port: number };
 
 beforeAll(async () => {
-  server = await startMcpTestServer({ MCP_ACCESS_ENABLED: 'true' }, { nodePackages: [nodesAiPackage] });
+  server = await startMcpTestServer(
+    {
+      MCP_ACCESS_ENABLED: 'true',
+      OAUTH_SERVER_REGISTER_RATE_LIMIT: '1000',
+      OAUTH_SERVER_AUTHORIZE_RATE_LIMIT: '1000',
+    },
+    { nodePackages: [nodesAiPackage] },
+  );
 });
 afterAll(async () => {
   await server?.close();
@@ -248,16 +255,22 @@ describe('MCP Server Trigger workspace sign-in', () => {
     expect(plain.mcpToolCall).toMatchObject({ toolName: 'Calculator' });
   });
 
-  it('checks the token for the trigger URL rebuilt on the MCP base URL (proxy scheme or prefix)', async () => {
+  it('checks the token for the trigger path built on the MCP base URL (never the Host or scheme seen)', async () => {
     const owner = await signup();
     const trigger = await signedInTrigger(owner);
     const accessToken = await tokenFor(owner, owner, trigger.url);
     const helper = createMcpAuthHelper(() => server.ctx);
     const path = new URL(trigger.url).pathname;
     expect((await helper.verifyAccessToken(accessToken, trigger.url))?.user.id).toBe(owner.user.id);
+    // the request path alone (what the trigger hands over), or any scheme and host in front of it
+    expect((await helper.verifyAccessToken(accessToken, path))?.role).toBe('owner');
+    expect((await helper.verifyAccessToken(accessToken, `https://proxy.example${path}?x=1`))?.role).toBe(
+      'owner',
+    );
+    // an extra path in front is another resource: the trigger routes sit at the root
     expect(
-      (await helper.verifyAccessToken(accessToken, `https://127.0.0.1:${server.port}/prefix${path}`))?.role,
-    ).toBe('owner');
+      await helper.verifyAccessToken(accessToken, `https://127.0.0.1:${server.port}/prefix${path}`),
+    ).toBeNull();
     // another trigger path, the test endpoint, the server URL or an MCP key: no user
     expect(
       await helper.verifyAccessToken(
@@ -275,5 +288,48 @@ describe('MCP Server Trigger workspace sign-in', () => {
     expect(helper.challenge(trigger.url)).toBe(
       `Bearer realm="MCP Server", resource_metadata="${server.url}/.well-known/oauth-protected-resource${path}"`,
     );
+    expect(helper.challenge(path)).toBe(helper.challenge(trigger.url));
+  });
+
+  it('keeps working while the workspace MCP access is off; only the tenant server is refused', async () => {
+    const owner = await signup();
+    const trigger = await signedInTrigger(owner);
+    const before = await tokenFor(owner, owner, trigger.url);
+    await owner.client.data(owner.client.patch('/rest/mcp/settings', { mcpAccessEnabled: false }));
+    try {
+      // a token from before and a new sign-in both work on the trigger
+      expect(await callCalculator(trigger.url, before)).toBe('5');
+      const after = await tokenFor(owner, owner, trigger.url);
+      expect(await callCalculator(trigger.url, after)).toBe('5');
+      expect((await initialize(trigger.url)).status).toBe(401);
+      // the tenant server's sign-in goes back to the client with invalid_target
+      const slug = owner.tenant.slug;
+      const reg = await fetch(`${server.url}/mcp-oauth/${slug}/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          client_name: 'Server client',
+          redirect_uris: ['http://127.0.0.1:7788/cb'],
+          token_endpoint_auth_method: 'none',
+        }),
+      });
+      expect(reg.status).toBe(201);
+      const { client_id: clientId } = (await reg.json()) as { client_id: string };
+      const refused = await fetch(
+        `${server.url}/mcp-oauth/${slug}/authorize?${new URLSearchParams({
+          response_type: 'code',
+          client_id: clientId,
+          code_challenge: createHash('sha256')
+            .update(randomBytes(32).toString('base64url'))
+            .digest('base64url'),
+          code_challenge_method: 'S256',
+        })}`,
+        { redirect: 'manual' },
+      );
+      expect(refused.status, await refused.clone().text()).toBe(302);
+      expect(new URL(refused.headers.get('location') ?? '').searchParams.get('error')).toBe('invalid_target');
+    } finally {
+      await owner.client.data(owner.client.patch('/rest/mcp/settings', { mcpAccessEnabled: true }));
+    }
   });
 });

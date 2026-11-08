@@ -13,7 +13,14 @@ import { MCP_OAUTH_FLOW_KIND } from '../src/services/mcp/oauth/authorize';
 import { redirectUriProblem } from '../src/services/mcp/oauth/clients';
 import { verifyMcpOAuthToken } from '../src/services/mcp/oauth/tokens';
 import { MCP_SCOPES, mcpOAuthIssuer, mcpServerUrl } from '../src/services/mcp/types';
-import { createWorkflow, node, startMcpTestServer, TestClient, type TestServer } from './helpers';
+import {
+  createTestServer,
+  createWorkflow,
+  node,
+  startMcpTestServer,
+  TestClient,
+  type TestServer,
+} from './helpers';
 
 type Server = TestServer & { url: string; port: number };
 let server: Server;
@@ -207,13 +214,13 @@ const mcpStatus = async (url: string, accessToken: string) => {
   return res.status;
 };
 
-/** an active MCP Server Trigger with workspace sign-in; its URL is a resource of the tenant */
-async function signedInTrigger(user: User) {
+/** an active MCP Server Trigger; with workspace sign-in (the default) its URL is a resource of the tenant */
+async function signedInTrigger(user: User, authentication = 'n8nOAuth2') {
   const path = `oauth-${randomUUID().slice(0, 8)}`;
   const wf = await createWorkflow(user.client, {
     name: `Trigger ${path}`,
     nodes: [
-      node('MCP Server Trigger', 'ai.mcpTrigger', { path, authentication: 'n8nOAuth2' }, [0, 0], {
+      node('MCP Server Trigger', 'ai.mcpTrigger', { path, authentication }, [0, 0], {
         webhookId: randomUUID(),
       }),
       node('Calculator', 'ai.toolCalculator', {}, [0, 200]),
@@ -745,6 +752,26 @@ describe('resource binding', () => {
     );
   });
 
+  it('a trigger without workspace sign-in is no resource: no metadata, authorize gives invalid_target', async () => {
+    const owner = await signup();
+    const client = await newClient(owner.tenant.slug);
+    const open = await signedInTrigger(owner, 'none');
+    const meta = await fetch(
+      `${server.url}/.well-known/oauth-protected-resource${new URL(open.url).pathname}`,
+    );
+    expect(meta.status).toBe(404);
+    const res = await authorize(owner.tenant.slug, {
+      response_type: 'code',
+      client_id: client.client_id,
+      redirect_uri: client.redirect_uris[0],
+      code_challenge: pkce().challenge,
+      code_challenge_method: 'S256',
+      resource: open.url,
+    });
+    expect(res.status).toBe(302);
+    expect(new URL(res.headers.get('location') ?? '').searchParams.get('error')).toBe('invalid_target');
+  });
+
   it("refuses a token on another workspace's slug, and a code at another workspace's token endpoint", async () => {
     const a = await signup();
     const b = await signup();
@@ -933,24 +960,91 @@ describe('routes', () => {
     expect(preflight.status).toBe(204);
   });
 
-  it('answers 404 on every OAuth route while MCP access is off, and for an unknown slug', async () => {
+  it('while MCP access is off refuses only the server resource; a trigger signs in; an unknown slug is 404', async () => {
     const owner = await signup();
-    await owner.client.data(owner.client.patch('/rest/mcp/settings', { mcpAccessEnabled: false }));
     const slug = owner.tenant.slug;
-    expect(
-      (await fetch(`${server.url}/.well-known/oauth-authorization-server/mcp-oauth/${slug}`)).status,
-    ).toBe(404);
+    const serverUrl = mcpServerUrl(server.ctx.config, slug);
+    const client = await newClient(slug);
+    const trigger = await signedInTrigger(owner);
+    // a server token pair and a server flow made while access is on
+    const before = await grant(owner, client);
+    const { challenge } = pkce();
+    const pending = flowOf(
+      await authorize(slug, {
+        response_type: 'code',
+        client_id: client.client_id,
+        redirect_uri: client.redirect_uris[0],
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+      }),
+    );
+    await owner.client.data(owner.client.patch('/rest/mcp/settings', { mcpAccessEnabled: false }));
+
+    // the shared routes keep answering (as n8n): metadata, registration
+    const asMeta = await fetch(`${server.url}/.well-known/oauth-authorization-server/mcp-oauth/${slug}`);
+    expect(asMeta.status).toBe(200);
+    expect(((await asMeta.json()) as { issuer: string }).issuer).toBe(owner.issuer);
+    expect((await register(slug, { redirect_uris: ['http://localhost/cb'] })).status).toBe(201);
+    // the server's own resource is refused: metadata, authorize (named or omitted), consent, refresh
     expect(
       (await fetch(`${server.url}/.well-known/oauth-protected-resource/mcp-server/${slug}/http`)).status,
     ).toBe(404);
-    expect((await register(slug, { redirect_uris: ['http://localhost/cb'] })).status).toBe(404);
-    expect((await authorize(slug, { client_id: 'x' })).status).toBe(404);
-    expect((await token(slug, { grant_type: 'refresh_token' })).status).toBe(404);
-    expect(await revoke(slug, { token: 'x' })).toBe(404);
+    for (const resource of [serverUrl, undefined]) {
+      const res = await authorize(slug, {
+        response_type: 'code',
+        client_id: client.client_id,
+        redirect_uri: client.redirect_uris[0],
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        ...(resource ? { resource } : {}),
+      });
+      expect(res.status).toBe(302);
+      const back = new URL(res.headers.get('location') ?? '');
+      expect(back.searchParams.get('error')).toBe('invalid_target');
+      expect(back.searchParams.get('error_description')).toBe(
+        'MCP access is not available for this workspace',
+      );
+    }
     expect(
-      (await fetch(`${server.url}/.well-known/oauth-authorization-server/mcp-oauth/no-such-${randomUUID()}`))
-        .status,
+      (await owner.client.post('/rest/consent/approve', { flow: pending, approved: true })).statusCode,
+    ).toBe(400);
+    const refreshed = await token(slug, {
+      grant_type: 'refresh_token',
+      refresh_token: before.refresh_token,
+      client_id: client.client_id,
+    });
+    expect(refreshed.status).toBe(400);
+    expect(refreshed.body.error).toBe('invalid_target');
+    expect(await mcpStatus(serverUrl, before.access_token)).toBe(404);
+
+    // a trigger with workspace sign-in keeps working: metadata, authorize, consent, token, call
+    const triggerMeta = await fetch(
+      `${server.url}/.well-known/oauth-protected-resource${new URL(trigger.url).pathname}`,
+    );
+    expect(triggerMeta.status).toBe(200);
+    const triggerToken = await grant(owner, client, { resource: trigger.url });
+    expect(await mcpStatus(trigger.url, triggerToken.access_token)).toBe(200);
+    expect(await revoke(slug, { token: triggerToken.access_token, client_id: client.client_id })).toBe(200);
+    expect(await mcpStatus(trigger.url, triggerToken.access_token)).toBe(401);
+
+    // on again: the refresh token issued before still works for the server
+    await owner.client.data(owner.client.patch('/rest/mcp/settings', { mcpAccessEnabled: true }));
+    const again = await token(slug, {
+      grant_type: 'refresh_token',
+      refresh_token: before.refresh_token,
+      client_id: client.client_id,
+    });
+    expect(again.status).toBe(200);
+    expect(await mcpStatus(serverUrl, again.body.access_token)).toBe(200);
+
+    const unknown = `no-such-${randomUUID()}`;
+    expect(
+      (await fetch(`${server.url}/.well-known/oauth-authorization-server/mcp-oauth/${unknown}`)).status,
     ).toBe(404);
+    expect((await register(unknown, { redirect_uris: ['http://localhost/cb'] })).status).toBe(404);
+    expect((await authorize(unknown, { client_id: 'x' })).status).toBe(404);
+    expect((await token(unknown, { grant_type: 'refresh_token' })).status).toBe(404);
+    expect(await revoke(unknown, { token: 'x' })).toBe(404);
   });
 
   it('lists clients, deletes one with its tokens, shows stats; admin only', async () => {
@@ -984,6 +1078,74 @@ describe('routes', () => {
     );
     expect(await owner.client.data(owner.client.get('/rest/mcp/oauth-clients'))).toEqual([]);
     expect((await owner.client.delete(`/rest/mcp/oauth-clients/${client.client_id}`)).statusCode).toBe(404);
+  });
+});
+
+describe('MCP_BASE_URL with a path prefix', () => {
+  const ORIGIN_9 = 'http://127.0.0.1:9';
+  let prefixed: TestServer;
+  beforeAll(async () => {
+    prefixed = await createTestServer(
+      {
+        BASE_URL: ORIGIN_9,
+        MCP_BASE_URL: `${ORIGIN_9}/wf`,
+        MCP_ACCESS_ENABLED: 'true',
+        OAUTH_SERVER_WELL_KNOWN_RATE_LIMIT: HIGH,
+      },
+      { reset: false, startMain: false, nodePackages: [nodesAiPackage] },
+    );
+  });
+  afterAll(async () => {
+    await prefixed?.close();
+  });
+  const get = (url: string) => prefixed.app.inject({ method: 'GET', url, headers: { host: '127.0.0.1:9' } });
+
+  it('serves both well-known documents with the prefix inserted after the well-known segment', async () => {
+    const owner = await signup();
+    const slug = owner.tenant.slug;
+    const trigger = await signedInTrigger(owner);
+    const triggerPath = new URL(trigger.url).pathname;
+
+    const as = await get(`/.well-known/oauth-authorization-server/wf/mcp-oauth/${slug}`);
+    expect(as.statusCode).toBe(200);
+    expect(as.json()).toMatchObject({
+      issuer: `${ORIGIN_9}/wf/mcp-oauth/${slug}`,
+      token_endpoint: `${ORIGIN_9}/wf/mcp-oauth/${slug}/token`,
+    });
+    const serverMeta = await get(`/.well-known/oauth-protected-resource/wf/mcp-server/${slug}/http`);
+    expect(serverMeta.statusCode).toBe(200);
+    expect(serverMeta.json()).toMatchObject({
+      resource: `${ORIGIN_9}/wf/mcp-server/${slug}/http`,
+      authorization_servers: [`${ORIGIN_9}/wf/mcp-oauth/${slug}`],
+    });
+    const triggerMeta = await get(`/.well-known/oauth-protected-resource/wf${triggerPath}`);
+    expect(triggerMeta.statusCode).toBe(200);
+    expect(triggerMeta.json().resource).toBe(`${ORIGIN_9}/wf${triggerPath}`);
+    // the URL the tenant server's 401 names is the one served
+    const unauthorized = await prefixed.app.inject({
+      method: 'POST',
+      url: `/mcp-server/${slug}/http`,
+      headers: {
+        host: '127.0.0.1:9',
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      payload: INIT,
+    });
+    expect(unauthorized.statusCode).toBe(401);
+    expect(unauthorized.headers['www-authenticate']).toContain(
+      `resource_metadata="${ORIGIN_9}/.well-known/oauth-protected-resource/wf/mcp-server/${slug}/http"`,
+    );
+
+    // without the prefix, or with another one: no document
+    expect((await get(`/.well-known/oauth-authorization-server/mcp-oauth/${slug}`)).statusCode).toBe(404);
+    expect((await get(`/.well-known/oauth-authorization-server/wf/mcp-oauth/${slug}/x`)).statusCode).toBe(
+      404,
+    );
+    expect((await get(`/.well-known/oauth-protected-resource/mcp-server/${slug}/http`)).statusCode).toBe(404);
+    expect(
+      (await get(`/.well-known/oauth-protected-resource/other/mcp-server/${slug}/http`)).statusCode,
+    ).toBe(404);
   });
 });
 

@@ -1,12 +1,13 @@
 /**
  * Discovery documents of the MCP OAuth server (P5-14). Issuer `${config.mcp.baseUrl}/mcp-oauth/<slug>`
- * (`mcpOAuthIssuer`); RFC 8414 at `/.well-known/oauth-authorization-server/mcp-oauth/<slug>` (path
- * insertion); RFC 9728 at `/.well-known/oauth-protected-resource/mcp-server/<slug>/http` and
- * `/.well-known/oauth-protected-resource/<endpoint>/<slug>/<path>` (`mcpResourceMetadataUrl`).
+ * (`mcpOAuthIssuer`); RFC 8414 at `/.well-known/oauth-authorization-server/<base path>/mcp-oauth/<slug>`
+ * (path insertion); RFC 9728 at `/.well-known/oauth-protected-resource/<base path>/mcp-server/<slug>/http`
+ * and `/.well-known/oauth-protected-resource/<base path>/<endpoint>/<slug>/<path>` (`mcpResourceMetadataUrl`).
  *
- * Also the one place that says which `resource` values a tenant has: its tenant server URL and the URLs
- * of its MCP Server Triggers (a published, active one on the production endpoint, a listening one on the
- * test endpoint).
+ * Also the one place that says which `resource` values a tenant has: its tenant server URL while its MCP
+ * access is on, and the URLs of its MCP Server Triggers with workspace sign-in (a published, active one
+ * on the production endpoint, a listening one on the test endpoint) whatever the access switch says (as
+ * n8n: the switch gates only the tenant server).
  */
 import type { WorkflowNode } from '@workflow/workflow';
 import type { Config } from '../../../config';
@@ -15,6 +16,7 @@ import type { TenantRow } from '../../../db/schema';
 import { loadPublishedDefinition } from '../../published-workflow';
 import { findTestWebhook } from '../../test-webhooks';
 import { matchDynamic, normalizePath, sortDynamic, webhookUrlBase } from '../../webhook-paths';
+import { mcpAccessEnabled } from '../settings';
 import { MCP_SCOPES, mcpOAuthIssuer, mcpServerUrl } from '../types';
 
 /** RFC 8414 authorization server metadata of the tenant (S256 only, the four endpoints, `MCP_SCOPES`) */
@@ -65,8 +67,9 @@ export function parseMcpTriggerResource(
   return { test, slug, path };
 }
 
+/** an enabled MCP Server Trigger with "Workspace sign-in": only those are resources (as n8n) */
 function isMcpTriggerNode(ctx: ServerContext, node: WorkflowNode | undefined): boolean {
-  if (!node || node.disabled) return false;
+  if (!node || node.disabled || node.parameters?.authentication !== 'n8nOAuth2') return false;
   const type = ctx.registries.nodeTypes.get(node.type);
   return Boolean(type?.description.webhooks?.some((hook) => webhookUrlBase(hook) === 'mcp'));
 }
@@ -108,13 +111,13 @@ export async function isTenantTriggerResource(
   }
 }
 
-/** whether `resource` is this tenant's server URL or one of its trigger URLs */
+/** whether `resource` is this tenant's server URL (only while MCP access is on) or one of its trigger URLs */
 export async function isTenantMcpResource(
   ctx: ServerContext,
   tenant: TenantRow,
   resource: string,
 ): Promise<boolean> {
-  if (resource === mcpServerUrl(ctx.config, tenant.slug)) return true;
+  if (resource === mcpServerUrl(ctx.config, tenant.slug)) return mcpAccessEnabled(ctx.config, tenant);
   return isTenantTriggerResource(ctx, tenant, resource);
 }
 

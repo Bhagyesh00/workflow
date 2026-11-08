@@ -13,7 +13,7 @@ import { ApiError } from '../../../http/errors';
 import type { OAuthClientRow } from '../../../repositories/mcp-oauth';
 import { sha256 } from '../../auth';
 import { mcpAccessEnabled } from '../settings';
-import { type McpScope, mcpOAuthIssuer } from '../types';
+import { type McpScope, mcpOAuthIssuer, mcpServerUrl } from '../types';
 import {
   type McpOAuthFlow,
   readMcpOAuthFlow,
@@ -65,8 +65,11 @@ async function loadFlow(ctx: ServerContext, auth: AuthContext, token: string): P
   const membership = await ctx.repos.memberships.get(flow.tenantId, auth.user.id);
   if (!membership) throw ApiError.forbidden(MCP_CONSENT_TEXTS.notMember);
   const tenant = await ctx.repos.tenants.get(flow.tenantId);
-  if (!tenant || !mcpAccessEnabled(ctx.config, tenant))
+  if (!tenant) throw ApiError.badRequest(MCP_CONSENT_TEXTS.invalidFlow);
+  // the access switch gates only the tenant server's resource, not a trigger's
+  if (flow.resource === mcpServerUrl(ctx.config, tenant.slug) && !mcpAccessEnabled(ctx.config, tenant)) {
     throw ApiError.badRequest(MCP_CONSENT_TEXTS.invalidFlow);
+  }
   const client = await ctx.repos.mcpOAuth.getClient(flow.tenantId, flow.clientId);
   const redirectUri = client?.redirectUris[flow.redirectIndex];
   // the client went, or its list changed since: no redirect anywhere

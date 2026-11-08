@@ -1,15 +1,16 @@
 /**
  * The authorize step of the MCP OAuth server (P5-14). The redirect URI is checked BEFORE any redirect
  * (GHSA-rc3w), against the client's list and the tenant's allowed list (empty adds no rule, non-loopback
- * exact, loopback any port). PKCE S256 required. `resource` must be this tenant's server URL or one of
- * its trigger URLs; omitted it is the server URL; anything else `invalid_target` (after the redirect
- * check). Unknown scopes dropped. Then a flow token (`formTokens.sign`, 300 s) holding the redirect's
+ * exact, loopback any port). PKCE S256 required. `resource` must be this tenant's server URL (only while
+ * its MCP access is on) or one of its trigger URLs; omitted it is the server URL; anything else
+ * `invalid_target` (after the redirect check). Unknown scopes dropped. Then a flow token (`formTokens.sign`, 300 s) holding the redirect's
  * index, not the URI, and `state` capped at 1024, and a redirect to `${baseUrl}/oauth/consent?flow=<token>`.
  */
 import type { DataObject } from '@workflow/workflow';
 import type { ServerContext } from '../../../context';
 import type { TenantRow } from '../../../db/schema';
 import type { TenantSettings } from '../../../plans';
+import { mcpAccessEnabled } from '../settings';
 import { isMcpScope, MCP_SCOPES, type McpScope, mcpOAuthIssuer, mcpServerUrl } from '../types';
 import { isLoopbackHost } from './clients';
 import { isTenantMcpResource } from './metadata';
@@ -169,6 +170,10 @@ export async function startMcpAuthorization(
   const rawResource = single(query, 'resource');
   if (rawResource === null) return back('invalid_target', 'resource must be given once', state);
   const resource = rawResource ?? mcpServerUrl(config, tenant.slug);
+  // the access switch gates only the tenant server; a trigger's sign-in keeps working while it is off
+  if (resource === mcpServerUrl(config, tenant.slug) && !mcpAccessEnabled(config, tenant)) {
+    return back('invalid_target', 'MCP access is not available for this workspace', state);
+  }
   if (!(await isTenantMcpResource(ctx, tenant, resource))) {
     return back('invalid_target', 'The resource is not an MCP server of this workspace', state);
   }

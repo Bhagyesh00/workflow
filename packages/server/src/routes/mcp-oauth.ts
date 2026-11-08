@@ -1,11 +1,15 @@
 /**
  * The MCP OAuth server's public routes (P5-14), outside `/rest` (no cookie): under the issuer
  * `/mcp-oauth/:tenantSlug` `register`, `authorize`, `token`, `revoke`; RFC 8414 metadata at
- * `/.well-known/oauth-authorization-server/mcp-oauth/:tenantSlug`; RFC 9728 metadata at
- * `/.well-known/oauth-protected-resource/<resource path>`. Every route: `mcpHostAllowed` (else 403),
- * `mcpCorsHeaders`, its 5-minute rate limit (`config.mcp.oauthRateLimits`), and 404 while MCP access is
- * off. This encapsulated plugin has its own form parser (routes/webhooks.ts `parseForm`) and the
- * `sweepExpired` timer (`unref()`, cleared in `onClose`). Registered by app.ts after `webhookPlugin`.
+ * `/.well-known/oauth-authorization-server/<base path>/mcp-oauth/:tenantSlug`; RFC 9728 metadata at
+ * `/.well-known/oauth-protected-resource/<base path>/<resource path>` (path insertion: the path of
+ * MCP_BASE_URL, if any, comes right after the well-known segment). Every route: `mcpHostAllowed` (else
+ * 403), `mcpCorsHeaders`, its 5-minute rate limit (`config.mcp.oauthRateLimits`), and 404 for an unknown
+ * slug. The routes are shared by the tenant MCP server and the MCP Server Triggers, so they answer while
+ * the workspace's MCP access is off (as n8n); the switch gates only the tenant server's resource (its
+ * authorize, consent, tokens and metadata). This encapsulated plugin has its own form parser
+ * (routes/webhooks.ts `parseForm`) and the `sweepExpired` timer (`unref()`, cleared in `onClose`).
+ * Registered by app.ts after `webhookPlugin`.
  */
 import { isPlainObject } from '@workflow/workflow';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -20,7 +24,6 @@ import {
   type McpOAuthTokenReply,
   revokeMcpOAuthToken,
 } from '../services/mcp/oauth/tokens';
-import { mcpAccessEnabled } from '../services/mcp/settings';
 import { parseForm } from './webhooks';
 
 /** how often expired codes and tokens are deleted */
@@ -32,6 +35,7 @@ const OAUTH_BODY_LIMIT = 64 * 1024;
 export const MCP_OAUTH_TEXTS = {
   host: 'The Host header does not match the MCP base URL',
   notAvailable: 'MCP access is not available for this workspace',
+  noResource: 'No protected resource at this path',
   rateLimited: 'Too many requests, please try again later',
   badRequest: 'The request could not be read',
   repeated: 'A parameter must not be given more than once',
@@ -70,6 +74,25 @@ const header = (request: FastifyRequest, name: string): string | undefined => {
   return Array.isArray(value) ? value[0] : value;
 };
 
+/**
+ * The rest of a well-known wildcard path after the MCP base URL's path (`wf` of `https://h/wf`), or null
+ * when the path does not start with it (RFC 8414 and RFC 9728 path insertion put it first).
+ */
+export function afterBasePath(baseUrl: string, path: string): string | null {
+  const base = new URL(baseUrl).pathname.replace(/^\/+|\/+$/g, '');
+  const rest = path.replace(/^\/+/, '');
+  if (!base) return rest;
+  return rest.startsWith(`${base}/`) ? rest.slice(base.length + 1) : null;
+}
+
+function decodedSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return '';
+  }
+}
+
 export async function mcpOAuthPlugin(app: FastifyInstance, opts: { ctx: ServerContext }): Promise<void> {
   const { ctx } = opts;
   const { config } = ctx;
@@ -101,14 +124,17 @@ export async function mcpOAuthPlugin(app: FastifyInstance, opts: { ctx: ServerCo
     }
   });
 
-  /** the tenant of the slug while its MCP access is on; else the 404 is sent and undefined returned */
+  /**
+   * The tenant of the slug; else the 404 is sent and undefined returned. Not gated by MCP access: these
+   * routes also serve the tenant's MCP Server Triggers, so the services refuse only the server's resource.
+   */
   const tenantOf = async (
     request: FastifyRequest,
     reply: FastifyReply,
     slug: string,
   ): Promise<TenantRow | undefined> => {
     const tenant = slug ? await ctx.repos.tenants.getBySlug(slug) : undefined;
-    if (tenant && mcpAccessEnabled(config, tenant)) return tenant;
+    if (tenant) return tenant;
     await send(reply, request, 404, oauthBody('not_found', MCP_OAUTH_TEXTS.notAvailable));
     return undefined;
   };
@@ -200,10 +226,14 @@ export async function mcpOAuthPlugin(app: FastifyInstance, opts: { ctx: ServerCo
   );
 
   app.get(
-    '/.well-known/oauth-authorization-server/mcp-oauth/:tenantSlug',
+    '/.well-known/oauth-authorization-server/*',
     { config: { rateLimit: mcpRateLimit(limits.wellKnown) } },
     async (request, reply) => {
-      const tenant = await tenantOf(request, reply, (request.params as { tenantSlug: string }).tenantSlug);
+      // `<base path>/mcp-oauth/<slug>`, the issuer's path
+      const path = afterBasePath(config.mcp.baseUrl, (request.params as { '*'?: string })['*'] ?? '');
+      const [issuer, rawSlug = '', ...more] = (path ?? '').split('/');
+      const slug = issuer === 'mcp-oauth' && more.length === 0 ? decodedSegment(rawSlug) : '';
+      const tenant = await tenantOf(request, reply, slug);
       if (!tenant) return reply;
       return send(reply, request, 200, mcpAuthorizationServerMetadata(config, tenant.slug));
     },
@@ -213,27 +243,22 @@ export async function mcpOAuthPlugin(app: FastifyInstance, opts: { ctx: ServerCo
     '/.well-known/oauth-protected-resource/*',
     { config: { rateLimit: mcpRateLimit(limits.wellKnown) } },
     async (request, reply) => {
-      const path = (request.params as { '*'?: string })['*'] ?? '';
-      // `mcp-server/<slug>/http` or `<endpoint>/<slug>/<path>`: the slug is the second segment
+      // `<base path>/mcp-server/<slug>/http` or `<base path>/<endpoint>/<slug>/<path>`
+      const path = afterBasePath(config.mcp.baseUrl, (request.params as { '*'?: string })['*'] ?? '');
+      if (path === null) return send(reply, request, 404, oauthBody('not_found', MCP_OAUTH_TEXTS.noResource));
+      // the slug is the second segment
       const [, rawSlug = ''] = path.split('/');
-      let slug = '';
-      try {
-        slug = decodeURIComponent(rawSlug);
-      } catch {
-        slug = '';
-      }
-      const tenant = await tenantOf(request, reply, slug);
+      const tenant = await tenantOf(request, reply, decodedSegment(rawSlug));
       if (!tenant) return reply;
       const metadata = await mcpProtectedResourceMetadata(ctx, tenant, path);
-      if (!metadata)
-        return send(reply, request, 404, oauthBody('not_found', 'No protected resource at this path'));
+      if (!metadata) return send(reply, request, 404, oauthBody('not_found', MCP_OAUTH_TEXTS.noResource));
       return send(reply, request, 200, metadata);
     },
   );
 
   // CORS preflights of browser-based MCP clients
   app.options('/mcp-oauth/:tenantSlug/*', preflight);
-  app.options('/.well-known/oauth-authorization-server/mcp-oauth/:tenantSlug', preflight);
+  app.options('/.well-known/oauth-authorization-server/*', preflight);
   app.options('/.well-known/oauth-protected-resource/*', preflight);
 
   const sweep = setInterval(() => {

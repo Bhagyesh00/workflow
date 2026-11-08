@@ -2,7 +2,9 @@
  * Tokens of the MCP OAuth server (P5-14): opaque, stored as SHA-256 only. Access `wfo_at_` (1 h) and
  * refresh `wfo_rt_` (30 days, rotated; an old one replayed gets `invalid_grant`), bound to the granted
  * `resource` (GHSA-cw9w). `verifyMcpOAuthToken` reads the membership on every call, so a removed user
- * loses access, and the role always comes from the membership, never the token.
+ * loses access, and the role always comes from the membership, never the token. While the workspace's
+ * MCP access is off, no token is issued or refreshed for the tenant server's resource; a trigger's
+ * resource follows only its own node settings (as n8n).
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { FormUser, McpAuthHelper } from '@workflow/workflow';
@@ -95,6 +97,13 @@ function pkceMatches(verifier: string, challenge: string): boolean {
 
 const newToken = (prefix: string) => `${prefix}${randomBytes(32).toString('base64url')}`;
 
+/** whether `resource` is the tenant server's URL while the workspace's MCP access is off */
+function serverResourceOff(ctx: ServerContext, tenant: TenantRow, resource: string): boolean {
+  return resource === mcpServerUrl(ctx.config, tenant.slug) && !mcpAccessEnabled(ctx.config, tenant);
+}
+
+const ACCESS_OFF = 'MCP access is not available for this workspace';
+
 /** a new access and refresh token pair for a grant, and the rows that store their hashes */
 function tokenPair(grant: {
   tenantId: string;
@@ -170,6 +179,7 @@ export async function exchangeMcpOAuthToken(
     if (body.resource !== undefined && body.resource !== row.resource) {
       return oauthError('invalid_target', 'resource does not match the authorization request');
     }
+    if (serverResourceOff(ctx, tenant, row.resource)) return oauthError('invalid_target', ACCESS_OFF);
     if (!(await ctx.repos.memberships.get(tenant.id, row.userId))) {
       return oauthError('invalid_grant', 'The authorization code is not valid');
     }
@@ -198,6 +208,7 @@ export async function exchangeMcpOAuthToken(
   if (body.resource !== undefined && body.resource !== row.resource) {
     return oauthError('invalid_target', 'resource does not match the granted resource');
   }
+  if (serverResourceOff(ctx, tenant, row.resource)) return oauthError('invalid_target', ACCESS_OFF);
   let scope = row.scope;
   if (body.scope !== undefined) {
     const asked = [...new Set(body.scope.split(' ').filter(Boolean))];
@@ -244,40 +255,22 @@ export async function revokeMcpOAuthToken(
 }
 
 /**
- * The resource of a trigger request rebuilt on the configured MCP base URL: the trigger sees
- * `<scheme>://<Host><path>` of the request (Host already checked), which behind a proxy may differ in
- * scheme or lack the base URL's path prefix. From the endpoint segment on, the path is the same.
+ * The resource of a trigger request built on the configured MCP base URL. The trigger hands the request
+ * path (`/<endpoint>/<slug>/<path>`, the routes sit at the root behind a proxy that strips the base
+ * path); a full URL is read for its path only, so neither the Host header nor the scheme the server saw
+ * counts. The path is never stripped of the base URL's path (that path may itself be `/mcp`). Whether
+ * the result names a trigger is for `parseMcpTriggerResource` to say.
  */
 export function canonicalMcpResource(ctx: ServerContext, resource: string): string {
-  const { config } = ctx;
-  let url: URL;
+  if (typeof resource !== 'string') return resource;
+  let path: string;
   try {
-    url = new URL(resource);
+    // a path resolves on a placeholder origin that is never used; a full URL keeps its own path
+    path = new URL(resource, 'http://localhost').pathname;
   } catch {
     return resource;
   }
-  const segments = url.pathname.split('/');
-  const at = segments.findIndex(
-    (segment, i) => i > 0 && (segment === config.mcp.endpoint || segment === config.mcp.endpointTest),
-  );
-  if (at < 0) return resource;
-  return `${config.mcp.baseUrl}/${segments.slice(at).join('/')}`;
-}
-
-/** the tenant slug a resource URL names (a trigger URL or the tenant server's URL) */
-function slugOfResource(ctx: ServerContext, resource: string): string | undefined {
-  const trigger = parseMcpTriggerResource(ctx.config, resource);
-  if (trigger) return trigger.slug;
-  const prefix = `${ctx.config.mcp.baseUrl}/mcp-server/`;
-  if (!resource.startsWith(prefix)) return undefined;
-  const [slug, rest, ...more] = resource.slice(prefix.length).split('/');
-  if (rest !== 'http' || more.length > 0) return undefined;
-  try {
-    const decoded = decodeURIComponent(slug);
-    return resource === mcpServerUrl(ctx.config, decoded) ? decoded : undefined;
-  } catch {
-    return undefined;
-  }
+  return `${ctx.config.mcp.baseUrl}${path}`;
 }
 
 function formUserOf(user: { id: string; email: string; name: string }): FormUser {
@@ -297,10 +290,11 @@ export function createMcpAuthHelper(ctxOrGetter: ServerContext | (() => ServerCo
       const ctx = context();
       if (!isMcpOAuthToken(token)) return null;
       const canonical = canonicalMcpResource(ctx, resource);
-      const slug = slugOfResource(ctx, canonical);
+      // a trigger URL only; not gated by the MCP access switch, which gates only the tenant server
+      const slug = parseMcpTriggerResource(ctx.config, canonical)?.slug;
       if (!slug) return null;
       const tenant = await ctx.repos.tenants.getBySlug(slug);
-      if (!tenant || !mcpAccessEnabled(ctx.config, tenant)) return null;
+      if (!tenant) return null;
       const info = await verifyMcpOAuthToken(ctx, tenant.id, token, canonical);
       if (!info) return null;
       const [user, membership] = await Promise.all([
