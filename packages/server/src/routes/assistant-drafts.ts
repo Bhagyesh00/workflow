@@ -17,8 +17,14 @@ const draftParams = z.object({
   draftId: z.string().min(1).max(64),
 });
 
-/** the accept body: an optional new name; nothing in it is a definition */
-const acceptSchema = z.object({ name: z.string().trim().max(128).optional() });
+/**
+ * the accept body: an optional new name and the draft version the person saw (`draft.updatedAt` of the
+ * GET; a draft rebuilt since is 409); nothing in it is a definition
+ */
+const acceptSchema = z.object({
+  name: z.string().trim().max(128).optional(),
+  updatedAt: z.string().min(1).max(64),
+});
 
 export function registerAssistantDraftRoutes(rest: FastifyInstance, ctx: ServerContext): void {
   rest.get(

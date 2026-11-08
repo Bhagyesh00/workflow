@@ -5,12 +5,18 @@
  * Nothing is saved until a person presses Accept (editor and above; a viewer sees why the buttons are off). A
  * refused Accept stays in the card with the server's reason (a changed workflow: build again or open it). Every
  * name and value is rendered as text.
+ *
+ * The card shows one version of the draft and Accept names it (`draft.updatedAt`), so the server saves only what
+ * the person saw. When the Assistant rebuilds the draft (a new `artifact` event for the same draft), the card loads
+ * the new version and Accept waits for it. Each added node shows its type and its parameters and credentials (the
+ * builder's `ParameterDiff` against nothing), since its name is the model's words.
  */
+import type { NodeChange, ValueChange, WorkflowNode } from '@workflow/workflow';
 import { Workflow } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { errorMessage } from '../../api/client';
-import { useMe } from '../../api/queries';
+import { useMe, useNodeTypes } from '../../api/queries';
 import type { AssistantDraftArtifact, AssistantDraftView } from '../../api/types';
 import { acceptDraft, discardDraft, loadDraft } from '../../features/assistant/draft-actions';
 import { useAssistantStore } from '../../stores/assistant-store';
@@ -34,11 +40,29 @@ function statusBadge(status: AssistantDraftView['draft']['status']) {
   return <Badge tone="brand">Draft</Badge>;
 }
 
-/** the nodes the draft adds, removes and renames, as short lines */
+/** an added node as a change from nothing: each of its parameters (and credentials) before and after */
+function addedNodeChange(node: WorkflowNode): NodeChange {
+  const changes: ValueChange[] = Object.entries(node.parameters ?? {}).map(([key, value]) => ({
+    path: `parameters.${key}`,
+    before: undefined,
+    after: value,
+  }));
+  for (const [type, ref] of Object.entries(node.credentials ?? {})) {
+    changes.push({ path: `credentials.${type}`, before: undefined, after: ref });
+  }
+  return { id: node.id, name: node.name, type: node.type, changes };
+}
+
+/** the nodes the draft adds (with their type), removes and renames, as short lines */
 function NodeChanges({ view }: { view: AssistantDraftView }) {
+  const nodeTypes = useNodeTypes();
   const { added, removed, renamed } = view.diff.nodes;
-  const lines = [
-    ...added.map((n) => ({ key: `add-${n.id}`, text: `Adds ${n.name}` })),
+  const lines: Array<{ key: string; text: string; type?: string }> = [
+    ...added.map((n) => ({
+      key: `add-${n.id}`,
+      text: `Adds ${n.name}`,
+      type: nodeTypes.get(n.type)?.displayName || n.type,
+    })),
     ...removed.map((n) => ({ key: `remove-${n.id}`, text: `Removes ${n.name}` })),
     ...renamed.map((n) => ({ key: `rename-${n.id}`, text: `Renames ${n.from} to ${n.to}` })),
   ];
@@ -57,7 +81,8 @@ function NodeChanges({ view }: { view: AssistantDraftView }) {
     <ul className="m-0 flex list-none flex-col gap-0.5 p-0 text-sm text-ink-2">
       {lines.map((line) => (
         <li key={line.key} className="min-w-0 break-words">
-          {line.text}
+          <span>{line.text}</span>
+          {line.type && <span className="text-ink-3">{` · ${line.type}`}</span>}
         </li>
       ))}
     </ul>
@@ -73,18 +98,39 @@ export function DraftCard({ draft }: DraftCardProps) {
     null,
   );
   const [busy, setBusy] = useState<'accept' | 'discard' | null>(null);
+  // the artifact event the shown version was loaded for: a new event for this draft is a rebuild
+  const [loadedFor, setLoadedFor] = useState<AssistantDraftArtifact | null>(view ? draft : null);
+  const stale = !view || loadedFor !== draft;
+  // the shown version is older than the newest artifact event: Accept waits for the new one
+  const rebuilding = loadedFor !== null && loadedFor !== draft;
 
   useEffect(() => {
-    if (!threadId || view) return;
+    if (!threadId || !stale) return;
     let live = true;
     setLoadError(null);
-    loadDraft(threadId, draft.draftId).catch((error) => {
-      if (live) setLoadError(errorMessage(error));
-    });
+    setActionError(null);
+    loadDraft(threadId, draft.draftId).then(
+      () => {
+        if (live) setLoadedFor(draft);
+      },
+      (error) => {
+        if (live) setLoadError(errorMessage(error));
+      },
+    );
     return () => {
       live = false;
     };
-  }, [threadId, draft.draftId, view]);
+  }, [threadId, draft, stale]);
+
+  const added = useMemo(() => {
+    if (!view) return [];
+    const byId = new Map((view.draft.definition.nodes ?? []).map((n) => [n.id, n]));
+    return view.diff.nodes.added
+      .map((a) => byId.get(a.id))
+      .filter((n): n is WorkflowNode => Boolean(n))
+      .map(addedNodeChange)
+      .filter((change) => change.changes.length > 0);
+  }, [view]);
 
   const label = `Draft ${draft.name}`;
   if (!view) {
@@ -109,14 +155,14 @@ export function DraftCard({ draft }: DraftCardProps) {
   const open = status === 'open';
   const errors = issues.filter((i) => i.severity === 'error').length;
   const warnings = issues.length - errors;
-  const changed = view.diff.nodes.changed.filter((change) => change.changes.length > 0);
+  const changed = [...view.diff.nodes.changed.filter((change) => change.changes.length > 0), ...added];
 
   const run = async (kind: 'accept' | 'discard') => {
     if (!threadId) return;
     setBusy(kind);
     setActionError(null);
     try {
-      if (kind === 'accept') await acceptDraft(threadId, draft.draftId);
+      if (kind === 'accept') await acceptDraft(threadId, draft.draftId, view.draft.updatedAt);
       else await discardDraft(threadId, draft.draftId);
     } catch (error) {
       setActionError({ kind, message: errorMessage(error) });
@@ -142,6 +188,16 @@ export function DraftCard({ draft }: DraftCardProps) {
         {warnings > 0 ? ` · ${plural(warnings, 'warning')}` : ''}
       </p>
 
+      {rebuilding && !loadError && (
+        <p className="m-0 flex items-center gap-2 text-xs text-ink-2" role="status">
+          <Spinner /> The Assistant changed this draft. Loading the new version
+        </p>
+      )}
+      {rebuilding && loadError && (
+        <Callout tone="err" title="Couldn't load the draft">
+          {loadError}
+        </Callout>
+      )}
       <NodeChanges view={view} />
       {changed.length > 0 && (
         <div className="flex min-w-0 flex-col gap-2">
@@ -185,7 +241,7 @@ export function DraftCard({ draft }: DraftCardProps) {
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="primary"
-            disabled={!canEdit || busy !== null}
+            disabled={!canEdit || busy !== null || stale}
             loading={busy === 'accept'}
             onClick={() => void run('accept')}
           >

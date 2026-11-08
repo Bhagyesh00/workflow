@@ -4,16 +4,25 @@
  *
  * A chat request gives a draft and no workflow row exists or changes before Accept; Accept saves it
  * (create, or update on the draft's base version), writes an audit row, marks the draft accepted and
- * sends a `workflow` artifact; a stale base is 409; Discard leaves nothing; a credential the model
+ * sends a `workflow` artifact; a stale base is 409; Accept names the version the person saw, so a
+ * rebuilt draft is 409 until reviewed again; two Accepts on two processes save once and a Discard
+ * never overwrites an Accept; Discard leaves nothing; a credential the model
  * writes is dropped and Accept fills the first credential of a needed type; another tenant's
  * `workflowId` is not found; another user's draft is 404 and a viewer's Accept 403; a viewer has no
  * `build_workflow`; an admin's block refuses it; tool names in every request are unique and the nested
  * builder's request carries S4's own build prompt; no tool reaches Accept.
  */
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import type { AssistantEvent, DataObject, WorkflowDefinition } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AuthContext } from '../src/http/auth';
 import { builderSystemPrompt } from '../src/services/ai-builder/prompt';
-import { ASSISTANT_DRAFT_TEXTS, type AssistantDraftView } from '../src/services/assistant/drafts';
+import {
+  ASSISTANT_DRAFT_TEXTS,
+  AssistantDrafts,
+  type AssistantDraftView,
+} from '../src/services/assistant/drafts';
 import { builtInAssistantTools } from '../src/services/assistant/tools';
 import { BUILD_BLOCKED, buildTools } from '../src/services/assistant/tools/build';
 import {
@@ -75,6 +84,23 @@ async function draftsOf(threadId: string) {
 
 const draftUrl = (threadId: string, draftId: string) =>
   `/rest/assistant/threads/${threadId}/drafts/${draftId}`;
+
+const ASSISTANT_DIR = path.join(__dirname, '../src/services/assistant');
+
+/** every .ts file under `dir` */
+function assistantSources(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return assistantSources(full);
+    return entry.name.endsWith('.ts') ? [full] : [];
+  });
+}
+
+/** the draft version the card shows (GET `draft.updatedAt`), which Accept sends back */
+async function seen(threadId: string, draftId: string, user: HarnessUser = h.owner): Promise<string> {
+  const view = await user.client.data<AssistantDraftView>(user.client.get(draftUrl(threadId, draftId)));
+  return view.draft.updatedAt;
+}
 
 const SLACK_URL = 'https://hooks.example.com/services/T0/B0/xyz';
 
@@ -230,7 +256,7 @@ describe('build_workflow', () => {
 
     // Accept saves the node with that credential
     const accepted = await h.owner.client.data<{ workflowId: string }>(
-      h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, {}),
+      h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, { updatedAt: view.draft.updatedAt }),
     );
     const row = await h.ctx.repos.workflows.get(h.tenantId, accepted.workflowId);
     const saved = ((row?.nodes ?? []) as WorkflowDefinition['nodes']).find((n) => n.name === 'Post');
@@ -240,8 +266,10 @@ describe('build_workflow', () => {
   it('Accept saves the draft once, audits it and sends a workflow artifact', async () => {
     const count = await workflowCount();
     const { threadId, draftId } = await buildDraft();
+    const shown = await seen(threadId, draftId);
     const res = await h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, {
       name: 'Greeting poster',
+      updatedAt: shown,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json().data as { workflowId: string; draft: { status: string; workflowId: string } };
@@ -273,19 +301,21 @@ describe('build_workflow', () => {
     expect(artifact?.runId).toBeNull();
 
     // a second Accept saves nothing more
-    const again = await h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, {});
+    const again = await h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, { updatedAt: shown });
     expect(again.statusCode).toBe(409);
+    expect(again.json().error.message).toBe(ASSISTANT_DRAFT_TEXTS.notOpen);
     expect(await workflowCount()).toBe(count + 1);
   });
 
   it('Discard leaves nothing, and a discarded draft cannot be accepted', async () => {
     const count = await workflowCount();
     const { threadId, draftId } = await buildDraft();
+    const shown = await seen(threadId, draftId);
     const res = await h.owner.client.post(`${draftUrl(threadId, draftId)}/discard`, {});
     expect(res.statusCode).toBe(200);
     expect(res.json().data).toEqual({ ok: true });
     expect((await draftsOf(threadId))[draftId].status).toBe('discarded');
-    const accept = await h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, {});
+    const accept = await h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, { updatedAt: shown });
     expect(accept.statusCode).toBe(409);
     expect(accept.json().error.message).toBe(ASSISTANT_DRAFT_TEXTS.notOpen);
     expect(await workflowCount()).toBe(count);
@@ -342,17 +372,105 @@ describe('build_workflow', () => {
     // a second draft on the same base; the first Accept moves the version, so the second is stale
     const second = await build();
     const accepted = await h.owner.client.data<{ workflowId: string }>(
-      h.owner.client.post(`${draftUrl(first.threadId, first.draftId)}/accept`, {}),
+      h.owner.client.post(`${draftUrl(first.threadId, first.draftId)}/accept`, {
+        updatedAt: await seen(first.threadId, first.draftId),
+      }),
     );
     expect(accepted.workflowId).toBe(saved.id);
     const after = await h.ctx.repos.workflows.get(h.tenantId, saved.id);
     expect(after?.versionId).not.toBe(saved.versionId);
     expect(JSON.stringify(after?.nodes)).toContain('https://new.example.com/hook');
 
-    const stale = await h.owner.client.post(`${draftUrl(second.threadId, second.draftId)}/accept`, {});
+    const stale = await h.owner.client.post(`${draftUrl(second.threadId, second.draftId)}/accept`, {
+      updatedAt: await seen(second.threadId, second.draftId),
+    });
     expect(stale.statusCode).toBe(409);
     expect(stale.json().error.message).toBe(ASSISTANT_DRAFT_TEXTS.stale);
     expect((await draftsOf(second.threadId))[second.draftId].status).toBe('open');
+  });
+
+  it('Accept saves only the version the person saw: a rebuilt draft is 409 until it is reviewed again', async () => {
+    const count = await workflowCount();
+    const { threadId, draftId } = await buildDraft();
+    const first = await seen(threadId, draftId);
+    // the Assistant rebuilds the same draft: same id, a fourth node
+    await turn(h.owner, threadId, 'Add a step', [
+      outerCall(callId(), 'build_workflow', { request: 'Add a final step', draftId }),
+      {
+        toolCalls: [
+          {
+            id: 'nested_add_more',
+            name: 'add_nodes',
+            arguments: { nodes: [{ type: 'core.set', name: 'Finish', parameters: { mode: 'manual' } }] },
+          },
+        ],
+      },
+      { text: 'Added a step.' },
+      { text: 'The draft has one more step.' },
+    ]);
+    const rebuilt = (await draftsOf(threadId))[draftId];
+    expect(rebuilt.definition.nodes.map((n) => n.name)).toContain('Finish');
+    expect(rebuilt.updatedAt).not.toBe(first);
+
+    // the card still shows the first version: Accept is refused and nothing is saved
+    const old = await h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, { updatedAt: first });
+    expect(old.statusCode).toBe(409);
+    expect(old.json().error.message).toBe(ASSISTANT_DRAFT_TEXTS.changed);
+    expect(await workflowCount()).toBe(count);
+    expect((await draftsOf(threadId))[draftId].status).toBe('open');
+    // a version is required
+    expect((await h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, {})).statusCode).toBe(400);
+
+    // reviewed again: the version shown is the one saved
+    const accepted = await h.owner.client.data<{ workflowId: string }>(
+      h.owner.client.post(`${draftUrl(threadId, draftId)}/accept`, {
+        updatedAt: await seen(threadId, draftId),
+      }),
+    );
+    const row = await h.ctx.repos.workflows.get(h.tenantId, accepted.workflowId);
+    expect(((row?.nodes ?? []) as WorkflowDefinition['nodes']).map((n) => n.name)).toContain('Finish');
+    expect(await workflowCount()).toBe(count + 1);
+  });
+
+  it('two Accepts on two processes save once; Discard never overwrites an Accept', async () => {
+    const count = await workflowCount();
+    const auth = {
+      user: { id: h.owner.userId },
+      tenant: { id: h.tenantId },
+      role: 'owner',
+    } as unknown as AuthContext;
+    // each instance stands for one main process (nothing in memory is shared)
+    const one = new AssistantDrafts(h.ctx.assistantDrafts.deps);
+    const two = new AssistantDrafts(h.ctx.assistantDrafts.deps);
+
+    const a = await buildDraft();
+    const version = await seen(a.threadId, a.draftId);
+    const results = await Promise.allSettled([
+      one.accept(auth, a.threadId, a.draftId, { updatedAt: version }),
+      two.accept(auth, a.threadId, a.draftId, { updatedAt: version }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(refused.reason).toMatchObject({ statusCode: 409, message: ASSISTANT_DRAFT_TEXTS.notOpen });
+    expect(await workflowCount()).toBe(count + 1);
+    expect((await draftsOf(a.threadId))[a.draftId].status).toBe('accepted');
+
+    // Accept and Discard at once: one wins, and the draft says which
+    const b = await buildDraft();
+    const [accept, discard] = await Promise.allSettled([
+      one.accept(auth, b.threadId, b.draftId, { updatedAt: await seen(b.threadId, b.draftId) }),
+      two.discard(auth, b.threadId, b.draftId),
+    ]);
+    const status = (await draftsOf(b.threadId))[b.draftId].status;
+    if (accept.status === 'fulfilled') {
+      expect(discard.status).toBe('rejected');
+      expect(status).toBe('accepted');
+      expect(await workflowCount()).toBe(count + 2);
+    } else {
+      expect(discard.status).toBe('fulfilled');
+      expect(status).toBe('discarded');
+      expect(await workflowCount()).toBe(count + 1);
+    }
   });
 
   it("another tenant's workflowId is not found and builds nothing", async () => {
@@ -373,9 +491,12 @@ describe('build_workflow', () => {
 
   it("another user's draft is 404, a viewer's Accept 403", async () => {
     const { threadId, draftId } = await buildDraft();
+    const shown = await seen(threadId, draftId);
     for (const user of [h.admin, h.editor]) {
       expect((await user.client.get(draftUrl(threadId, draftId))).statusCode).toBe(404);
-      expect((await user.client.post(`${draftUrl(threadId, draftId)}/accept`, {})).statusCode).toBe(404);
+      expect(
+        (await user.client.post(`${draftUrl(threadId, draftId)}/accept`, { updatedAt: shown })).statusCode,
+      ).toBe(404);
       expect((await user.client.post(`${draftUrl(threadId, draftId)}/discard`, {})).statusCode).toBe(404);
     }
     expect((await h.viewer.client.post(`${draftUrl(threadId, draftId)}/accept`, {})).statusCode).toBe(403);
@@ -395,6 +516,14 @@ describe('build_workflow', () => {
         .join('\n');
       expect(source, `${tool.name} reaches Accept`).not.toMatch(/assistantDrafts\.accept|\.accept\(/);
       expect(source, `${tool.name} saves a workflow`).not.toMatch(/workflows\.(create|update)\(/);
+    }
+    // and no helper they call: every Assistant source file but drafts.ts (the routes' service), whole
+    for (const file of assistantSources(ASSISTANT_DIR)) {
+      if (path.relative(ASSISTANT_DIR, file) === 'drafts.ts') continue;
+      const text = readFileSync(file, 'utf8');
+      expect(text, `${file} reaches Accept`).not.toMatch(/assistantDrafts\.accept|\.accept\(/);
+      expect(text, `${file} saves a workflow`).not.toMatch(/workflows\.(create|update)\(/);
+      expect(text, `${file} imports a workflow writer`).not.toMatch(/mcp\/tools\/builder\/(create|update)'/);
     }
   });
 

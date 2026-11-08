@@ -9,6 +9,11 @@
  * workflow shape, credentials of this workspace only, the validation, then the first credential of each
  * needed type for a node that has none. It writes an audit row, marks the draft accepted and sends a
  * `workflow` artifact on the thread.
+ *
+ * Accept names the draft version the person saw (`updatedAt`); a draft rebuilt since is 409 `The draft
+ * changed. Review it again`. Before anything is saved, one conditional update moves the draft from open
+ * to accepted (only that version, only while open), so a second Accept on any process is refused; a
+ * save that fails before the workflow is written puts it back to open. Discard moves it the same way.
  */
 import {
   type AssistantDraftDTO,
@@ -19,8 +24,9 @@ import {
   type WorkflowDefinition,
   type WorkflowDiff,
 } from '@workflow/workflow';
+import { and, eq, type SQL, sql } from 'drizzle-orm';
 import type { ServerContext, ServiceDeps } from '../../context';
-import type { AssistantStoredDraft } from '../../db/schema';
+import { type AssistantStoredDraft, assistantThreads } from '../../db/schema';
 import type { AuthContext } from '../../http/auth';
 import { ApiError, parse } from '../../http/errors';
 import { workflowDataSchema } from '../../http/schemas';
@@ -48,13 +54,15 @@ export interface AssistantDraftView {
 /** the body of POST `.../accept` (L7 may add fields; nothing in it is trusted as a definition) */
 export interface AssistantAcceptDraftBody {
   name?: string;
+  /** the draft version the person saw (`draft.updatedAt` of the GET); Accept saves only that version */
+  updatedAt: string;
 }
 
 /** the texts a person sees from these routes */
 export const ASSISTANT_DRAFT_TEXTS = {
   stale: 'The workflow changed. Build again or open it',
   notOpen: 'This draft is no longer open',
-  busy: 'This draft is being saved already',
+  changed: 'The draft changed. Review it again',
   invalid: 'The draft has errors, so it was not saved',
 } as const;
 
@@ -129,11 +137,51 @@ export async function credentialAssignments(
 
 const EMPTY: WorkflowDefinition = { name: '', nodes: [], connections: {} };
 
-export class AssistantDrafts {
-  /** drafts being accepted on this process: a second Accept of the same draft waits for nothing, it is refused */
-  private readonly accepting = new Set<string>();
+const threads = assistantThreads;
 
+/** the version clients see for a stored draft (`draftDto`'s `updatedAt`) */
+function draftVersion(stored: AssistantStoredDraft): string {
+  return draftDto(stored).updatedAt;
+}
+
+export class AssistantDrafts {
   constructor(readonly deps: ServiceDeps) {}
+
+  /**
+   * One conditional update of the caller's draft: sets `status` (and `updatedAt` when given) only where the
+   * draft is still in `from` (and at `version` when given). The draft as stored after the update, or null
+   * when no row matched (another Accept or Discard got there first, or the draft was rebuilt).
+   */
+  private async moveStatus(
+    auth: AuthContext,
+    threadId: string,
+    draftId: string,
+    change: { from: 'open' | 'accepted'; to: AssistantDraftStatus; version?: string; updatedAt?: string },
+  ): Promise<AssistantStoredDraft | null> {
+    const entry = sql`(${threads.drafts} -> ${draftId}::text)`;
+    const patch: Record<string, string> = { status: change.to };
+    if (change.updatedAt) patch.updatedAt = change.updatedAt;
+    const conditions: SQL[] = [
+      eq(threads.tenantId, auth.tenant.id),
+      eq(threads.userId, auth.user.id),
+      eq(threads.id, threadId),
+      sql`jsonb_typeof(${entry}) = 'object'`,
+      change.from === 'open'
+        ? sql`coalesce(${entry} ->> 'status', 'open') not in ('accepted', 'discarded')`
+        : sql`${entry} ->> 'status' = 'accepted'`,
+    ];
+    if (change.version !== undefined) {
+      conditions.push(sql`coalesce(${entry} ->> 'updatedAt', ${entry} ->> 'createdAt') = ${change.version}`);
+    }
+    const [row] = await this.deps.database.db
+      .update(threads)
+      .set({
+        drafts: sql`jsonb_set(${threads.drafts}, array[${draftId}::text], ${entry} || ${JSON.stringify(patch)}::jsonb)`,
+      })
+      .where(and(...conditions))
+      .returning({ draft: sql<AssistantStoredDraft | null>`${entry}` });
+    return row?.draft ?? null;
+  }
 
   private get ctx(): ServerContext {
     return this.deps.context();
@@ -181,26 +229,48 @@ export class AssistantDrafts {
     body: AssistantAcceptDraftBody,
     actor?: Actor,
   ): Promise<{ workflowId: string; draft: AssistantDraftDTO }> {
-    const tenantId = auth.tenant.id;
-    const key = `${tenantId}:${threadId}:${draftId}`;
-    if (this.accepting.has(key)) throw ApiError.conflict(ASSISTANT_DRAFT_TEXTS.busy);
-    this.accepting.add(key);
-    try {
-      const stored = await this.load(auth, threadId, draftId);
-      if (draftStatus(stored) !== 'open') throw ApiError.conflict(ASSISTANT_DRAFT_TEXTS.notOpen);
-      return await this.save(auth, threadId, stored, body, actor ?? { userId: auth.user.id });
-    } finally {
-      this.accepting.delete(key);
+    const shown = await this.load(auth, threadId, draftId);
+    if (draftStatus(shown) !== 'open') throw ApiError.conflict(ASSISTANT_DRAFT_TEXTS.notOpen);
+    if (draftVersion(shown) !== body.updatedAt) throw ApiError.conflict(ASSISTANT_DRAFT_TEXTS.changed);
+    // one conditional update: open to accepted, only the version the person saw; a second Accept finds none
+    const stored = await this.moveStatus(auth, threadId, draftId, {
+      from: 'open',
+      to: 'accepted',
+      version: body.updatedAt,
+    });
+    if (!stored?.definition) {
+      const now = await this.load(auth, threadId, draftId);
+      throw ApiError.conflict(
+        draftStatus(now) === 'open' ? ASSISTANT_DRAFT_TEXTS.changed : ASSISTANT_DRAFT_TEXTS.notOpen,
+      );
     }
+    const by = actor ?? { userId: auth.user.id };
+    let written: Awaited<ReturnType<AssistantDrafts['save']>>;
+    try {
+      written = await this.save(auth, stored, body, by);
+    } catch (error) {
+      // nothing was written: the draft is open again, at the same version
+      await this.moveStatus(auth, threadId, draftId, {
+        from: 'accepted',
+        to: 'open',
+        version: body.updatedAt,
+      }).catch(() => null);
+      throw error;
+    }
+    return this.finish(auth, threadId, stored, written, by);
   }
 
+  /** checks the claimed draft again and writes the workflow (create, or update on the base version) */
   private async save(
     auth: AuthContext,
-    threadId: string,
     stored: AssistantStoredDraft,
     body: AssistantAcceptDraftBody,
     actor: Actor,
-  ): Promise<{ workflowId: string; draft: AssistantDraftDTO }> {
+  ): Promise<{
+    saved: { id: string; name: string; versionId: string };
+    definition: WorkflowDefinition;
+    issues: DoctorIssue[];
+  }> {
     const ctx = this.ctx;
     const tenantId = auth.tenant.id;
     // the stored definition is checked again as if a client sent it: nothing in a draft is trusted
@@ -273,7 +343,19 @@ export class AssistantDrafts {
         actor,
       );
     }
+    return { saved, definition, issues: validation.issues };
+  }
 
+  /** after the workflow is written: audit row, the draft marked accepted, the `workflow` artifact */
+  private async finish(
+    auth: AuthContext,
+    threadId: string,
+    stored: AssistantStoredDraft,
+    { saved, definition, issues }: Awaited<ReturnType<AssistantDrafts['save']>>,
+    actor: Actor,
+  ): Promise<{ workflowId: string; draft: AssistantDraftDTO }> {
+    const ctx = this.ctx;
+    const tenantId = auth.tenant.id;
     await this.deps.repos.audit.add(tenantId, {
       userId: auth.user.id,
       action: 'assistant.draft_accepted',
@@ -292,7 +374,7 @@ export class AssistantDrafts {
       definition,
       status: 'accepted',
       nodeCount: definition.nodes.length,
-      issues: validation.issues,
+      issues,
       updatedAt: now,
     };
     await this.put(tenantId, threadId, accepted);
@@ -307,13 +389,17 @@ export class AssistantDrafts {
   /** marks the draft discarded; nothing is saved */
   async discard(auth: AuthContext, threadId: string, draftId: string): Promise<void> {
     const stored = await this.load(auth, threadId, draftId);
-    const status = draftStatus(stored);
-    if (status === 'discarded') return;
-    if (status === 'accepted') throw ApiError.conflict(ASSISTANT_DRAFT_TEXTS.notOpen);
-    await this.put(auth.tenant.id, threadId, {
-      ...stored,
-      status: 'discarded',
-      updatedAt: new Date().toISOString(),
-    });
+    if (draftStatus(stored) === 'discarded') return;
+    if (draftStatus(stored) === 'open') {
+      // the same conditional move as Accept, so a Discard never overwrites a draft being accepted
+      const moved = await this.moveStatus(auth, threadId, draftId, {
+        from: 'open',
+        to: 'discarded',
+        updatedAt: new Date().toISOString(),
+      });
+      if (moved) return;
+    }
+    const now = await this.load(auth, threadId, draftId);
+    if (draftStatus(now) !== 'discarded') throw ApiError.conflict(ASSISTANT_DRAFT_TEXTS.notOpen);
   }
 }
