@@ -1,6 +1,7 @@
 /** Phase 5 S3, C0f1: editor contracts (API, chat transport, query keys, log panel tabs, scopes). */
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { CHAT_TRIGGER_TYPE, type WorkflowNode } from '@workflow/workflow';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chatFetch, setChatFetch } from '../src/api/chat-transport';
 import { type ApiRequest, setTransport } from '../src/api/client';
@@ -12,6 +13,7 @@ import { demoNodeTypes } from '../src/demo/fixtures';
 import { isEventTrigger } from '../src/features/editor/editor-actions';
 import { useUiStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
+import { withProviders } from './utils';
 
 function record(reply: unknown = null) {
   const requests: ApiRequest[] = [];
@@ -170,7 +172,12 @@ describe('log panel tabs', () => {
   });
 
   it('shows Logs, Console and Run timeline, and Chat only with an enabled chat trigger', () => {
-    const { unmount } = render(<LogPanel {...props} />);
+    // the Chat tab reads node types and navigates: the app always has a query client and a router
+    const { unmount } = withProviders(
+      <MemoryRouter>
+        <LogPanel {...props} />
+      </MemoryRouter>,
+    );
     const names = () => screen.getAllByRole('tab').map((tab) => tab.textContent);
     expect(names()).toEqual(['Logs', 'Console', 'Run timeline']);
     expect(screen.getByRole('tab', { name: 'Logs' }).getAttribute('aria-selected')).toBe('true');

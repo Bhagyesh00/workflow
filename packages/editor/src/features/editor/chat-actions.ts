@@ -18,10 +18,10 @@ import {
 import { chatFetch } from '../../api/chat-transport';
 import { errorMessage } from '../../api/client';
 import { workflowsApi } from '../../api/endpoints';
+import { getAncestors } from '../../lib/workflow-ops';
 import { type ChatLine, useChatStore } from '../../stores/chat-store';
 import { useRunStore } from '../../stores/run-store';
 import { toast, useUiStore } from '../../stores/ui-store';
-import { getAncestors } from '../../lib/workflow-ops';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { type EditorDeps, ranDefinitionOf, saveWorkflow, stopListening } from './editor-actions';
 

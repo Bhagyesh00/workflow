@@ -23,7 +23,7 @@ import { useRunStore } from '../src/stores/run-store';
 import { useToastStore, useUiStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
 import { backend, signedIn } from './backend';
-import { withProviders } from './utils';
+import { renderApp, withProviders } from './utils';
 
 configure({ asyncUtilTimeout: 20_000 });
 
@@ -357,5 +357,35 @@ describe('read only', () => {
       ['user', 'Hi'],
       ['bot', 'Hello there'],
     ]);
+  });
+});
+
+describe('opening another workflow', () => {
+  it('starts a new chat session and drops the messages and the step run destination', async () => {
+    const chatWorkflow = (name: string) =>
+      backend().seedWorkflow({
+        name,
+        nodes: [nodeOf('Chat', CHAT_TRIGGER_TYPE, {}, { webhookId: `hook-${name}` })],
+        connections: {},
+      });
+    const a = chatWorkflow('Chat A');
+    const b = chatWorkflow('Chat B');
+    const { router } = renderApp(`/workflow/${a.id}`);
+    await screen.findByRole('textbox', { name: 'Workflow name' }, { timeout: 20_000 });
+    const before = useChatStore.getState().sessionId;
+    act(() => {
+      useChatStore.getState().addMessage('user', 'hello from A');
+      useChatStore.getState().setDestination('Agent');
+      useChatStore.getState().markSent();
+    });
+    await act(async () => {
+      await router.navigate(`/workflow/${b.id}`);
+    });
+    await waitFor(() => expect(useWorkflowStore.getState().meta.id).toBe(b.id));
+    const chat = useChatStore.getState();
+    expect(chat.sessionId).not.toBe(before);
+    expect(chat.messages).toEqual([]);
+    expect(chat.destinationNode).toBeNull();
+    expect(chat.hasSent).toBe(false);
   });
 });

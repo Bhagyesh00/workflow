@@ -57,6 +57,7 @@ import {
 import { issuesByNode, lintWorkflow } from '../lib/doctor';
 import { isTriggerDescription } from '../lib/ports';
 import { getMainParents, getNode } from '../lib/workflow-ops';
+import { useChatStore } from '../stores/chat-store';
 import { useRunStore } from '../stores/run-store';
 import { toast, useUiStore } from '../stores/ui-store';
 import { useWorkflowStore } from '../stores/workflow-store';
@@ -529,6 +530,7 @@ export function WorkflowEditorPage() {
     if (!query.data) return;
     useWorkflowStore.getState().load(query.data, { readOnly: viewer });
     useRunStore.getState().reset();
+    useChatStore.getState().newSession();
     const debug = search.get('debug');
     if (debug && !viewer) void loadExecutionAsPinnedData(debug);
   }, [query.data, search, viewer]);
@@ -537,12 +539,14 @@ export function WorkflowEditorPage() {
     if (!isNew) return;
     useWorkflowStore.getState().reset();
     useRunStore.getState().reset();
+    useChatStore.getState().newSession();
   }, [isNew]);
 
   useEffect(
     () => () => {
       useWorkflowStore.getState().reset();
       useRunStore.getState().reset();
+      useChatStore.getState().newSession();
       useUiStore.setState({
         ndvNode: null,
         sidePanel: null,
