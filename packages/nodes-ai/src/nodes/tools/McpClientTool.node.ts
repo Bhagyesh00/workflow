@@ -1,75 +1,21 @@
 /**
- * MCP Client Tool: connects to an MCP server (Streamable HTTP) and offers its tools to the agent.
+ * MCP Client Tool: connects to an MCP server (Streamable HTTP or the deprecated SSE) and offers its tools to the agent.
  * Requests go through `ctx.helpers.httpRequest`, so the server URL is subject to the SSRF policy.
  */
 import {
-  assertCredentialUrlAllowed,
-  type BaseContext,
+  type AiTool,
   type DataObject,
-  getCredentialAllowedDomains,
-  type HttpFullResponse,
   type JsonSchema,
   type LoadOptionsContext,
   NodeOperationError,
   type NodeType,
 } from '@workflow/workflow';
-import { McpClient, type McpTool, mcpResultText } from '../../shared/mcp-client';
+import { type McpClient, type McpTool, type McpToolResult, mcpResultText } from '../../shared/mcp-client';
+import { createMcpConnection, mcpConnectErrorMessage, resolveMcpAuth } from '../../shared/mcp-connect';
+import { MCP_CLIENT_CREDENTIALS, MCP_CLIENT_PROPERTIES } from '../../shared/mcp-description';
 import { acquireShared, type Shared, sharedKey } from '../../shared/shared-resource';
 import { createTool } from '../../shared/tools';
-import { errorMessage, toToolName } from '../../shared/utils';
-
-interface McpAuth {
-  headers: Record<string, string>;
-  /** the credential's allowed domains (undefined = unrestricted) */
-  allowedDomains?: string[];
-}
-
-/**
- * The credential is read by hand here, so its allowed domains are read with it. The endpoint is typed
- * by the user, so the credential's `none` mode applies (it throws).
- */
-async function authHeaders(
-  ctx: Pick<BaseContext, 'getCredentials'>,
-  authentication: string,
-  itemIndex = 0,
-): Promise<McpAuth> {
-  if (authentication === 'bearerAuth') {
-    const creds = await ctx.getCredentials('httpBearerAuth', itemIndex);
-    return {
-      headers: { authorization: `Bearer ${String(creds.token ?? '')}` },
-      allowedDomains: getCredentialAllowedDomains(creds, { userUrl: true }),
-    };
-  }
-  if (authentication === 'headerAuth') {
-    const creds = await ctx.getCredentials('httpHeaderAuth', itemIndex);
-    const allowedDomains = getCredentialAllowedDomains(creds, { userUrl: true });
-    if (!creds.name) throw new Error('The header auth credential has no header name');
-    return { headers: { [String(creds.name).toLowerCase()]: String(creds.value ?? '') }, allowedDomains };
-  }
-  return { headers: {} };
-}
-
-function createClient(
-  ctx: Pick<BaseContext, 'helpers'>,
-  endpoint: string,
-  auth: McpAuth,
-  timeoutMs: number,
-): McpClient {
-  if (!/^https?:\/\//i.test(endpoint)) throw new Error('The MCP endpoint must be an http(s) URL');
-  // checked before any request carries the credential; the list also goes with every request, so
-  // HttpClient refuses a redirect to another host
-  assertCredentialUrlAllowed(endpoint, auth.allowedDomains);
-  const { allowedDomains } = auth;
-  return new McpClient(
-    async (request) =>
-      (await ctx.helpers.httpRequest<string>(
-        allowedDomains === undefined ? request : { ...request, allowedDomains },
-      )) as HttpFullResponse<string>,
-    endpoint,
-    auth.headers,
-    timeoutMs,
-  );
-}
+import { toToolName } from '../../shared/utils';
 
 export function selectTools<T extends { name: string }>(
   tools: T[],
@@ -105,39 +51,9 @@ export const McpClientToolNode: NodeType = {
     outputNames: ['Tools'],
     categories: ['AI', 'Tools'],
     alias: ['mcp', 'model context protocol', 'tools server'],
-    credentials: [
-      {
-        name: 'httpBearerAuth',
-        required: true,
-        displayOptions: { show: { authentication: ['bearerAuth'] } },
-      },
-      {
-        name: 'httpHeaderAuth',
-        required: true,
-        displayOptions: { show: { authentication: ['headerAuth'] } },
-      },
-    ],
+    credentials: MCP_CLIENT_CREDENTIALS,
     properties: [
-      {
-        displayName: 'Endpoint',
-        name: 'endpointUrl',
-        type: 'string',
-        default: '',
-        required: true,
-        placeholder: 'https://mcp.example.com/mcp',
-        description: 'Streamable HTTP endpoint of the MCP server',
-      },
-      {
-        displayName: 'Authentication',
-        name: 'authentication',
-        type: 'options',
-        default: 'none',
-        options: [
-          { name: 'None', value: 'none' },
-          { name: 'Bearer Auth', value: 'bearerAuth' },
-          { name: 'Header Auth', value: 'headerAuth' },
-        ],
-      },
+      ...MCP_CLIENT_PROPERTIES,
       {
         displayName: 'Tools to Include',
         name: 'include',
@@ -156,7 +72,7 @@ export const McpClientToolNode: NodeType = {
         default: [],
         typeOptions: {
           loadOptionsMethod: 'listTools',
-          loadOptionsDependsOn: ['endpointUrl', 'authentication'],
+          loadOptionsDependsOn: ['endpointUrl', 'serverTransport', 'authentication'],
         },
         displayOptions: { show: { include: ['selected'] } },
       },
@@ -167,7 +83,7 @@ export const McpClientToolNode: NodeType = {
         default: [],
         typeOptions: {
           loadOptionsMethod: 'listTools',
-          loadOptionsDependsOn: ['endpointUrl', 'authentication'],
+          loadOptionsDependsOn: ['endpointUrl', 'serverTransport', 'authentication'],
         },
         displayOptions: { show: { include: ['except'] } },
       },
@@ -194,35 +110,53 @@ export const McpClientToolNode: NodeType = {
           : [],
     );
     const options = ctx.getNodeParameter('options', itemIndex, {}) as DataObject;
+    const serverTransport = String(ctx.getNodeParameter('serverTransport', itemIndex, 'httpStreamable')) as
+      | 'httpStreamable'
+      | 'sse';
     let shared: Shared<{ client: McpClient; tools: McpTool[] }>;
     try {
-      const auth = await authHeaders(ctx, authentication, itemIndex);
+      const auth = await resolveMcpAuth(ctx, authentication, endpoint, itemIndex);
       const timeout = Number(options.timeout ?? 60_000);
       // one session per node and execution, shared by every item the agent processes
       shared = await acquireShared(
-        sharedKey(ctx, 'mcp', endpoint, auth.headers, auth.allowedDomains, timeout),
+        sharedKey(
+          ctx,
+          'mcp',
+          endpoint,
+          serverTransport,
+          auth.headers,
+          auth.credentialType,
+          auth.allowedDomains,
+          timeout,
+        ),
         async () => {
-          const client = createClient(ctx, endpoint, auth, timeout);
-          await client.connect();
-          return { client, tools: await client.listTools() };
+          const client = await createMcpConnection(ctx, {
+            endpointUrl: endpoint,
+            serverTransport,
+            authentication,
+            timeoutMs: timeout,
+            itemIndex,
+          });
+          try {
+            return { client, tools: await client.listTools() };
+          } catch (error) {
+            await client.close();
+            throw error;
+          }
         },
         ({ client }) => client.close(),
       );
     } catch (error) {
-      throw new NodeOperationError(
-        ctx.getNode(),
-        `Could not connect to the MCP server: ${errorMessage(error)}`,
-        {
-          itemIndex,
-          cause: error,
-        },
-      );
+      throw new NodeOperationError(ctx.getNode(), mcpConnectErrorMessage(error), {
+        itemIndex,
+        cause: error,
+      });
     }
     const { client } = shared.value;
     const serverTools = selectTools(shared.value.tools, include, selected);
     const tools = serverTools.map((tool) => {
       const parameters: JsonSchema = { type: 'object', properties: {}, ...(tool.inputSchema ?? {}) };
-      return createTool(
+      const base = createTool(
         ctx,
         { name: toToolName(tool.name), description: tool.description ?? tool.name, parameters },
         async (args) => {
@@ -232,6 +166,28 @@ export const McpClientToolNode: NodeType = {
           return text;
         },
       );
+      // the server's own content array, for an MCP Server Trigger that passes the result on as it is
+      const withRaw: AiTool = {
+        ...base,
+        async invokeRaw(args) {
+          const input = { input: args };
+          try {
+            const result: McpToolResult = await client.callTool(tool.name, args ?? {});
+            ctx.logSubNodeRun(input, { response: mcpResultText(result) });
+            return {
+              content: result.content ?? [],
+              ...(result.structuredContent !== undefined
+                ? { structuredContent: result.structuredContent }
+                : {}),
+              ...(result.isError ? { isError: true } : {}),
+            };
+          } catch (error) {
+            ctx.logSubNodeRun(input, {}, error as Error);
+            throw error;
+          }
+        },
+      };
+      return withRaw;
     });
     return { response: tools, closeFunction: shared.release };
   },
@@ -242,9 +198,16 @@ export const McpClientToolNode: NodeType = {
         const endpoint = String(ctx.getCurrentNodeParameter('endpointUrl') ?? '').trim();
         if (!endpoint) return [];
         const authentication = String(ctx.getCurrentNodeParameter('authentication') ?? 'none');
-        const client = createClient(ctx, endpoint, await authHeaders(ctx, authentication), 30_000);
+        const serverTransport = String(ctx.getCurrentNodeParameter('serverTransport') ?? 'httpStreamable') as
+          | 'httpStreamable'
+          | 'sse';
+        const client = await createMcpConnection(ctx, {
+          endpointUrl: endpoint,
+          serverTransport,
+          authentication,
+          timeoutMs: 30_000,
+        });
         try {
-          await client.connect();
           const tools = await client.listTools();
           return tools.map((t) => ({ name: t.name, value: t.name, description: t.description }));
         } finally {

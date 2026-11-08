@@ -9,7 +9,8 @@ import type { DataObject, HttpFullResponse, HttpRequestOptions } from '@workflow
 import { sseJson } from './sse';
 import { truncate } from './utils';
 
-export const MCP_PROTOCOL_VERSION = '2025-06-18';
+/** what we ask for; the version the server answers is used from then on (older servers are accepted) */
+export const MCP_PROTOCOL_VERSION = '2025-11-25';
 
 export interface McpTool {
   name: string;
@@ -29,6 +30,8 @@ export class McpError extends Error {
   constructor(
     message: string,
     readonly code?: number,
+    /** the HTTP status when the server refused the request itself */
+    readonly httpStatus?: number,
   ) {
     super(message);
     this.name = 'McpError';
@@ -47,6 +50,8 @@ export class McpClient {
     private readonly endpoint: string,
     private readonly extraHeaders: Record<string, string> = {},
     private readonly timeoutMs = 60_000,
+    /** ends what the transport holds open (the SSE stream); runs on `close` */
+    private readonly onClose?: () => Promise<void>,
   ) {}
 
   async connect(): Promise<void> {
@@ -88,6 +93,14 @@ export class McpClient {
 
   /** end the session; servers may not support explicit termination (405), which is fine */
   async close(): Promise<void> {
+    try {
+      await this.endSession();
+    } finally {
+      await this.onClose?.().catch(() => undefined);
+    }
+  }
+
+  private async endSession(): Promise<void> {
     if (!this.sessionId) return;
     try {
       await this.transport({
@@ -132,7 +145,11 @@ export class McpClient {
   private async notify(method: string, params?: DataObject): Promise<void> {
     const response = await this.post({ jsonrpc: '2.0', method, ...(params ? { params } : {}) });
     if (response.statusCode >= 400) {
-      throw new McpError(`MCP server rejected ${method} with HTTP ${response.statusCode}`);
+      throw new McpError(
+        `MCP server rejected ${method} with HTTP ${response.statusCode}`,
+        undefined,
+        response.statusCode,
+      );
     }
   }
 
@@ -150,6 +167,8 @@ export class McpClient {
         `MCP server answered ${method} with HTTP ${response.statusCode}${
           response.body ? `: ${truncate(String(response.body), 300)}` : ''
         }`,
+        undefined,
+        response.statusCode,
       );
     }
     const message = findResponse(response, id);
