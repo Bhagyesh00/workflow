@@ -7,6 +7,11 @@
  * server itself (rows paged), not here.
  */
 import type { InstanceLimits } from '@workflow/workflow';
+import { XMLParser } from 'fast-xml-parser';
+import * as XLSX from 'xlsx';
+import { PdfReadError, pdfPages } from '../nodes/core/extract/pdf';
+import { SpreadsheetError, spreadsheetRows } from '../nodes/core/extract/spreadsheet';
+import { ArchiveError, unzipBounded } from './archive';
 
 /** the document formats `documentText` reads */
 export type DocumentFormat = 'pdf' | 'docx' | 'xlsx' | 'html' | 'text' | 'markdown';
@@ -37,11 +42,202 @@ export class DocumentTextError extends Error {
   }
 }
 
+/** sheets of one workbook read at most */
+const MAX_SHEETS = 20;
+
 /** The text of `bytes` read as `format`, within `options.limits`. Throws `DocumentTextError`. */
 export async function documentText(
-  _bytes: Uint8Array,
-  _format: DocumentFormat,
-  _options: DocumentTextOptions,
+  bytes: Uint8Array,
+  format: DocumentFormat,
+  options: DocumentTextOptions,
 ): Promise<DocumentText> {
-  throw new Error('not implemented (L11)');
+  try {
+    const read = await readText(bytes, format, options);
+    return cut(read, options.maxChars);
+  } catch (error) {
+    if (error instanceof DocumentTextError) throw error;
+    if (
+      error instanceof PdfReadError ||
+      error instanceof ArchiveError ||
+      error instanceof SpreadsheetError
+    ) {
+      throw new DocumentTextError(error.message);
+    }
+    throw new DocumentTextError(`The ${format} file could not be read: it is damaged or not in that format`);
+  }
+}
+
+function cut(read: DocumentText, maxChars: number | undefined): DocumentText {
+  if (maxChars === undefined || maxChars < 0 || read.text.length <= maxChars) return read;
+  return { ...read, text: read.text.slice(0, maxChars), truncated: true };
+}
+
+async function readText(
+  bytes: Uint8Array,
+  format: DocumentFormat,
+  options: DocumentTextOptions,
+): Promise<DocumentText> {
+  switch (format) {
+    case 'pdf':
+      return readPdfText(bytes, options);
+    case 'xlsx':
+      return readWorkbookText(bytes, options);
+    case 'docx':
+      return readDocxText(bytes, options);
+    case 'html':
+      return { text: htmlToText(decodeUtf8(bytes)), truncated: false };
+    case 'text':
+    case 'markdown':
+      return { text: decodeUtf8(bytes), truncated: false };
+    default:
+      throw new DocumentTextError(`The format "${String(format)}" cannot be read as text`);
+  }
+}
+
+function decodeUtf8(bytes: Uint8Array): string {
+  return new TextDecoder('utf-8').decode(bytes).replace(/^﻿/, '');
+}
+
+async function readPdfText(bytes: Uint8Array, options: DocumentTextOptions): Promise<DocumentText> {
+  const maxPages = Math.max(0, Math.floor(options.maxPages ?? 0));
+  // one page past the cap tells whether the document has more
+  const pages = await pdfPages(bytes, {
+    maxPages: maxPages > 0 ? maxPages + 1 : 0,
+    maxBytes: options.limits.maxDecompressedBytes,
+  });
+  const more = maxPages > 0 && pages.length > maxPages;
+  const kept = more ? pages.slice(0, maxPages) : pages;
+  return { text: kept.join('\n\n'), truncated: more, pages: kept.length };
+}
+
+function sheetNames(bytes: Uint8Array): string[] {
+  try {
+    return XLSX.read(bytes, { type: 'buffer', bookSheets: true }).SheetNames;
+  } catch {
+    throw new DocumentTextError('The file could not be read as XLSX: it is damaged or not in that format');
+  }
+}
+
+function cellText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value).replace(/[\t\r\n]+/g, ' ');
+}
+
+function readWorkbookText(bytes: Uint8Array, options: DocumentTextOptions): DocumentText {
+  const { limits, maxChars } = options;
+  // the first read checks the container and the size before the sheet list is read
+  const first = spreadsheetRows(bytes, 'xlsx', { headerRow: false }, limits);
+  const names = sheetNames(bytes);
+  const blocks: string[] = [];
+  let size = 0;
+  let read = 0;
+  let truncated = names.length > MAX_SHEETS;
+  for (const [index, name] of names.slice(0, MAX_SHEETS).entries()) {
+    const rows =
+      index === 0 ? first : spreadsheetRows(bytes, 'xlsx', { headerRow: false, sheetName: name }, limits);
+    const lines = rows.map((row) => {
+      const cells = Array.isArray(row.row) ? row.row : [];
+      return cells.map(cellText).join('\t');
+    });
+    const block = `## Sheet: ${name}\n${lines.join('\n')}`;
+    blocks.push(block);
+    read += 1;
+    size += block.length + 2;
+    if (maxChars !== undefined && size > maxChars) {
+      truncated = truncated || read < names.length;
+      break;
+    }
+  }
+  return { text: blocks.join('\n\n'), truncated, pages: read };
+}
+
+type XmlNode = Record<string, unknown>;
+
+/** the text of one `w:p` tree: runs of `w:t`, tabs and line breaks */
+function paragraphText(children: unknown): string {
+  if (!Array.isArray(children)) return '';
+  let text = '';
+  for (const child of children as XmlNode[]) {
+    for (const [key, value] of Object.entries(child)) {
+      if (key === '#text') text += String(value);
+      else if (key === 'w:tab') text += '\t';
+      else if (key === 'w:br' || key === 'w:cr') text += '\n';
+      else if (key !== ':@' && key !== 'w:pPr' && key !== 'w:rPr') text += paragraphText(value);
+    }
+  }
+  return text;
+}
+
+/** every `w:p` below `nodes`, in document order; stops once `budget` characters are collected */
+function collectParagraphs(nodes: unknown, out: string[], budget: { left: number }): void {
+  if (!Array.isArray(nodes) || budget.left <= 0) return;
+  for (const node of nodes as XmlNode[]) {
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'w:p') {
+        const text = paragraphText(value);
+        out.push(text);
+        budget.left -= text.length + 2;
+      } else if (key !== ':@') {
+        collectParagraphs(value, out, budget);
+      }
+    }
+  }
+}
+
+async function readDocxText(bytes: Uint8Array, options: DocumentTextOptions): Promise<DocumentText> {
+  const { limits } = options;
+  const files = await unzipBounded(bytes, {
+    maxBytes: limits.maxDecompressedBytes,
+    maxEntries: limits.maxArchiveEntries,
+  });
+  const main = files.find((file) => file.name === 'word/document.xml');
+  if (!main) throw new DocumentTextError('The file is not a DOCX document: word/document.xml is missing');
+  const parser = new XMLParser({
+    preserveOrder: true,
+    ignoreAttributes: true,
+    processEntities: true,
+    trimValues: false,
+    parseTagValue: false,
+  });
+  const tree: unknown = parser.parse(Buffer.from(main.data).toString('utf8'));
+  const paragraphs: string[] = [];
+  const budget = { left: options.maxChars ?? Number.POSITIVE_INFINITY };
+  collectParagraphs(tree, paragraphs, budget);
+  return { text: paragraphs.join('\n\n'), truncated: false };
+}
+
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+};
+
+function decodeEntities(text: string): string {
+  return text.replace(/&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z]{2,6});/gi, (whole, name: string) => {
+    if (name[0] === '#') {
+      const code =
+        name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
+    }
+    return NAMED_ENTITIES[name.toLowerCase()] ?? whole;
+  });
+}
+
+/** the visible text of an HTML page: scripts, styles and comments dropped, block tags become line breaks */
+function htmlToText(html: string): string {
+  const stripped = html
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, ' ')
+    .replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6]|\/table|\/section|\/article|\/pre|\/ul|\/ol)\b[^>]*>/gi, '\n')
+    .replace(/<[^>]*>/g, ' ');
+  return decodeEntities(stripped)
+    .split('\n')
+    .map((line) => line.replace(/[ \t ]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }

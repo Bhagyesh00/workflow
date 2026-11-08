@@ -8,6 +8,7 @@
 import {
   type DataObject,
   type ExecuteContext,
+  type InstanceLimits,
   NodeOperationError,
   type NodeProperty,
 } from '@workflow/workflow';
@@ -58,6 +59,14 @@ export const spreadsheetOptionFields: NodeProperty[] = [
   },
 ];
 
+/** a workbook that cannot or may not be read; the message is for a person */
+export class SpreadsheetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SpreadsheetError';
+  }
+}
+
 /** one JSON object per row of the input file of item `itemIndex` */
 export async function extractSpreadsheet(
   ctx: ExecuteContext,
@@ -65,10 +74,30 @@ export async function extractSpreadsheet(
   operation: SpreadsheetOperation,
   options: DataObject,
 ): Promise<DataObject[]> {
-  const fail = (message: string) => new NodeOperationError(ctx.getNode(), message, { itemIndex });
   const limits = ctx.helpers.getInstanceLimits();
   const property = String(ctx.getNodeParameter('binaryPropertyName', itemIndex, 'data') || 'data');
   const bytes = await ctx.helpers.getBinaryDataBuffer(itemIndex, property);
+  try {
+    return spreadsheetRows(bytes, operation, options, limits);
+  } catch (error) {
+    if (error instanceof SpreadsheetError) {
+      throw new NodeOperationError(ctx.getNode(), error.message, { itemIndex });
+    }
+    throw error;
+  }
+}
+
+/**
+ * One JSON object per row of the workbook `bytes` (the reader behind `extractSpreadsheet`, also used by the
+ * Assistant's document reader). Throws `SpreadsheetError`.
+ */
+export function spreadsheetRows(
+  bytes: Uint8Array,
+  operation: SpreadsheetOperation,
+  options: DataObject,
+  limits: Pick<InstanceLimits, 'maxDecompressedBytes' | 'maxArchiveEntries' | 'maxSpreadsheetCells'>,
+): DataObject[] {
+  const fail = (message: string) => new SpreadsheetError(message);
 
   if (bytes.byteLength > limits.maxDecompressedBytes) {
     throw fail(`The file is too large: the limit is ${limits.maxDecompressedBytes} bytes`);
@@ -114,7 +143,7 @@ export async function extractSpreadsheet(
     // `sheets` only narrows XLSX parsing; XLS and ODS parse every sheet, so the sheet is picked by name below
     book = XLSX.read(input.data, { ...readOptions, sheets: sheetName, sheetRows });
   } catch (error) {
-    if (error instanceof NodeOperationError) throw error;
+    if (error instanceof SpreadsheetError) throw error;
     throw fail(
       `The file could not be read as ${operation.toUpperCase()}: it is damaged or not in that format`,
     );
