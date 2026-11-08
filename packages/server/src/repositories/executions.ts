@@ -1,5 +1,5 @@
 /** Executions and their (separately stored) run data. */
-import { and, count, desc, eq, inArray, lt, lte, notInArray, type SQL, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, lt, lte, ne, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import { type ExecutionDataRow, type ExecutionRow, executionData, executions } from '../db/schema';
 import type { Cursor } from '../http/pagination';
@@ -224,11 +224,18 @@ export class ExecutionRepository {
     return rows.map((r) => r.id);
   }
 
+  /** the plan's concurrent count: evaluation cases are left out, the evaluation pool bounds them (n8n's separate queue) */
   async countRunning(tenantId: string): Promise<number> {
     const [row] = await this.db
       .select({ n: count() })
       .from(executions)
-      .where(and(eq(executions.tenantId, tenantId), inArray(executions.status, ['new', 'running'])));
+      .where(
+        and(
+          eq(executions.tenantId, tenantId),
+          inArray(executions.status, ['new', 'running']),
+          ne(executions.mode, 'evaluation'),
+        ),
+      );
     return Number(row?.n ?? 0);
   }
 

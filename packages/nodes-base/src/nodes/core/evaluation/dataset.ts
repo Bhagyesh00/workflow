@@ -175,6 +175,9 @@ export async function readTableRows(
 export function tableRowJson(table: DataTableInfo, row: DataTableRow, position: number): DataObject {
   const json: DataObject = { row_number: position, row_id: row.id };
   for (const column of table.columns) json[column.name] = row[column.name] ?? null;
+  // a column named row_number or row_id never replaces the row's own keys
+  json.row_number = position;
+  json.row_id = row.id;
   return json;
 }
 
@@ -210,6 +213,7 @@ export async function sheetDataset(ctx: ExecuteContext): Promise<DatasetRow[]> {
       data.headers.forEach((header, c) => {
         if (header) json[header] = row.values[c] ?? '';
       });
+      json.row_number = row.rowNumber;
       return { key: row.rowNumber, json };
     });
   if (ctx.getNodeParameter('filterRows', 0, false)) {

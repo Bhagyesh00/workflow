@@ -66,7 +66,7 @@ const GOOGLE_CREDENTIALS: Record<string, string> = {
 };
 const ACTIVE = ['new', 'running'] as const;
 
-type StopReason = 'cancel' | 'shutdown';
+type StopReason = 'cancel' | 'shutdown' | 'error';
 
 interface LocalRun {
   tenantId: string;
@@ -163,6 +163,7 @@ export class EvaluationService {
     const definition = await runtimeDefinition(repos, tenant.id, row, 'manual');
     const trigger = definition.nodes.find((n) => n.type === EVALUATION_TRIGGER_TYPE);
     if (!trigger) {
+      // REST and public API both refuse; n8n's REST stores an error run and answers 202 instead (a deliberate difference)
       throw ApiError.conflict('Workflow has no evaluation trigger', { code: 'EVALUATION_TRIGGER_NOT_FOUND' });
     }
     const limit = Math.max(1, config.evaluationConcurrencyLimit);
@@ -422,18 +423,24 @@ export class EvaluationService {
     const cases = await repos.testRuns.seedCasesAt(tenantId, run.id, indices);
     let next = 0;
     const pool = this.pool(tenantId);
+    let failure: { error: unknown } | undefined;
     const worker = async () => {
       while (!signal.aborted && next < cases.length) {
         const testCase = cases[next++];
         if (!(await pool.acquire(signal))) return;
         try {
           await this.runCase(run, definition, trigger, testCase, rows[testCase.runIndex], actor, entry);
+        } catch (error) {
+          // one failing worker stops the others, and the run fails only after every worker has left its slot
+          failure ??= { error };
+          this.stopLocal(run.id, 'error');
         } finally {
           pool.release();
         }
       }
     };
     await Promise.all(Array.from({ length: Math.min(run.concurrency, cases.length) }, worker));
+    if (failure) throw failure.error;
     if (signal.aborted) return this.stopped(run.id, entry);
 
     const all = await repos.testRuns.listCases(tenantId, run.id, { limit: MAX_EVALUATION_ROWS });

@@ -12,10 +12,11 @@ const VERTEX_API_HOST =
   /(^|[.-])aiplatform\.((eu|us)\.rep\.)?googleapis\.com$|^cloudresourcemanager\.googleapis\.com$/i;
 /** the Sheets API host: as in n8n, a Sheets call with a service account needs no scope typed */
 const SHEETS_API_HOST = /^sheets\.googleapis\.com$/i;
-/** the scopes n8n's Sheets path asks for */
+/** the scopes n8n's Sheets path asks for, in its order */
 const SHEETS_SCOPES = [
   'https://www.googleapis.com/auth/drive.file',
   'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/drive.metadata',
 ];
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');

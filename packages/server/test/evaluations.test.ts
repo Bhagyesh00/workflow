@@ -589,6 +589,53 @@ describe('concurrency', () => {
     expect(run).toMatchObject({ status: 'completed', caseCounts: { success: 3 } });
     expect(probe.peak).toBe(3);
   });
+
+  it("running cases do not use up the plan's concurrent limit", async () => {
+    const owner = await signup();
+    await server.ctx.repos.tenants.updateSettings(owner.tenant.id, { limits: { concurrentExecutions: 1 } });
+    const tableId = await makeDataset(owner, ROWS.slice(0, 1));
+    const wf = await createWorkflow(owner.client, probeWorkflow(tableId, 1500));
+    const manual = await createWorkflow(owner.client, {
+      nodes: [node('Start', 'core.manualTrigger')],
+      connections: {},
+    });
+    const runId = await startRun(owner.client, wf.id, { concurrency: 1 });
+    await waitFor(async () => probe.inFlight > 0, { message: 'a case to be running' });
+    // a manual run still starts while the case holds the plan's only slot
+    const res = await owner.client.post(`/rest/workflows/${manual.id}/run`, {});
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await finished(owner.client, wf.id, runId)).status).toBe('completed');
+  });
+
+  it('a worker that fails stops the other workers before the run fails', async () => {
+    const owner = await signup();
+    const tableId = await makeDataset(owner, ROWS);
+    // the first case ends at once and its result cannot be read; the second is still running
+    const definition = probeWorkflow(tableId, 1);
+    definition.nodes[1].parameters = { ms: '={{ $json.points === 1 ? 20 : 3000 }}' };
+    const wf = await createWorkflow(owner.client, definition);
+    const repo = server.ctx.repos.executions;
+    const getData = repo.getData;
+    let thrown = false;
+    repo.getData = async (...args) => {
+      // only the runner's read of a finished case fails
+      if (thrown || !new Error().stack?.includes('runCase')) return getData.apply(repo, args);
+      thrown = true;
+      throw new Error('database down');
+    };
+    try {
+      const runId = await startRun(owner.client, wf.id, { concurrency: 2 });
+      const run = await finished(owner.client, wf.id, runId);
+      // the slow case of the other worker was stopped, not left running past the end of the run
+      expect(probe.inFlight).toBe(0);
+      expect(run).toMatchObject({ status: 'error', errorCode: 'UNKNOWN_ERROR' });
+      expect(thrown).toBe(true);
+      const cases = await casesOf(owner.client, wf.id, runId);
+      expect(cases.map((c) => c.status)).toEqual(['cancelled', 'cancelled', 'cancelled']);
+    } finally {
+      repo.getData = getData;
+    }
+  });
 });
 
 describe('access', () => {

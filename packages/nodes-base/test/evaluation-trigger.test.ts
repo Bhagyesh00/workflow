@@ -205,6 +205,31 @@ describe('dataset.getRows', () => {
     expect(limited.rows.map((row) => row.row_id)).toEqual([1, 2]);
   });
 
+  it('keeps the row keys when the table has columns named row_id and row_number', async () => {
+    const fake = new FakeTables();
+    const table = fake.add('Imported', [
+      { name: 'row_id', type: 'number' },
+      { name: 'row_number', type: 'number' },
+      { name: 'question', type: 'string' },
+    ]);
+    await fake.insertRows(
+      table.id,
+      [
+        { row_id: 40, row_number: 90, question: 'q1' },
+        { row_id: 41, row_number: 91, question: 'q2' },
+      ],
+      'count',
+    );
+    const r = await getRows(
+      { dataTableId: { __rl: true, mode: 'id', value: table.id } },
+      { dataTables: fake },
+    );
+    expect(r.rows).toEqual([
+      { row_number: 1, row_id: 1, question: 'q1' },
+      { row_number: 2, row_id: 2, question: 'q2' },
+    ]);
+  });
+
   it('gives an empty list for an empty table (the runner reports it)', async () => {
     const { fake, byId } = seeded();
     const r = await getRows({ dataTableId: byId }, { dataTables: fake });
@@ -315,6 +340,19 @@ describe('Google Sheets source', () => {
     ]);
   });
 
+  it('keeps the sheet row number when a header is named row_number', async () => {
+    const http = new FakeHttpClient()
+      .on('GET', `${SHEETS}/DOC1?`, () => ({ sheets: [{ properties: { sheetId: 0, title: 'Cases' } }] }))
+      .on('GET', `${SHEETS}/DOC1/values/`, () => ({
+        values: [
+          ['row_number', 'question'],
+          ['7', 'What is 2+2?'],
+        ],
+      }));
+    const r = await getRows(params(), { http }, oauth);
+    expect(r.rows).toEqual([{ row_number: 2, question: 'What is 2+2?' }]);
+  });
+
   it('signs with the credential Authentication picks: a service account reads the sheet with no scope typed', async () => {
     const { privateKey } = generateKeyPairSync('rsa', {
       modulusLength: 2048,
@@ -333,9 +371,10 @@ describe('Google Sheets source', () => {
     const token = http.requests.find((req) => req.url === GOOGLE_TOKEN);
     const assertion = String(((token?.body ?? {}) as { assertion?: string }).assertion).split('.')[1] ?? '';
     const claims = JSON.parse(Buffer.from(assertion, 'base64url').toString('utf8')) as { scope: string };
-    expect(claims.scope.split(' ').sort()).toEqual([
+    expect(claims.scope.split(' ')).toEqual([
       'https://www.googleapis.com/auth/drive.file',
       'https://www.googleapis.com/auth/spreadsheets',
+      'https://www.googleapis.com/auth/drive.metadata',
     ]);
     const calls = http.requests.filter((req) => req.url.startsWith(SHEETS));
     expect(calls.length).toBeGreaterThan(0);

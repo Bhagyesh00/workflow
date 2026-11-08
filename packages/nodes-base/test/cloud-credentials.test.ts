@@ -689,9 +689,20 @@ describe('googleApi', () => {
     expect(claimsOf(tokenCalls(fake)[0]).scope).toBe('a');
   });
 
+  it("asks for n8n's Sheets scopes on the Sheets host when none is typed", async () => {
+    const fake = new FakeHttpClient()
+      .on('POST', GOOGLE_TOKEN, () => ({ access_token: 'tok', expires_in: 3600 }))
+      .on('*', /googleapis/, () => ({ ok: 1 }));
+    await send(fake, googleApi, googleKeys({ scopes: '' }), { url: 'https://sheets.googleapis.com/v4/x' });
+    expect(claimsOf(tokenCalls(fake)[0]).scope).toBe(
+      'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.metadata',
+    );
+  });
+
   it('refuses a missing email, key or scope, and a bad key with no key text', async () => {
     const fake = tokenFake();
-    const OTHER = 'https://sheets.googleapis.com/v4/x';
+    // a Google host that gets no default scope
+    const OTHER = 'https://www.googleapis.com/x';
     for (const [extra, url] of [
       [{ email: '' }, API],
       [{ privateKey: '' }, API],
