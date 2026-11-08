@@ -6,11 +6,13 @@
  * the same upload options, read from `ctx.getChatTrigger()`. Only `sessionId`, `chatInput` and the files reach
  * the output item: a caller cannot pass `approved` or `data`, which decide a human review. A text reply to an
  * approval is not an approval (`data.approved = false`, as n8n's newest version); the agent of a review reads
- * the text as the person's feedback.
+ * the text as the person's feedback. As n8n, the reply is saved as the run's `input_<node>` highlighted data
+ * unless the node's own Auto-save Highlighted Data option is off.
  */
 import { SEND_AND_WAIT } from '@workflow/nodes-base/utils/send-and-wait';
 import {
   type DataObject,
+  highlightedInputKey,
   type Item,
   isPlainObject,
   type WebhookContext,
@@ -62,5 +64,10 @@ export async function chatReply(ctx: WebhookContext): Promise<WebhookResponseDat
   if (ctx.getNodeParameter('responseType', 0, 'approval') === 'approval') json.data = { approved: false };
   const item: Item = { json };
   if (Object.keys(uploads.binary).length) item.binary = uploads.binary;
-  return { workflowData: [[item]] };
+  const result: WebhookResponseData = { workflowData: [[item]] };
+  const options = ctx.getNodeParameter('options', 0, {});
+  if (!isPlainObject(options) || options.autoSaveHighlightedData !== false) {
+    result.customData = { [highlightedInputKey(ctx.getNode().name)]: chatInput };
+  }
+  return result;
 }

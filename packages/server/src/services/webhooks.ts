@@ -579,9 +579,15 @@ export class WebhookService {
     // request, and then for all of its hooks: its page (setup) and a refused POST leave it listening.
     const claimOnAccept = kind === 'form' || chat;
     if (!claimOnAccept && !(await testWebhooks.remove(registration))) return missing();
+    // the claim takes only this listen's registrations: a listen that replaced them meanwhile keeps its own
     const claim = async () => {
       if (!(await testWebhooks.remove(registration))) return missing();
-      await testWebhooks.removeForNode(tenant.id, registration.workflowId, registration.nodeName);
+      await testWebhooks.removeForNode(
+        tenant.id,
+        registration.workflowId,
+        registration.nodeName,
+        registration,
+      );
       return undefined;
     };
     return this.run({
@@ -699,6 +705,8 @@ export class WebhookService {
 
     let output: Item[][];
     let answer: WebhookResponse | undefined;
+    // highlighted data the node saves with the reply (a chat reply's `input_<node>`)
+    let customData: Record<string, string> | undefined;
     if (node && type?.webhook && hook) {
       const services = await this.contextServices({
         tenant,
@@ -751,6 +759,7 @@ export class WebhookService {
       if (!result.workflowData)
         return cors(fromWebhookResponse(result.webhookResponse ?? { statusCode: 200 }));
       output = result.workflowData;
+      customData = result.customData;
       answer = result.webhookResponse;
     } else {
       const body = request.body;
@@ -779,6 +788,7 @@ export class WebhookService {
       wait: Boolean(chatStream) || responseMode !== 'onReceived',
       observer: chatStream?.observer ?? (responseMode === 'onReceived' ? undefined : handle.observer),
       ...(toolWait ? { atWait: { toolNode: toolWait.toolNode, toolRunIndex: toolWait.toolRunIndex } } : {}),
+      ...(customData ? { customData } : {}),
     });
     if (!resumed) {
       return cors(closedPage() ?? json(409, errorBody('not_waiting', 'The execution is not waiting')));
@@ -1003,8 +1013,10 @@ export class WebhookService {
    * any chunk still answers: its last node's output becomes one group. A failure or a timeout writes one
    * `error` frame with fixed text in `content` and `message`, never a detail of the error.
    * A client that closes the stream before the end stops the run, so no model is called for nobody.
-   * In `responseNodes` mode only the Respond to Chat nodes speak (no last-node fallback), and a run that stops
-   * at one of them to wait ends with a `wait` frame naming where the next message goes.
+   * In `responseNodes` mode only the Respond to Chat nodes speak (no last-node fallback): a chunk of any other
+   * node (an agent that streams) is dropped, as n8n streams an agent only in Streaming mode. A run that stops
+   * at one of them to wait ends with a `wait` frame naming where the next message goes; a client that closes
+   * once the run has finished or waits no longer stops it.
    */
   private streamHandle(
     tenant: TenantRow,
@@ -1013,6 +1025,14 @@ export class WebhookService {
   ) {
     const stream = new PassThrough();
     let chunks = 0;
+    /** set when the run finished or waits: a client that closes after that stops nothing */
+    let settled = false;
+    /** in `responseNodes` mode, whether a node's chunks reach the chat (Respond to Chat and its copies only) */
+    const speaks = (meta: ChatChunkMeta | undefined) => {
+      if (mode !== 'responseNodes') return true;
+      const stored = meta ? workflow.getNode(meta.nodeName) : undefined;
+      return Boolean(stored && takesChatReply(this.deps.nodeTypes.get(stored.type)));
+    };
     /** open groups by node run, with the meta of their last chunk */
     const open = new Map<string, ChatChunkMeta>();
     const write = (frame: ChatFrame) => {
@@ -1029,6 +1049,7 @@ export class WebhookService {
     };
     const observer: ExecutionObserver = {
       onChunk: (content, meta) => {
+        if (!speaks(meta)) return;
         chunks++;
         const from = meta ?? UNKNOWN_CHUNK_META;
         const key = runKey(from);
@@ -1050,7 +1071,7 @@ export class WebhookService {
       }, limitMs);
       timer.unref();
       stream.once('close', () => {
-        if (stream.writableFinished) return;
+        if (settled || stream.writableFinished) return;
         clearTimeout(timer);
         const { executions, logger } = this.deps;
         executions.discardWaiter(execution.executionId);
@@ -1062,6 +1083,7 @@ export class WebhookService {
         });
       });
       void execution.finished?.then(async (outcome) => {
+        settled = true;
         clearTimeout(timer);
         if (outcome.status !== 'success' && outcome.status !== 'waiting') return fail(STREAM_FAILED);
         if (mode === 'responseNodes') {

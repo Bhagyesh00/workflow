@@ -3,7 +3,8 @@
  * whose Response Mode is "Using Response Nodes", or sends one and waits for the person's reply (approval,
  * free text or a form, from the send-and-wait kit). The reply arrives on the `chatReply` POST of the
  * waiting run's resume URL (chat-reply.ts); an approval button opens the kit's `answer` link.
- * As a tool (`ai.chatTool`) it sends and returns `{...json, sent: true}`; its Human review copy is
+ * As a tool (`ai.chatTool`) it sends and returns `{...json, sendMessage, sent: true}` (the run keeps the sent
+ * message, as n8n's `sendMessage`); its Human review copy is
  * `ai.chatHitlTool`, made by S1's rule from the Send and Wait operation.
  *
  * Messages are data: the text goes to the stream as it is and the widget escapes it.
@@ -118,12 +119,13 @@ async function keep(ctx: ExecuteContext, options: DataObject, item: Item | undef
   }
 }
 
-/** a tool's result: its input with `sent: true`, without an empty `chatInput` */
-function toolResult(json: DataObject): DataObject {
+/** a tool's result: its input with the sent message and `sent: true`, without an empty `chatInput` */
+function toolResult(json: DataObject, sendMessage: string): DataObject {
   const { chatInput, ...rest } = json;
   return {
     ...rest,
     ...(typeof chatInput === 'string' && chatInput.trim() ? { chatInput } : {}),
+    sendMessage,
     sent: true,
   };
 }
@@ -209,7 +211,7 @@ export const ChatNode: NodeType = {
     await keep(ctx, options, items[0], message);
     if (items.length > 1) ctx.addExecutionHints({ message: FIRST_ITEM_HINT, level: 'info' });
     if (ctx.getNode().type === CHAT_TOOL_TYPE) {
-      return [[{ json: toolResult(items[0]?.json ?? {}), pairedItem: { item: 0 } }]];
+      return [[{ json: toolResult(items[0]?.json ?? {}, message), pairedItem: { item: 0 } }]];
     }
     return [items];
   },

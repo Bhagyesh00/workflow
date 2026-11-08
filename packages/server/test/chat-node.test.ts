@@ -14,7 +14,11 @@ import type {
   NodeTypeDescription,
   WorkflowNode,
 } from '@workflow/workflow';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { Workflow } from '@workflow/workflow';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { TenantRow } from '../src/db/schema';
+import type { ExecutionOutcome, StartedExecution } from '../src/services/executions';
+import type { WebhookReply } from '../src/services/webhooks';
 import {
   createTestServer,
   createWorkflow,
@@ -244,6 +248,8 @@ describe('Respond to Chat in a "Using Response Nodes" chat', () => {
     const state = await run.finished();
     expect(outputOf(state, 'Ask')).toEqual([{ sessionId: 's1', chatInput: 'Ada' }]);
     expect(outputOf(state, 'After')[0]).toMatchObject({ after: 'yes' });
+    // the reply is saved as the run's highlighted data of the waiting node
+    expect(state.resultData.customData).toMatchObject({ input_ask: 'Ada' });
   });
 
   it('answers the preflight of the resume URL for any origin', async () => {
@@ -454,6 +460,8 @@ describe('the Chat node under an agent', () => {
     const run = await review();
     const res = await get(buttonsOf(run.frames).Approve, { accept: NDJSON });
     expect(res.statusCode, res.body).toBe(200);
+    // only Respond to Chat nodes speak in this mode: the agent's answer is no frame of the resumed run
+    expect(framesOf(res.body)).toEqual([]);
     const state = await run.finished();
     expect(refunds).toEqual([{ amount: '10' }]);
     expect(toolResults(requests.Model[1])).toEqual([['c1', '[{"refunded":"10"}]']]);
@@ -480,19 +488,60 @@ describe('the Chat node under an agent', () => {
     expect(String(toolResults(requests.Model[1])[0][1])).toContain('provided feedback: "only 5 please"');
   });
 
-  it('a Send Message tool posts its message as its own group, before the agent answer', async () => {
+  it('a Send Message tool posts its message as its own group; the agent answer is no frame', async () => {
     scripts.Model = [callTool('Notify', {}, 'c1'), say('ok')];
     const run = await agentWorkflow(node('Notify', 'ai.chatTool', { message: 'Working on it' }, [200, 200]));
+    // only Respond to Chat nodes speak in Using Response Nodes mode, as n8n: the agent streams only in Streaming
     expect(shape(run.frames)).toEqual([
       ['begin', null, 'Notify'],
       ['item', 'Working on it', 'Notify'],
       ['end', null, 'Notify'],
-      ['begin', null, 'Agent'],
-      ['item', 'ok', 'Agent'],
-      ['end', null, 'Agent'],
     ]);
-    expect(run.frames[0].metadata?.nodeId).not.toBe(run.frames[3].metadata?.nodeId);
     const result = JSON.parse(String(requests.Model[1].find((m) => m.role === 'tool')?.content));
-    expect(result[0]).toMatchObject({ sessionId: 's1', chatInput: 'Hi', sent: true });
+    expect(result[0]).toMatchObject({
+      sessionId: 's1',
+      chatInput: 'Hi',
+      sendMessage: 'Working on it',
+      sent: true,
+    });
+  });
+});
+
+describe('a chat stream that closes after the run waits', () => {
+  type StreamHandle = {
+    streamHandle(
+      tenant: TenantRow,
+      workflow: Workflow,
+      mode: 'responseNodes',
+    ): { attach(execution: StartedExecution): WebhookReply };
+    chatReplyUrl(): Promise<string | undefined>;
+  };
+
+  it('does not cancel the waiting run while the wait frame is looked up', async () => {
+    const service = server.ctx.webhooks as unknown as StreamHandle;
+    let lookedUp!: (url: string | undefined) => void;
+    const lookup = vi
+      .spyOn(service, 'chatReplyUrl')
+      .mockReturnValue(new Promise((resolve) => (lookedUp = resolve)));
+    const stop = vi.spyOn(server.ctx.executions, 'stop').mockResolvedValue('waiting');
+    try {
+      const workflow = new Workflow(
+        { id: 'wf1', name: 'chat', nodes: [trigger()], connections: {} },
+        server.ctx.registries.nodeTypes,
+      );
+      const outcome: ExecutionOutcome = { executionId: 'e1', status: 'waiting' };
+      const reply = service
+        .streamHandle({ id: 't1' } as TenantRow, workflow, 'responseNodes')
+        .attach({ executionId: 'e1', finished: Promise.resolve(outcome) });
+      // the run has reached its wait and the handler reads where the next message goes
+      await vi.waitFor(() => expect(lookup).toHaveBeenCalled());
+      reply.stream!.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(stop).not.toHaveBeenCalled();
+      lookedUp(undefined);
+    } finally {
+      lookup.mockRestore();
+      stop.mockRestore();
+    }
   });
 });

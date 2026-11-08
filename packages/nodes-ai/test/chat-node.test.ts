@@ -264,10 +264,13 @@ describe('Send Message', () => {
     expect(output('Reply')).toEqual([{ n: 1 }, { n: 2 }]);
   });
 
-  it('as a tool sends with its own node and returns its input with sent: true, without an empty chatInput', async () => {
+  it('as a tool sends with its own node and returns its input with the message and sent: true, without an empty chatInput', async () => {
     for (const [chatInput, expected] of [
-      ['Hi', { sessionId: 's1', chatInput: 'Hi', toolCallId: 'c1', sent: true }],
-      ['', { sessionId: 's1', toolCallId: 'c1', sent: true }],
+      [
+        'Hi',
+        { sessionId: 's1', chatInput: 'Hi', toolCallId: 'c1', sendMessage: 'From the tool', sent: true },
+      ],
+      ['', { sessionId: 's1', toolCallId: 'c1', sendMessage: 'From the tool', sent: true }],
     ] as const) {
       chunks = [];
       const requests = scriptModel('Model', [toolCalls(['Reply', {}, 'c1']), 'done']);
@@ -288,6 +291,10 @@ describe('Send Message', () => {
       ]);
       const toolMessage = requests[1].messages.find((m) => m.role === 'tool');
       expect(JSON.parse(String(toolMessage?.content))).toEqual([expected]);
+      // the tool's run keeps the sent message on its output item, as n8n's sendMessage
+      expect(JSON.stringify(result.state.resultData.runData.Reply)).toContain(
+        '"sendMessage":"From the tool"',
+      );
     }
   });
 });
@@ -417,6 +424,17 @@ describe('the chat reply', () => {
       { body: { action: 'sendMessage', sessionId: 's1', chatInput: 'Ada', extra: 'dropped' } },
     );
     expect(result.workflowData).toEqual([[{ json: { sessionId: 's1', chatInput: 'Ada' } }]]);
+  });
+
+  it("saves the reply as the run's input highlighted data of the node unless its own option is off", async () => {
+    const on = await replyHook({ responseType: 'freeText' }, { body: { sessionId: 's1', chatInput: 'Ada' } });
+    expect(on.customData).toEqual({ input_reply: 'Ada' });
+    const off = await replyHook(
+      { responseType: 'freeText', options: { autoSaveHighlightedData: false } },
+      { body: { sessionId: 's1', chatInput: 'Ada' } },
+    );
+    expect(off.customData).toBeUndefined();
+    expect(off.workflowData).toEqual(on.workflowData);
   });
 
   it('a typed answer to an approval approves nothing, whatever the body says', async () => {
