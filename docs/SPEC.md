@@ -97,7 +97,7 @@
 | Redis, Kafka, RabbitMQ and MQTT nodes                                                                                | M2  | ✅                  |
 | AMQP Trigger and Sender                                                                                              | M2  | ✅                  |
 | Missed-schedule policy (catch-up), durable scheduler leases                                                          | M2  | ✅                  |
-| MCP Server Trigger (expose a workflow as MCP tools)                                                                  | M2  | 📋                  |
+| MCP Server Trigger (expose a workflow as MCP tools)                                                                  | M2  | ✅                  |
 
 ### 1.5 Executions and debugging
 
@@ -185,7 +185,7 @@
 | Chains: Basic LLM, Information Extractor, Text Classifier, Sentiment, Summarization, Retrieval QA                         | M1  | ✅                             |
 | Chat models: OpenAI, Anthropic, Gemini, Ollama, any OpenAI-compatible (OpenRouter, Groq, Mistral, DeepSeek, xAI...)       | M1  | ✅                             |
 | Memory: window, Postgres, Redis                                                                                           | M1  | ✅                             |
-| Tools: Calculator, Code, HTTP Request, Call Workflow, Think, Vector Store, MCP Client                                     | M1  | 🔨 (all but MCP Client ✅)        |
+| Tools: Calculator, Code, HTTP Request, Call Workflow, Think, Vector Store, MCP Client                                     | M1  | ✅                               |
 | RAG: embeddings (OpenAI, Gemini, Ollama), vector stores (in-memory, PGVector, Qdrant), loaders, splitters, output parsers | M1  | ✅                             |
 | Chat Trigger                                                                                                              | M1  | ✅                             |
 | Hosted/embeddable chat widget (sandbox origin)                                                                            | M2  | ✅                             |
@@ -210,8 +210,14 @@
 | Execution Data node and the highlighted-data filter on executions                                                         | M2  | ✅                             |
 | Evaluations page: test runs, run detail, metric chart, run in parallel                                                    | M2  | ✅                             |
 | Test run public API (start, list, cancel, cases) with scopes                                                              | M2  | ✅                             |
-| AI workflow copilot that produces reviewable drafts (NF-26)                                                               | M2  | 📋                             |
-| MCP server for the tenant (search/run/build workflows)                                                                    | M2  | 📋                             |
+| AI workflow copilot that produces reviewable drafts (NF-26)                                                               | M2  | ✅                             |
+| MCP server for the tenant (search/run/build workflows)                                                                    | M2  | ✅                             |
+| MCP OAuth server: sign-in, consent, client registration, token rules                                                      | M2  | ✅                             |
+| MCP settings page, keys, workflow access and the consent page                                                             | M2  | ✅                             |
+| MCP Client node (call one tool of an MCP server)                                                                          | M2  | ✅                             |
+| MCP OAuth2 credential with discovery and dynamic registration                                                             | M2  | ✅                             |
+| Builder plan mode: questions and a plan before it builds                                                                  | M2  | ✅                             |
+| Builder sessions: chat history, truncate and compaction                                                                   | M2  | ✅                             |
 
 ### 1.13 Users, access and authentication
 
