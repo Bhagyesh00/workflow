@@ -4,11 +4,26 @@
  */
 import type { BuilderMessage } from '@workflow/workflow';
 import type { ServerContext } from '../../context';
+import type { BuilderSessionRow } from '../../repositories/builder-sessions';
 import type { BuilderSession, BuilderSessionKey } from './types';
 
+function fromRow(key: BuilderSessionKey, row: BuilderSessionRow | undefined): BuilderSession {
+  return {
+    tenantId: key.tenantId,
+    workflowId: key.workflowId,
+    userId: key.userId,
+    messages: Array.isArray(row?.messages) ? structuredClone(row.messages) : [],
+    previousSummary: row?.previousSummary ?? null,
+    activeVersionCardId: row?.activeVersionCardId ?? null,
+    resumeAfterRestoreMessageId: row?.resumeAfterRestoreMessageId ?? null,
+    allowedWebDomains: Array.isArray(row?.allowedWebDomains) ? [...row.allowedWebDomains] : [],
+  };
+}
+
 /** the stored session, or an empty one (no row written) when this user has none for this workflow */
-export async function loadSession(_ctx: ServerContext, _key: BuilderSessionKey): Promise<BuilderSession> {
-  throw new Error('not implemented (L1)');
+export async function loadSession(ctx: ServerContext, key: BuilderSessionKey): Promise<BuilderSession> {
+  const row = await ctx.repos.builderSessions.get(key.tenantId, key.workflowId, key.userId);
+  return fromRow(key, row);
 }
 
 /**
@@ -17,9 +32,17 @@ export async function loadSession(_ctx: ServerContext, _key: BuilderSessionKey):
  * Returns the saved session.
  */
 export async function saveTurn(
-  _ctx: ServerContext,
-  _session: BuilderSession,
-  _messages: BuilderMessage[],
+  ctx: ServerContext,
+  session: BuilderSession,
+  messages: BuilderMessage[],
 ): Promise<BuilderSession> {
-  throw new Error('not implemented (L1)');
+  const { tenantId, workflowId, userId } = session;
+  const row = await ctx.repos.builderSessions.upsert(tenantId, workflowId, userId, {
+    messages: [...session.messages, ...messages],
+    previousSummary: session.previousSummary,
+    activeVersionCardId: session.activeVersionCardId,
+    resumeAfterRestoreMessageId: session.resumeAfterRestoreMessageId,
+    allowedWebDomains: session.allowedWebDomains,
+  });
+  return fromRow({ tenantId, workflowId, userId }, row);
 }
