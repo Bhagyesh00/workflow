@@ -9,7 +9,7 @@ import { ArrowLeft } from 'lucide-react';
 import { Link, useParams } from 'react-router';
 import { errorMessage } from '../api/client';
 import { evaluationsApi, workflowsApi } from '../api/endpoints';
-import { queryKeys, useMe } from '../api/queries';
+import { queryKeys, useMe, useSettings } from '../api/queries';
 import { MetricsChart } from '../components/evaluations/MetricsChart';
 import { RunControls } from '../components/evaluations/RunControls';
 import { EVALUATION_POLL_MS, isActiveRun } from '../components/evaluations/RunStatusPill';
@@ -26,6 +26,7 @@ export function EvaluationsPage() {
   const { id = '' } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
   const canWrite = useMe().data?.role !== 'viewer';
+  const concurrencyLimit = useSettings().evaluationConcurrencyLimit;
 
   const workflow = useQuery({
     queryKey: queryKeys.workflow(id),
@@ -92,6 +93,7 @@ export function EvaluationsPage() {
         </p>
         <RunControls
           canWrite={canWrite}
+          concurrencyLimit={concurrencyLimit}
           blockedReason={
             workflow.isSuccess && !steps.trigger
               ? 'Add an Evaluation Trigger to the workflow to run a test.'

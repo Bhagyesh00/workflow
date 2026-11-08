@@ -3,7 +3,7 @@
  * runs table, metrics chart, Run with "run in parallel", Stop test, delete, cases table, cancel of a pending
  * case, error texts, polling, and the read-only view of a viewer.
  */
-import { act, configure, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   type Connections,
@@ -12,9 +12,11 @@ import {
   TEST_CASE_ERROR_TEXTS,
   TEST_RUN_ERROR_HINTS,
   TEST_RUN_ERROR_TEXTS,
+  type TestRunDto,
   type WorkflowNode,
 } from '@workflow/workflow';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { RunControls } from '../src/components/evaluations/RunControls';
 import { runStatusLabel } from '../src/components/evaluations/RunStatusPill';
 import { setupSteps } from '../src/components/evaluations/SetupGuide';
 import { seedTestRun, updateTestRun } from '../src/demo/mock-evaluations';
@@ -186,6 +188,54 @@ describe('metrics chart', () => {
   });
 });
 
+describe('run controls and the workspace limit', () => {
+  const controls = (concurrencyLimit: number | undefined, onStart = vi.fn()) => (
+    <RunControls
+      canWrite
+      blockedReason={null}
+      running={false}
+      starting={false}
+      stopping={false}
+      concurrencyLimit={concurrencyLimit}
+      onStart={onStart}
+      onStop={() => undefined}
+    />
+  );
+  const slider = () => screen.queryByRole('slider', { name: 'Run in parallel' });
+
+  it('stops the slider at the smaller of 10 and the limit', () => {
+    const { rerender } = render(controls(3));
+    expect(slider()?.getAttribute('max')).toBe('3');
+    rerender(controls(50));
+    expect(slider()?.getAttribute('max')).toBe('10');
+  });
+
+  it('hides the slider at a limit of 1 and while the limit is unknown, and still runs', async () => {
+    const onStart = vi.fn();
+    const { rerender } = render(controls(1, onStart));
+    expect(slider()).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    expect(onStart).toHaveBeenCalledWith(undefined);
+    rerender(controls(undefined, onStart));
+    expect(slider()).toBeNull();
+  });
+
+  it('cuts a kept count to a lower limit when it reads it', async () => {
+    const onStart = vi.fn();
+    const { rerender } = render(controls(10, onStart));
+    fireEvent.change(slider() as HTMLInputElement, { target: { value: '8' } });
+    expect(screen.getByText('8 at once')).toBeTruthy();
+    rerender(controls(4, onStart));
+    expect(screen.getByText('4 at once')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    expect(onStart).toHaveBeenCalledWith(4);
+    // a limit that falls to 1 sends nothing
+    rerender(controls(1, onStart));
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    expect(onStart).toHaveBeenLastCalledWith(undefined);
+  });
+});
+
 describe('run, parallel and stop', () => {
   it('starts a run on the demo, polls it to the end and shows the scores', async () => {
     const wf = seedWorkflow();
@@ -204,7 +254,8 @@ describe('run, parallel and stop', () => {
     const wf = seedWorkflow();
     await openList(wf.id);
     const slider = await screen.findByRole('slider', { name: 'Run in parallel' });
-    expect(slider.getAttribute('max')).toBe('10');
+    // the demo settings answer a limit of 5
+    expect(slider.getAttribute('max')).toBe('5');
     expect(screen.getByText('One at a time')).toBeTruthy();
     fireEvent.change(slider, { target: { value: '3' } });
     expect(screen.getByText('3 at once')).toBeTruthy();
@@ -257,6 +308,33 @@ describe('run, parallel and stop', () => {
     expect((reply.body as { error: { message: string } }).error.message).toBe(
       'Workflow has no evaluation trigger',
     );
+  });
+
+  it('averages each metric over the cases that have it, failed cases included', async () => {
+    // Set Metrics is never reached, so every case fails with NO_METRICS_COLLECTED
+    const wf = seedWorkflow(FULL_NODES, {
+      Dataset: { main: [[{ node: 'Outputs', type: 'main' as const, index: 0 }]] },
+    });
+    const start = await backend().handle({
+      method: 'POST',
+      path: `/workflows/${wf.id}/test-runs/new`,
+      body: {},
+    });
+    const { testRunId } = (start.body as { data: { testRunId: string } }).data;
+    let run: TestRunDto | undefined;
+    await waitFor(async () => {
+      const reply = await backend().handle({
+        method: 'GET',
+        path: `/workflows/${wf.id}/test-runs/${testRunId}`,
+      });
+      run = (reply.body as { data: TestRunDto }).data;
+      expect(run.status).toBe('completed');
+    });
+    expect(run?.finalResult).toBe('error');
+    expect(run?.caseCounts.error).toBe(run?.caseCounts.total);
+    // the predefined metrics of the failed cases still make the run's mean
+    expect(Object.keys(run?.metrics ?? {})).toEqual(['executionTime']);
+    expect(typeof run?.metrics?.executionTime).toBe('number');
   });
 
   it('polls while a run goes', async () => {

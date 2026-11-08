@@ -49,7 +49,7 @@ import {
 import { filterExecutionList, registerAnnotationRoutes } from './mock-annotations';
 import { registerChatRoutes } from './mock-chat';
 import { registerDataTableRoutes, searchDataTables } from './mock-data-tables';
-import { registerEvaluationRoutes } from './mock-evaluations';
+import { DEMO_EVALUATION_CONCURRENCY_LIMIT, registerEvaluationRoutes } from './mock-evaluations';
 import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
 import { registerFormAuthRoutes } from './mock-form-auth';
 import { copy, HttpError, now, page } from './mock-http';
@@ -815,6 +815,7 @@ export class MockBackend {
         limits: { executionTimeoutMax: 3600 },
         features: { demo: true },
         autosaveEnabled: true,
+        evaluationConcurrencyLimit: DEMO_EVALUATION_CONCURRENCY_LIMIT,
         workflowReviews: copy(
           this.session ? this.settingsOf(this.session.tenantId).workflowReviews : { enabled: false },
         ),

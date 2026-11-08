@@ -7,9 +7,9 @@
  *
  * The rules follow the server's service (services/evaluations.ts): a workflow without an Evaluation Trigger
  * is a 409, a disabled trigger or a missing Set Metrics node ends the run with that error code, the run's
- * `concurrency` is clamped to 1..MAX_EVALUATION_CONCURRENCY, a run that is new or running cannot be deleted,
+ * `concurrency` is clamped to 1..DEMO_EVALUATION_CONCURRENCY_LIMIT, a run that is new or running cannot be deleted,
  * only a case that has not started can be cancelled, and a completed run holds the mean of each metric over
- * its successful cases and a `finalResult` of the worst case.
+ * the cases that have it and a `finalResult` of the worst case.
  * State lives in `backend.ext.testRuns`.
  */
 import {
@@ -29,6 +29,9 @@ import { newId } from '../lib/ids';
 import { demoEvaluationRows } from './fixtures';
 import type { MockBackend, StoredWorkflow } from './mock-backend';
 import { HttpError, now } from './mock-http';
+
+/** what /settings tells the demo editor, like the server's CONCURRENCY_EVALUATION_LIMIT default */
+export const DEMO_EVALUATION_CONCURRENCY_LIMIT = 5;
 
 interface StoredRun extends TestRunDto {
   tenantId: string;
@@ -111,11 +114,11 @@ function outputOf(wf: StoredWorkflow, runData: RunData, pick: (operation: string
   return null;
 }
 
-/** mean of each metric over the successful cases; null when none has metrics */
+/** mean of each metric over the cases that have it (failed cases still add the predefined metrics); null when none has metrics */
 function meanMetrics(cases: StoredCase[]): Record<string, number> | null {
   const sums = new Map<string, { sum: number; count: number }>();
   for (const c of cases) {
-    if (c.status !== 'success' || !c.metrics) continue;
+    if (!c.metrics) continue;
     for (const [name, value] of Object.entries(c.metrics)) {
       const entry = sums.get(name) ?? { sum: 0, count: 0 };
       entry.sum += value;
@@ -156,6 +159,9 @@ async function runCase(
   testCase.outputs =
     (outputOf(wf, runData, (operation) => operation === 'setOutputs')?.json as DataObject | undefined) ??
     null;
+  // as the server: a failed case still keeps the predefined metrics
+  const predefined = { executionTime: execution.durationMs ?? 0 };
+  testCase.metrics = predefined;
   if (execution.status !== 'success') {
     testCase.status = 'error';
     testCase.errorCode = 'FAILED_TO_EXECUTE_WORKFLOW';
@@ -175,7 +181,7 @@ async function runCase(
     return;
   }
   testCase.status = 'success';
-  testCase.metrics = { ...metrics, executionTime: execution.durationMs ?? 0 };
+  testCase.metrics = { ...metrics, ...predefined };
 }
 
 /** run the cases of `run`, `run.concurrency` at once, then complete it (unless it was stopped) */
@@ -335,7 +341,11 @@ export function registerEvaluationRoutes(backend: MockBackend): void {
     if (body.rowIndices !== undefined && !Array.isArray(body.rowIndices)) {
       throw badRequest('rowIndices must be a list of row numbers');
     }
-    const concurrency = Math.min((requested as number | undefined) ?? 1, MAX_EVALUATION_CONCURRENCY);
+    const concurrency = Math.min(
+      (requested as number | undefined) ?? 1,
+      MAX_EVALUATION_CONCURRENCY,
+      DEMO_EVALUATION_CONCURRENCY_LIMIT,
+    );
     const s = state();
     const stamp = now();
     const run: StoredRun = {
