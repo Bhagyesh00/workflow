@@ -5,22 +5,36 @@
  * autosave, duplicate, convert to sub-workflow). `clearReview` ends a review and any running stream;
  * `reset` also clears the chat, so another workflow never sees this one's stream or draft.
  *
- * C0 holds the state, the setters, `clearReview` and `reset`; L2 fills the actions (`send` ...
- * `loadHistory`), which L3, L4, L5 and L6 call by these names.
+ * The actions (`send` ... `loadHistory`) are what L3, L4, L5 and L6 call. A turn: the first send on a new
+ * canvas saves the row once; the request carries the canvas as `workflowData`; the first `workflow-updated`
+ * takes the snapshot and starts the review (before the canvas changes, so autosave never sees the draft);
+ * the turn's `abortController` lives here, so `stop`, `clearReview` and `reset` end the stream.
  */
-import type {
-  BuilderChunk,
-  BuilderMessage,
-  BuilderMode,
-  BuilderPlan,
-  BuilderQuestion,
-  BuilderResume,
+import {
+  BUILDER_PROMPT_LIMIT,
+  BUILDER_PROMPT_TOO_LONG,
+  type BuilderChunk,
+  type BuilderMessage,
+  type BuilderMode,
+  type BuilderPlan,
+  type BuilderQuestion,
+  type BuilderResume,
+  type BuildRequest,
 } from '@workflow/workflow';
 import type { ReactFlowInstance } from '@xyflow/react';
 import { create } from 'zustand';
-import type { EditorDeps } from '../features/editor/editor-actions';
+import { streamBuild } from '../api/ai-stream';
+import { errorMessage } from '../api/client';
+import { aiApi, credentialsApi } from '../api/endpoints';
+import type { CredentialSummary } from '../api/types';
+import { acceptBuilderDraft } from '../features/builder/accept-draft';
+import { applyBuilderChunk, setBuilderCredentials } from '../features/builder/apply-chunk';
+import { notifyBuilderDone } from '../features/builder/notify';
+import { type EditorDeps, runWorkflow, saveWorkflow } from '../features/editor/editor-actions';
+import { newId } from '../lib/ids';
 import type { WorkflowGraph } from '../lib/workflow-ops';
 import { toast, useUiStore } from './ui-store';
+import { graphOf, toWorkflowBody, useWorkflowStore } from './workflow-store';
 
 /** the toast every save path shows while a draft is under review */
 export const BUILDER_REVIEW_BLOCKED = 'Accept or discard the draft first';
@@ -142,9 +156,56 @@ export const builderInitialState = (): Omit<BuilderStateData, 'deps'> => ({
   abortController: null,
 });
 
-const notImplemented = (): never => {
-  throw new Error('not implemented (L2)');
-};
+/** title of a turn that failed before or outside the stream (a failed request, not an `error` chunk) */
+export const BUILDER_REQUEST_FAILED = "Couldn't build the workflow";
+/** title of a chat history that did not load */
+export const BUILDER_HISTORY_FAILED = "Couldn't load the chat";
+
+const isAbort = (error: unknown): boolean => (error as { name?: unknown } | null)?.name === 'AbortError';
+
+/** the user's credentials for the client-side assignment; none when they cannot be read */
+async function loadCredentials(): Promise<CredentialSummary[]> {
+  try {
+    return await credentialsApi.list();
+  } catch {
+    return [];
+  }
+}
+
+/** a `tool` chunk on the progress rows: it updates the running row of that tool, else it is a new row */
+function withProgress(
+  rows: BuilderProgress[],
+  chunk: Extract<BuilderChunk, { type: 'tool' }>,
+): BuilderProgress[] {
+  const row: BuilderProgress = {
+    toolName: chunk.toolName,
+    status: chunk.status,
+    ...(chunk.summary ? { summary: chunk.summary } : {}),
+  };
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].toolName === chunk.toolName && rows[i].status === 'running') {
+      return rows.map((r, at) => (at === i ? { ...r, ...row } : r));
+    }
+  }
+  return [...rows, row];
+}
+
+/** a `message` chunk on the chat: a delta adds to its message, a whole text replaces it */
+function withMessage(
+  messages: BuilderMessage[],
+  chunk: Extract<BuilderChunk, { type: 'message' }>,
+): BuilderMessage[] {
+  const at = messages.findIndex((m) => m.id === chunk.id);
+  if (at < 0) {
+    return [
+      ...messages,
+      { id: chunk.id, role: 'assistant', text: chunk.text, createdAt: new Date().toISOString() },
+    ];
+  }
+  return messages.map((m, i) =>
+    i === at ? { ...m, text: chunk.delta ? m.text + chunk.text : chunk.text } : m,
+  );
+}
 
 export const useBuilderStore = create<BuilderState>()((set, get) => ({
   ...builderInitialState(),
@@ -205,13 +266,170 @@ export const useBuilderStore = create<BuilderState>()((set, get) => ({
     set(builderInitialState());
   },
 
-  send: async () => notImplemented(),
-  stop: () => notImplemented(),
-  applyChunk: () => notImplemented(),
-  acceptDraft: async () => notImplemented(),
-  discardDraft: () => notImplemented(),
-  runDraft: async () => notImplemented(),
-  loadHistory: async () => notImplemented(),
+  async send(text, options = {}) {
+    const start = get();
+    const resumeData = options.resumeData;
+    const deps = start.deps;
+    if (start.streaming || !deps) return;
+    if (!text.trim() && !resumeData) return;
+    if (text.length > BUILDER_PROMPT_LIMIT) {
+      set({ error: { title: BUILDER_REQUEST_FAILED, message: BUILDER_PROMPT_TOO_LONG } });
+      return;
+    }
+    if (useWorkflowStore.getState().readOnly) return;
+
+    const controller = new AbortController();
+    set({
+      abortController: controller,
+      streaming: true,
+      error: null,
+      progress: [],
+      questions: null,
+      plan: null,
+      pendingWebFetch: null,
+    });
+    if (text.trim()) {
+      get().addMessage({ id: newId(), role: 'user', text, createdAt: new Date().toISOString() });
+    }
+    let ended = false;
+    try {
+      // a new canvas gets its row first (n8n saves before the first build): the draft then has a version
+      // to be reviewed against, and the server a workflow to build for
+      if (!useWorkflowStore.getState().meta.id) {
+        const created = await saveWorkflow(deps);
+        if (!created || controller.signal.aborted) return;
+      }
+      setBuilderCredentials(await loadCredentials());
+      if (controller.signal.aborted) return;
+      const wf = useWorkflowStore.getState();
+      const body: BuildRequest = {
+        workflowId: wf.meta.id as string,
+        text,
+        workflowData: { id: wf.meta.id, ...toWorkflowBody(wf) },
+        mode: get().mode,
+        ...(resumeData ? { resumeData } : {}),
+      };
+      await streamBuild(
+        body,
+        (chunk) => {
+          if (!controller.signal.aborted) get().applyChunk(chunk);
+        },
+        controller.signal,
+      );
+      ended = !controller.signal.aborted;
+    } catch (error) {
+      if (!controller.signal.aborted && !isAbort(error)) {
+        set({ error: { title: BUILDER_REQUEST_FAILED, message: errorMessage(error) } });
+        ended = true;
+      }
+    } finally {
+      if (get().abortController === controller) set({ abortController: null, streaming: false });
+      setBuilderCredentials([]);
+      if (ended) notifyBuilderDone();
+    }
+  },
+
+  stop() {
+    const controller = get().abortController;
+    if (controller && !controller.signal.aborted) controller.abort();
+    set((s) => ({
+      abortController: null,
+      streaming: false,
+      progress: s.progress.map(
+        (p): BuilderProgress => (p.status === 'running' ? { ...p, status: 'error', summary: 'Stopped' } : p),
+      ),
+    }));
+  },
+
+  applyChunk(chunk) {
+    switch (chunk.type) {
+      case 'message':
+        set((s) => ({ messages: withMessage(s.messages, chunk) }));
+        return;
+      case 'tool':
+        set((s) => ({ progress: withProgress(s.progress, chunk) }));
+        return;
+      case 'workflow-updated': {
+        if (useWorkflowStore.getState().readOnly) return;
+        if (!get().reviewing) {
+          // the canvas before the builder's first change; the review starts before the canvas changes,
+          // so autosave never schedules the draft
+          const wf = useWorkflowStore.getState();
+          set({
+            snapshot: { graph: graphOf(wf), versionId: wf.meta.versionId, dirty: wf.dirty },
+            reviewing: true,
+          });
+        }
+        applyBuilderChunk(chunk, get().deps);
+        return;
+      }
+      case 'execution-requested':
+        get().addMessage({
+          id: newId(),
+          role: 'assistant',
+          text: chunk.reason?.trim() || 'Run the draft to test it.',
+          createdAt: new Date().toISOString(),
+        });
+        return;
+      case 'questions':
+        set({ questions: chunk.questions });
+        return;
+      case 'plan':
+        set({ plan: chunk.plan });
+        return;
+      case 'session-messages':
+        set({ messages: chunk.messages });
+        return;
+      case 'web-fetch-approval':
+        set({ pendingWebFetch: { url: chunk.url, domain: chunk.domain } });
+        return;
+      case 'error':
+        set({ error: { title: chunk.title, message: chunk.message } });
+        return;
+    }
+  },
+
+  async acceptDraft() {
+    const deps = get().deps;
+    if (!deps) return false;
+    return (await acceptBuilderDraft(deps)) !== null;
+  },
+
+  discardDraft() {
+    const { snapshot } = get();
+    // end the stream first, so no late chunk lands on the restored canvas
+    get().clearReview();
+    if (!snapshot) return;
+    const wf = useWorkflowStore.getState();
+    wf.load({ ...wf.meta, ...snapshot.graph, versionId: snapshot.versionId }, { readOnly: wf.readOnly });
+    if (snapshot.dirty) useWorkflowStore.setState((s) => ({ dirty: true, revision: s.revision + 1 }));
+  },
+
+  async runDraft() {
+    const { deps, streaming } = get();
+    if (!deps || streaming) return;
+    await runWorkflow(deps);
+  },
+
+  async loadHistory(workflowId) {
+    try {
+      const session = await aiApi.sessions(workflowId);
+      // a turn started meanwhile, or another workflow is open: its chat wins
+      if (get().streaming || useWorkflowStore.getState().meta.id !== workflowId) return;
+      const messages = session.messages ?? [];
+      const last = messages.at(-1);
+      const waiting = last?.role === 'assistant' ? last : undefined;
+      set({
+        messages,
+        // a turn that ended on questions or a plan waits for the answer, also after a reload
+        questions: waiting?.questions?.length ? waiting.questions : null,
+        plan: waiting?.plan && !waiting.questions?.length ? waiting.plan : null,
+      });
+    } catch (error) {
+      if (useWorkflowStore.getState().meta.id !== workflowId) return;
+      set({ error: { title: BUILDER_HISTORY_FAILED, message: errorMessage(error) } });
+    }
+  },
 }));
 
 /**
