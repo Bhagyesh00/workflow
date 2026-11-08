@@ -374,6 +374,19 @@ export class WebhookService {
     const hook = this.hookOf(definition, node, found.webhookName);
     // /form serves only form hooks, /webhook none
     if (!hook || webhookUrlBase(hook.description) !== kind) return missing();
+    // P5-03: the MCP Server Trigger owns its transports, sessions and runs; its body is read there
+    if (kind === 'mcp') {
+      return this.deps.mcpTrigger.handle({
+        tenant,
+        definition,
+        workflowId: row.id,
+        node,
+        hook,
+        mode: 'webhook',
+        incoming,
+        params: found.params,
+      });
+    }
     const workflow = new Workflow(definition, this.deps.nodeTypes);
     const source: CorsSource = { tenant, mode: 'webhook', workflowId: row.id, workflow, node };
     const cors = (reply: WebhookReply) => this.decorate(reply, source, incoming.headers);
@@ -574,17 +587,10 @@ export class WebhookService {
     if (chat && testToken !== undefined && !this.chatTokenValid(testToken, CHAT_TOKEN_KINDS.test, source)) {
       return this.decorate(json(403, errorBody('forbidden', STALE_TEST_TOKEN)), source, incoming.headers);
     }
-    // a body that cannot be read (too large, malformed) leaves the registration in place
-    let received: ReceivedWebhook;
-    try {
-      received = await receive(incoming);
-    } catch (error) {
-      return this.decorate(bodyErrorReply(error, kind), source, incoming.headers);
-    }
     // one-shot: the first call consumes the registration. A form or a chat uses it up only with an accepted
-    // request, and then for all of its hooks: its page (setup) and a refused POST leave it listening.
-    const claimOnAccept = kind === 'form' || chat;
-    if (!claimOnAccept && !(await testWebhooks.remove(registration))) return missing();
+    // request, and then for all of its hooks: its page (setup) and a refused POST leave it listening. An MCP
+    // Server Trigger uses it up with its first tool call (P5-03): initialize, lists and its stream leave it.
+    const claimOnAccept = kind === 'form' || kind === 'mcp' || chat;
     // the claim takes only this listen's registrations: a listen that replaced them meanwhile keeps its own
     const claim = async () => {
       if (!(await testWebhooks.remove(registration))) return missing();
@@ -596,6 +602,30 @@ export class WebhookService {
       );
       return undefined;
     };
+    if (kind === 'mcp') {
+      return this.deps.mcpTrigger.handle({
+        tenant,
+        definition,
+        workflowId: registration.workflowId,
+        node,
+        hook,
+        mode: 'manual',
+        incoming,
+        params: found.params,
+        userId: registration.userId,
+        claim,
+        onStarted: (executionId) =>
+          push.send(tenant.id, 'testWebhookReceived', { workflowId: registration.workflowId, executionId }),
+      });
+    }
+    // a body that cannot be read (too large, malformed) leaves the registration in place
+    let received: ReceivedWebhook;
+    try {
+      received = await receive(incoming);
+    } catch (error) {
+      return this.decorate(bodyErrorReply(error, kind), source, incoming.headers);
+    }
+    if (!claimOnAccept && !(await testWebhooks.remove(registration))) return missing();
     return this.run({
       claim: claimOnAccept ? claim : undefined,
       tenant,
