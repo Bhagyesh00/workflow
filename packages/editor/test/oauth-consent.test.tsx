@@ -157,7 +157,9 @@ describe('OAuth consent page (P5-15)', () => {
 describe('consentRedirectProblem', () => {
   it('accepts an address on the shown host and refuses the rest', () => {
     expect(consentRedirectProblem('https://client.example.com/cb?code=1', 'client.example.com')).toBeNull();
-    expect(consentRedirectProblem('cursor://anysphere.cursor-mcp/oauth/callback?code=1', 'anysphere.cursor-mcp')).toBeNull();
+    expect(
+      consentRedirectProblem('cursor://anysphere.cursor-mcp/oauth/callback?code=1', 'anysphere.cursor-mcp'),
+    ).toBeNull();
     expect(consentRedirectProblem('http://localhost:8080/cb', 'localhost:8080')).toBeNull();
     expect(consentRedirectProblem('http://client.example.com/cb', 'client.example.com')).not.toBeNull();
     expect(consentRedirectProblem('https://client.example.com/cb', 'other.example.com')).not.toBeNull();

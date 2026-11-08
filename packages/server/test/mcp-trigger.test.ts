@@ -148,11 +148,17 @@ async function signup() {
   return { client, ...data };
 }
 
-const toolLink = () => ({ ai_tool: [[{ node: TRIGGER, type: 'ai_tool', index: 0 }]] }) as unknown as DataObject;
+const toolLink = () =>
+  ({ ai_tool: [[{ node: TRIGGER, type: 'ai_tool', index: 0 }]] }) as unknown as DataObject;
 
 async function mcpWorkflow(
   client: TestClient,
-  options: { path?: string; parameters?: DataObject; credentials?: Record<string, { id: string; name: string }>; activate?: boolean } = {},
+  options: {
+    path?: string;
+    parameters?: DataObject;
+    credentials?: Record<string, { id: string; name: string }>;
+    activate?: boolean;
+  } = {},
 ) {
   const path = options.path ?? `tools-${randomUUID().slice(0, 8)}`;
   const wf = await createWorkflow(client, {
@@ -201,7 +207,10 @@ const sseClient = async (url: string, headers: Record<string, string> = {}) => {
 };
 
 const modernClient = async (url: string, headers: Record<string, string> = {}) => {
-  const client = new Client({ name: 'modern-test', version: '1.0.0' }, { versionNegotiation: { mode: 'auto' } });
+  const client = new Client(
+    { name: 'modern-test', version: '1.0.0' },
+    { versionNegotiation: { mode: 'auto' } },
+  );
   await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } }));
   return client;
 };
@@ -230,7 +239,11 @@ const rpcBody = async (res: Response) => (await res.json()) as RpcBody;
 const post = (url: string, body: unknown, headers: Record<string, string> = {}) =>
   fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+      ...headers,
+    },
     body: typeof body === 'string' ? body : JSON.stringify(body),
   });
 
@@ -261,9 +274,13 @@ describe('MCP Server Trigger with real clients', () => {
       expect(tools.map((t) => t.name).sort()).toEqual(['Calculator', 'Shout', 'echo']);
       // listing runs nothing
       expect(await executionsOf(server.ctx, tenant.id, wf.id)).toHaveLength(0);
-      expect(textOf(await mcp.client.callTool({ name: 'Calculator', arguments: { input: '6 * 7' } }))).toBe('42');
+      expect(textOf(await mcp.client.callTool({ name: 'Calculator', arguments: { input: '6 * 7' } }))).toBe(
+        '42',
+      );
       expect(await executionsOf(server.ctx, tenant.id, wf.id)).toHaveLength(1);
-      expect(textOf(await mcp.client.callTool({ name: 'Shout', arguments: { query: 'hello' } }))).toBe('HELLO');
+      expect(textOf(await mcp.client.callTool({ name: 'Shout', arguments: { query: 'hello' } }))).toBe(
+        'HELLO',
+      );
       // one execution per call, with the trigger item n8n's shape
       const runs = await executionsOf(server.ctx, tenant.id, wf.id);
       expect(runs).toHaveLength(2);
@@ -337,7 +354,9 @@ describe('auth and redaction', () => {
 
   async function withCredential(type: string, data: DataObject, authentication: string) {
     const user = await signup();
-    const credential = await user.client.data(user.client.post('/rest/credentials', { name: type, type, data }));
+    const credential = await user.client.data(
+      user.client.post('/rest/credentials', { name: type, type, data }),
+    );
     const wf = await mcpWorkflow(user.client, {
       parameters: { authentication },
       credentials: { [type]: { id: credential.id, name: type } },
@@ -347,7 +366,9 @@ describe('auth and redaction', () => {
 
   it('Bearer: 401 without or with a wrong token, and the token never reaches a tool or the run data', async () => {
     const { tenant, wf, url } = await withCredential('httpBearerAuth', { token: BEARER }, 'bearerAuth');
-    for (const headers of [{}, { authorization: 'Bearer wrong-token' }, { authorization: BEARER }] as Array<Record<string, string>>) {
+    for (const headers of [{}, { authorization: 'Bearer wrong-token' }, { authorization: BEARER }] as Array<
+      Record<string, string>
+    >) {
       const res = await post(url, INIT, headers);
       expect(res.status).toBe(401);
       expect(res.headers.get('www-authenticate')).toBe('Bearer realm="MCP Server"');
@@ -358,7 +379,10 @@ describe('auth and redaction', () => {
     try {
       const answer = textOf(await mcp.client.callTool({ name: 'echo', arguments: { text: 'hi' } }));
       expect(JSON.parse(answer).args).toEqual({ text: 'hi' });
-      expect(JSON.parse(answer).item.headers).toMatchObject({ authorization: '**hidden**', cookie: '**hidden**' });
+      expect(JSON.parse(answer).item.headers).toMatchObject({
+        authorization: '**hidden**',
+        cookie: '**hidden**',
+      });
       expect(answer).not.toContain(BEARER);
       expect(answer).not.toContain('cookie-secret');
       const execution = await lastExecution(tenant.id, wf.id);
@@ -394,14 +418,20 @@ describe('auth and redaction', () => {
     expect((await post(open.url, INIT)).status).toBe(200);
     const { client, url, wf } = await withCredential('httpBearerAuth', { token: BEARER }, 'bearerAuth');
     const session = await openSession(url, { authorization: `Bearer ${BEARER}` });
-    const ok = await post(url, rpc('tools/list'), { authorization: `Bearer ${BEARER}`, 'mcp-session-id': session });
+    const ok = await post(url, rpc('tools/list'), {
+      authorization: `Bearer ${BEARER}`,
+      'mcp-session-id': session,
+    });
     expect(ok.status).toBe(200);
     // the token changes: the old session belongs to another subject now
     const definition = await client.data(client.get(`/rest/workflows/${wf.id}`));
-    const credentialId = (definition.nodes as Array<{ credentials?: DataObject }>)[0].credentials?.httpBearerAuth as {
+    const credentialId = (definition.nodes as Array<{ credentials?: DataObject }>)[0].credentials
+      ?.httpBearerAuth as {
       id: string;
     };
-    await client.data(client.patch(`/rest/credentials/${credentialId.id}`, { data: { token: `${BEARER}-new` } }));
+    await client.data(
+      client.patch(`/rest/credentials/${credentialId.id}`, { data: { token: `${BEARER}-new` } }),
+    );
     const moved = await post(url, rpc('tools/list'), {
       authorization: `Bearer ${BEARER}-new`,
       'mcp-session-id': session,
@@ -428,7 +458,9 @@ describe('sessions and transport rules', () => {
     expect(res.status).toBe(404);
     expect((await rpcBody(res)).error.message).toBe('Session not found');
     // DELETE of an unknown or missing session
-    expect((await fetch(url, { method: 'DELETE', headers: { 'mcp-session-id': sessionId } })).status).toBe(404);
+    expect((await fetch(url, { method: 'DELETE', headers: { 'mcp-session-id': sessionId } })).status).toBe(
+      404,
+    );
     const missing = await fetch(url, { method: 'DELETE' });
     expect(missing.status).toBe(400);
     expect((await rpcBody(missing)).error.message).toBe('No sessionId provided');
@@ -471,7 +503,9 @@ describe('sessions and transport rules', () => {
     expect(ping.headers.get('access-control-allow-origin')).toBe('*');
     expect(ping.headers.get('access-control-allow-credentials')).toBeNull();
     expect(ping.headers.get('access-control-expose-headers')).toContain('mcp-session-id');
-    expect((await post(url, { jsonrpc: '2.0', method: 'notifications/initialized' }, headers)).status).toBe(202);
+    expect((await post(url, { jsonrpc: '2.0', method: 'notifications/initialized' }, headers)).status).toBe(
+      202,
+    );
     const unknown = await post(url, rpc('resources/list'), headers);
     expect((await rpcBody(unknown)).error.code).toBe(-32601);
   });
@@ -544,7 +578,9 @@ describe('test URL', () => {
     try {
       expect((await mcp.client.listTools()).tools).toHaveLength(3);
       expect((await registrations()).length).toBeGreaterThan(0);
-      expect(textOf(await mcp.client.callTool({ name: 'Calculator', arguments: { input: '3 + 4' } }))).toBe('7');
+      expect(textOf(await mcp.client.callTool({ name: 'Calculator', arguments: { input: '3 + 4' } }))).toBe(
+        '7',
+      );
       expect(await registrations()).toEqual([]);
       const execution = await lastExecution(tenant.id, wf.id);
       expect(execution?.mode).toBe('manual');

@@ -199,7 +199,12 @@ describe('shared/mcp-server.ts', () => {
     });
     const waiting = tool({
       invoke: async () => {
-        throw new ToolSuspension({ toolNode: 'Add', waitTill: new Date(), toolName: 'add', toolCallId: 'c1' });
+        throw new ToolSuspension({
+          toolNode: 'Add',
+          waitTill: new Date(),
+          toolName: 'add',
+          toolCallId: 'c1',
+        });
       },
     });
     await expect(callMcpTool(waiting, {})).rejects.toBeInstanceOf(ToolSuspension);
@@ -247,7 +252,10 @@ describe('MCP Server Trigger webhook', () => {
       },
     });
     // 2026 has no initialize: a client asking for it gets the newest 2025 revision
-    const latest = await callWebhook({}, { body: rpc('initialize', { protocolVersion: MCP_LATEST_REVISION }) });
+    const latest = await callWebhook(
+      {},
+      { body: rpc('initialize', { protocolVersion: MCP_LATEST_REVISION }) },
+    );
     expect(resultOf(latest).protocolVersion).toBe('2025-11-25');
   });
 
@@ -282,7 +290,10 @@ describe('MCP Server Trigger webhook', () => {
     const body = rpc('tools/call', { name: 'Calculator', arguments: { input: '1+1' } });
     const result = await callWebhook(
       {},
-      { body, headers: { host: 'h', authorization: 'Bearer abc', cookie: 'c=1', accept: 'application/json' } },
+      {
+        body,
+        headers: { host: 'h', authorization: 'Bearer abc', cookie: 'c=1', accept: 'application/json' },
+      },
     );
     expect(result.webhookResponse).toBeUndefined();
     expect(result.workflowData).toEqual([
@@ -290,7 +301,12 @@ describe('MCP Server Trigger webhook', () => {
         {
           json: {
             body,
-            headers: { host: 'h', authorization: MCP_REDACTED, cookie: MCP_REDACTED, accept: 'application/json' },
+            headers: {
+              host: 'h',
+              authorization: MCP_REDACTED,
+              cookie: MCP_REDACTED,
+              accept: 'application/json',
+            },
           },
         },
       ],
@@ -300,7 +316,12 @@ describe('MCP Server Trigger webhook', () => {
 
   it('checks a Bearer token: 401 with WWW-Authenticate when missing or wrong', async () => {
     const parameters = { authentication: 'bearerAuth' };
-    for (const authorization of [undefined, 'Bearer wrong', 'Basic secret-bearer-token', 'secret-bearer-token']) {
+    for (const authorization of [
+      undefined,
+      'Bearer wrong',
+      'Basic secret-bearer-token',
+      'secret-bearer-token',
+    ]) {
       const result = await callWebhook(parameters, {
         body: rpc('initialize', { protocolVersion: '2025-06-18' }),
         headers: authorization ? { authorization } : {},
@@ -431,7 +452,11 @@ describe('MCP Server Trigger execute', () => {
     expect(calc.status).toBe('success');
     const [item] = calc.output(TRIGGER);
     expect(item.mcpToolResult).toEqual({ content: [{ type: 'text', text: '5' }] });
-    expect(item.mcpToolCall).toEqual({ toolName: 'Calculator', arguments: { input: '2 + 3' }, sourceNodeName: '' });
+    expect(item.mcpToolCall).toEqual({
+      toolName: 'Calculator',
+      arguments: { input: '2 + 3' },
+      sourceNodeName: '',
+    });
     expect(item.mcpMessageId).toBe(9);
     // the tool's own run is logged in the run data
     expect(calc.runData.Calculator).toHaveLength(1);
@@ -442,7 +467,8 @@ describe('MCP Server Trigger execute', () => {
 
   it('passes arguments as data, never as expressions', async () => {
     const result = await runCall('echo', { text: '={{ $json.headers.host }}' });
-    const text = (result.output(TRIGGER)[0].mcpToolResult as { content: Array<{ text: string }> }).content[0].text;
+    const text = (result.output(TRIGGER)[0].mcpToolResult as { content: Array<{ text: string }> }).content[0]
+      .text;
     const answer = JSON.parse(text) as { args: DataObject; item: DataObject };
     expect(answer.args).toEqual({ text: '={{ $json.headers.host }}' });
     // the tool reads the trigger's item: body and redacted headers
@@ -451,7 +477,10 @@ describe('MCP Server Trigger execute', () => {
 
   it('answers an unknown tool with -32602 Tool not found', async () => {
     const result = await runCall('nope', {});
-    expect(result.output(TRIGGER)[0].mcpError).toEqual({ code: MCP_ERRORS.INVALID_PARAMS, message: 'Tool not found' });
+    expect(result.output(TRIGGER)[0].mcpError).toEqual({
+      code: MCP_ERRORS.INVALID_PARAMS,
+      message: 'Tool not found',
+    });
   });
 
   it('passes an item without a tool call through', async () => {

@@ -59,7 +59,13 @@ import type { ExecutionOutcome, StartedExecution } from './executions';
 import { createMcpAuthHelper } from './mcp/oauth/tokens';
 import { McpSessionLimitError, type McpSessionRecord, type McpSessionStore } from './mcp-sessions';
 import type { NodeWebhook } from './webhook-paths';
-import { fromWebhookResponse, header, type IncomingWebhook, WebhookBodyError, type WebhookReply } from './webhooks';
+import {
+  fromWebhookResponse,
+  header,
+  type IncomingWebhook,
+  WebhookBodyError,
+  type WebhookReply,
+} from './webhooks';
 
 export interface McpTriggerServiceDeps extends ServiceDeps {
   /** the context's MCP session store (`createMcpSessionStore`) */
@@ -118,7 +124,11 @@ const TEXTS = {
 /** the bus channel an SSE session's answers travel on */
 export const mcpSessionChannel = (sessionId: string) => `mcp-session:${sessionId}`;
 
-const rpc = (statusCode: number, body: JsonRpcResponse, headers: Record<string, string> = {}): WebhookReply => ({
+const rpc = (
+  statusCode: number,
+  body: JsonRpcResponse,
+  headers: Record<string, string> = {},
+): WebhookReply => ({
   statusCode,
   headers: { 'content-type': 'application/json', ...headers },
   body,
@@ -259,7 +269,9 @@ export class McpTriggerService {
   /** a refusal of the node (auth), sent as it is */
   private refusalOf(result: WebhookResponseData): WebhookReply | undefined {
     if (result.workflowData || !result.webhookResponse) return undefined;
-    return (result.webhookResponse.statusCode ?? 200) >= 400 ? fromWebhookResponse(result.webhookResponse) : undefined;
+    return (result.webhookResponse.statusCode ?? 200) >= 400
+      ? fromWebhookResponse(result.webhookResponse)
+      : undefined;
   }
 
   private subjectOf(result: WebhookResponseData): string {
@@ -457,7 +469,11 @@ export class McpTriggerService {
     const item = {
       json: {
         ...base,
-        mcpToolCall: { toolName, arguments: args, sourceNodeName: sourceNodeOf(workflow, input.node, toolName) },
+        mcpToolCall: {
+          toolName,
+          arguments: args,
+          sourceNodeName: sourceNodeOf(workflow, input.node, toolName),
+        },
         mcpMessageId: message.id,
       },
     };
@@ -484,7 +500,8 @@ export class McpTriggerService {
         });
       } catch (error) {
         // limits and quotas: their texts are fixed and safe to show
-        if (error instanceof ApiError) return { answer: mcpError(message.id, MCP_ERRORS.INTERNAL, error.message) };
+        if (error instanceof ApiError)
+          return { answer: mcpError(message.id, MCP_ERRORS.INTERNAL, error.message) };
         throw error;
       }
       input.onStarted?.(execution.executionId);

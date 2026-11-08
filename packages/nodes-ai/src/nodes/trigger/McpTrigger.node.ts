@@ -167,8 +167,13 @@ async function answer(
       return mcpResult(message.id, mcpDiscoverResult(serverInfo(ctx)));
     case 'tools/list': {
       if (!withTools) return undefined;
-      const result: DataObject = { tools: mcpToolDescriptors(await getTools(ctx, 0)) as unknown as DataObject[] };
-      return mcpResult(message.id, isModernMcpRequest(message) ? mcpCompleteResult(message.method, result) : result);
+      const result: DataObject = {
+        tools: mcpToolDescriptors(await getTools(ctx, 0)) as unknown as DataObject[],
+      };
+      return mcpResult(
+        message.id,
+        isModernMcpRequest(message) ? mcpCompleteResult(message.method, result) : result,
+      );
     }
     default:
       return undefined;
@@ -341,12 +346,16 @@ export const McpTriggerNode: NodeType = {
       if (resumed) {
         // the client got its "waiting" answer long ago; the run records what the person answered
         const answered = resumed.answer?.[0]?.[0]?.json;
-        out.push({ json: { ...json, mcpToolResult: mcpResultFromValue(answered ?? WAIT_ANSWERED) as never } });
+        out.push({
+          json: { ...json, mcpToolResult: mcpResultFromValue(answered ?? WAIT_ANSWERED) as never },
+        });
         continue;
       }
       const tool = (await getTools(ctx, i)).find((t) => t.name === call.toolName);
       if (!tool) {
-        out.push({ json: { ...json, mcpError: { code: MCP_ERRORS.INVALID_PARAMS, message: 'Tool not found' } } });
+        out.push({
+          json: { ...json, mcpError: { code: MCP_ERRORS.INVALID_PARAMS, message: 'Tool not found' } },
+        });
         continue;
       }
       // the arguments are the client's data: handed to the tool as they came, never evaluated

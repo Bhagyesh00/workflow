@@ -30,7 +30,12 @@ describe('parseMcpMessage', () => {
       message: { jsonrpc: '2.0', id: 7, method: 'tools/list' },
     });
     expect(
-      parseMcpMessage({ jsonrpc: '2.0', id: 'a', method: 'tools/call', params: { name: 'x', arguments: {} } }),
+      parseMcpMessage({
+        jsonrpc: '2.0',
+        id: 'a',
+        method: 'tools/call',
+        params: { name: 'x', arguments: {} },
+      }),
     ).toEqual({
       kind: 'request',
       message: { jsonrpc: '2.0', id: 'a', method: 'tools/call', params: { name: 'x', arguments: {} } },
@@ -113,16 +118,21 @@ describe('versions and answers', () => {
 
   it('builds the initialize result with tools only and instructions as a string', () => {
     expect(
-      mcpInitializeResult({ name: 'My_Tools', version: '0.1.0', instructions: 'Use me', protocolVersion: '2025-06-18' }),
+      mcpInitializeResult({
+        name: 'My_Tools',
+        version: '0.1.0',
+        instructions: 'Use me',
+        protocolVersion: '2025-06-18',
+      }),
     ).toEqual({
       protocolVersion: '2025-06-18',
       capabilities: { tools: {} },
       serverInfo: { name: 'My_Tools', version: '0.1.0' },
       instructions: 'Use me',
     });
-    expect(mcpInitializeResult({ name: 'n', version: '0.1.0', protocolVersion: '2025-03-26' })).not.toHaveProperty(
-      'instructions',
-    );
+    expect(
+      mcpInitializeResult({ name: 'n', version: '0.1.0', protocolVersion: '2025-03-26' }),
+    ).not.toHaveProperty('instructions');
   });
 
   it('builds the 2026 discover result with every supported revision', () => {
@@ -186,9 +196,14 @@ describe('checkMcpRoutingHeaders', () => {
   });
 
   it('requires the headers on a 2026 request and decodes a base64 name', () => {
-    expect(checkMcpRoutingHeaders({}, request('tools/list', modernMeta))?.code).toBe(MCP_ERRORS.HEADER_MISMATCH);
+    expect(checkMcpRoutingHeaders({}, request('tools/list', modernMeta))?.code).toBe(
+      MCP_ERRORS.HEADER_MISMATCH,
+    );
     expect(
-      checkMcpRoutingHeaders({ 'mcp-method': 'tools/call' }, request('tools/call', { ...modernMeta, name: 'add' })),
+      checkMcpRoutingHeaders(
+        { 'mcp-method': 'tools/call' },
+        request('tools/call', { ...modernMeta, name: 'add' }),
+      ),
     ).toEqual({ code: MCP_ERRORS.HEADER_MISMATCH, text: 'The Mcp-Name header does not match the request' });
     const name = 'héllo';
     const encoded = `=?base64?${btoa(String.fromCharCode(...new TextEncoder().encode(name)))}?=`;
@@ -198,7 +213,9 @@ describe('checkMcpRoutingHeaders', () => {
         request('tools/call', { ...modernMeta, name }),
       ),
     ).toBeNull();
-    expect(checkMcpRoutingHeaders({ 'mcp-method': ['tools/list'] }, request('tools/list', modernMeta))).toBeNull();
+    expect(
+      checkMcpRoutingHeaders({ 'mcp-method': ['tools/list'] }, request('tools/list', modernMeta)),
+    ).toBeNull();
   });
 });
 

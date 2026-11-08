@@ -46,7 +46,10 @@ export function McpWorkflowsTable({
     if (ok) onBulk(value);
   };
   return (
-    <section className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4" aria-labelledby="mcp-workflows">
+    <section
+      className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4"
+      aria-labelledby="mcp-workflows"
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 id="mcp-workflows" className="text-md font-semibold">

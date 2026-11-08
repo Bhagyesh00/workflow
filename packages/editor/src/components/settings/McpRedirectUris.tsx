@@ -20,7 +20,8 @@ export function redirectUriProblem(
   if (!uri) return 'A redirect URI must not be empty';
   if (checkLength && uri.length > 2048) return 'A redirect URI may have at most 2048 characters';
   const lower = uri.trim().toLowerCase();
-  if (REFUSED_SCHEMES.some((scheme) => lower.startsWith(scheme))) return 'This redirect URI scheme is not allowed';
+  if (REFUSED_SCHEMES.some((scheme) => lower.startsWith(scheme)))
+    return 'This redirect URI scheme is not allowed';
   if (uri.includes('#')) return 'A redirect URI must not have a fragment';
   if (/\s/.test(uri)) return 'A redirect URI must not contain spaces';
   let url: URL;
@@ -35,12 +36,20 @@ export function redirectUriProblem(
   if (url.protocol === 'http:' && !LOOPBACK.test(host)) {
     return 'A redirect URI may use http only on a loopback host (localhost, 127.0.0.1, [::1])';
   }
-  if ((url.protocol === 'http:' || url.protocol === 'https:') && !host) return 'A redirect URI must name a host';
+  if ((url.protocol === 'http:' || url.protocol === 'https:') && !host)
+    return 'A redirect URI must name a host';
   return null;
 }
 
 function parse(text: string): string[] {
-  return [...new Set(text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 export function McpRedirectUris({
@@ -62,14 +71,17 @@ export function McpRedirectUris({
   const problems = uris.map((uri) => ({ uri, problem: redirectUriProblem(uri) })).filter((p) => p.problem);
   const unchanged = uris.join('\n') === saved;
   return (
-    <section className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4" aria-labelledby="mcp-uris">
+    <section
+      className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4"
+      aria-labelledby="mcp-uris"
+    >
       <div>
         <h3 id="mcp-uris" className="text-md font-semibold">
           Callback URLs
         </h3>
         <p className="mt-1 text-sm text-ink-2">
-          Where an MCP client may send people back after they approve it. Leave empty to accept any URL a client
-          registered. Loopback URLs (localhost) match on any port.
+          Where an MCP client may send people back after they approve it. Leave empty to accept any URL a
+          client registered. Loopback URLs (localhost) match on any port.
         </p>
       </div>
       <FormField label="Allowed callback URLs" hint="One URL per line.">

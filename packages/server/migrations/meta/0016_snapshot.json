@@ -70,12 +70,8 @@
           "name": "annotation_tags_tenant_id_tenants_id_fk",
           "tableFrom": "annotation_tags",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -204,12 +200,8 @@
           "name": "api_keys_tenant_id_tenants_id_fk",
           "tableFrom": "api_keys",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -217,12 +209,8 @@
           "name": "api_keys_user_id_users_id_fk",
           "tableFrom": "api_keys",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -232,9 +220,7 @@
         "api_keys_key_hash_unique": {
           "name": "api_keys_key_hash_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "key_hash"
-          ]
+          "columns": ["key_hash"]
         }
       },
       "policies": {},
@@ -330,12 +316,8 @@
           "name": "audit_log_tenant_id_tenants_id_fk",
           "tableFrom": "audit_log",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -436,12 +418,8 @@
           "name": "credentials_tenant_id_tenants_id_fk",
           "tableFrom": "credentials",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -449,12 +427,8 @@
           "name": "credentials_created_by_users_id_fk",
           "tableFrom": "credentials",
           "tableTo": "users",
-          "columnsFrom": [
-            "created_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -548,14 +522,8 @@
           "name": "data_table_columns_table_fk",
           "tableFrom": "data_table_columns",
           "tableTo": "data_tables",
-          "columnsFrom": [
-            "tenant_id",
-            "table_id"
-          ],
-          "columnsTo": [
-            "tenant_id",
-            "id"
-          ],
+          "columnsFrom": ["tenant_id", "table_id"],
+          "columnsTo": ["tenant_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -565,10 +533,7 @@
         "data_table_columns_table_name_unique": {
           "name": "data_table_columns_table_name_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "table_id",
-            "name"
-          ]
+          "columns": ["table_id", "name"]
         }
       },
       "policies": {},
@@ -658,14 +623,8 @@
           "name": "data_table_rows_table_fk",
           "tableFrom": "data_table_rows",
           "tableTo": "data_tables",
-          "columnsFrom": [
-            "tenant_id",
-            "table_id"
-          ],
-          "columnsTo": [
-            "tenant_id",
-            "id"
-          ],
+          "columnsFrom": ["tenant_id", "table_id"],
+          "columnsTo": ["tenant_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -673,10 +632,7 @@
       "compositePrimaryKeys": {
         "data_table_rows_table_id_row_id_pk": {
           "name": "data_table_rows_table_id_row_id_pk",
-          "columns": [
-            "table_id",
-            "row_id"
-          ]
+          "columns": ["table_id", "row_id"]
         }
       },
       "uniqueConstraints": {},
@@ -735,12 +691,8 @@
           "name": "data_tables_tenant_id_tenants_id_fk",
           "tableFrom": "data_tables",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -750,18 +702,12 @@
         "data_tables_tenant_name_unique": {
           "name": "data_tables_tenant_name_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "tenant_id",
-            "name"
-          ]
+          "columns": ["tenant_id", "name"]
         },
         "data_tables_tenant_id_unique": {
           "name": "data_tables_tenant_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "tenant_id",
-            "id"
-          ]
+          "columns": ["tenant_id", "id"]
         }
       },
       "policies": {},
@@ -813,12 +759,8 @@
           "name": "execution_annotation_tags_execution_id_executions_id_fk",
           "tableFrom": "execution_annotation_tags",
           "tableTo": "executions",
-          "columnsFrom": [
-            "execution_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["execution_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -826,12 +768,8 @@
           "name": "execution_annotation_tags_tag_id_annotation_tags_id_fk",
           "tableFrom": "execution_annotation_tags",
           "tableTo": "annotation_tags",
-          "columnsFrom": [
-            "tag_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tag_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -839,12 +777,8 @@
           "name": "execution_annotation_tags_tenant_id_tenants_id_fk",
           "tableFrom": "execution_annotation_tags",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -852,10 +786,7 @@
       "compositePrimaryKeys": {
         "execution_annotation_tags_execution_id_tag_id_pk": {
           "name": "execution_annotation_tags_execution_id_tag_id_pk",
-          "columns": [
-            "execution_id",
-            "tag_id"
-          ]
+          "columns": ["execution_id", "tag_id"]
         }
       },
       "uniqueConstraints": {},
@@ -899,12 +830,8 @@
           "name": "execution_annotations_execution_id_executions_id_fk",
           "tableFrom": "execution_annotations",
           "tableTo": "executions",
-          "columnsFrom": [
-            "execution_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["execution_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -912,12 +839,8 @@
           "name": "execution_annotations_tenant_id_tenants_id_fk",
           "tableFrom": "execution_annotations",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -975,12 +898,8 @@
           "name": "execution_data_execution_id_executions_id_fk",
           "tableFrom": "execution_data",
           "tableTo": "executions",
-          "columnsFrom": [
-            "execution_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["execution_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -988,12 +907,8 @@
           "name": "execution_data_tenant_id_tenants_id_fk",
           "tableFrom": "execution_data",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1232,12 +1147,8 @@
           "name": "executions_tenant_id_tenants_id_fk",
           "tableFrom": "executions",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1245,12 +1156,8 @@
           "name": "executions_workflow_id_workflows_id_fk",
           "tableFrom": "executions",
           "tableTo": "workflows",
-          "columnsFrom": [
-            "workflow_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["workflow_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1306,12 +1213,8 @@
           "name": "folder_tags_folder_id_folders_id_fk",
           "tableFrom": "folder_tags",
           "tableTo": "folders",
-          "columnsFrom": [
-            "folder_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["folder_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1319,12 +1222,8 @@
           "name": "folder_tags_tag_id_tags_id_fk",
           "tableFrom": "folder_tags",
           "tableTo": "tags",
-          "columnsFrom": [
-            "tag_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tag_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1332,12 +1231,8 @@
           "name": "folder_tags_tenant_id_tenants_id_fk",
           "tableFrom": "folder_tags",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1345,10 +1240,7 @@
       "compositePrimaryKeys": {
         "folder_tags_folder_id_tag_id_pk": {
           "name": "folder_tags_folder_id_tag_id_pk",
-          "columns": [
-            "folder_id",
-            "tag_id"
-          ]
+          "columns": ["folder_id", "tag_id"]
         }
       },
       "uniqueConstraints": {},
@@ -1428,12 +1320,8 @@
           "name": "folders_tenant_id_tenants_id_fk",
           "tableFrom": "folders",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1441,12 +1329,8 @@
           "name": "folders_parent_folder_id_folders_id_fk",
           "tableFrom": "folders",
           "tableTo": "folders",
-          "columnsFrom": [
-            "parent_folder_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["parent_folder_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1540,12 +1424,8 @@
           "name": "invitations_tenant_id_tenants_id_fk",
           "tableFrom": "invitations",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1553,12 +1433,8 @@
           "name": "invitations_invited_by_users_id_fk",
           "tableFrom": "invitations",
           "tableTo": "users",
-          "columnsFrom": [
-            "invited_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["invited_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -1568,9 +1444,7 @@
         "invitations_token_hash_unique": {
           "name": "invitations_token_hash_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "token_hash"
-          ]
+          "columns": ["token_hash"]
         }
       },
       "policies": {},
@@ -1629,12 +1503,8 @@
           "name": "memberships_tenant_id_tenants_id_fk",
           "tableFrom": "memberships",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1642,12 +1512,8 @@
           "name": "memberships_user_id_users_id_fk",
           "tableFrom": "memberships",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1655,10 +1521,7 @@
       "compositePrimaryKeys": {
         "memberships_tenant_id_user_id_pk": {
           "name": "memberships_tenant_id_user_id_pk",
-          "columns": [
-            "tenant_id",
-            "user_id"
-          ]
+          "columns": ["tenant_id", "user_id"]
         }
       },
       "uniqueConstraints": {},
@@ -1764,12 +1627,8 @@
           "name": "oauth_access_tokens_tenant_id_tenants_id_fk",
           "tableFrom": "oauth_access_tokens",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1777,12 +1636,8 @@
           "name": "oauth_access_tokens_client_id_oauth_clients_id_fk",
           "tableFrom": "oauth_access_tokens",
           "tableTo": "oauth_clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1790,12 +1645,8 @@
           "name": "oauth_access_tokens_user_id_users_id_fk",
           "tableFrom": "oauth_access_tokens",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1891,12 +1742,8 @@
           "name": "oauth_authorization_codes_tenant_id_tenants_id_fk",
           "tableFrom": "oauth_authorization_codes",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1904,12 +1751,8 @@
           "name": "oauth_authorization_codes_client_id_oauth_clients_id_fk",
           "tableFrom": "oauth_authorization_codes",
           "tableTo": "oauth_clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1917,12 +1760,8 @@
           "name": "oauth_authorization_codes_user_id_users_id_fk",
           "tableFrom": "oauth_authorization_codes",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2015,12 +1854,8 @@
           "name": "oauth_clients_tenant_id_tenants_id_fk",
           "tableFrom": "oauth_clients",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2129,12 +1964,8 @@
           "name": "oauth_refresh_tokens_tenant_id_tenants_id_fk",
           "tableFrom": "oauth_refresh_tokens",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2142,12 +1973,8 @@
           "name": "oauth_refresh_tokens_client_id_oauth_clients_id_fk",
           "tableFrom": "oauth_refresh_tokens",
           "tableTo": "oauth_clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2155,12 +1982,8 @@
           "name": "oauth_refresh_tokens_user_id_users_id_fk",
           "tableFrom": "oauth_refresh_tokens",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2214,12 +2037,8 @@
           "name": "oauth_user_consents_tenant_id_tenants_id_fk",
           "tableFrom": "oauth_user_consents",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2227,12 +2046,8 @@
           "name": "oauth_user_consents_user_id_users_id_fk",
           "tableFrom": "oauth_user_consents",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2240,12 +2055,8 @@
           "name": "oauth_user_consents_client_id_oauth_clients_id_fk",
           "tableFrom": "oauth_user_consents",
           "tableTo": "oauth_clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2255,11 +2066,7 @@
         "oauth_user_consents_tenant_user_client_unique": {
           "name": "oauth_user_consents_tenant_user_client_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "tenant_id",
-            "user_id",
-            "client_id"
-          ]
+          "columns": ["tenant_id", "user_id", "client_id"]
         }
       },
       "policies": {},
@@ -2307,12 +2114,8 @@
           "name": "schedule_slots_tenant_id_tenants_id_fk",
           "tableFrom": "schedule_slots",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2320,12 +2123,8 @@
           "name": "schedule_slots_workflow_id_workflows_id_fk",
           "tableFrom": "schedule_slots",
           "tableTo": "workflows",
-          "columnsFrom": [
-            "workflow_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["workflow_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2333,11 +2132,7 @@
       "compositePrimaryKeys": {
         "schedule_slots_workflow_id_node_name_rule_key_pk": {
           "name": "schedule_slots_workflow_id_node_name_rule_key_pk",
-          "columns": [
-            "workflow_id",
-            "node_name",
-            "rule_key"
-          ]
+          "columns": ["workflow_id", "node_name", "rule_key"]
         }
       },
       "uniqueConstraints": {},
@@ -2426,12 +2221,8 @@
           "name": "secret_connections_tenant_id_tenants_id_fk",
           "tableFrom": "secret_connections",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2439,12 +2230,8 @@
           "name": "secret_connections_created_by_users_id_fk",
           "tableFrom": "secret_connections",
           "tableTo": "users",
-          "columnsFrom": [
-            "created_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -2454,10 +2241,7 @@
         "secret_connections_tenant_provider_key_unique": {
           "name": "secret_connections_tenant_provider_key_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "tenant_id",
-            "provider_key"
-          ]
+          "columns": ["tenant_id", "provider_key"]
         }
       },
       "policies": {},
@@ -2549,12 +2333,8 @@
           "name": "sessions_user_id_users_id_fk",
           "tableFrom": "sessions",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2562,12 +2342,8 @@
           "name": "sessions_tenant_id_tenants_id_fk",
           "tableFrom": "sessions",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2644,12 +2420,8 @@
           "name": "tags_tenant_id_tenants_id_fk",
           "tableFrom": "tags",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2712,9 +2484,7 @@
         "tenants_slug_unique": {
           "name": "tenants_slug_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "slug"
-          ]
+          "columns": ["slug"]
         }
       },
       "policies": {},
@@ -2841,12 +2611,8 @@
           "name": "test_case_executions_tenant_id_tenants_id_fk",
           "tableFrom": "test_case_executions",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2854,12 +2620,8 @@
           "name": "test_case_executions_test_run_id_test_runs_id_fk",
           "tableFrom": "test_case_executions",
           "tableTo": "test_runs",
-          "columnsFrom": [
-            "test_run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["test_run_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3021,12 +2783,8 @@
           "name": "test_runs_tenant_id_tenants_id_fk",
           "tableFrom": "test_runs",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3034,12 +2792,8 @@
           "name": "test_runs_workflow_id_workflows_id_fk",
           "tableFrom": "test_runs",
           "tableTo": "workflows",
-          "columnsFrom": [
-            "workflow_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["workflow_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3087,12 +2841,8 @@
           "name": "usage_counters_tenant_id_tenants_id_fk",
           "tableFrom": "usage_counters",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3100,10 +2850,7 @@
       "compositePrimaryKeys": {
         "usage_counters_tenant_id_period_pk": {
           "name": "usage_counters_tenant_id_period_pk",
-          "columns": [
-            "tenant_id",
-            "period"
-          ]
+          "columns": ["tenant_id", "period"]
         }
       },
       "uniqueConstraints": {},
@@ -3175,12 +2922,8 @@
           "name": "user_favorites_tenant_id_tenants_id_fk",
           "tableFrom": "user_favorites",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3188,12 +2931,8 @@
           "name": "user_favorites_user_id_users_id_fk",
           "tableFrom": "user_favorites",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3201,11 +2940,7 @@
       "compositePrimaryKeys": {
         "user_favorites_user_id_resource_type_resource_id_pk": {
           "name": "user_favorites_user_id_resource_type_resource_id_pk",
-          "columns": [
-            "user_id",
-            "resource_type",
-            "resource_id"
-          ]
+          "columns": ["user_id", "resource_type", "resource_id"]
         }
       },
       "uniqueConstraints": {},
@@ -3357,12 +3092,8 @@
           "name": "variables_tenant_id_tenants_id_fk",
           "tableFrom": "variables",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3437,12 +3168,8 @@
           "name": "webhook_idempotency_tenant_id_tenants_id_fk",
           "tableFrom": "webhook_idempotency",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3450,12 +3177,8 @@
           "name": "webhook_idempotency_workflow_id_workflows_id_fk",
           "tableFrom": "webhook_idempotency",
           "tableTo": "workflows",
-          "columnsFrom": [
-            "workflow_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["workflow_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3463,11 +3186,7 @@
       "compositePrimaryKeys": {
         "webhook_idempotency_tenant_id_workflow_id_key_pk": {
           "name": "webhook_idempotency_tenant_id_workflow_id_key_pk",
-          "columns": [
-            "tenant_id",
-            "workflow_id",
-            "key"
-          ]
+          "columns": ["tenant_id", "workflow_id", "key"]
         }
       },
       "uniqueConstraints": {},
@@ -3585,12 +3304,8 @@
           "name": "webhooks_tenant_id_tenants_id_fk",
           "tableFrom": "webhooks",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3598,12 +3313,8 @@
           "name": "webhooks_workflow_id_workflows_id_fk",
           "tableFrom": "webhooks",
           "tableTo": "workflows",
-          "columnsFrom": [
-            "workflow_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["workflow_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3611,11 +3322,7 @@
       "compositePrimaryKeys": {
         "webhooks_tenant_id_method_path_pk": {
           "name": "webhooks_tenant_id_method_path_pk",
-          "columns": [
-            "tenant_id",
-            "method",
-            "path"
-          ]
+          "columns": ["tenant_id", "method", "path"]
         }
       },
       "uniqueConstraints": {},
@@ -3705,12 +3412,8 @@
           "name": "workflow_publish_history_tenant_id_tenants_id_fk",
           "tableFrom": "workflow_publish_history",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3718,12 +3421,8 @@
           "name": "workflow_publish_history_workflow_id_workflows_id_fk",
           "tableFrom": "workflow_publish_history",
           "tableTo": "workflows",
-          "columnsFrom": [
-            "workflow_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["workflow_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3731,12 +3430,8 @@
           "name": "workflow_publish_history_version_id_workflow_versions_id_fk",
           "tableFrom": "workflow_publish_history",
           "tableTo": "workflow_versions",
-          "columnsFrom": [
-            "version_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["version_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -3744,12 +3439,8 @@
           "name": "workflow_publish_history_user_id_users_id_fk",
           "tableFrom": "workflow_publish_history",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -3842,12 +3533,8 @@
           "name": "workflow_review_activity_request_id_workflow_review_requests_id_fk",
           "tableFrom": "workflow_review_activity",
           "tableTo": "workflow_review_requests",
-          "columnsFrom": [
-            "request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3855,12 +3542,8 @@
           "name": "workflow_review_activity_tenant_id_tenants_id_fk",
           "tableFrom": "workflow_review_activity",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3868,12 +3551,8 @@
           "name": "workflow_review_activity_created_by_users_id_fk",
           "tableFrom": "workflow_review_activity",
           "tableTo": "users",
-          "columnsFrom": [
-            "created_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -3935,12 +3614,8 @@
           "name": "workflow_review_authors_request_id_workflow_review_requests_id_fk",
           "tableFrom": "workflow_review_authors",
           "tableTo": "workflow_review_requests",
-          "columnsFrom": [
-            "request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3948,12 +3623,8 @@
           "name": "workflow_review_authors_user_id_users_id_fk",
           "tableFrom": "workflow_review_authors",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3961,12 +3632,8 @@
           "name": "workflow_review_authors_tenant_id_tenants_id_fk",
           "tableFrom": "workflow_review_authors",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3974,10 +3641,7 @@
       "compositePrimaryKeys": {
         "workflow_review_authors_request_id_user_id_pk": {
           "name": "workflow_review_authors_request_id_user_id_pk",
-          "columns": [
-            "request_id",
-            "user_id"
-          ]
+          "columns": ["request_id", "user_id"]
         }
       },
       "uniqueConstraints": {},
@@ -4049,12 +3713,8 @@
           "name": "workflow_review_comments_activity_id_workflow_review_activity_id_fk",
           "tableFrom": "workflow_review_comments",
           "tableTo": "workflow_review_activity",
-          "columnsFrom": [
-            "activity_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["activity_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4062,12 +3722,8 @@
           "name": "workflow_review_comments_tenant_id_tenants_id_fk",
           "tableFrom": "workflow_review_comments",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4075,12 +3731,8 @@
           "name": "workflow_review_comments_created_by_users_id_fk",
           "tableFrom": "workflow_review_comments",
           "tableTo": "users",
-          "columnsFrom": [
-            "created_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -4235,12 +3887,8 @@
           "name": "workflow_review_requests_tenant_id_tenants_id_fk",
           "tableFrom": "workflow_review_requests",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4248,12 +3896,8 @@
           "name": "workflow_review_requests_workflow_id_workflows_id_fk",
           "tableFrom": "workflow_review_requests",
           "tableTo": "workflows",
-          "columnsFrom": [
-            "workflow_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["workflow_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -4261,12 +3905,8 @@
           "name": "workflow_review_requests_created_by_users_id_fk",
           "tableFrom": "workflow_review_requests",
           "tableTo": "users",
-          "columnsFrom": [
-            "created_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -4274,12 +3914,8 @@
           "name": "workflow_review_requests_updated_by_users_id_fk",
           "tableFrom": "workflow_review_requests",
           "tableTo": "users",
-          "columnsFrom": [
-            "updated_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["updated_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -4287,12 +3923,8 @@
           "name": "workflow_review_requests_closed_by_users_id_fk",
           "tableFrom": "workflow_review_requests",
           "tableTo": "users",
-          "columnsFrom": [
-            "closed_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["closed_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -4363,12 +3995,8 @@
           "name": "workflow_review_reviewers_request_id_workflow_review_requests_id_fk",
           "tableFrom": "workflow_review_reviewers",
           "tableTo": "workflow_review_requests",
-          "columnsFrom": [
-            "request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4376,12 +4004,8 @@
           "name": "workflow_review_reviewers_user_id_users_id_fk",
           "tableFrom": "workflow_review_reviewers",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4389,12 +4013,8 @@
           "name": "workflow_review_reviewers_tenant_id_tenants_id_fk",
           "tableFrom": "workflow_review_reviewers",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -4402,10 +4022,7 @@
       "compositePrimaryKeys": {
         "workflow_review_reviewers_request_id_user_id_pk": {
           "name": "workflow_review_reviewers_request_id_user_id_pk",
-          "columns": [
-            "request_id",
-            "user_id"
-          ]
+          "columns": ["request_id", "user_id"]
         }
       },
       "uniqueConstraints": {},
@@ -4458,12 +4075,8 @@
           "name": "workflow_tags_workflow_id_workflows_id_fk",
           "tableFrom": "workflow_tags",
           "tableTo": "workflows",
-          "columnsFrom": [
-            "workflow_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["workflow_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4471,12 +4084,8 @@
           "name": "workflow_tags_tag_id_tags_id_fk",
           "tableFrom": "workflow_tags",
           "tableTo": "tags",
-          "columnsFrom": [
-            "tag_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tag_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4484,12 +4093,8 @@
           "name": "workflow_tags_tenant_id_tenants_id_fk",
           "tableFrom": "workflow_tags",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -4497,10 +4102,7 @@
       "compositePrimaryKeys": {
         "workflow_tags_workflow_id_tag_id_pk": {
           "name": "workflow_tags_workflow_id_tag_id_pk",
-          "columns": [
-            "workflow_id",
-            "tag_id"
-          ]
+          "columns": ["workflow_id", "tag_id"]
         }
       },
       "uniqueConstraints": {},
@@ -4641,12 +4243,8 @@
           "name": "workflow_versions_workflow_id_workflows_id_fk",
           "tableFrom": "workflow_versions",
           "tableTo": "workflows",
-          "columnsFrom": [
-            "workflow_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["workflow_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4654,12 +4252,8 @@
           "name": "workflow_versions_tenant_id_tenants_id_fk",
           "tableFrom": "workflow_versions",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4667,12 +4261,8 @@
           "name": "workflow_versions_author_id_users_id_fk",
           "tableFrom": "workflow_versions",
           "tableTo": "users",
-          "columnsFrom": [
-            "author_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["author_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -4878,12 +4468,8 @@
           "name": "workflows_tenant_id_tenants_id_fk",
           "tableFrom": "workflows",
           "tableTo": "tenants",
-          "columnsFrom": [
-            "tenant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["tenant_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4891,12 +4477,8 @@
           "name": "workflows_folder_id_folders_id_fk",
           "tableFrom": "workflows",
           "tableTo": "folders",
-          "columnsFrom": [
-            "folder_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["folder_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -4904,12 +4486,8 @@
           "name": "workflows_created_by_users_id_fk",
           "tableFrom": "workflows",
           "tableTo": "users",
-          "columnsFrom": [
-            "created_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }

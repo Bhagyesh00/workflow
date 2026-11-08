@@ -23,9 +23,15 @@ import { Callout, PageLoader } from '../components/ui/misc';
 const SCOPE_TEXTS: Record<string, { label: string; allows: string }> = {
   'workflow:read': { label: 'Read workflows', allows: 'Find workflows and read their nodes and settings' },
   'workflow:write': { label: 'Change workflows', allows: 'Create, edit, archive and restore workflows' },
-  'workflow:execute': { label: 'Run workflows', allows: 'Start workflows that are available to MCP and read the result' },
+  'workflow:execute': {
+    label: 'Run workflows',
+    allows: 'Start workflows that are available to MCP and read the result',
+  },
   'execution:read': { label: 'Read executions', allows: 'See past runs and what they returned' },
-  'credential:read': { label: 'List credentials', allows: 'See the name and type of credentials, never their secrets' },
+  'credential:read': {
+    label: 'List credentials',
+    allows: 'See the name and type of credentials, never their secrets',
+  },
   'tag:read': { label: 'Read tags', allows: 'List tags' },
   'dataTable:read': { label: 'Read data tables', allows: 'List data tables and read their rows' },
   'dataTable:write': { label: 'Change data tables', allows: 'Create tables and add, change or delete rows' },

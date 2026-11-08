@@ -56,7 +56,11 @@ export function McpSettingsPage() {
   });
   const clients = useQuery({ queryKey: KEYS.clients, queryFn: mcpApi.clients, enabled: isAdmin });
   const stats = useQuery({ queryKey: KEYS.stats, queryFn: mcpApi.stats, enabled: isAdmin });
-  const redirectUris = useQuery({ queryKey: KEYS.redirectUris, queryFn: mcpApi.redirectUris, enabled: isAdmin });
+  const redirectUris = useQuery({
+    queryKey: KEYS.redirectUris,
+    queryFn: mcpApi.redirectUris,
+    enabled: isAdmin,
+  });
 
   const patch = useMutation({
     mutationFn: mcpApi.patchSettings,

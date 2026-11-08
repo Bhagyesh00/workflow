@@ -43,7 +43,11 @@ export function mcpToolDescriptors(tools: AiTool[]): McpToolDescriptor[] {
  * is an `isError` result (`<name>: <message>`, secrets removed); a tool that stops the run to wait for a person
  * throws its suspension on, so the run ends `waiting`.
  */
-export async function callMcpTool(tool: AiTool, args: DataObject, signal?: AbortSignal): Promise<McpCallResult> {
+export async function callMcpTool(
+  tool: AiTool,
+  args: DataObject,
+  signal?: AbortSignal,
+): Promise<McpCallResult> {
   try {
     if (tool.invokeRaw) return await tool.invokeRaw(args, { signal });
     return mcpResultFromValue(await tool.invoke(args, { signal }));

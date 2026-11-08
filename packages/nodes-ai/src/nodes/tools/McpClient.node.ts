@@ -337,7 +337,9 @@ export const McpClientNode: NodeType = {
         try {
           return await createMcpConnection(ctx, {
             endpointUrl: String(ctx.getNodeParameter('endpointUrl', itemIndex, '')).trim(),
-            serverTransport: transportOf(ctx.getNodeParameter('serverTransport', itemIndex, 'httpStreamable')),
+            serverTransport: transportOf(
+              ctx.getNodeParameter('serverTransport', itemIndex, 'httpStreamable'),
+            ),
             authentication: String(ctx.getNodeParameter('authentication', itemIndex, 'none')),
             timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_TIMEOUT,
             itemIndex,

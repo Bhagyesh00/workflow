@@ -41,7 +41,12 @@ function CopyBox({ label, value }: { label: string; value: string }) {
           {value}
         </pre>
       </figure>
-      <Button size="sm" icon={<Copy size={14} />} aria-label={`Copy ${label}`} onClick={() => void copyText(value, label)}>
+      <Button
+        size="sm"
+        icon={<Copy size={14} />}
+        aria-label={`Copy ${label}`}
+        onClick={() => void copyText(value, label)}
+      >
         Copy
       </Button>
     </div>
@@ -110,13 +115,15 @@ export function McpConnectDialog({
       footer={<Button onClick={onClose}>Done</Button>}
     >
       <div className="flex flex-col gap-4">
-        {!mcpOn && <Callout tone="warn">MCP access is off. Clients can connect after an admin turns it on.</Callout>}
+        {!mcpOn && (
+          <Callout tone="warn">MCP access is off. Clients can connect after an admin turns it on.</Callout>
+        )}
         <Tabs items={TABS} value={tab} onChange={setTab} label="Connection method" />
         {tab === 'oauth' ? (
           <div className="flex flex-col gap-3">
             <p className="text-sm text-ink-2">
-              Add this URL as a remote MCP server in your client. It opens a sign-in page here, and you approve
-              what the client may do.
+              Add this URL as a remote MCP server in your client. It opens a sign-in page here, and you
+              approve what the client may do.
             </p>
             <CopyBox label="Server URL" value={serverUrl} />
           </div>

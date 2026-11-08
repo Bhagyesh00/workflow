@@ -44,7 +44,10 @@ afterEach(() => {
 });
 
 describe('memory store', () => {
-  const config = testConfig({ MCP_SERVER_SESSION_IDLE_TTL_MS: '1000', MCP_SERVER_SESSION_SWEEP_INTERVAL_MS: '500' });
+  const config = testConfig({
+    MCP_SERVER_SESSION_IDLE_TTL_MS: '1000',
+    MCP_SERVER_SESSION_SWEEP_INTERVAL_MS: '500',
+  });
   let store: McpSessionStore;
   afterEach(async () => {
     await store?.close();
@@ -66,7 +69,10 @@ describe('memory store', () => {
     store = createMcpSessionStore({ config, logger });
     const id = await store.create(record({ subjectHash: 'abc' }));
     expect(id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(await store.get(id)).toMatchObject({ ...record({ subjectHash: 'abc' }), lastSeen: expect.any(Number) });
+    expect(await store.get(id)).toMatchObject({
+      ...record({ subjectHash: 'abc' }),
+      lastSeen: expect.any(Number),
+    });
     expect(await store.get(randomUUID())).toBeUndefined();
     expect(await store.touch(id)).toBe(true);
     expect(await store.delete(id)).toBe(true);
@@ -294,7 +300,11 @@ describe('sessions through the app', () => {
   const post = (body: DataObject, headers: Record<string, string> = {}) =>
     fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        ...headers,
+      },
       body: JSON.stringify(body),
     });
   const open = async () => {
@@ -306,7 +316,8 @@ describe('sessions through the app', () => {
     });
     return res.headers.get('mcp-session-id') as string;
   };
-  const list = (session: string) => post({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'mcp-session-id': session });
+  const list = (session: string) =>
+    post({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'mcp-session-id': session });
 
   it('a running call keeps its session past the idle TTL; an idle one goes', async () => {
     const busy = await open();
@@ -315,7 +326,9 @@ describe('sessions through the app', () => {
       { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'slow', arguments: {} } },
       { 'mcp-session-id': busy },
     );
-    expect(((await call.json()) as { result: { content: Array<{ text: string }> } }).result.content[0].text).toBe('done');
+    expect(
+      ((await call.json()) as { result: { content: Array<{ text: string }> } }).result.content[0].text,
+    ).toBe('done');
     expect((await list(busy)).status).toBe(200);
     expect((await list(idle)).status).toBe(404);
   });

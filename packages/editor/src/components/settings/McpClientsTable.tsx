@@ -36,7 +36,10 @@ export function McpClientsTable({
     if (ok) onRevoke(client);
   };
   return (
-    <section className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4" aria-labelledby="mcp-clients">
+    <section
+      className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4"
+      aria-labelledby="mcp-clients"
+    >
       <div className="flex items-baseline justify-between gap-3">
         <h3 id="mcp-clients" className="text-md font-semibold">
           Connected clients

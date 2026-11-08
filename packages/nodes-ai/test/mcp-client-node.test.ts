@@ -144,12 +144,7 @@ describe('MCP Client node (P5-16)', () => {
     const r = await run(
       [
         node('Start', 'test.trigger'),
-        node(
-          'MCP',
-          'ai.mcpClient',
-          { endpointUrl: endpoint, authentication: 'none', ...parameters },
-          extra,
-        ),
+        node('MCP', 'ai.mcpClient', { endpointUrl: endpoint, authentication: 'none', ...parameters }, extra),
       ],
       { Start: { main: [[{ node: 'MCP', type: 'main', index: 0 }]] } },
       { triggerItems: items, services: services() },
@@ -278,7 +273,11 @@ describe('MCP Client node (P5-16)', () => {
     expect(item.binary?.data_0.fileName).toBe('data_0.png');
     expect(item.binary?.data_1.mimeType).toBe('audio/wav');
     expect(item.binary?.data_1.fileName).toBe('data_1.wav');
-    expect(Buffer.from(item.binary?.data_0.data ?? '', 'base64').subarray(1, 4).toString()).toBe('PNG');
+    expect(
+      Buffer.from(item.binary?.data_0.data ?? '', 'base64')
+        .subarray(1, 4)
+        .toString(),
+    ).toBe('PNG');
     // only the text stays in content
     expect(item.json.content).toEqual(['plain words']);
   });

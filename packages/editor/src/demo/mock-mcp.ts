@@ -74,7 +74,11 @@ export function mcpDemoState(backend: MockBackend): McpDemoState {
       flows: new Map([
         [
           DEMO_CONSENT_FLOW,
-          { clientName: 'Claude Desktop', scopes: [...DEMO_SCOPES], redirectUri: 'http://127.0.0.1:33418/callback' },
+          {
+            clientName: 'Claude Desktop',
+            scopes: [...DEMO_SCOPES],
+            redirectUri: 'http://127.0.0.1:33418/callback',
+          },
         ],
       ]),
       forcedRedirectUrl: null,
@@ -114,14 +118,20 @@ function keyDto(key: StoredKey, revealed: boolean) {
 }
 
 function newKey(): StoredKey {
-  return { id: nextId('mcpkey'), prefix: randomSecret().slice(0, 8), secret: randomSecret(), createdAt: new Date().toISOString() };
+  return {
+    id: nextId('mcpkey'),
+    prefix: randomSecret().slice(0, 8),
+    secret: randomSecret(),
+    createdAt: new Date().toISOString(),
+  };
 }
 
 /** a short version of the server's redirect URI rule (clients.ts `redirectUriProblem`) */
 function redirectProblem(uri: unknown): string | null {
   if (typeof uri !== 'string' || !uri) return 'A redirect URI must be a non-empty string';
   const lower = uri.trim().toLowerCase();
-  if (REFUSED_SCHEMES.some((scheme) => lower.startsWith(scheme))) return 'This redirect URI scheme is not allowed';
+  if (REFUSED_SCHEMES.some((scheme) => lower.startsWith(scheme)))
+    return 'This redirect URI scheme is not allowed';
   if (uri.includes('#')) return 'A redirect URI must not have a fragment';
   try {
     new URL(uri);
@@ -147,7 +157,8 @@ export function registerMcpRoutes(backend: MockBackend): void {
       throw new HttpError(409, 'conflict', 'MCP access is set by the server environment');
     }
     if (typeof body.mcpAccessEnabled === 'boolean') settings.mcpAccessEnabled = body.mcpAccessEnabled;
-    if (typeof body.autoExposeNewWorkflows === 'boolean') settings.autoExposeNewWorkflows = body.autoExposeNewWorkflows;
+    if (typeof body.autoExposeNewWorkflows === 'boolean')
+      settings.autoExposeNewWorkflows = body.autoExposeNewWorkflows;
     return { ...settings };
   });
 
@@ -190,7 +201,8 @@ export function registerMcpRoutes(backend: MockBackend): void {
     const { tenant } = backend.requireRole('admin');
     const value = body.availableInMCP === true;
     const ids = Array.isArray(body.workflowIds) ? (body.workflowIds as string[]) : undefined;
-    if (ids && ids.length > 100) throw new HttpError(400, 'bad_request', 'Pick at most 100 workflows at a time');
+    if (ids && ids.length > 100)
+      throw new HttpError(400, 'bad_request', 'Pick at most 100 workflows at a time');
     if (!ids && !body.folderId && body.allWorkflows !== true) {
       throw new HttpError(400, 'bad_request', 'Name the workflows, a folder or all workflows');
     }

@@ -35,7 +35,9 @@ describe('Settings > MCP (P5-15)', () => {
     const status = await screen.findByRole('switch', { name: 'MCP access' });
     expect(status.getAttribute('aria-checked')).toBe('false');
     await user.click(status);
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'MCP access' }).getAttribute('aria-checked')).toBe('true'));
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: 'MCP access' }).getAttribute('aria-checked')).toBe('true'),
+    );
     expect(sent('PATCH', '/mcp/settings')[0].body).toEqual({ mcpAccessEnabled: true });
     expect([...mcpDemoState(backend()).settings.values()][0].mcpAccessEnabled).toBe(true);
   });
@@ -123,11 +125,15 @@ describe('Settings > MCP (P5-15)', () => {
     renderApp('/settings/mcp');
     const row = await screen.findByRole('switch', { name: 'Available in MCP: Sync orders' });
     expect(row.getAttribute('aria-checked')).toBe('false');
-    expect(screen.getByRole('switch', { name: 'Available in MCP: Send digest' }).getAttribute('aria-checked')).toBe('true');
+    expect(
+      screen.getByRole('switch', { name: 'Available in MCP: Send digest' }).getAttribute('aria-checked'),
+    ).toBe('true');
 
     await user.click(row);
     await waitFor(() =>
-      expect(screen.getByRole('switch', { name: 'Available in MCP: Sync orders' }).getAttribute('aria-checked')).toBe('true'),
+      expect(
+        screen.getByRole('switch', { name: 'Available in MCP: Sync orders' }).getAttribute('aria-checked'),
+      ).toBe('true'),
     );
     expect(sent('PATCH', '/mcp/workflows/toggle-access')[0].body).toEqual({
       availableInMCP: true,
@@ -139,9 +145,14 @@ describe('Settings > MCP (P5-15)', () => {
     const dialog = await screen.findByRole('dialog');
     await user.click(within(dialog).getByRole('button', { name: 'Hide all' }));
     await waitFor(() => expect(sent('PATCH', '/mcp/workflows/toggle-access')).toHaveLength(2));
-    expect(sent('PATCH', '/mcp/workflows/toggle-access')[1].body).toEqual({ availableInMCP: false, allWorkflows: true });
+    expect(sent('PATCH', '/mcp/workflows/toggle-access')[1].body).toEqual({
+      availableInMCP: false,
+      allWorkflows: true,
+    });
     await waitFor(() =>
-      expect(screen.getByRole('switch', { name: 'Available in MCP: Send digest' }).getAttribute('aria-checked')).toBe('false'),
+      expect(
+        screen.getByRole('switch', { name: 'Available in MCP: Send digest' }).getAttribute('aria-checked'),
+      ).toBe('false'),
     );
   });
 
@@ -159,7 +170,11 @@ describe('Settings > MCP (P5-15)', () => {
 
   it('says so when a list fails and when there are none', async () => {
     signedIn();
-    server.use(http.get('/rest/mcp/workflows', () => HttpResponse.json({ error: { code: 'internal', message: 'down' } }, { status: 500 })));
+    server.use(
+      http.get('/rest/mcp/workflows', () =>
+        HttpResponse.json({ error: { code: 'internal', message: 'down' } }, { status: 500 }),
+      ),
+    );
     renderApp('/settings/mcp');
     expect(await screen.findByText("Couldn't load the workflows")).toBeTruthy();
     expect(await screen.findByText('No clients yet')).toBeTruthy();
@@ -193,7 +208,12 @@ describe('Settings > MCP (P5-15)', () => {
   it('keeps a client when the revoke is cancelled', async () => {
     const user = userEvent.setup();
     signedIn();
-    mcpDemoState(backend()).clients.push({ id: 'c2', name: 'Keeper', redirectUris: [], createdAt: '2026-11-01T10:00:00.000Z' });
+    mcpDemoState(backend()).clients.push({
+      id: 'c2',
+      name: 'Keeper',
+      redirectUris: [],
+      createdAt: '2026-11-01T10:00:00.000Z',
+    });
     renderApp('/settings/mcp');
     await user.click(await screen.findByRole('button', { name: 'Revoke Keeper' }));
     const dialog = await screen.findByRole('dialog');
@@ -233,7 +253,11 @@ describe('Settings > MCP (P5-15)', () => {
 
   it('says why the page cannot load', async () => {
     signedIn();
-    server.use(http.get('/rest/mcp/settings', () => HttpResponse.json({ error: { code: 'internal', message: 'down' } }, { status: 500 })));
+    server.use(
+      http.get('/rest/mcp/settings', () =>
+        HttpResponse.json({ error: { code: 'internal', message: 'down' } }, { status: 500 }),
+      ),
+    );
     renderApp('/settings/mcp');
     expect(await screen.findByText("Couldn't load the MCP settings")).toBeTruthy();
   });
@@ -245,7 +269,14 @@ describe('Workflow settings: Available in MCP (P5-15)', () => {
     signedIn();
     const onSave = vi.fn();
     withProviders(
-        <WorkflowSettingsModal open onClose={() => undefined} value={{}} workflowId="w1" onSave={onSave} readOnly={false} />,
+      <WorkflowSettingsModal
+        open
+        onClose={() => undefined}
+        value={{}}
+        workflowId="w1"
+        onSave={onSave}
+        readOnly={false}
+      />,
     );
     const toggle = await screen.findByRole('switch', { name: 'Available in MCP' });
     expect(toggle.getAttribute('aria-checked')).toBe('false');
@@ -258,14 +289,14 @@ describe('Workflow settings: Available in MCP (P5-15)', () => {
   it('shows the saved flag and is locked when the workflow is read only', async () => {
     signedIn();
     withProviders(
-        <WorkflowSettingsModal
-          open
-          onClose={() => undefined}
-          value={{ availableInMCP: true }}
-          workflowId="w1"
-          onSave={() => undefined}
-          readOnly
-        />,
+      <WorkflowSettingsModal
+        open
+        onClose={() => undefined}
+        value={{ availableInMCP: true }}
+        workflowId="w1"
+        onSave={() => undefined}
+        readOnly
+      />,
     );
     const toggle = (await screen.findByRole('switch', { name: 'Available in MCP' })) as HTMLButtonElement;
     expect(toggle.getAttribute('aria-checked')).toBe('true');

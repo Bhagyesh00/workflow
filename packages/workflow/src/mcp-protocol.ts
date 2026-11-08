@@ -109,7 +109,11 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const isId = (value: unknown): value is JsonRpcId =>
   typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
 
-const invalid = (id: JsonRpcId | null, text: string, code: number = MCP_ERRORS.INVALID_REQUEST): McpMessage => ({
+const invalid = (
+  id: JsonRpcId | null,
+  text: string,
+  code: number = MCP_ERRORS.INVALID_REQUEST,
+): McpMessage => ({
   kind: 'invalid',
   id,
   code,
@@ -128,7 +132,8 @@ export function parseMcpMessage(body: unknown): McpMessage {
     if ('method' in body) return invalid(id, 'Invalid Request: a message is either a request or a response');
     return { kind: 'response' };
   }
-  if (typeof body.method !== 'string' || !body.method) return invalid(id, 'Invalid Request: method is required');
+  if (typeof body.method !== 'string' || !body.method)
+    return invalid(id, 'Invalid Request: method is required');
   if (body.params !== undefined && !isObject(body.params)) {
     return invalid(id, 'Invalid Request: params must be an object');
   }
@@ -151,7 +156,12 @@ export function mcpResult(id: JsonRpcId | null, result: unknown): JsonRpcRespons
   return { jsonrpc: '2.0', id, result };
 }
 
-export function mcpError(id: JsonRpcId | null, code: number, message: string, data?: unknown): JsonRpcResponse {
+export function mcpError(
+  id: JsonRpcId | null,
+  code: number,
+  message: string,
+  data?: unknown,
+): JsonRpcResponse {
   return { jsonrpc: '2.0', id, error: { code, message, ...(data === undefined ? {} : { data }) } };
 }
 
