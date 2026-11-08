@@ -261,7 +261,7 @@ describe('MCP Client Tool', () => {
       httpBearerAuth: { token: 'T', ...restricted('example.com') },
     });
     expect(r.status).toBe('error');
-    expect(String(r.error?.message)).toContain('Domain not allowed');
+    expect(String(r.error?.description)).toContain('Domain not allowed');
     expect(mcp.hits).toHaveLength(0);
   });
 
@@ -288,14 +288,16 @@ describe('MCP Client Tool', () => {
       httpBearerAuth: { token: 'T', allowedHttpRequestDomains: 'none' },
     });
     expect(bearer.r.status).toBe('error');
-    expect(String(bearer.r.error?.message)).toContain('prevent use within an HTTP Request or GraphQL node');
+    expect(String(bearer.r.error?.description)).toContain(
+      'prevent use within an HTTP Request or GraphQL node',
+    );
     const header = await connectTo(
       `${mcp.url}/mcp`,
       { httpHeaderAuth: { name: 'X-Key', value: 'v', ...restricted('example.com') } },
       'headerAuth',
     );
     expect(header.r.status).toBe('error');
-    expect(String(header.r.error?.message)).toContain('Domain not allowed');
+    expect(String(header.r.error?.description)).toContain('Domain not allowed');
     expect(mcp.hits).toHaveLength(0);
   });
 
