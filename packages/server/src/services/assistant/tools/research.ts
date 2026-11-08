@@ -17,6 +17,7 @@
 import { z } from 'zod';
 import type { ServerContext } from '../../../context';
 import { fetchApprovedPage, parseFetchUrl, WebFetchRefusal } from '../../ai-builder/web-fetch';
+import { stripInvisible } from '../mcp-sanitize';
 import type { AssistantRunScope, AssistantToolDefinition } from '../types';
 import { WEB_SEARCH_LIMITS, WebSearchError, webSearch } from '../web-search';
 
@@ -112,14 +113,12 @@ const fetchInput = z.object({
     .describe('Characters of the page text to answer (30000 by default, 100000 at most)'),
 });
 
-/** HTML comments and characters a person cannot see, which can carry hidden instructions */
-// biome-ignore lint/suspicious/noMisleadingCharacterClass: these are exactly the invisible characters to remove
-const INVISIBLE = /[­͏؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮⁠-⁯ㅤ︀-️﻿ﾠ]|[\u{E0000}-\u{E0FFF}]/gu;
-// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are removed on purpose
-const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
-
+/**
+ * HTML comments and characters a person cannot see, which can carry hidden instructions: the same
+ * invisible and control characters an MCP server's text loses (`stripInvisible`).
+ */
 export function cleanPageText(text: string): string {
-  return text.replace(/<!--[\s\S]*?-->/g, ' ').replace(INVISIBLE, '').replace(CONTROL, '');
+  return stripInvisible(text.replace(/<!--[\s\S]*?-->/g, ' '));
 }
 
 function refusalText(error: unknown): string {

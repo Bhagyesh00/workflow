@@ -19,6 +19,7 @@ import {
   SearchCache,
   searchCache,
   WEB_SEARCH_NO_PROVIDER,
+  WEB_SEARCH_NO_VALID_DOMAIN,
 } from '../src/services/assistant/web-search';
 import {
   type AssistantHarness,
@@ -218,6 +219,18 @@ describe('Assistant web research (P5-73)', () => {
       const urls = unwrap(turn.result ?? '').results.map((r: { url: string }) => new URL(r.url).hostname);
       expect(urls).toEqual(['docs.example.com', 'example.com']);
       expect(urls).not.toContain('evil-example.com');
+    });
+
+    it('matches nothing when no includeDomains entry is a host name, and asks the provider nothing', async () => {
+      const cred = await makeCredential('searXngApi', { apiUrl: siteUrl });
+      await configure(cred.id, { webSearch: 'always_allow' });
+      const before = hitsOn('/search').length;
+      const turn = await h.callTool(h.editor, 'web_search', {
+        query: `bad filter ${suffix()}`,
+        includeDomains: ['docs example', 'http://'],
+      });
+      expect(unwrap(turn.result ?? '')).toEqual({ results: [], note: WEB_SEARCH_NO_VALID_DOMAIN });
+      expect(hitsOn('/search')).toHaveLength(before);
     });
 
     it('goes without a card when webSearch is always allowed, and the cache answers a repeat', async () => {
@@ -449,6 +462,13 @@ describe('Assistant web research (P5-73)', () => {
 
     it('cleans comments and invisible characters from text', () => {
       expect(cleanPageText('a<!-- x -->b​c⁠d\u0007e\nf')).toBe('a bcde\nf');
+    });
+
+    it('removes the same invisible characters as an MCP result: annotations, musical controls, C1', () => {
+      const hidden = [0xfff9, 0xfffa, 0xfffb, 0x1d173, 0x1d17a, 0x80, 0x9f].map((c) =>
+        String.fromCodePoint(c),
+      );
+      expect(cleanPageText(`a${hidden.join('x')}b`)).toBe('axxxxxxb');
     });
   });
 

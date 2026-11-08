@@ -33,6 +33,10 @@ export const WEB_SEARCH_LIMITS = {
 export const WEB_SEARCH_NO_PROVIDER =
   'No web search provider is set up for this workspace, so nothing was searched. An admin can choose a Brave Search or SearXNG credential in the Assistant settings.';
 
+/** `includeDomains` was given, but no entry is a host name: nothing was searched */
+export const WEB_SEARCH_NO_VALID_DOMAIN =
+  'None of the domains is a valid host name, so nothing was searched.';
+
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 /** a refusal or failure whose text is safe for the model and the person */
@@ -308,13 +312,17 @@ export async function webSearch(
   if (!row || (row.type !== 'braveSearchApi' && row.type !== 'searXngApi')) {
     return { results: [], note: WEB_SEARCH_NO_PROVIDER };
   }
+  const wanted = (request.includeDomains ?? []).map(normalizeDomain).filter(Boolean);
+  // a filter of only bad entries matches nothing; it never turns into no filter
+  if ((request.includeDomains?.length ?? 0) > 0 && wanted.length === 0) {
+    return { results: [], note: WEB_SEARCH_NO_VALID_DOMAIN };
+  }
   const key = SearchCache.key(request.tenantId, row.id, request.query);
   let all = cache.get(key);
   if (!all) {
     all = await runProvider(ctx, row, request.query, request.signal);
     cache.set(key, all);
   }
-  const wanted = (request.includeDomains ?? []).map(normalizeDomain).filter(Boolean);
   const filtered = wanted.length
     ? all.filter((result) => {
         try {
