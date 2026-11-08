@@ -56,11 +56,7 @@ export async function documentText(
     return cut(read, options.maxChars);
   } catch (error) {
     if (error instanceof DocumentTextError) throw error;
-    if (
-      error instanceof PdfReadError ||
-      error instanceof ArchiveError ||
-      error instanceof SpreadsheetError
-    ) {
+    if (error instanceof PdfReadError || error instanceof ArchiveError || error instanceof SpreadsheetError) {
       throw new DocumentTextError(error.message);
     }
     throw new DocumentTextError(`The ${format} file could not be read: it is damaged or not in that format`);
@@ -294,7 +290,7 @@ function hiddenElementEnd(html: string, name: string, from: number): number {
  * the markup): an unclosed comment or hidden element hides the rest of the page, as in a browser, and a
  * `<` with no `>` after it is text.
  */
-function htmlToText(html: string): string {
+export function htmlToText(html: string): string {
   const parts: string[] = [];
   let at = 0;
   while (at < html.length) {

@@ -301,6 +301,24 @@ describe('HTTP Request tool', () => {
     expect(optimizeResponse({ a: 1, b: 2 }, { fieldsToInclude: 'except', fields: 'b' })).toBe('{"a":1}');
     expect(optimizeResponse('x'.repeat(500), { responseType: 'text', maxLength: 100 })).toHaveLength(101);
   });
+
+  it('reads a hostile HTML body in linear time (no backtracking)', () => {
+    // unclosed script openings and a long run of '<' with no '>' are quadratic for a backtracking regex reader
+    const hostile = [
+      `<p>Start</p>${'<script x'.repeat(100_000)}`,
+      `<p>Start</p>${'<'.repeat(500_000)}`,
+      `<p>Start</p>${'<style>'.repeat(100_000)}`,
+    ];
+    for (const body of hostile) {
+      const started = Date.now();
+      const text = optimizeResponse(body, { responseType: 'html', maxLength: 100 });
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(text.startsWith('Start')).toBe(true);
+    }
+    expect(
+      optimizeResponse('<h1>Title</h1>\n\n\n<p>One</p><p>Two</p>', { responseType: 'html', maxLength: 100 }),
+    ).toBe('Title\nOne\nTwo');
+  });
 });
 
 describe('Call Workflow tool', () => {

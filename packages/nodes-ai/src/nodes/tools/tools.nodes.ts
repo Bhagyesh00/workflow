@@ -5,6 +5,8 @@
  * only arithmetic, code runs in the isolate with the arguments passed as JSON, and the HTTP tool
  * never lets the model pick the host of a request that carries credentials.
  */
+
+import { MAX_HTML_CHARS, htmlToText as readHtmlText } from '@workflow/nodes-base/utils/document-text';
 import {
   assertCredentialUrlAllowed,
   type DataObject,
@@ -325,21 +327,10 @@ export function fillJsonBody(template: string, values: DataObject): unknown {
   }
 }
 
+/** the visible text of an HTML body, read in linear time by the shared reader (cut at MAX_HTML_CHARS), one line per block */
 function htmlToText(html: string): string {
-  return html
-    .replace(/<(script|style|noscript|template)[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr)>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/[ \t]+/g, ' ')
-    .replace(/ *\n */g, '\n')
-    .replace(/\n{2,}/g, '\n')
-    .trim();
+  const text = readHtmlText(html.length > MAX_HTML_CHARS ? html.slice(0, MAX_HTML_CHARS) : html);
+  return text.replace(/\n{2,}/g, '\n');
 }
 
 function pickFields(value: unknown, mode: string, fields: string[]): unknown {
