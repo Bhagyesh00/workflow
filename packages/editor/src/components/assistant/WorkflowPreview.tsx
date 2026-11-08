@@ -44,8 +44,9 @@ export function WorkflowPreview({ workflowId }: WorkflowPreviewProps) {
           Open
         </Link>
       </div>
+      {/* React Flow sizes to 100% of this box, so the box needs a set height: a min-height alone leaves it 0 tall */}
       <div
-        className="min-h-[50vh] flex-1 overflow-hidden rounded-xl border border-line"
+        className="h-[60vh] min-h-[320px] shrink-0 overflow-hidden rounded-xl border border-line"
         data-testid="workflow-preview"
       >
         <ReactFlowProvider>

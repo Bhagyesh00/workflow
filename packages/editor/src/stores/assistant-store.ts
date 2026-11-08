@@ -24,7 +24,7 @@ import { streamAssistantEvents } from '../api/assistant-stream';
 import { errorMessage } from '../api/client';
 import { assistantApi } from '../api/endpoints';
 import type { AssistantDraftView, AssistantThreadPage } from '../api/types';
-import { reduceAssistantEvent } from '../features/assistant/event-reducer';
+import { artifactKey, reduceAssistantEvent } from '../features/assistant/event-reducer';
 import { newId } from '../lib/ids';
 
 /** where the open thread is: nothing open, loading it, a turn running, or a turn waiting for a card */
@@ -54,8 +54,12 @@ export interface AssistantThreadState {
   tasks: AssistantTask[];
   artifacts: AssistantArtifact[];
   status: AssistantPhase;
-  /** the highest durable event id seen; the stream resumes after it, and a lower id is dropped */
+  /** the highest durable event id seen; the stream resumes after it */
   cursor: number;
+  /** the cursor the thread was loaded at (set by the first event): an id at or below it is in `messages` */
+  floor?: number;
+  /** the last durable ids applied (bounded): a replay of one changes nothing, an older id not among them applies */
+  delivered?: number[];
   error: string | null;
 }
 
@@ -110,15 +114,40 @@ export function initialAssistantState(): AssistantStoreData {
     drafts: {},
     status: 'idle',
     cursor: 0,
+    floor: undefined,
+    delivered: undefined,
     error: null,
   };
 }
 
 /** the open thread's part of the state, empty */
 function emptyThread(): AssistantThreadState {
-  const { messages, streamingText, toolRuns, pending, tasks, artifacts, status, cursor, error } =
-    initialAssistantState();
-  return { messages, streamingText, toolRuns, pending, tasks, artifacts, status, cursor, error };
+  const {
+    messages,
+    streamingText,
+    toolRuns,
+    pending,
+    tasks,
+    artifacts,
+    status,
+    cursor,
+    floor,
+    delivered,
+    error,
+  } = initialAssistantState();
+  return {
+    messages,
+    streamingText,
+    toolRuns,
+    pending,
+    tasks,
+    artifacts,
+    status,
+    cursor,
+    floor,
+    delivered,
+    error,
+  };
 }
 
 /** the running stream of the open thread; one at a time */
@@ -173,6 +202,19 @@ function startStream(threadId: string, afterId: number, token: number): void {
   });
 }
 
+/** the artifacts the loaded messages carry, one per id; a later one replaces the earlier and moves last */
+function artifactsOf(messages: AssistantMessageDTO[]): AssistantArtifact[] {
+  const byKey = new Map<string, AssistantArtifact>();
+  for (const message of messages) {
+    for (const artifact of message.artifacts ?? []) {
+      const key = artifactKey(artifact);
+      byKey.delete(key);
+      byKey.set(key, artifact);
+    }
+  }
+  return [...byKey.values()];
+}
+
 /** messages, then status, then the stream from `nextEventId - 1` (n8n's open order) */
 async function loadThread(threadId: string, token: number): Promise<void> {
   try {
@@ -181,12 +223,18 @@ async function loadThread(threadId: string, token: number): Promise<void> {
     const status = await assistantApi.status(threadId);
     if (token !== generation) return;
     const cursor = Math.max(0, (Number(page.nextEventId) || 1) - 1);
+    const messages = page.messages ?? [];
     useAssistantStore.setState({
-      messages: page.messages ?? [],
+      messages,
+      // the checklist and the artifacts column as the last stored events left them; live events update them
+      tasks: [...messages].reverse().find((message) => message.tasks)?.tasks ?? [],
+      artifacts: artifactsOf(messages),
       pending: status.pending ?? [],
       status: phaseOf({ ...status, pending: status.pending ?? [] }),
       streamingText: '',
       cursor,
+      floor: undefined,
+      delivered: undefined,
       error: null,
     });
     startStream(threadId, cursor, token);
@@ -324,8 +372,7 @@ export const useAssistantStore = create<AssistantState>()((set, get) => ({
 
   applyEvent: (event) =>
     set((state) => {
-      // a replay the state already holds
-      if (typeof event.id === 'number' && event.id <= state.cursor) return state;
+      // a replay the state already holds comes back as the same state (the reducer's delivered ids)
       const next = reduceAssistantEvent(state, event);
       if (event.type !== 'thread-title-updated') return next === state ? state : next;
       const title = event.payload.title;

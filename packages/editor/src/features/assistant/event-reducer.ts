@@ -1,7 +1,7 @@
 /**
  * P5-67 (L2): one Assistant event applied to the open thread's state. Pure: deltas append to the live segment
  * and `text-block` replaces it with a message, so a reconnect mid-block never shows text twice; a durable event
- * with an id at or below `cursor` changes nothing.
+ * at or below the loaded cursor (`floor`), or one already applied (`delivered`), changes nothing.
  *
  * An event that changes nothing returns the same state object, so a caller can tell a dropped replay apart.
  * `thread-title-updated` and `status` change no thread state (the store keeps the title in its thread list,
@@ -14,6 +14,7 @@ import type {
   AssistantMessageDTO,
   AssistantRunStatus,
 } from '@workflow/workflow';
+import { ASSISTANT_DELIVERED_IDS } from '../../api/assistant-stream';
 import type { AssistantPhase, AssistantThreadState, AssistantToolRun } from '../../stores/assistant-store';
 
 /** the text a run that ended in an error shows when the server gave no reason */
@@ -190,9 +191,17 @@ export function reduceAssistantEvent(
   event: AssistantEvent,
 ): AssistantThreadState {
   const id = typeof event.id === 'number' && Number.isFinite(event.id) ? event.id : null;
-  // a replayed durable event the state already holds
-  if (id !== null && id <= state.cursor) return state;
+  if (id === null) return apply(state, event);
+  // a durable event the loaded messages hold, or a replay of one already applied (two writers of one
+  // thread can send id N after N+1, so an id below the cursor that is not among them still applies)
+  const floor = state.floor ?? state.cursor;
+  const delivered = state.delivered ?? [];
+  if (id <= floor || delivered.includes(id)) return state;
   const next = apply(state, event);
-  if (id === null) return next;
-  return next === state ? { ...state, cursor: id } : { ...next, cursor: id };
+  const seen = {
+    cursor: Math.max(state.cursor, id),
+    floor,
+    delivered: [...delivered, id].slice(-ASSISTANT_DELIVERED_IDS),
+  };
+  return next === state ? { ...state, ...seen } : { ...next, ...seen };
 }

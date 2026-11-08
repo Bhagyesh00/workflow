@@ -67,6 +67,8 @@ describe('server stream (P5-67)', () => {
   });
 
   it('reads split SSE frames with the tenant header, drops replays and reconnects from the highest id', async () => {
+    // each id once: an older id than one delivered still arrives (two writers), a replay or one at or below
+    // the start id does not
     setCurrentTenant('tenant-1');
     const seen: Array<{ lastEventId: string | null; tenant: string | null; header: string | null }> = [];
     server.use(
@@ -86,8 +88,10 @@ describe('server stream (P5-67)', () => {
               'data: {"type":"text-delta","runId":"r1","payload":{"text":"Hel"}}\r\n\r\n',
               'data: not json\n\n',
               frame({ type: 'nope', runId: null, payload: {} }),
-              // an older id than one already delivered
+              // an older id than one already delivered, from a second writer of the thread
               frame({ type: 'tasks-update', id: 4, runId: 'r1', payload: { tasks: [] } }),
+              // the loaded page holds it already
+              frame({ type: 'tasks-update', id: 3, runId: 'r1', payload: { tasks: [] } }),
             ],
             request,
           );
@@ -116,6 +120,7 @@ describe('server stream (P5-67)', () => {
     expect(events.map((event) => [event.type, event.id])).toEqual([
       ['run-start', 5],
       ['text-delta', undefined],
+      ['tasks-update', 4],
       ['text-block', 6],
     ]);
     expect(seen).toEqual([
@@ -323,6 +328,24 @@ describe('event reducer (P5-67)', () => {
     expect(reduceAssistantEvent(state, ev('error', { message: 'old' }, 10))).toBe(state);
     expect(reduceAssistantEvent(state, ev('error', { message: 'old' }, 9))).toBe(state);
   });
+
+  it('applies an older id that arrives after a newer one, once, and keeps the highest as the cursor', () => {
+    const loaded = { ...thread(), cursor: 4 };
+    const state = reduceAll(
+      [
+        ev('tool-call', { toolCallId: 'c2', toolName: 'get_workflow', args: {} }, 6),
+        // a second writer's event, sent after the newer one
+        ev('tool-call', { toolCallId: 'c1', toolName: 'list_workflows', args: {} }, 5),
+      ],
+      loaded,
+    );
+    expect(state.toolRuns.map((r) => r.toolCallId)).toEqual(['c2', 'c1']);
+    expect(state.cursor).toBe(6);
+    // replays of both, and an id the loaded page holds, change nothing
+    expect(reduceAssistantEvent(state, ev('error', { message: 'again' }, 5))).toBe(state);
+    expect(reduceAssistantEvent(state, ev('error', { message: 'again' }, 6))).toBe(state);
+    expect(reduceAssistantEvent(state, ev('error', { message: 'loaded' }, 4))).toBe(state);
+  });
 });
 
 describe('store open order (P5-67)', () => {
@@ -375,5 +398,22 @@ describe('store open order (P5-67)', () => {
     expect(useAssistantStore.getState().error).toBeNull();
     sinks[1](ev('error', { message: 'from B' }, 1));
     expect(useAssistantStore.getState().error).toBe('from B');
+  });
+
+  it("applies a second writer's older event through the store and drops its replay", async () => {
+    const created = await assistantApi.createThread({});
+    const sinks: Array<(event: AssistantEvent) => void> = [];
+    setAssistantStreamConnector(async (_threadId, _afterId, onEvent, signal) => {
+      sinks.push(onEvent);
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+    });
+    await useAssistantStore.getState().openThread(created.id);
+    sinks[0](ev('tasks-update', { tasks: [{ id: 't1', description: 'Plan', status: 'done' }] }, 3));
+    sinks[0](ev('error', { message: 'late' }, 2));
+    expect(useAssistantStore.getState().error).toBe('late');
+    expect(useAssistantStore.getState().cursor).toBe(3);
+    useAssistantStore.setState({ error: null });
+    sinks[0](ev('error', { message: 'late' }, 2));
+    expect(useAssistantStore.getState().error).toBeNull();
   });
 });

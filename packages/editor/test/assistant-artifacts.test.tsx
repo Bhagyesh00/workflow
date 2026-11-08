@@ -6,10 +6,11 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { WorkflowNode } from '@workflow/workflow';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setAssistantStreamConnector } from '../src/api/assistant-stream';
 import type { ApiRequest } from '../src/api/client';
-import { dataTablesApi } from '../src/api/endpoints';
+import { assistantApi, dataTablesApi } from '../src/api/endpoints';
 import { ArtifactsPanel } from '../src/components/assistant/ArtifactsPanel';
 import { assistantDemoState, demoAssistantStream } from '../src/demo/mock-assistant';
 import { useAssistantStore } from '../src/stores/assistant-store';
@@ -105,6 +106,73 @@ describe('Assistant artifacts (P5-67)', () => {
       (r: ApiRequest) => r.method === 'GET' && r.path === `/data-tables/${table.id}/rows`,
     );
     expect(String(read?.query?.take)).toBe('20');
+  });
+
+  it('gives the workflow preview canvas a set height so React Flow draws the nodes', async () => {
+    const wf = backend().seedWorkflow({
+      name: 'Sized flow',
+      nodes: [node('t', 'Start here', 'core.manualTrigger', 0)],
+      connections: {},
+    });
+    withProviders(
+      <MemoryRouter>
+        <ArtifactsPanel artifacts={[{ type: 'workflow', id: wf.id, name: 'Sized flow' }]} />
+      </MemoryRouter>,
+    );
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Open Sized flow' }));
+    const dialog = await screen.findByRole('dialog', undefined, WAIT);
+    const box = await within(dialog).findByTestId('workflow-preview', undefined, WAIT);
+    // React Flow is width and height 100%: a box with only a min-height (and no sized parent) leaves it 0 tall
+    expect(box.className.split(/\s+/)).toContain('h-[60vh]');
+    expect(box.className.split(/\s+/)).not.toContain('flex-1');
+    expect(box.querySelector('.react-flow')).toBeTruthy();
+    expect(await within(box).findByText('Start here', undefined, WAIT)).toBeTruthy();
+  });
+
+  it('shows the stored task list and artifacts of a thread after a reload', async () => {
+    const thread = await assistantApi.createThread({});
+    const demo = assistantDemoState(backend()).threads.get(thread.id);
+    if (!demo) throw new Error('no demo thread');
+    const at = '2026-11-08T00:00:00.000Z';
+    demo.messages.push(
+      {
+        id: 'm-1',
+        runId: 'r1',
+        role: 'assistant',
+        content: 'First',
+        summarized: false,
+        createdAt: at,
+        tasks: [{ id: 't0', description: 'Old plan', status: 'todo' }],
+        artifacts: [
+          { type: 'workflow', id: 'w1', name: 'Orders' },
+          { type: 'data-table', id: 't1', name: 'Leads' },
+        ],
+      },
+      {
+        id: 'm-2',
+        runId: 'r2',
+        role: 'assistant',
+        content: 'Second',
+        summarized: false,
+        createdAt: at,
+        tasks: [
+          { id: 't1', description: 'Find the table', status: 'done' },
+          { id: 't2', description: 'Build the workflow', status: 'in_progress' },
+        ],
+        artifacts: [{ type: 'workflow', id: 'w1', name: 'Orders v2' }],
+      },
+    );
+    renderApp(`/assistant/${thread.id}`);
+    const tasks = await screen.findByRole('region', { name: 'Tasks' }, WAIT);
+    expect(within(tasks).getByText('Tasks: 1 of 2 done')).toBeTruthy();
+    expect(within(tasks).queryByText('Old plan')).toBeNull();
+    const panel = await screen.findByRole('region', { name: 'Artifacts' }, WAIT);
+    await within(panel).findByRole('button', { name: 'Open Orders v2' }, WAIT);
+    expect(
+      within(panel)
+        .getAllByRole('listitem')
+        .map((li) => li.textContent),
+    ).toEqual(['LeadsData tableOpen', 'Orders v2WorkflowOpen']);
   });
 
   it('lists each artifact once and says when there is none', async () => {

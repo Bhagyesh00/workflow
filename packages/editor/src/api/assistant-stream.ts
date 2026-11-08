@@ -5,8 +5,8 @@
  * events.
  *
  * The server stream: its own small SSE parser (`data:` lines hold one JSON event, `id:` the stored event's id,
- * comments and pings are skipped), the highest id seen (lower ones are dropped), reconnect with backoff from
- * that id, stop on abort. An answer that cannot get better by retrying (401, 403, 404, 409, 400) ends the
+ * comments and pings are skipped), each id once (a bounded set of delivered ids: two writers of one thread
+ * can send id N after N+1), reconnect with backoff from the highest id seen, stop on abort. An answer that cannot get better by retrying (401, 403, 404, 409, 400) ends the
  * stream with an `ApiError`; a network failure, a 429 or a 5xx retries.
  */
 import { ASSISTANT_EVENT_TYPES, type AssistantEvent, isDurableAssistantEvent } from '@workflow/workflow';
@@ -24,6 +24,9 @@ export type AssistantStreamConnector = (
 ) => Promise<void>;
 
 let connector: AssistantStreamConnector | null = null;
+
+/** how many delivered event ids a stream (and the thread state) remembers to drop a replay */
+export const ASSISTANT_DELIVERED_IDS = 1000;
 
 /** Replace the stream (the demo's seam); `null` goes back to the server stream. */
 export function setAssistantStreamConnector(next: AssistantStreamConnector | null): void {
@@ -220,12 +223,19 @@ async function serverStream(
   onEvent: (event: AssistantEvent) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  let highest = Number.isFinite(afterId) ? afterId : 0;
+  // the reconnect cursor only: two writers of one thread can send id N after N+1
+  const floor = Number.isFinite(afterId) ? afterId : 0;
+  let highest = floor;
+  const delivered = new Set<number>();
   const deliver = (event: AssistantEvent) => {
     if (typeof event.id === 'number') {
-      // a replay of an event already delivered
-      if (event.id <= highest) return;
-      highest = event.id;
+      // the caller holds it already, or a replay of an event already delivered
+      if (event.id <= floor || delivered.has(event.id)) return;
+      delivered.add(event.id);
+      if (delivered.size > ASSISTANT_DELIVERED_IDS) {
+        delivered.delete(delivered.values().next().value as number);
+      }
+      highest = Math.max(highest, event.id);
     }
     onEvent(event);
   };
