@@ -278,21 +278,34 @@ function webhookItem(inputData: unknown): Item {
   };
 }
 
-/** a Chat Trigger item: `{ sessionId, action: 'sendMessage', chatInput }` from a text or `{ chatInput }` */
+/**
+ * A Chat Trigger item: `{ sessionId, action: 'sendMessage', chatInput }` from a text or `{ chatInput }`;
+ * other data becomes the message as JSON (as n8n), so the run never sends an empty message by mistake.
+ */
 function chatItem(inputData: unknown): Item {
   const data = isPlainObject(inputData) ? inputData : {};
-  const chatInput =
-    typeof inputData === 'string' ? inputData : typeof data.chatInput === 'string' ? data.chatInput : '';
+  let chatInput = '';
+  if (typeof inputData === 'string') chatInput = inputData;
+  else if (typeof data.chatInput === 'string') chatInput = data.chatInput;
+  else if (inputData !== undefined && inputData !== null) chatInput = JSON.stringify(inputData) ?? '';
   const sessionId = typeof data.sessionId === 'string' && data.sessionId ? data.sessionId : randomUUID();
   return { json: { sessionId, action: 'sendMessage', chatInput } };
 }
 
-/** a Form Trigger item: the fields as a flat map, plus `submittedAt` and `formMode: 'test'` */
+/** the error for Form Trigger data wrapped in `formFields` (n8n refuses it too) */
+export const FORM_FIELDS_WRAPPED =
+  'Couldn\'t use inputData for the Form Trigger: give the fields as a flat map, such as { "email": "ada@example.com" }, not inside formFields';
+
+/**
+ * A Form Trigger item: the fields as a flat map, plus `submittedAt` and `formMode: 'test'`. Fields wrapped
+ * in a `formFields` object are refused, since the workflow would read `$json.formFields.x` that never exists.
+ */
 function formItems(inputData: unknown): Item[] {
   const submittedAt = new Date().toISOString();
-  return plainItems(inputData).map((item) => ({
-    json: { ...item.json, submittedAt, formMode: 'test' },
-  }));
+  return plainItems(inputData).map((item) => {
+    if (isPlainObject(item.json.formFields)) throw new Error(FORM_FIELDS_WRAPPED);
+    return { json: { ...item.json, submittedAt, formMode: 'test' } };
+  });
 }
 
 function zonedParts(date: Date, timeZone: string): Record<string, string> {

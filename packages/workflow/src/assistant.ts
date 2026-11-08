@@ -339,6 +339,16 @@ export interface AssistantMessageDTO {
   toolCallId?: string;
   name?: string;
   attachments?: AssistantAttachmentRef[];
+  /**
+   * On the last assistant message of a run: the run's latest task list, folded from its stored
+   * `tasks-update` events up to the page's `nextEventId` (a reload rebuilds the checklist from it).
+   */
+  tasks?: AssistantTask[];
+  /**
+   * On the last assistant message of a run: the workflows, data tables and drafts the run showed, folded
+   * from its stored `artifact` events (one per id, the latest name), for the artifacts column on a reload.
+   */
+  artifacts?: AssistantArtifact[];
   summarized: boolean;
   createdAt: string;
 }

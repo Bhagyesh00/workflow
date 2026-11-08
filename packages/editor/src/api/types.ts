@@ -1015,6 +1015,8 @@ export interface AssistantDraftView {
 /** body of POST .../drafts/:draftId/accept (editor; a person only) */
 export interface AssistantAcceptDraftBody {
   name?: string;
+  /** the draft version the card shows (draft.updatedAt); the server saves only that version */
+  updatedAt?: string;
 }
 
 /** answer of POST .../drafts/:draftId/accept */
