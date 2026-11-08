@@ -1,26 +1,17 @@
 /** /rest/settings, /rest/node-types, /rest/credential-types */
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
-import { createBaseContext } from '@workflow/core';
-import {
-  type CredentialTypeDescription,
-  ExpressionEvaluator,
-  type LoadOptionsContext,
-  Workflow,
-  type WorkflowDefinition,
-  type WorkflowNode,
-} from '@workflow/workflow';
+import type { CredentialTypeDescription } from '@workflow/workflow';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import { clearSessionCookie, requireAuth, requireRole } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
-import { decodeCursor, encodeCursor } from '../http/pagination';
-import { nodeSchema } from '../http/schemas';
 import { currentPeriod, effectiveLimits, PLANS, type TenantSettings } from '../plans';
-import { isUuid } from '../repositories/util';
 import { CREDENTIAL_MISMATCH, credentialFitsModel, isBuilderModelNode } from '../services/ai-builder/model';
+import { assistantFeature } from '../services/assistant/settings';
 import { hasRole } from '../services/auth';
+import { loadNodeOptions } from '../services/node-options';
 
 const settingsPatch = z.object({
   brand: z
@@ -68,33 +59,6 @@ function aiBuilderFeature(enabled: boolean, settings: TenantSettings) {
   return { enabled, setup: Boolean(ai?.credentialId && ai.nodeType && ai.model) };
 }
 
-const optionsSchema = z.object({
-  nodeType: z.string().min(1),
-  method: z.string().min(1),
-  kind: z.enum(['loadOptions', 'listSearch', 'resourceMapping']),
-  node: nodeSchema,
-  filter: z.string().max(1000).optional(),
-  paginationToken: z.string().max(2000).optional(),
-  /** the workflow open in the editor (left out of workflow pickers) */
-  workflowId: z.string().uuid().optional(),
-});
-
-const WORKFLOW_PAGE_SIZE = 50;
-
-const isIsoDate = (value: string) => {
-  const time = new Date(value).getTime();
-  return !Number.isNaN(time) && new Date(time).toISOString() === value;
-};
-
-/** a workflow cursor is [updatedAt, id]: both reach the query, so both must be what the query expects */
-function decodeWorkflowCursor(token: string | undefined) {
-  const cursor = decodeCursor(token);
-  if (cursor && (!isIsoDate(cursor.value) || !isUuid(cursor.id))) {
-    throw ApiError.badRequest('Invalid cursor');
-  }
-  return cursor;
-}
-
 /** JSON copy without functions (descriptions are data by contract; this enforces it) */
 function plain<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -134,6 +98,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
           webhookIdempotency: true,
           ssrfProtection: config.ssrf.enabled,
           aiBuilder: aiBuilderFeature(config.ai.enabled, tenantSettings),
+          /** P5-67: the Assistant on/off and whether a model is set; never a credential id */
+          assistant: assistantFeature(config, tenantSettings, registries.nodeTypes),
         },
         ...(usage
           ? { usage: { period: usage.period, executions: usage.executions, executionMs: usage.executionMs } }
@@ -250,81 +216,6 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
 
   app.post('/node-types/options', async (request) => {
     const auth = requireRole(request, 'editor');
-    const body = parse(optionsSchema, request.body);
-    const type = registries.nodeTypes.get(body.nodeType);
-    if (!type) throw ApiError.badRequest(`Unknown node type "${body.nodeType}"`);
-    // own entries only: `constructor` must not reach Object() with the context
-    const methods = type.methods?.[body.kind];
-    const method = methods && Object.hasOwn(methods, body.method) ? methods[body.method] : undefined;
-    if (!method)
-      throw ApiError.badRequest(`Node type "${body.nodeType}" has no ${body.kind} method "${body.method}"`);
-    const node = { ...body.node, type: body.nodeType } as WorkflowNode;
-    const workflow = new Workflow(
-      { id: body.workflowId, name: 'options', nodes: [node], connections: {} },
-      registries.nodeTypes,
-    );
-    const services = await ctx.executions.buildServices({
-      tenant: auth.tenant,
-      executionId: '',
-      mode: 'manual',
-    });
-    const base = createBaseContext({
-      workflow,
-      node,
-      services,
-      evaluator: new ExpressionEvaluator({ timeoutMs: 1000 }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    const { getNodeParameter, ...rest } = base;
-    const loadCtx: LoadOptionsContext = {
-      ...rest,
-      getCurrentNodeParameter: (name: string) => {
-        try {
-          return getNodeParameter(name, 0, undefined);
-        } catch {
-          return undefined;
-        }
-      },
-      listWorkflows: async ({ filter, paginationToken, excludeId }) => {
-        // one row more than a page tells whether another page follows; one more again covers the excluded row
-        const rows = await repos.workflows.list(auth.tenant.id, {
-          search: filter,
-          limit: WORKFLOW_PAGE_SIZE + (excludeId ? 1 : 0),
-          cursor: decodeWorkflowCursor(paginationToken),
-        });
-        const visible = rows.filter((row) => row.id !== excludeId);
-        const page = visible.slice(0, WORKFLOW_PAGE_SIZE);
-        const last = page[page.length - 1];
-        return {
-          workflows: page.map((row) => ({ id: row.id, name: row.name })),
-          paginationToken:
-            visible.length > WORKFLOW_PAGE_SIZE && last ? encodeCursor(last.updatedAt, last.id) : undefined,
-        };
-      },
-      readWorkflow: async (id) => {
-        const row = await repos.workflows.get(auth.tenant.id, id);
-        if (!row) return undefined;
-        return {
-          id: row.id,
-          name: row.name,
-          nodes: row.nodes as WorkflowDefinition['nodes'],
-          connections: row.connections as WorkflowDefinition['connections'],
-          settings: row.settings as WorkflowDefinition['settings'],
-        };
-      },
-    };
-    try {
-      const result =
-        body.kind === 'listSearch'
-          ? await (method as (c: LoadOptionsContext, f?: string, t?: string) => Promise<unknown>)(
-              loadCtx,
-              body.filter,
-              body.paginationToken,
-            )
-          : await (method as (c: LoadOptionsContext) => Promise<unknown>)(loadCtx);
-      return { data: result };
-    } catch (error) {
-      throw new ApiError(400, 'options_error', (error as Error).message);
-    }
+    return { data: await loadNodeOptions(ctx, auth, request.body) };
   });
 }

@@ -27,6 +27,21 @@ import type {
   AnnotationTag,
   AnnotationVote,
   ApiKey,
+  AssistantAcceptDraftBody,
+  AssistantAcceptDraftResult,
+  AssistantConfirmAnswer,
+  AssistantDraftView,
+  AssistantMcpConnectionBody,
+  AssistantMcpConnectionDTO,
+  AssistantMcpConnectionPatchBody,
+  AssistantMessagesPage,
+  AssistantSendMessage,
+  AssistantSettingsDTO,
+  AssistantSettingsPatchBody,
+  AssistantStatusDTO,
+  AssistantThreadDTO,
+  AssistantThreadPage,
+  AssistantThreadsQuery,
   AuthResult,
   CreatedApiKey,
   CredentialDetail,
@@ -558,6 +573,54 @@ export const mcpApi = {
   deleteClient: (clientId: string) => api.delete<{ ok: true }>(`/mcp/oauth-clients/${enc(clientId)}`),
   /** admin */
   stats: () => api.get<McpInstanceStats>('/mcp/instance-stats'),
+};
+
+/**
+ * P5-67..74: the Assistant. Threads, messages and status are the caller's own (every role); the turn's events
+ * stream through api/assistant-stream.ts. Settings and MCP connection writes are admin only.
+ */
+export const assistantApi = {
+  threads: (query: AssistantThreadsQuery = {}) =>
+    api.get<AssistantThreadPage>('/assistant/threads', { limit: query.limit, cursor: query.cursor }),
+  createThread: (body: { title?: string } = {}) => api.post<AssistantThreadDTO>('/assistant/threads', body),
+  renameThread: (threadId: string, title: string) =>
+    api.patch<AssistantThreadDTO>(`/assistant/threads/${enc(threadId)}`, { title }),
+  deleteThread: (threadId: string) => api.delete<{ ok: true }>(`/assistant/threads/${enc(threadId)}`),
+  messages: (threadId: string) =>
+    api.get<AssistantMessagesPage>(`/assistant/threads/${enc(threadId)}/messages`),
+  status: (threadId: string) => api.get<AssistantStatusDTO>(`/assistant/threads/${enc(threadId)}/status`),
+  /** starts a turn; its events come through the stream */
+  chat: (threadId: string, body: AssistantSendMessage) =>
+    api.post<{ runId: string }>(`/assistant/chat/${enc(threadId)}`, body),
+  cancel: (threadId: string) => api.post<{ ok: true }>(`/assistant/chat/${enc(threadId)}/cancel`),
+  /** a person's answer to a card */
+  confirm: (requestId: string, answer: AssistantConfirmAnswer) =>
+    api.post<{ ok: true }>(`/assistant/confirm/${enc(requestId)}`, answer),
+  /** admin */
+  settings: () => api.get<AssistantSettingsDTO>('/assistant/settings'),
+  /** admin */
+  patchSettings: (body: AssistantSettingsPatchBody) =>
+    api.patch<AssistantSettingsDTO>('/assistant/settings', body),
+  mcpConnections: () => api.get<AssistantMcpConnectionDTO[]>('/assistant/mcp-connections'),
+  /** admin */
+  createMcpConnection: (body: AssistantMcpConnectionBody) =>
+    api.post<AssistantMcpConnectionDTO>('/assistant/mcp-connections', body),
+  /** admin */
+  patchMcpConnection: (id: string, body: AssistantMcpConnectionPatchBody) =>
+    api.patch<AssistantMcpConnectionDTO>(`/assistant/mcp-connections/${enc(id)}`, body),
+  /** admin */
+  deleteMcpConnection: (id: string) => api.delete<{ ok: true }>(`/assistant/mcp-connections/${enc(id)}`),
+  draft: (threadId: string, draftId: string) =>
+    api.get<AssistantDraftView>(`/assistant/threads/${enc(threadId)}/drafts/${enc(draftId)}`),
+  /** editor; a person only (no tool calls it) */
+  acceptDraft: (threadId: string, draftId: string, body: AssistantAcceptDraftBody = {}) =>
+    api.post<AssistantAcceptDraftResult>(
+      `/assistant/threads/${enc(threadId)}/drafts/${enc(draftId)}/accept`,
+      body,
+    ),
+  /** editor */
+  discardDraft: (threadId: string, draftId: string) =>
+    api.post<{ ok: true }>(`/assistant/threads/${enc(threadId)}/drafts/${enc(draftId)}/discard`),
 };
 
 /** P5-14: the OAuth consent page (`/oauth/consent?flow=...`); `flow` is the signed flow token */

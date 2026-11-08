@@ -23,6 +23,7 @@ import {
   type HttpFullResponse,
   redactSecrets,
 } from '@workflow/workflow';
+import type { ServerContext } from '../../context';
 import { wrapUntrusted } from './context';
 import type { BuilderToolDeps } from './tools';
 import type { BuilderTurnState } from './types';
@@ -37,14 +38,14 @@ const TEXT_TYPES = /^(text\/|application\/(xhtml\+xml|xml|json)|$)/i;
 const fetchesInTurn = new WeakMap<BuilderTurnState, number>();
 
 /** what the model and the user hear when a fetch is refused */
-class WebFetchRefusal extends Error {}
+export class WebFetchRefusal extends Error {}
 
 function isLoopback(hostname: string): boolean {
   return LOOPBACK.has(hostname);
 }
 
 /** the URL when it may be fetched at all: https, or http on a loopback host; else a refusal */
-function parseFetchUrl(raw: unknown): URL {
+export function parseFetchUrl(raw: unknown): URL {
   let url: URL;
   try {
     url = new URL(String(raw ?? '').trim());
@@ -100,16 +101,54 @@ async function readCapped(body: unknown, maxBytes: number): Promise<{ bytes: Buf
   return { bytes: Buffer.concat(chunks), truncated };
 }
 
-/** the page's text for the model, at most `maxChars` characters */
-async function fetchPageText(
-  deps: BuilderToolDeps,
-  first: URL,
+/** the limits of one page fetch; `BUILDER_WEB_FETCH` fits */
+export interface FetchPageLimits {
+  timeoutMs: number;
+  maxBytes: number;
+  /** characters of text kept */
+  maxChars: number;
+  /**
+   * true: a redirect to another host is not followed and comes back as `redirectedTo` (the Assistant's
+   * `fetch_url` asks again); unset or false: it is refused with a `WebFetchRefusal` (the builder)
+   */
+  reportCrossHostRedirect?: boolean;
+}
+
+export interface FetchedPage {
+  /** the URL the text came from (after same-host redirects) */
+  finalUrl: string;
+  /** the HTML `<title>`, when the page has one */
+  title?: string;
+  /** the page's text, HTML stripped, at most `maxChars` characters; empty with `redirectedTo` */
+  text: string;
+  /** whether bytes or characters were cut */
+  truncated: boolean;
+  /** only with `reportCrossHostRedirect`: the other host's URL the page redirected to */
+  redirectedTo?: string;
+}
+
+function pageTitle(raw: string): string | undefined {
+  const match = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(raw);
+  const title = match ? stripHtml(match[1]).replace(/\s+/g, ' ').trim() : '';
+  return title ? title.slice(0, 300) : undefined;
+}
+
+/**
+ * Fetches an approved page through `ctx.http` (the SSRF guard, `allowedDomains: [host]`, no credential,
+ * no cookie, no header of the user) in an own loop of at most 3 redirects, each hop rechecked (scheme
+ * rule, host by `===`, never https to http). Refusals throw `WebFetchRefusal` with a message for the
+ * model and the user. `url` as a string is checked with the same scheme rule first.
+ */
+export async function fetchApprovedPage(
+  ctx: ServerContext,
+  url: URL | string,
   host: string,
-  signal: AbortSignal,
-): Promise<string> {
-  let current = first;
+  limits: FetchPageLimits,
+  signal?: AbortSignal,
+): Promise<FetchedPage> {
+  let current = typeof url === 'string' ? parseFetchUrl(url) : url;
   for (let hop = 0; hop <= MAX_HOPS; hop++) {
-    const response = (await deps.ctx.http.request<AsyncIterable<Uint8Array>>(
+    const response = (await ctx.http.request<AsyncIterable<Uint8Array>>(
       {
         url: current.toString(),
         method: 'GET',
@@ -117,7 +156,7 @@ async function fetchPageText(
         responseType: 'stream',
         returnFullResponse: true,
         ignoreHttpStatusErrors: true,
-        timeout: BUILDER_WEB_FETCH.timeoutMs,
+        timeout: limits.timeoutMs,
         followRedirects: false,
         allowedDomains: [host],
       },
@@ -134,8 +173,12 @@ async function fetchPageText(
       } catch {
         throw new WebFetchRefusal('The page redirected to a URL that is not valid.');
       }
-      if (next.hostname !== host)
+      if (next.hostname !== host) {
+        if (limits.reportCrossHostRedirect) {
+          return { finalUrl: current.toString(), text: '', truncated: false, redirectedTo: next.toString() };
+        }
         throw new WebFetchRefusal('The page redirected to another host, which is refused.');
+      }
       if (current.protocol === 'https:' && next.protocol !== 'https:') {
         throw new WebFetchRefusal('The page redirected to plain http, which is refused.');
       }
@@ -152,10 +195,18 @@ async function fetchPageText(
       await readCapped(response.body, 0);
       throw new WebFetchRefusal('The page is not text, so it was not read.');
     }
-    const { bytes } = await readCapped(response.body, BUILDER_WEB_FETCH.maxBytes);
+    const { bytes, truncated: cutBytes } = await readCapped(response.body, limits.maxBytes);
     const raw = new TextDecoder('utf-8').decode(bytes);
-    const text = /html|xml/i.test(type) || /^\s*<(!doctype|html)/i.test(raw) ? stripHtml(raw) : raw.trim();
-    return text.length > BUILDER_WEB_FETCH.maxChars ? text.slice(0, BUILDER_WEB_FETCH.maxChars) : text;
+    const isHtml = /html|xml/i.test(type) || /^\s*<(!doctype|html)/i.test(raw);
+    const text = isHtml ? stripHtml(raw) : raw.trim();
+    const title = isHtml ? pageTitle(raw) : undefined;
+    const cutChars = text.length > limits.maxChars;
+    return {
+      finalUrl: current.toString(),
+      ...(title ? { title } : {}),
+      text: cutChars ? text.slice(0, limits.maxChars) : text,
+      truncated: cutBytes || cutChars,
+    };
   }
   throw new WebFetchRefusal('The page redirected too many times.');
 }
@@ -167,7 +218,7 @@ async function readPage(state: BuilderTurnState, deps: BuilderToolDeps, url: URL
     throw new WebFetchRefusal(`Only ${BUILDER_WEB_FETCH.perTurn} pages can be read in one turn.`);
   }
   fetchesInTurn.set(state, used + 1);
-  const text = await fetchPageText(deps, url, url.hostname, state.signal);
+  const { text } = await fetchApprovedPage(deps.ctx, url, url.hostname, BUILDER_WEB_FETCH, state.signal);
   return wrapUntrusted(`web page ${url.hostname}`, text || '(the page has no text)');
 }
 

@@ -25,6 +25,7 @@ import { buildApp } from '../src/app';
 import { type Config, loadConfig } from '../src/config';
 import { createContext, type ServerContext } from '../src/context';
 import type { AiRuntime } from '../src/services/ai-builder/runtime';
+import type { AssistantToolDefinition } from '../src/services/assistant/types';
 import type { SecretProviderType } from '../src/services/secrets/types';
 
 export const BASE_URL = 'http://localhost:5678';
@@ -347,6 +348,11 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'assistant_pending_confirmations',
+  'assistant_events',
+  'assistant_messages',
+  'assistant_threads',
+  'assistant_mcp_connections',
   'workflow_builder_sessions',
   'oauth_user_consents',
   'oauth_refresh_tokens',
@@ -418,6 +424,8 @@ export async function createTestServer(
     secretProviderTypes?: SecretProviderType[];
     /** P5-09: the builder's agent runtime (`createContext`'s `aiRuntime`) */
     aiRuntime?: AiRuntime;
+    /** P5-67: extra Assistant tools (`createContext`'s `assistantTools`, the test seam) */
+    assistantTools?: AssistantToolDefinition[];
   } = {},
 ): Promise<TestServer> {
   const config = testConfig(overrides);
@@ -426,6 +434,7 @@ export async function createTestServer(
     nodePackages: [nodesBasePackage, testPackage, ...(options.nodePackages ?? [])],
     secretProviderTypes: options.secretProviderTypes,
     aiRuntime: options.aiRuntime,
+    assistantTools: options.assistantTools,
     // local test servers (credential test, OAuth2 token endpoint) live on 127.0.0.1
     http:
       options.http ??

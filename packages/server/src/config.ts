@@ -17,6 +17,12 @@ const bool = (fallback: boolean) =>
     .optional()
     .transform((v) => (v === undefined ? fallback : ['true', '1', 'yes'].includes(v)));
 
+/** a flag with no default: unset stays undefined, so a saved setting or a later fallback decides */
+const optionalBool = z
+  .enum(['true', 'false', '1', '0', 'yes', 'no'])
+  .optional()
+  .transform((v) => (v === undefined ? undefined : ['true', '1', 'yes'].includes(v)));
+
 const list = z
   .string()
   .optional()
@@ -194,6 +200,26 @@ const envSchema = z.object({
   AI_TIMEOUT_MAX: int(3600, 1),
   /** P5-09: when false, parameter values are not sent to the model */
   AI_ALLOW_SENDING_PARAMETER_VALUES: bool(true),
+  /** P5-67: the Assistant; unset leaves it to the workspace setting (default on, as n8n's community) */
+  INSTANCE_AI_ENABLED: optionalBool,
+  /** P5-68: how long a confirmation card waits, ms; 0 = no timeout */
+  INSTANCE_AI_CONFIRMATION_TIMEOUT: int(86_400_000),
+  /** P5-67: threads not updated for this many days are deleted; 0 = never */
+  INSTANCE_AI_THREAD_TTL_DAYS: int(30),
+  /** P5-67: how often the thread TTL prune runs, ms; 0 = off */
+  INSTANCE_AI_PRUNE_INTERVAL: int(3_600_000),
+  /** P5-67: estimated message tokens that start a compaction into observations */
+  INSTANCE_AI_OBSERVER_MESSAGE_TOKENS: int(30_000, 1),
+  /** P5-67: estimated observation tokens that start a second, condensing call */
+  INSTANCE_AI_REFLECTOR_OBSERVATION_TOKENS: int(40_000, 1),
+  /** P5-67: concurrent Assistant runs on the instance; -1 = no limit */
+  INSTANCE_AI_MAX_CONCURRENT_RUNS: int(-1, -1),
+  /** P5-67: concurrent Assistant runs per user; -1 = no limit */
+  INSTANCE_AI_MAX_CONCURRENT_RUNS_PER_USER: int(-1, -1),
+  /** P5-67: a model stream silent this long (ms) is a stall; 0 = off */
+  AI_MODEL_STREAM_IDLE_TIMEOUT_MS: int(90_000),
+  /** P5-67: a model stream with no output this long (ms) after the request is a stall; 0 = off */
+  AI_MODEL_STREAM_FIRST_OUTPUT_TIMEOUT_MS: int(180_000),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -307,6 +333,27 @@ export interface Config {
     /** AI_TIMEOUT_MAX, seconds */
     timeoutMaxS: number;
     allowSendingParameterValues: boolean;
+  };
+  /** P5-67: INSTANCE_AI_* and AI_MODEL_STREAM_* */
+  assistant: {
+    /** INSTANCE_AI_ENABLED; undefined when unset (the workspace setting, then on, decides) */
+    enabled: boolean | undefined;
+    /** ms a card waits; 0 = no timeout */
+    confirmationTimeoutMs: number;
+    /** 0 = threads are never pruned */
+    threadTtlDays: number;
+    /** ms between thread prunes; 0 = off */
+    pruneIntervalMs: number;
+    observerMessageTokens: number;
+    reflectorObservationTokens: number;
+    /** -1 = no limit */
+    maxConcurrentRuns: number;
+    /** -1 = no limit */
+    maxConcurrentRunsPerUser: number;
+    /** ms; 0 = off */
+    streamIdleTimeoutMs: number;
+    /** ms; 0 = off */
+    streamFirstOutputTimeoutMs: number;
   };
 }
 
@@ -475,6 +522,18 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       enabled: e.AI_ENABLED,
       timeoutMaxS: e.AI_TIMEOUT_MAX,
       allowSendingParameterValues: e.AI_ALLOW_SENDING_PARAMETER_VALUES,
+    },
+    assistant: {
+      enabled: e.INSTANCE_AI_ENABLED,
+      confirmationTimeoutMs: e.INSTANCE_AI_CONFIRMATION_TIMEOUT,
+      threadTtlDays: e.INSTANCE_AI_THREAD_TTL_DAYS,
+      pruneIntervalMs: e.INSTANCE_AI_PRUNE_INTERVAL,
+      observerMessageTokens: e.INSTANCE_AI_OBSERVER_MESSAGE_TOKENS,
+      reflectorObservationTokens: e.INSTANCE_AI_REFLECTOR_OBSERVATION_TOKENS,
+      maxConcurrentRuns: e.INSTANCE_AI_MAX_CONCURRENT_RUNS,
+      maxConcurrentRunsPerUser: e.INSTANCE_AI_MAX_CONCURRENT_RUNS_PER_USER,
+      streamIdleTimeoutMs: e.AI_MODEL_STREAM_IDLE_TIMEOUT_MS,
+      streamFirstOutputTimeoutMs: e.AI_MODEL_STREAM_FIRST_OUTPUT_TIMEOUT_MS,
     },
   };
 }

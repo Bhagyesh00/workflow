@@ -14,6 +14,11 @@ import { ActiveWorkflowManager } from './services/active-workflows';
 import { AiBuilderService } from './services/ai-builder/builder';
 import type { AiRuntime } from './services/ai-builder/runtime';
 import { AnnotationService } from './services/annotations';
+import { AssistantApprovals } from './services/assistant/approvals';
+import { AssistantDrafts } from './services/assistant/drafts';
+import { AssistantService } from './services/assistant/service';
+import { AssistantSettingsService } from './services/assistant/settings';
+import type { AssistantToolDefinition } from './services/assistant/types';
 import { AuthService } from './services/auth';
 import { MemoryBus, type MessageBus, PushService, RedisBus } from './services/bus';
 import { CredentialService } from './services/credentials';
@@ -105,6 +110,14 @@ export interface ServerContext {
   mcpSessions: McpSessionStore;
   /** P5-09 (L1): the AI workflow builder; closed in close */
   aiBuilder: AiBuilderService;
+  /** P5-67 (L1): the Assistant (threads, chat, events); the leader timers run its sweep and pruneThreads */
+  assistant: AssistantService;
+  /** P5-67 (L3): approval cards */
+  assistantApprovals: AssistantApprovals;
+  /** P5-67 (L7): workflow drafts */
+  assistantDrafts: AssistantDrafts;
+  /** P5-67 (L8): a tenant's Assistant settings */
+  assistantSettings: AssistantSettingsService;
   /** start leader duties (triggers, wait tracker, pruning) on mains */
   startMain(): Promise<void>;
   /** consume the execution queue (queue mode workers) */
@@ -137,6 +150,66 @@ export interface ContextOptions {
   secretProviderTypes?: SecretProviderType[];
   /** P5-09: the builder's agent runtime (tests pass one); default loads `@workflow/nodes-ai` when installed */
   aiRuntime?: AiRuntime;
+  /**
+   * P5-67: test seam, tools offered to the Assistant after the built-in ones (the service gets them as
+   * `extraTools`, the approvals as their extra tools)
+   */
+  assistantTools?: AssistantToolDefinition[];
+}
+
+/** P5-67: how often the leader sweeps stale Assistant runs and expired cards (fixed) */
+export const ASSISTANT_SWEEP_INTERVAL_MS = 30_000;
+
+export interface AssistantTimers {
+  /** clears both timers and waits for a sweep or prune in flight */
+  stop(): Promise<void>;
+}
+
+/**
+ * P5-67: the Assistant's two leader timers, both `unref()`. `sweep` runs once at once, then every 30 s
+ * (stale runs, expired cards); `pruneThreads` runs every `pruneIntervalMs` (thread TTL only; 0 is off).
+ * A run never overlaps the one before it of the same kind; an error is logged, never thrown.
+ */
+export function startAssistantTimers(
+  assistant: Pick<AssistantService, 'sweep' | 'pruneThreads'>,
+  options: { pruneIntervalMs: number; logger: Pick<PinoLogger, 'warn'> },
+): AssistantTimers {
+  const inFlight = new Set<Promise<void>>();
+  const busy = { sweep: false, prune: false };
+  let stopped = false;
+  const run = (kind: 'sweep' | 'prune') => {
+    if (stopped || busy[kind]) return;
+    busy[kind] = true;
+    const now = new Date();
+    const job = (async () => {
+      try {
+        await (kind === 'sweep' ? assistant.sweep(now) : assistant.pruneThreads(now));
+      } catch (error) {
+        options.logger.warn(
+          { err: error },
+          kind === 'sweep' ? 'Assistant sweep failed' : 'Assistant thread pruning failed',
+        );
+      } finally {
+        busy[kind] = false;
+      }
+    })();
+    inFlight.add(job);
+    void job.finally(() => inFlight.delete(job));
+  };
+  const sweepTimer = setInterval(() => run('sweep'), ASSISTANT_SWEEP_INTERVAL_MS);
+  sweepTimer.unref();
+  const pruneTimer =
+    options.pruneIntervalMs > 0 ? setInterval(() => run('prune'), options.pruneIntervalMs) : undefined;
+  pruneTimer?.unref();
+  run('sweep');
+  return {
+    async stop() {
+      stopped = true;
+      clearInterval(sweepTimer);
+      if (pruneTimer) clearInterval(pruneTimer);
+      await Promise.allSettled([...inFlight]);
+    },
+  };
 }
 
 export async function createContext(options: ContextOptions): Promise<ServerContext> {
@@ -212,6 +285,20 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const mcpTrigger = new McpTriggerService({ ...serviceDeps, sessions: mcpSessions });
   const mcpAuth = createMcpAuthHelper(serviceDeps.context);
   const aiBuilder = new AiBuilderService(serviceDeps, options.aiRuntime);
+  // P5-67: the context keeps no copy of `aiRuntime`; the service hands it to `loadAiRuntime`
+  const assistant = new AssistantService(serviceDeps, {
+    aiRuntime: options.aiRuntime,
+    extraTools: options.assistantTools,
+  });
+  const assistantApprovals = new AssistantApprovals(serviceDeps, options.assistantTools ?? []);
+  const assistantDrafts = new AssistantDrafts(serviceDeps);
+  const assistantSettings = new AssistantSettingsService(serviceDeps);
+  let assistantTimers: AssistantTimers | undefined;
+  const stopAssistantTimers = async () => {
+    const timers = assistantTimers;
+    assistantTimers = undefined;
+    await timers?.stop();
+  };
 
   const metrics = new Metrics({
     queueDepth: queue ? () => queue.depth() : undefined,
@@ -323,6 +410,10 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     mcpTrigger,
     mcpSessions,
     aiBuilder,
+    assistant,
+    assistantApprovals,
+    assistantDrafts,
+    assistantSettings,
 
     async startMain() {
       if (started) return;
@@ -349,12 +440,19 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
           waitTracker.start();
           pruner.start();
           historyCompaction.start();
+          // P5-67: stale runs and expired cards every 30 s (one run now); thread TTL pruning
+          await stopAssistantTimers();
+          assistantTimers = startAssistantTimers(assistant, {
+            pruneIntervalMs: config.assistant.pruneIntervalMs,
+            logger,
+          });
         },
         async () => {
           logger.warn('Leadership lost: stopping triggers, wait tracker and pruning');
           waitTracker.stop();
           pruner.stop();
           historyCompaction.stop();
+          await stopAssistantTimers();
           await activeWorkflows.stopAll();
         },
       );
@@ -377,11 +475,13 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       waitTracker.stop();
       pruner.stop();
       historyCompaction.stop();
+      await stopAssistantTimers();
       await leadership.stop().catch(() => {});
       await activeWorkflows.close().catch(() => {});
       await queue?.close().catch(() => {});
       await evaluations.close().catch(() => {});
       await aiBuilder.close().catch(() => {});
+      await assistant.close().catch(() => {});
       await mcpTrigger.close().catch(() => {});
       await mcpSessions.close().catch(() => {});
       await executions.close().catch(() => {});

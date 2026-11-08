@@ -153,6 +153,7 @@ describe('package', () => {
         'searXngApi',
         'wolframAlphaApi',
         'mcpOAuth2Api',
+        'braveSearchApi',
       ].sort(),
     );
   });
@@ -204,6 +205,14 @@ describe('package', () => {
       authorization: 'Bearer k',
     });
     expect((await apply('qdrantApi', { apiKey: 'k' })).headers).toEqual({ a: '1', 'api-key': 'k' });
+    // Brave (P5-73): the key in its header, never the query string; the test request runs one search
+    const brave = await apply('braveSearchApi', { apiKey: 'k' });
+    expect(brave.headers).toEqual({ a: '1', 'x-subscription-token': 'k' });
+    expect(brave.qs).toBeUndefined();
+    expect(credentials.find((c) => c.name === 'braveSearchApi')?.test?.request).toEqual({
+      url: 'https://api.search.brave.com/res/v1/web/search',
+      qs: { q: 'test' },
+    });
     for (const c of credentials) {
       if (NO_TEST.has(c.name)) continue;
       // Xata's test URL is the endpoint and the branch: `={{$credentials.databaseEndpoint}}:{{...branch}}`

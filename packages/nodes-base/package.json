@@ -12,7 +12,8 @@
     "./extract/pdf": "./src/nodes/core/extract/pdf.ts",
     "./utils/databricks-lakebase": "./src/utils/databricks-lakebase.ts",
     "./utils/send-and-wait": "./src/utils/send-and-wait/index.ts",
-    "./utils/user-auth": "./src/utils/user-auth.ts"
+    "./utils/user-auth": "./src/utils/user-auth.ts",
+    "./utils/document-text": "./src/utils/document-text.ts"
   },
   "scripts": {
     "test": "vitest run",

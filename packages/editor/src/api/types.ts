@@ -3,6 +3,14 @@
  * contract exactly; the server is built against the same document.
  */
 import type {
+  AssistantArtifact,
+  AssistantConfirmation,
+  AssistantDraftDTO,
+  AssistantMcpAuthentication,
+  AssistantMcpTransport,
+  AssistantPermissionMode,
+  AssistantPermissions,
+  AssistantThreadDTO,
   BuilderMessage,
   Connections,
   CredentialTypeDescription,
@@ -934,3 +942,111 @@ export interface McpConsentDecisionBody {
 export interface McpConsentResult {
   redirectUrl: string;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phase 5 S5: Assistant (P5-67..74). The DTOs, events and cards are workflow's (src/assistant.ts).
+
+export type {
+  AssistantArtifact,
+  AssistantAttachmentRef,
+  AssistantConfirmAnswer,
+  AssistantConfirmation,
+  AssistantDraftDTO,
+  AssistantEvent,
+  AssistantMcpAuthentication,
+  AssistantMcpConnectionDTO,
+  AssistantMcpTransport,
+  AssistantMessageDTO,
+  AssistantMessagesPage,
+  AssistantPermissionMode,
+  AssistantPermissions,
+  AssistantSendMessage,
+  AssistantSettingsDTO,
+  AssistantStatusDTO,
+  AssistantTask,
+  AssistantThreadDTO,
+} from '@workflow/workflow';
+
+/**
+ * `features.assistant` of GET /settings: `enabled` = the Assistant is on for the workspace, `modelSet` = a chat
+ * model is set for it. Never a credential id.
+ */
+export interface AssistantFeature {
+  enabled: boolean;
+  modelSet: boolean;
+}
+
+/** one card kind, as the card components take it (`ApprovalCard` gets `AssistantConfirmationOf<'approval'>`) */
+export type AssistantConfirmationOf<K extends AssistantConfirmation['inputType']> = Extract<
+  AssistantConfirmation,
+  { inputType: K }
+>;
+
+/** an `artifact` event's draft reference; `DraftCard` loads the draft itself (`assistantApi.draft`) */
+export type AssistantDraftArtifact = Extract<AssistantArtifact, { type: 'draft' }>;
+
+/** answer of GET /assistant/threads (newest first) */
+export interface AssistantThreadPage {
+  data: AssistantThreadDTO[];
+  nextCursor: string | null;
+}
+
+/** GET /assistant/threads query */
+export interface AssistantThreadsQuery {
+  limit?: number;
+  cursor?: string;
+}
+
+/** a credential Accept assigns to a node that has none (first of its type in the workspace) */
+export interface AssistantDraftAssignment {
+  nodeName: string;
+  credentialType: string;
+  credentialId: string;
+  credentialName: string;
+}
+
+/** answer of GET /assistant/threads/:threadId/drafts/:draftId */
+export interface AssistantDraftView {
+  draft: AssistantDraftDTO;
+  diff: WorkflowDiff;
+  assignments: AssistantDraftAssignment[];
+}
+
+/** body of POST .../drafts/:draftId/accept (editor; a person only) */
+export interface AssistantAcceptDraftBody {
+  name?: string;
+}
+
+/** answer of POST .../drafts/:draftId/accept */
+export interface AssistantAcceptDraftResult {
+  workflowId: string;
+  draft: AssistantDraftDTO;
+}
+
+/** body of PATCH /assistant/settings (admin): each field optional, null clears a field that can be cleared */
+export interface AssistantSettingsPatchBody {
+  enabled?: boolean | null;
+  credentialId?: string | null;
+  nodeType?: string | null;
+  model?: string | null;
+  searchCredentialId?: string | null;
+  searchDisabled?: boolean | null;
+  mcpAccessEnabled?: boolean | null;
+  permissions?: Partial<AssistantPermissions> | null;
+  allowSendingParameterValues?: boolean | null;
+}
+
+/** body of POST /assistant/mcp-connections (admin); a credential id, never a secret */
+export interface AssistantMcpConnectionBody {
+  name: string;
+  url: string;
+  transport?: AssistantMcpTransport;
+  authentication?: AssistantMcpAuthentication;
+  credentialId?: string | null;
+  enabled?: boolean;
+  /** may only tighten the workspace's MCP permissions */
+  toolPermissions?: Record<string, AssistantPermissionMode>;
+}
+
+/** body of PATCH /assistant/mcp-connections/:id (admin) */
+export type AssistantMcpConnectionPatchBody = Partial<AssistantMcpConnectionBody>;

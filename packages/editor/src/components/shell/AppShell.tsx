@@ -12,6 +12,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
+  Sparkles,
   Sun,
   Table2,
   Workflow,
@@ -26,10 +27,11 @@ import {
   setCurrentTenant,
 } from '../../api/client';
 import { authApi } from '../../api/endpoints';
-import { queryKeys, useMe, useSettings } from '../../api/queries';
+import { assistantFeatureOf, queryKeys, useMe, useSettings } from '../../api/queries';
 import type { Me } from '../../api/types';
 import { CommandBar } from '../../features/command-bar/CommandBar';
 import { InboxNavBadge } from '../../features/reviews/InboxNavBadge';
+import { assistantLinkVisible } from '../../lib/assistant-access';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { DataTableStorageBanner } from '../data-tables/StorageBanner';
 import { Button } from '../ui/Button';
@@ -57,6 +59,8 @@ function useNarrowScreen(): boolean {
 
 const NAV = [
   { to: '/workflows', label: 'Workflows', icon: Workflow },
+  // P5-67: shown while the Assistant is on, to members once a model is set (lib/assistant-access.ts)
+  { to: '/assistant', label: 'Assistant', icon: Sparkles },
   { to: '/executions', label: 'Executions', icon: History },
   // P3-19: shown while workflow reviews are on for the workspace
   { to: '/inbox', label: 'Inbox', icon: Inbox },
@@ -220,7 +224,9 @@ export function AppShell() {
     location.pathname.startsWith('/workflow/') || /^\/executions\/[^/]+/.test(location.pathname);
   const narrow = useNarrowScreen();
   const collapsed = collapsedPref || inEditor || narrow;
-  const reviewsEnabled = useSettings().workflowReviews?.enabled === true;
+  const settings = useSettings();
+  const reviewsEnabled = settings.workflowReviews?.enabled === true;
+  const assistantVisible = assistantLinkVisible(assistantFeatureOf(settings), me.data?.role);
 
   useEffect(
     () =>
@@ -302,7 +308,10 @@ export function AppShell() {
         </div>
         <TenantSwitcher me={data} collapsed={collapsed} />
         <ul className="flex flex-col gap-0.5">
-          {NAV.filter((item) => item.to !== '/inbox' || reviewsEnabled).map(({ to, label, icon: Icon }) => (
+          {NAV.filter(
+            (item) =>
+              (item.to !== '/inbox' || reviewsEnabled) && (item.to !== '/assistant' || assistantVisible),
+          ).map(({ to, label, icon: Icon }) => (
             <li key={to}>
               <NavLink
                 to={to}

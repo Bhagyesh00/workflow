@@ -245,6 +245,26 @@ export const mcpOAuth2Api: CredentialType = {
   ],
 };
 
+/** Brave Search API host: the Assistant's web search (P5-73) sends to it only, with this credential */
+export const BRAVE_SEARCH_HOST = 'api.search.brave.com';
+
+/**
+ * Brave Search API (P5-73), as n8n: the key travels in the `x-subscription-token` header, never in the
+ * query string; the test request runs one web search.
+ */
+export const braveSearchApi: CredentialType = {
+  name: 'braveSearchApi',
+  displayName: 'Brave Search API',
+  icon: 'lucide:search',
+  documentationUrl: 'https://api-dashboard.search.brave.com/app/documentation/web-search/get-started',
+  properties: [apiKey()],
+  authenticate: {
+    type: 'generic',
+    properties: { headers: { 'x-subscription-token': '={{$credentials.apiKey}}' } },
+  },
+  test: { request: { url: `https://${BRAVE_SEARCH_HOST}/res/v1/web/search`, qs: { q: 'test' } } },
+};
+
 export const aiCredentials: CredentialType[] = [
   openAiApi,
   anthropicApi,
@@ -258,4 +278,5 @@ export const aiCredentials: CredentialType[] = [
   googleVertexAiApi,
   ...ragCredentials,
   mcpOAuth2Api,
+  braveSearchApi,
 ];

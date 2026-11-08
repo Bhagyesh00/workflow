@@ -15,7 +15,13 @@ import {
   variablesApi,
   workflowsApi,
 } from './endpoints';
-import type { AiBuilderFeature, CredentialTypeDescription, NodeTypeDescription, Settings } from './types';
+import type {
+  AiBuilderFeature,
+  AssistantFeature,
+  CredentialTypeDescription,
+  NodeTypeDescription,
+  Settings,
+} from './types';
 
 export const queryKeys = {
   me: ['me'] as const,
@@ -68,6 +74,15 @@ export const queryKeys = {
   mcpClients: ['mcp', 'oauth-clients'] as const,
   mcpStats: ['mcp', 'instance-stats'] as const,
   consentDetails: (flow: string) => ['oauth-consent', flow] as const,
+  /** P5-67..74: invalidating `assistant` refreshes every Assistant query (prefix match) */
+  assistant: ['assistant'] as const,
+  assistantThreads: (query: object = {}) => ['assistant', 'threads', query] as const,
+  assistantMessages: (threadId: string) => ['assistant', 'thread', threadId, 'messages'] as const,
+  assistantStatus: (threadId: string) => ['assistant', 'thread', threadId, 'status'] as const,
+  assistantDraft: (threadId: string, draftId: string) =>
+    ['assistant', 'thread', threadId, 'drafts', draftId] as const,
+  assistantSettings: ['assistant', 'settings'] as const,
+  assistantMcpConnections: ['assistant', 'mcp-connections'] as const,
 };
 
 export function createQueryClient(): QueryClient {
@@ -134,6 +149,21 @@ export function aiBuilderFeatureOf(settings: Pick<Settings, 'features'>): AiBuil
 /** P5-09: whether the AI builder is on (AI_ENABLED) and has a model set for the workspace */
 export function useAiBuilderFeature(): AiBuilderFeature {
   return aiBuilderFeatureOf(useSettings());
+}
+
+const ASSISTANT_OFF: AssistantFeature = { enabled: false, modelSet: false };
+
+/** P5-67: `settings.features.assistant`, typed (`Settings.features` is a free record); off until it loads */
+export function assistantFeatureOf(settings: Pick<Settings, 'features'>): AssistantFeature {
+  const value = settings.features.assistant;
+  if (!value || typeof value !== 'object') return ASSISTANT_OFF;
+  const { enabled, modelSet } = value as Partial<AssistantFeature>;
+  return { enabled: enabled === true, modelSet: modelSet === true };
+}
+
+/** P5-67: whether the Assistant is on for the workspace and has a model */
+export function useAssistantFeature(): AssistantFeature {
+  return assistantFeatureOf(useSettings());
 }
 
 export interface NodeTypeIndex {

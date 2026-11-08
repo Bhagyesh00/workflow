@@ -66,6 +66,13 @@ const McpSettingsPage = lazy(() =>
 const OAuthConsentPage = lazy(() =>
   import('./pages/OAuthConsentPage').then((m) => ({ default: m.OAuthConsentPage })),
 );
+// P5-67, P5-71
+const AssistantPage = lazy(() =>
+  import('./pages/AssistantPage').then((m) => ({ default: m.AssistantPage })),
+);
+const AssistantSettingsPage = lazy(() =>
+  import('./pages/AssistantSettingsPage').then((m) => ({ default: m.AssistantSettingsPage })),
+);
 
 function Lazy({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<PageLoader />}>{children}</Suspense>;
@@ -96,6 +103,22 @@ export const routes: RouteObject[] = [
     children: [
       { index: true, element: <Navigate to="/workflows" replace /> },
       { path: 'workflows', element: <WorkflowsPage /> },
+      {
+        path: 'assistant',
+        element: (
+          <Lazy>
+            <AssistantPage />
+          </Lazy>
+        ),
+      },
+      {
+        path: 'assistant/:threadId',
+        element: (
+          <Lazy>
+            <AssistantPage />
+          </Lazy>
+        ),
+      },
       {
         path: 'workflow/:id',
         element: (
@@ -179,6 +202,14 @@ export const routes: RouteObject[] = [
             element: (
               <Lazy>
                 <McpSettingsPage />
+              </Lazy>
+            ),
+          },
+          {
+            path: 'assistant',
+            element: (
+              <Lazy>
+                <AssistantSettingsPage />
               </Lazy>
             ),
           },

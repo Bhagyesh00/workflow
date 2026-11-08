@@ -2,6 +2,7 @@
  * Plan limits (ARCHITECTURE.md §10). A tenant's effective limits are its plan's defaults
  * overridden by `tenants.settings.limits`. `null` means unlimited.
  */
+import type { AssistantPermissions } from '@workflow/workflow';
 import type { Config } from './config';
 
 export interface PlanLimits {
@@ -56,6 +57,22 @@ export interface TenantSettings {
   ai?: { credentialId: string; nodeType: string; model: string; allowSendingParameterValues?: boolean };
   /** P5-04, P5-14: the tenant MCP server (off by default), auto expose of new workflows, OAuth redirect allow list */
   mcp?: { enabled?: boolean; autoExposeNewWorkflows?: boolean; allowedRedirectUris?: string[] };
+  /**
+   * P5-67 to P5-73: the Assistant (admins set it). Unset `enabled` is on unless `INSTANCE_AI_ENABLED` says
+   * otherwise; its own model (credential, node type, model id), web search credential, MCP access, tool
+   * permissions (read through `resolveAssistantPermissions`) and data sharing
+   */
+  assistant?: {
+    enabled?: boolean;
+    credentialId?: string;
+    nodeType?: string;
+    model?: string;
+    searchCredentialId?: string | null;
+    searchDisabled?: boolean;
+    mcpAccessEnabled?: boolean;
+    permissions?: Partial<AssistantPermissions>;
+    allowSendingParameterValues?: boolean;
+  };
 }
 
 export function effectiveLimits(plan: string, settings: TenantSettings | null | undefined): PlanLimits {

@@ -1,5 +1,6 @@
 export * from './ai-builder';
 export * from './ai-types';
+export * from './assistant';
 export * from './aws-host';
 export * from './chat-protocol';
 export * from './credential-domain-restrictions';

@@ -127,6 +127,27 @@
       "when": 1794104812489,
       "tag": "0017_workflow_builder_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1794134725799,
+      "tag": "0018_assistant_threads",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794134761105,
+      "tag": "0019_assistant_confirmations",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794134780577,
+      "tag": "0020_assistant_mcp_connections",
+      "breakpoints": true
     }
   ]
 }

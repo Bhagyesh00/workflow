@@ -13,6 +13,9 @@ import {
   UserRepository,
 } from './accounts';
 import { AnnotationRepository } from './annotations';
+import { AssistantConfirmationRepository } from './assistant-confirmations';
+import { AssistantMcpRepository } from './assistant-mcp';
+import { AssistantThreadRepository } from './assistant-threads';
 import { BuilderSessionRepository } from './builder-sessions';
 import { DataTableRepository } from './data-tables';
 import { ExecutionRepository } from './executions';
@@ -73,6 +76,12 @@ export interface Repositories {
   builderSessions: BuilderSessionRepository;
   /** P5-14 (L10) */
   mcpOAuth: McpOAuthRepository;
+  /** P5-67 (L1) */
+  assistantThreads: AssistantThreadRepository;
+  /** P5-68 (L3) */
+  assistantConfirmations: AssistantConfirmationRepository;
+  /** P5-72 (L9) */
+  assistantMcp: AssistantMcpRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -105,10 +114,27 @@ export function createRepositories(db: DbOrTx): Repositories {
     testRuns: new TestRunRepository(db),
     builderSessions: new BuilderSessionRepository(db),
     mcpOAuth: new McpOAuthRepository(db),
+    assistantThreads: new AssistantThreadRepository(db),
+    assistantConfirmations: new AssistantConfirmationRepository(db),
+    assistantMcp: new AssistantMcpRepository(db),
   };
 }
 
 export type { AnnotationFilter, AnnotationVote, ExecutionAnnotationDTO } from './annotations';
+export type {
+  AssistantConfirmationRow,
+  AssistantConfirmationStatus,
+  NewAssistantConfirmation,
+} from './assistant-confirmations';
+export type { AssistantMcpConnectionInput, AssistantMcpConnectionRow } from './assistant-mcp';
+export type {
+  AssistantEventRow,
+  AssistantMessageListOptions,
+  AssistantMessageRow,
+  AssistantThreadListQuery,
+  AssistantThreadRow,
+  NewAssistantMessage,
+} from './assistant-threads';
 export type { BuilderSessionPatch, BuilderSessionRow } from './builder-sessions';
 export type { FavoriteResourceType } from './favorites';
 export type {

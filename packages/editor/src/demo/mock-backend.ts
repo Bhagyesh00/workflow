@@ -24,6 +24,7 @@ import type { ApiRequest, ApiResponse } from '../api/client';
 import type {
   AiBuilderFeature,
   ApiKey,
+  AssistantFeature,
   CredentialSummary,
   ExecutionDetail,
   ExecutionSummary,
@@ -49,6 +50,11 @@ import {
 } from './fixtures';
 import { registerAiRoutes } from './mock-ai';
 import { filterExecutionList, registerAnnotationRoutes } from './mock-annotations';
+import { registerAssistantRoutes } from './mock-assistant';
+import { registerAssistantConfirmRoutes } from './mock-assistant-confirm';
+import { registerAssistantDraftRoutes } from './mock-assistant-drafts';
+import { registerAssistantMcpRoutes } from './mock-assistant-mcp';
+import { registerAssistantSettingsRoutes } from './mock-assistant-settings';
 import { registerChatRoutes } from './mock-chat';
 import { registerDataTableRoutes, searchDataTables } from './mock-data-tables';
 import { DEMO_EVALUATION_CONCURRENCY_LIMIT, registerEvaluationRoutes } from './mock-evaluations';
@@ -188,6 +194,8 @@ export interface MockBackendOptions {
   signupEnabled?: boolean;
   /** P5-09: `features.aiBuilder` of GET /settings; on and set up when left out */
   aiBuilder?: AiBuilderFeature;
+  /** P5-67: `features.assistant` of GET /settings; on and with a model when left out */
+  assistant?: AssistantFeature;
 }
 
 type Handler = (ctx: {
@@ -200,6 +208,9 @@ export { HttpError };
 
 /** P5-09: the demo builder is on and has a model (`features.aiBuilder`) */
 const DEMO_AI_BUILDER: AiBuilderFeature = { enabled: true, setup: true };
+
+/** P5-67: the demo Assistant is on and has a model (`features.assistant`) */
+const DEMO_ASSISTANT: AssistantFeature = { enabled: true, modelSet: true };
 
 /** P3-13: the n8n messages of GET /from-url */
 const NOT_JSON = 'The URL does not point to valid JSON file!';
@@ -245,6 +256,11 @@ export class MockBackend {
     registerEvaluationRoutes(this);
     registerAiRoutes(this);
     registerMcpRoutes(this);
+    registerAssistantRoutes(this);
+    registerAssistantConfirmRoutes(this);
+    registerAssistantDraftRoutes(this);
+    registerAssistantSettingsRoutes(this);
+    registerAssistantMcpRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -829,7 +845,11 @@ export class MockBackend {
         webhookBaseUrl: typeof window === 'undefined' ? 'http://localhost' : window.location.origin,
         timezone: 'Europe/Berlin',
         limits: { executionTimeoutMax: 3600 },
-        features: { demo: true, aiBuilder: copy(this.options.aiBuilder ?? DEMO_AI_BUILDER) },
+        features: {
+          demo: true,
+          aiBuilder: copy(this.options.aiBuilder ?? DEMO_AI_BUILDER),
+          assistant: copy(this.options.assistant ?? DEMO_ASSISTANT),
+        },
         autosaveEnabled: true,
         evaluationConcurrencyLimit: DEMO_EVALUATION_CONCURRENCY_LIMIT,
         workflowReviews: copy(

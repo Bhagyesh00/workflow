@@ -4,6 +4,15 @@
  * (`pnpm db:generate`) into `packages/server/migrations`.
  */
 import type {
+  AiContentPart,
+  AiToolCall,
+  AssistantAttachmentRef,
+  AssistantConfirmAnswer,
+  AssistantConfirmation,
+  AssistantEvent,
+  AssistantPermissionMode,
+  AssistantTask,
+  BinaryData,
   BuilderMessage,
   DataObject,
   EvaluationMetrics,
@@ -11,6 +20,7 @@ import type {
   TestCaseStatus,
   TestRunErrorCode,
   TestRunStatus,
+  WorkflowDefinition,
 } from '@workflow/workflow';
 import { sql } from 'drizzle-orm';
 import {
@@ -935,6 +945,183 @@ export const workflowBuilderSessions = pgTable(
   (t) => [
     unique('workflow_builder_sessions_tenant_workflow_user_unique').on(t.tenantId, t.workflowId, t.userId),
   ],
+);
+
+/**
+ * A workflow the Assistant built on a thread and the user has not accepted yet (P5-67, filled by L7).
+ * Keyed by its id in `assistant_threads.drafts`; the lane may store more keys than these.
+ */
+export interface AssistantStoredDraft {
+  id: string;
+  name: string;
+  /** the workflow the draft changes; null for a new workflow */
+  workflowId: string | null;
+  /** the version the draft was built on, so Accept can refuse a workflow changed since */
+  baseVersionId: string | null;
+  definition: WorkflowDefinition;
+  createdAt: string;
+  [key: string]: unknown;
+}
+
+/** an attachment as a message stores it: the reference the DTO shows plus the stored binary */
+export type AssistantStoredAttachment = AssistantAttachmentRef & { binary: BinaryData };
+
+/**
+ * Assistant threads (P5-67): one user's chat in one tenant. `active_run_id` is the run lock
+ * (`acquireRun` sets it only while it is null) and `run_heartbeat_at` the heartbeat the sweep reads.
+ * `grants` holds the session "always allow" keys, `drafts` the unaccepted workflows by id.
+ */
+export const assistantThreads = pgTable(
+  'assistant_threads',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    title: text('title').notNull().default(''),
+    observations: text('observations'),
+    tasks: jsonb('tasks').$type<AssistantTask[]>().notNull().default([]),
+    grants: jsonb('grants').$type<string[]>().notNull().default([]),
+    drafts: jsonb('drafts').$type<Record<string, AssistantStoredDraft>>().notNull().default({}),
+    activeRunId: text('active_run_id'),
+    runHeartbeatAt: timestamp('run_heartbeat_at', { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index('assistant_threads_tenant_user_updated_idx').on(t.tenantId, t.userId, t.updatedAt),
+    index('assistant_threads_run_heartbeat_idx').on(t.runHeartbeatAt),
+  ],
+);
+
+/**
+ * Assistant messages (P5-67), in `seq` order. `content`, `tool_calls`, `tool_call_id` and `name` are
+ * the agent loop's message; `summarized` rows were folded into the thread's observations.
+ */
+export const assistantMessages = pgTable(
+  'assistant_messages',
+  {
+    seq: bigint('seq', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    id: uuid('id').notNull().unique().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    threadId: uuid('thread_id')
+      .notNull()
+      .references(() => assistantThreads.id, { onDelete: 'cascade' }),
+    runId: text('run_id'),
+    role: text('role').$type<'system' | 'user' | 'assistant' | 'tool'>().notNull(),
+    content: jsonb('content').$type<string | AiContentPart[]>().notNull(),
+    toolCalls: jsonb('tool_calls').$type<AiToolCall[]>(),
+    toolCallId: text('tool_call_id'),
+    name: text('name'),
+    attachments: jsonb('attachments').$type<AssistantStoredAttachment[]>(),
+    summarized: boolean('summarized').notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [index('assistant_messages_tenant_thread_seq_idx').on(t.tenantId, t.threadId, t.seq)],
+);
+
+/** Assistant durable events (P5-67): the replay log of a thread's stream, in `id` order. */
+export const assistantEvents = pgTable(
+  'assistant_events',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    threadId: uuid('thread_id')
+      .notNull()
+      .references(() => assistantThreads.id, { onDelete: 'cascade' }),
+    runId: text('run_id'),
+    type: text('type').$type<AssistantEvent['type']>().notNull(),
+    payload: jsonb('payload').$type<AssistantEvent>().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index('assistant_events_tenant_thread_id_idx').on(t.tenantId, t.threadId, t.id)],
+);
+
+/** the answer a card gets from the server, not a person: a cancel, a timeout, a stopped run */
+export interface AssistantSystemAnswer {
+  kind: 'system';
+  reason: string;
+}
+
+/**
+ * Assistant confirmation cards (P5-68): one row per tool call that waits for a person. Status moves
+ * `pending` to `approved`, `denied` or `expired` (one atomic claim), and `approved` to `executed`
+ * once the tool ran. `expires_at` null means no timeout. `grant_key` null offers no "always allow".
+ */
+export const assistantPendingConfirmations = pgTable(
+  'assistant_pending_confirmations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    threadId: uuid('thread_id')
+      .notNull()
+      .references(() => assistantThreads.id, { onDelete: 'cascade' }),
+    runId: text('run_id'),
+    toolCallId: text('tool_call_id').notNull(),
+    toolName: text('tool_name').notNull(),
+    args: jsonb('args').$type<DataObject>().notNull(),
+    inputType: text('input_type').$type<AssistantConfirmation['inputType']>().notNull(),
+    details: jsonb('details').$type<AssistantConfirmation['details']>().notNull(),
+    grantKey: text('grant_key'),
+    /** `pending`, `approved`, `denied`, `expired`, `executed` */
+    status: text('status')
+      .$type<'pending' | 'approved' | 'denied' | 'expired' | 'executed'>()
+      .notNull()
+      .default('pending'),
+    answer: jsonb('answer').$type<AssistantConfirmAnswer | AssistantSystemAnswer>(),
+    createdAt: createdAt(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  },
+  (t) => [
+    unique('assistant_pending_confirmations_thread_tool_call_unique').on(t.threadId, t.toolCallId),
+    index('assistant_pending_confirmations_tenant_user_status_idx').on(t.tenantId, t.userId, t.status),
+    index('assistant_pending_confirmations_expires_idx').on(t.expiresAt),
+  ],
+);
+
+/**
+ * The workspace's MCP servers for the Assistant (P5-72). Holds a credential id, never a secret;
+ * `tool_permissions` (tool name to mode) may only tighten the workspace's `mcpRead`/`mcpWrite`.
+ */
+export const assistantMcpConnections = pgTable(
+  'assistant_mcp_connections',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    url: text('url').notNull(),
+    transport: text('transport').$type<'httpStreamable' | 'sse'>().notNull().default('httpStreamable'),
+    /** as the MCP Client node: `none`, `bearerAuth`, `headerAuth`, `multipleHeadersAuth`, `mcpOAuth2Api` */
+    authentication: text('authentication')
+      .$type<'none' | 'bearerAuth' | 'headerAuth' | 'multipleHeadersAuth' | 'mcpOAuth2Api'>()
+      .notNull()
+      .default('none'),
+    credentialId: uuid('credential_id').references(() => credentials.id, { onDelete: 'set null' }),
+    enabled: boolean('enabled').notNull().default(true),
+    toolPermissions: jsonb('tool_permissions')
+      .$type<Record<string, AssistantPermissionMode>>()
+      .notNull()
+      .default({}),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [unique('assistant_mcp_connections_tenant_name_unique').on(t.tenantId, t.name)],
 );
 
 export type Role = 'owner' | 'admin' | 'editor' | 'viewer';

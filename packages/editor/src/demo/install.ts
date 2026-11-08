@@ -4,11 +4,13 @@
  * page and resets on reload.
  */
 import { type BuildStreamConnector, setBuildStreamConnector } from '../api/ai-stream';
+import { setAssistantStreamConnector } from '../api/assistant-stream';
 import { setChatFetch } from '../api/chat-transport';
 import { setTransport } from '../api/client';
 import { setPushConnector } from '../api/push';
 import { demoGroupedWorkflow } from './fixtures';
 import { demoBuildChunks } from './mock-ai';
+import { demoAssistantStream } from './mock-assistant';
 import { MockBackend } from './mock-backend';
 import { demoChatFetch } from './mock-chat';
 
@@ -278,6 +280,8 @@ export function installDemo(): MockBackend {
   setChatFetch(demoChatFetch(backend));
   // S4: the AI builder's turns play scripted chunks (mock-ai) instead of POST /ai/build
   setBuildStreamConnector(demoBuildStream);
+  // S5: the Assistant's thread events play scripted turns (mock-assistant) instead of GET /assistant/events
+  setAssistantStreamConnector(demoAssistantStream(backend));
   setPushConnector((onEvent, onStatus) => {
     onStatus('open');
     const unsubscribe = backend.subscribe(onEvent);

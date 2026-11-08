@@ -16,6 +16,8 @@ export interface McpTool {
   name: string;
   description?: string;
   inputSchema?: DataObject;
+  /** the server's tool annotations (for example `readOnlyHint`), as `McpToolDescriptor`: untrusted hints */
+  annotations?: DataObject;
 }
 
 export interface McpToolResult {
@@ -25,6 +27,10 @@ export interface McpToolResult {
 }
 
 export type McpTransport = (request: HttpRequestOptions) => Promise<HttpFullResponse<string>>;
+
+function isPlainObject(value: unknown): value is DataObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 export class McpError extends Error {
   constructor(
@@ -80,7 +86,12 @@ export class McpClient {
         tools?: McpTool[];
         nextCursor?: string;
       };
-      tools.push(...(result?.tools ?? []).filter((t) => t && typeof t.name === 'string'));
+      for (const tool of result?.tools ?? []) {
+        if (!tool || typeof tool.name !== 'string') continue;
+        // annotations are kept only as a plain object, so readers never meet another shape
+        const { annotations, ...rest } = tool;
+        tools.push(isPlainObject(annotations) ? { ...rest, annotations } : rest);
+      }
       if (!result?.nextCursor) break;
       cursor = result.nextCursor;
     }

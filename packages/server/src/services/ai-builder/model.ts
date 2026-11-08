@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { type ContextDeps, createWebhookSubNodes, type NodeTypeRegistry } from '@workflow/core';
 import {
   type AiChatModel,
+  type ConnectionType,
   ExpressionEvaluator,
   latestVersion,
   type NodeCredentialDescription,
@@ -69,6 +70,50 @@ export function credentialFitsModel(ctx: ServerContext, nodeType: string, creden
   return credentialSlot(ctx, slots, credentialType) !== undefined;
 }
 
+/** a chat model setting: the tenant's credential, the chat model node type and the model name */
+export interface ModelSetting {
+  credentialId: string;
+  nodeType: string;
+  model: string;
+}
+
+/** the sub-nodes of one parent node in a definition, opened as a webhook run opens them */
+export interface OpenSubNodes {
+  /** what the sub-nodes on input `type` (for example `ai_languageModel`, `ai_tool`) supply, index 0 */
+  get(type: ConnectionType): Promise<unknown>;
+  /** releases what the sub-nodes opened; the caller runs it in a `finally` */
+  close(): Promise<void>;
+}
+
+/**
+ * Opens the sub-nodes of `parentName` in `definition` for `tenant` (services mode `internal`), with no
+ * hand-built context. The builder's model and the Assistant's model and MCP tools (L9) use it.
+ */
+export async function openSubNodes(
+  ctx: ServerContext,
+  tenant: TenantRow,
+  definition: WorkflowDefinition,
+  parentName: string,
+  signal: AbortSignal,
+): Promise<OpenSubNodes> {
+  const workflow = new Workflow(definition, ctx.registries.nodeTypes);
+  const node = workflow.nodes[parentName];
+  if (!node) throw new Error(`The definition has no node "${parentName}"`);
+  const services = await ctx.executions.buildServices({ tenant, executionId: '', mode: 'internal' });
+  const deps: ContextDeps = {
+    workflow,
+    node,
+    services,
+    evaluator,
+    signal,
+  };
+  const subNodes = createWebhookSubNodes(deps, { json: {} });
+  return {
+    get: (type) => subNodes.callbacks.getInputConnectionData(type, 0),
+    close: () => subNodes.close(),
+  };
+}
+
 /**
  * The tenant's builder model. Refusals (L1): no setting `Set an AI model in Settings first`, no AI
  * package `The AI nodes are not installed`, no tool calling or a completion model
@@ -82,14 +127,30 @@ export async function loadBuilderModel(
   const settings = (tenant.settings ?? {}) as TenantSettings;
   const ai = settings.ai;
   if (!ai?.credentialId || !ai.nodeType || !ai.model) throw new BuilderModelError(NO_MODEL_SET);
+  return loadModelFromSetting(ctx, tenant, ai, signal);
+}
+
+/**
+ * The chat model a setting names (the builder's `TenantSettings.ai`, the Assistant's model), with the
+ * same refusals as `loadBuilderModel` and `The AI credential in Settings doesn't fit the chosen model`
+ * when the credential fills no credential slot of the node.
+ */
+export async function loadModelFromSetting(
+  ctx: ServerContext,
+  tenant: TenantRow,
+  setting: ModelSetting,
+  signal: AbortSignal,
+): Promise<BuilderModel> {
+  if (!setting?.credentialId || !setting.nodeType || !setting.model)
+    throw new BuilderModelError(NO_MODEL_SET);
   const nodeTypes = ctx.registries.nodeTypes;
   const agentType = nodeTypes.get(AGENT_TYPE);
-  const modelType = nodeTypes.get(ai.nodeType);
+  const modelType = nodeTypes.get(setting.nodeType);
   if (!agentType || !modelType) throw new BuilderModelError(NO_AI_PACKAGE);
-  if (!isBuilderModelNode(nodeTypes, ai.nodeType) || !modelType.supplyData) {
+  if (!isBuilderModelNode(nodeTypes, setting.nodeType) || !modelType.supplyData) {
     throw new BuilderModelError(NO_TOOL_CALLING);
   }
-  const credential = await ctx.repos.credentials.get(tenant.id, ai.credentialId);
+  const credential = await ctx.repos.credentials.get(tenant.id, setting.credentialId);
   if (!credential) throw new BuilderModelError(NO_MODEL_SET);
   const match = credentialSlot(ctx, modelType.description.credentials ?? [], credential.type);
   if (!match) throw new BuilderModelError(CREDENTIAL_MISMATCH);
@@ -110,10 +171,10 @@ export async function loadBuilderModel(
       {
         id: randomUUID(),
         name: MODEL_NODE_NAME,
-        type: ai.nodeType,
+        type: setting.nodeType,
         typeVersion: latestVersion(modelType.description),
         position: [0, 200],
-        parameters: { ...match.parameters, [modelParameter]: ai.model },
+        parameters: { ...match.parameters, [modelParameter]: setting.model },
         credentials: { [match.slot.name]: { id: credential.id, name: credential.name } },
       },
     ],
@@ -123,19 +184,10 @@ export async function loadBuilderModel(
       },
     },
   };
-  const workflow = new Workflow(definition, nodeTypes);
-  const services = await ctx.executions.buildServices({ tenant, executionId: '', mode: 'internal' });
-  const deps: ContextDeps = {
-    workflow,
-    node: workflow.nodes[BUILDER_NODE_NAME],
-    services,
-    evaluator,
-    signal,
-  };
-  const subNodes = createWebhookSubNodes(deps, { json: {} });
+  const subNodes = await openSubNodes(ctx, tenant, definition, BUILDER_NODE_NAME, signal);
   let supplied: unknown;
   try {
-    supplied = await subNodes.callbacks.getInputConnectionData('ai_languageModel', 0);
+    supplied = await subNodes.get('ai_languageModel');
   } catch (error) {
     await subNodes.close();
     throw error;

@@ -56,6 +56,11 @@ export interface AiToolDefinition {
   description: string;
   /** JSON schema of the arguments object */
   parameters: JsonSchema;
+  /**
+   * MCP tool annotations (for example `readOnlyHint`) as the server sent them: untrusted, read only by the
+   * Assistant's permission check; never sent to a provider
+   */
+  annotations?: DataObject;
 }
 
 export interface AiUsage {

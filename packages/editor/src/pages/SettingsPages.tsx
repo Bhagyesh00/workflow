@@ -41,6 +41,8 @@ export function SettingsLayout() {
           { to: '/settings/external-secrets', label: 'External secrets' },
           // P5-09: the builder's model; admins only
           { to: '/settings/ai', label: 'AI' },
+          // P5-71: the Assistant's model, search, permissions and MCP connections; admins only
+          { to: '/settings/assistant', label: 'Assistant' },
         ]
       : []),
     // P5-04: every role (the page shows each role what it may do; the MCP key is per user)

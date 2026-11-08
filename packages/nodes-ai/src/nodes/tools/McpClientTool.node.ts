@@ -174,6 +174,8 @@ export const McpClientToolNode: NodeType = {
       // the server's own content array, for an MCP Server Trigger that passes the result on as it is
       const withRaw: AiTool = {
         ...base,
+        // the server's annotations (for example `readOnlyHint`), read by the Assistant's permission check only
+        ...(tool.annotations ? { annotations: tool.annotations } : {}),
         async invokeRaw(args) {
           const input = { input: args };
           try {

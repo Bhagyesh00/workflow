@@ -2089,6 +2089,27 @@ export const demoCredentialTypes: CredentialTypeDescription[] = [
     isOAuth2: true,
     isOAuth1: false,
   },
+  {
+    // P5-73: nodes-ai ai.credentials.ts, the Assistant's web search key (header X-Subscription-Token)
+    name: 'braveSearchApi',
+    displayName: 'Brave Search API',
+    icon: 'lucide:search',
+    documentationUrl: 'https://api-dashboard.search.brave.com/app/documentation/web-search/get-started',
+    properties: [
+      {
+        displayName: 'API Key',
+        name: 'apiKey',
+        type: 'string',
+        default: '',
+        required: true,
+        typeOptions: { password: true },
+      },
+    ],
+    hasAuthenticate: true,
+    isOAuth2: false,
+    isOAuth1: false,
+    test: { request: { url: 'https://api.search.brave.com/res/v1/web/search', qs: { q: 'test' } } },
+  },
 ];
 
 export const demoLoadOptions: Record<

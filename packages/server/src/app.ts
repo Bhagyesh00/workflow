@@ -9,6 +9,11 @@ import { handleError } from './http/errors';
 import { registerAiRoutes } from './routes/ai';
 import { registerAiSessionRoutes } from './routes/ai-sessions';
 import { registerAnnotationTagRoutes } from './routes/annotation-tags';
+import { registerAssistantRoutes } from './routes/assistant';
+import { registerAssistantConfirmRoutes } from './routes/assistant-confirm';
+import { registerAssistantDraftRoutes } from './routes/assistant-drafts';
+import { registerAssistantMcpRoutes } from './routes/assistant-mcp';
+import { registerAssistantSettingsRoutes } from './routes/assistant-settings';
 import { registerAuthRoutes } from './routes/auth';
 import { registerChatWidgetRoutes } from './routes/chat-widget';
 import { registerCredentialRoutes } from './routes/credentials';
@@ -160,6 +165,12 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerMcpSettingsRoutes(rest, ctx);
       registerMcpOAuthClientRoutes(rest, ctx);
       registerMcpConsentRoutes(rest, ctx);
+      // Phase 5 S5: the Assistant (P5-67): threads, chat and events, approval cards, drafts, settings, MCP connections
+      registerAssistantRoutes(rest, ctx);
+      registerAssistantConfirmRoutes(rest, ctx);
+      registerAssistantDraftRoutes(rest, ctx);
+      registerAssistantSettingsRoutes(rest, ctx);
+      registerAssistantMcpRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );
