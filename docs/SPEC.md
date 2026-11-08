@@ -90,7 +90,7 @@
 | Schedule (seconds to months, cron, workflow timezone)                                                                | M1  | ✅ node · 🔨 server |
 | Polling triggers (Gmail) with persisted cursor                                                                       | M1  | 🔨                  |
 | Third-party webhook registration lifecycle (Telegram)                                                                | M1  | 🔨                  |
-| Chat Trigger (public or authenticated, allowed origins, streaming)                                                   | M1  | 🔨                  |
+| Chat Trigger (public or authenticated, allowed origins, streaming)                                                   | M1  | ✅                  |
 | Event/stream triggers: Postgres LISTEN, Redis, Kafka, RabbitMQ, MQTT, IMAP, SSE                                      | M2  | ✅                  |
 | Trigger restart with backoff and test listen (up to 120 s) for event triggers                                        | M2  | ✅                  |
 | RSS Feed Trigger                                                                                                     | M2  | ✅                  |
@@ -187,11 +187,11 @@
 | Memory: window, Postgres, Redis                                                                                           | M1  | ✅                             |
 | Tools: Calculator, Code, HTTP Request, Call Workflow, Think, Vector Store, MCP Client                                     | M1  | 🔨 (all but MCP Client ✅)        |
 | RAG: embeddings (OpenAI, Gemini, Ollama), vector stores (in-memory, PGVector, Qdrant), loaders, splitters, output parsers | M1  | ✅                             |
-| Chat Trigger                                                                                                              | M1  | 🔨                             |
-| Hosted/embeddable chat widget (sandbox origin)                                                                            | M2  | 📋                             |
+| Chat Trigger                                                                                                              | M1  | ✅                             |
+| Hosted/embeddable chat widget (sandbox origin)                                                                            | M2  | ✅                             |
 | Any node usable as an agent tool, `$fromAI()`                                                                             | M2  | ✅                             |
 | Guardrails node (PII, jailbreak, secrets, URLs)                                                                           | M2  | ✅                             |
-| Evaluations (datasets, metrics, AI judge)                                                                                 | M2  | 📋                             |
+| Evaluations (datasets, metrics, AI judge)                                                                                 | M2  | ✅                             |
 | More vector stores, rerankers                                                                                             | M2  | ✅                             |
 | Bedrock, Vertex AI, Azure OpenAI and Foundry, Mistral, Cohere and named OpenAI-compatible models                          | M2  | ✅                             |
 | Human review for agent tools, tools that wait, `$tool`                                                                    | M2  | ✅                             |
@@ -204,6 +204,12 @@
 | Memory: MongoDB, Xata, Databricks Lakebase                                                                                | M2  | ✅                             |
 | Retrievers: vector store, contextual compression, multi query, workflow                                                   | M2  | ✅                             |
 | Search tools: SearXNG, Wikipedia, Wolfram Alpha                                                                           | M2  | ✅                             |
+| Chat node: Send Message, Send and Wait in the chat, approval for tools                                                    | M2  | ✅                             |
+| Canvas chat and embed snippets (hosted page, widget, script tag)                                                          | M2  | ✅                             |
+| Logs tree: sub-node runs, details, token counts, pop-out window                                                           | M2  | ✅                             |
+| Execution Data node and the highlighted-data filter on executions                                                         | M2  | ✅                             |
+| Evaluations page: test runs, run detail, metric chart, run in parallel                                                    | M2  | ✅                             |
+| Test run public API (start, list, cancel, cases) with scopes                                                              | M2  | ✅                             |
 | AI workflow copilot that produces reviewable drafts (NF-26)                                                               | M2  | 📋                             |
 | MCP server for the tenant (search/run/build workflows)                                                                    | M2  | 📋                             |
 
