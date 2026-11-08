@@ -10,11 +10,7 @@ import type { ReactNode } from 'react';
 import { errorMessage } from '../api/client';
 import { assistantApi } from '../api/endpoints';
 import { queryKeys, useMe } from '../api/queries';
-import type {
-  AssistantPermissionMode,
-  AssistantSettingsDTO,
-  AssistantSettingsPatchBody,
-} from '../api/types';
+import type { AssistantPermissionMode, AssistantSettingsDTO, AssistantSettingsPatchBody } from '../api/types';
 import { AssistantModelForm, useSearchCredentials } from '../components/assistant/AssistantWizard';
 import { AssistantMcpConnections } from '../components/settings/AssistantMcpConnections';
 import { FormField, Select, Switch } from '../components/ui/Field';
@@ -178,7 +174,8 @@ export function AssistantSettingsPage() {
         />
         {!dto.modelSet && (
           <Callout tone="warn" title="No model is set">
-            Choose a model below. Until then members can't use the Assistant, and they don't see it in the menu.
+            Choose a model below. Until then members can't use the Assistant, and they don't see it in the
+            menu.
           </Callout>
         )}
       </Section>
@@ -206,7 +203,12 @@ export function AssistantSettingsPage() {
           }
         >
           {(id) => (
-            <Select id={id} value={searchValue} disabled={busy} onChange={(e) => chooseSearch(e.target.value)}>
+            <Select
+              id={id}
+              value={searchValue}
+              disabled={busy}
+              onChange={(e) => chooseSearch(e.target.value)}
+            >
               <option value="">Not set</option>
               <option value={SEARCH_OFF}>Off</option>
               {search.list.map((c) => (
@@ -262,7 +264,9 @@ export function AssistantSettingsPage() {
                         value={dto.permissions[row.key]}
                         disabled={busy}
                         onChange={(e) =>
-                          patch.mutate({ permissions: { [row.key]: e.target.value as AssistantPermissionMode } })
+                          patch.mutate({
+                            permissions: { [row.key]: e.target.value as AssistantPermissionMode },
+                          })
                         }
                       >
                         {modes.map((mode) => (

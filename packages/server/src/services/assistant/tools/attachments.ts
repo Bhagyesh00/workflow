@@ -175,7 +175,10 @@ async function parseFile(ctx: ServerContext, run: AssistantRunScope, input: Pars
     if (Array.isArray(value)) {
       return { ...head, ...pageRows(value as unknown[], startRow, maxRows) };
     }
-    return { ...head, ...pageText(JSON.stringify(value, null, 2) ?? '', startRow, input.maxRows ?? TEXT_LINES) };
+    return {
+      ...head,
+      ...pageText(JSON.stringify(value, null, 2) ?? '', startRow, input.maxRows ?? TEXT_LINES),
+    };
   }
 
   try {
@@ -199,10 +202,29 @@ const parseFileTool: AssistantToolDefinition<ParseFileInput> = {
   input: z.object({
     attachmentIndex: z.number().int().min(0).max(99).describe('The position of the file, counted from 0'),
     format: z.enum(FORMATS).optional().describe('Read the file as this format instead of its own'),
-    hasHeader: z.boolean().optional().describe('CSV and TSV: whether the first row holds column names (default true)'),
-    delimiter: z.string().min(1).max(8).optional().describe('CSV and TSV: the field delimiter (default: detected)'),
-    startRow: z.number().int().min(0).optional().describe('The first row (or line of text) to return, from 0'),
-    maxRows: z.number().int().min(1).max(MAX_ROWS).optional().describe('Rows (or lines) to return, at most 1000'),
+    hasHeader: z
+      .boolean()
+      .optional()
+      .describe('CSV and TSV: whether the first row holds column names (default true)'),
+    delimiter: z
+      .string()
+      .min(1)
+      .max(8)
+      .optional()
+      .describe('CSV and TSV: the field delimiter (default: detected)'),
+    startRow: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('The first row (or line of text) to return, from 0'),
+    maxRows: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_ROWS)
+      .optional()
+      .describe('Rows (or lines) to return, at most 1000'),
   }),
   minRole: 'viewer',
   untrusted: 'attached-file',

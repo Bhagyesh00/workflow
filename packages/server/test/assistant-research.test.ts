@@ -195,7 +195,10 @@ describe('Assistant web research (P5-73)', () => {
       expect(card.allowSession).toBe(true);
       expect(hitsOn('/search')).toHaveLength(0);
 
-      const text = await answer(h.editor, threadId, turn.toolCallId, card, { kind: 'approval', approved: true });
+      const text = await answer(h.editor, threadId, turn.toolCallId, card, {
+        kind: 'approval',
+        approved: true,
+      });
       expect(hitsOn('/search')).toHaveLength(1);
       expect(hitsOn('/search')[0].path).toContain('format=json');
       expect(hitsOn('/search')[0].path).toContain('q=workflow+engines');
@@ -253,7 +256,13 @@ describe('Assistant web research (P5-73)', () => {
         seen.push({ url: options.url, headers: options.headers, allowedDomains: options.allowedDomains });
         const body = JSON.stringify({
           web: {
-            results: [{ title: 'Brave <strong>hit</strong>', url: 'https://brave.example/a', description: 'About it' }],
+            results: [
+              {
+                title: 'Brave <strong>hit</strong>',
+                url: 'https://brave.example/a',
+                description: 'About it',
+              },
+            ],
           },
         });
         return Promise.resolve({
@@ -299,7 +308,9 @@ describe('Assistant web research (P5-73)', () => {
 
     it('checks the provider address: https or loopback http, Brave host by ===', () => {
       const brave = 'api.search.brave.com';
-      expect(() => checkSearchUrl('https://api.search.brave.com.evil.test/res/v1/web/search', brave)).toThrow();
+      expect(() =>
+        checkSearchUrl('https://api.search.brave.com.evil.test/res/v1/web/search', brave),
+      ).toThrow();
       expect(() => checkSearchUrl('https://evil.test/@api.search.brave.com', brave)).toThrow();
       expect(() => checkSearchUrl('https://api.search.brave.com/res/v1/web/search', brave)).not.toThrow();
       expect(() => checkSearchUrl('http://search.example.com/search')).toThrow(/https/);
@@ -442,7 +453,10 @@ describe('Assistant web research (P5-73)', () => {
 
     it('keeps a page with a closing tag inside one wrapper and removes comments and invisible characters', async () => {
       await configure(null, { fetchUrl: 'always_allow' });
-      const turn = await h.callTool(h.editor, 'fetch_url', { url: `${siteUrl}/plain`, maxContentLength: 5000 });
+      const turn = await h.callTool(h.editor, 'fetch_url', {
+        url: `${siteUrl}/plain`,
+        maxContentLength: 5000,
+      });
       const text = turn.result ?? '';
       expect(text.match(/<\/untrusted_data>/g)).toHaveLength(1);
       expect(text.match(/<untrusted_data /g)).toHaveLength(1);

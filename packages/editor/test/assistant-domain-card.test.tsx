@@ -19,9 +19,7 @@ import { withProviders } from './utils';
 
 const WAIT = { timeout: 20_000 };
 
-function card(
-  overrides: Partial<AssistantConfirmationOf<'domain'>> = {},
-): AssistantConfirmationOf<'domain'> {
+function card(overrides: Partial<AssistantConfirmationOf<'domain'>> = {}): AssistantConfirmationOf<'domain'> {
   return {
     requestId: 'dom-1',
     toolCallId: 'call-1',

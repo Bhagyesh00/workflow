@@ -17,7 +17,9 @@ import type { AssistantToolDefinition } from '../types';
 
 const fact = (label: string, value: unknown) => ({ label, value: String(value) });
 
-const listInput = z.object({ type: z.string().max(128).optional().describe('Only credentials of this type') });
+const listInput = z.object({
+  type: z.string().max(128).optional().describe('Only credentials of this type'),
+});
 
 const listCredentials: AssistantToolDefinition<z.output<typeof listInput>> = {
   name: 'list_credentials',

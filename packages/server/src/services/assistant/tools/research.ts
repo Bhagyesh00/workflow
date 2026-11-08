@@ -69,7 +69,11 @@ const webSearchTool: AssistantToolDefinition<z.output<typeof searchInput>> = {
       ? await ctx.repos.credentials.get(tenant.id, settings.searchCredentialId)
       : undefined;
     const provider =
-      row?.type === 'braveSearchApi' ? 'Brave Search' : row?.type === 'searXngApi' ? 'SearXNG' : 'None set up';
+      row?.type === 'braveSearchApi'
+        ? 'Brave Search'
+        : row?.type === 'searXngApi'
+          ? 'SearXNG'
+          : 'None set up';
     return {
       title: 'Search the web',
       resourceName: input.query,

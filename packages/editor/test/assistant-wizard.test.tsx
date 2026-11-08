@@ -23,14 +23,24 @@ async function setUp(role: Role = 'owner') {
   const mock = signedIn();
   backend().options.assistant = { enabled: true, modelSet: false };
   setCurrentTenant(mock.session!.tenantId);
-  const model = await credentialsApi.create({ name: 'My model key', type: 'openAiApi', data: { apiKey: 'k' } });
-  const brave = await credentialsApi.create({ name: 'My Brave key', type: 'braveSearchApi', data: { apiKey: 'b' } });
+  const model = await credentialsApi.create({
+    name: 'My model key',
+    type: 'openAiApi',
+    data: { apiKey: 'k' },
+  });
+  const brave = await credentialsApi.create({
+    name: 'My Brave key',
+    type: 'braveSearchApi',
+    data: { apiKey: 'b' },
+  });
   mock.memberships[0].role = role;
   return { model, brave };
 }
 
 function patches() {
-  return backend().requests.filter((r) => r.method === 'PATCH' && r.path.split('?')[0] === '/assistant/settings');
+  return backend().requests.filter(
+    (r) => r.method === 'PATCH' && r.path.split('?')[0] === '/assistant/settings',
+  );
 }
 
 async function chooseModel(modelId: string) {
@@ -80,7 +90,10 @@ describe('Assistant wizard (P5-71)', () => {
     const { model } = await setUp('owner');
     server.use(
       http.patch('/rest/assistant/settings', () =>
-        HttpResponse.json({ error: { code: 'bad_request', message: 'The AI credential does not fit' } }, { status: 400 }),
+        HttpResponse.json(
+          { error: { code: 'bad_request', message: 'The AI credential does not fit' } },
+          { status: 400 },
+        ),
       ),
     );
     renderApp('/assistant');
@@ -100,7 +113,9 @@ describe('Assistant wizard (P5-71)', () => {
   it.each(['editor', 'viewer'] as const)('gives an %s no wizard', async (role) => {
     await setUp(role);
     renderApp('/assistant');
-    expect(await screen.findByText('No model is set. An admin can set one in Settings', undefined, WAIT)).toBeTruthy();
+    expect(
+      await screen.findByText('No model is set. An admin can set one in Settings', undefined, WAIT),
+    ).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Choose a model' })).toBeNull();
   });
 });

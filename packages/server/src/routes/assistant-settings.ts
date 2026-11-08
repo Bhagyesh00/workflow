@@ -18,7 +18,9 @@ import { clientIp, requireRole } from '../http/auth';
 import { parse } from '../http/errors';
 import { assistantRouteOptions } from './assistant';
 
-const mode = z.enum(ASSISTANT_PERMISSION_MODES as unknown as [AssistantPermissionMode, ...AssistantPermissionMode[]]);
+const mode = z.enum(
+  ASSISTANT_PERMISSION_MODES as unknown as [AssistantPermissionMode, ...AssistantPermissionMode[]],
+);
 
 /** each permission key optional; `always_allow` only where the three keys allow it */
 const permissionsSchema = z

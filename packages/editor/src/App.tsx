@@ -67,9 +67,7 @@ const OAuthConsentPage = lazy(() =>
   import('./pages/OAuthConsentPage').then((m) => ({ default: m.OAuthConsentPage })),
 );
 // P5-67, P5-71
-const AssistantPage = lazy(() =>
-  import('./pages/AssistantPage').then((m) => ({ default: m.AssistantPage })),
-);
+const AssistantPage = lazy(() => import('./pages/AssistantPage').then((m) => ({ default: m.AssistantPage })));
 const AssistantSettingsPage = lazy(() =>
   import('./pages/AssistantSettingsPage').then((m) => ({ default: m.AssistantSettingsPage })),
 );

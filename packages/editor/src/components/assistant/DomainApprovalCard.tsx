@@ -68,8 +68,8 @@ export function DomainApprovalCard({ confirmation }: DomainApprovalCardProps) {
         <dd className="m-0 min-w-0 break-all text-ink">{details.url}</dd>
       </dl>
       <p className="text-xs text-ink-2">
-        The page is read from the server, without your cookies or sign-in. What it says is treated as data, never as
-        instructions.
+        The page is read from the server, without your cookies or sign-in. What it says is treated as data,
+        never as instructions.
       </p>
 
       {approvalSummary && (
@@ -88,7 +88,11 @@ export function DomainApprovalCard({ confirmation }: DomainApprovalCardProps) {
         >
           Allow once
         </Button>
-        <Button disabled={disabled} loading={busy === 'allow_domain'} onClick={() => void answer('allow_domain')}>
+        <Button
+          disabled={disabled}
+          loading={busy === 'allow_domain'}
+          onClick={() => void answer('allow_domain')}
+        >
           Allow this website
         </Button>
         <Button disabled={disabled} loading={busy === 'allow_all'} onClick={() => void answer('allow_all')}>

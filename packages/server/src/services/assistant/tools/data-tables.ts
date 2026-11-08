@@ -67,11 +67,7 @@ function describeData(data: Record<string, unknown>): string {
     .join(', ');
 }
 
-async function tableOf(
-  ctx: ServerContext,
-  caller: AssistantCaller,
-  id: string,
-): Promise<DataTableInfo> {
+async function tableOf(ctx: ServerContext, caller: AssistantCaller, id: string): Promise<DataTableInfo> {
   return ctx.dataTables.get(caller.tenant.id, id);
 }
 
@@ -96,7 +92,8 @@ async function matchPreview(
 
 const listDataTables: AssistantToolDefinition<{ query?: string; limit: number; skip: number }> = {
   name: 'list_data_tables',
-  description: 'List the data tables of the workspace, each with its columns. Optionally by part of the name.',
+  description:
+    'List the data tables of the workspace, each with its columns. Optionally by part of the name.',
   input: z.object({
     query: z.string().max(128).optional().describe('Part of the table name'),
     limit: z.number().int().min(1).max(100).default(20),
@@ -123,7 +120,9 @@ const getDataTableSchema: AssistantToolDefinition<{ dataTableId: string }> = {
 
 const queryInput = z.object({
   dataTableId,
-  filter: dataTableFilterSchema.optional().describe('Column conditions; `like` and `ilike` take a text value'),
+  filter: dataTableFilterSchema
+    .optional()
+    .describe('Column conditions; `like` and `ilike` take a text value'),
   search: z.string().max(1024).optional().describe('Text matched against every column'),
   sortBy: z
     .object({ column: z.string().min(1).max(128), direction: z.enum(['asc', 'desc']).default('asc') })
@@ -188,7 +187,8 @@ const createDataTable: AssistantToolDefinition<z.output<typeof createInput>> = {
 
 const deleteDataTable: AssistantToolDefinition<{ dataTableId: string }> = {
   name: 'delete_data_table',
-  description: 'Delete a data table with all its rows. This cannot be undone, so a person approves it every time.',
+  description:
+    'Delete a data table with all its rows. This cannot be undone, so a person approves it every time.',
   input: z.object({ dataTableId }),
   minRole: 'editor',
   permission: 'deleteDataTable',
@@ -248,7 +248,8 @@ const addDataTableColumn: AssistantToolDefinition<z.output<typeof addColumnInput
 
 const deleteDataTableColumn: AssistantToolDefinition<{ dataTableId: string; columnId: string }> = {
   name: 'delete_data_table_column',
-  description: 'Delete a column of a data table and its values. This cannot be undone, so a person approves it every time.',
+  description:
+    'Delete a column of a data table and its values. This cannot be undone, so a person approves it every time.',
   input: z.object({ dataTableId, columnId }),
   minRole: 'editor',
   permission: 'mutateDataTableSchema',

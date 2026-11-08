@@ -26,7 +26,10 @@ describe('AttachmentPicker (P5-74)', () => {
     const user = userEvent.setup();
     render(<Harness />);
     expect(screen.queryByRole('list', { name: 'Attached files' })).toBeNull();
-    await user.upload(input(), [file('report.pdf', new Uint8Array(2048), 'application/pdf'), file('data.csv', 'a,b\n1,2', 'text/csv')]);
+    await user.upload(input(), [
+      file('report.pdf', new Uint8Array(2048), 'application/pdf'),
+      file('data.csv', 'a,b\n1,2', 'text/csv'),
+    ]);
     const chips = screen.getByRole('list', { name: 'Attached files' });
     expect(chips.textContent).toContain('report.pdf');
     expect(chips.textContent).toContain('2 KB');
@@ -49,14 +52,18 @@ describe('AttachmentPicker (P5-74)', () => {
   it('warns about a file that is too large before anything is sent', () => {
     const big = file('huge.pdf', new Uint8Array(8 * 1024 * 1024), 'application/pdf');
     render(<Harness initial={[big]} />);
-    expect(screen.getByRole('alert').textContent).toBe('"huge.pdf" is too large: a file can be at most 7.5 MB');
+    expect(screen.getByRole('alert').textContent).toBe(
+      '"huge.pdf" is too large: a file can be at most 7.5 MB',
+    );
   });
 
   it('warns about a type that cannot be attached and about more than 10 files', async () => {
     const user = userEvent.setup({ applyAccept: false });
     render(<Harness />);
     await user.upload(input(), file('tool.exe', 'MZ', 'application/x-msdownload'));
-    expect(screen.getByRole('alert').textContent).toBe('"tool.exe" is a type of file that cannot be attached');
+    expect(screen.getByRole('alert').textContent).toBe(
+      '"tool.exe" is a type of file that cannot be attached',
+    );
     await user.click(screen.getByRole('button', { name: 'Remove tool.exe' }));
     expect(screen.queryByRole('alert')).toBeNull();
 
@@ -68,8 +75,12 @@ describe('AttachmentPicker (P5-74)', () => {
   });
 
   it('warns when the files are too large together', () => {
-    const files = Array.from({ length: 4 }, (_, i) => file(`p${i}.pdf`, new Uint8Array(4 * 1024 * 1024), 'application/pdf'));
-    expect(attachmentProblem(files)).toBe('The files are too large together: one message can carry at most 12 MB');
+    const files = Array.from({ length: 4 }, (_, i) =>
+      file(`p${i}.pdf`, new Uint8Array(4 * 1024 * 1024), 'application/pdf'),
+    );
+    expect(attachmentProblem(files)).toBe(
+      'The files are too large together: one message can carry at most 12 MB',
+    );
   });
 });
 

@@ -57,9 +57,7 @@ function workbook(sheets: Record<string, unknown[][]>): Uint8Array {
 }
 
 async function docx(paragraphs: string[], extra: { name: string; data: Uint8Array }[] = []) {
-  const body = paragraphs
-    .map((p) => `<w:p><w:r><w:t xml:space="preserve">${p}</w:t></w:r></w:p>`)
-    .join('');
+  const body = paragraphs.map((p) => `<w:p><w:r><w:t xml:space="preserve">${p}</w:t></w:r></w:p>`).join('');
   const xml = `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`;
   return zipFiles([
     { name: '[Content_Types].xml', data: enc('<Types/>') },
@@ -110,7 +108,9 @@ describe('documentText (P5-74)', () => {
   });
 
   it('refuses an XLSX over the cell limit and a file that is not a workbook', async () => {
-    const big = workbook({ Big: [Array.from({ length: 50 }, (_, i) => i), Array.from({ length: 50 }, (_, i) => i)] });
+    const big = workbook({
+      Big: [Array.from({ length: 50 }, (_, i) => i), Array.from({ length: 50 }, (_, i) => i)],
+    });
     await expect(
       documentText(big, 'xlsx', { limits: { ...LIMITS, maxSpreadsheetCells: 20 } }),
     ).rejects.toThrow(/cells/);
@@ -119,7 +119,12 @@ describe('documentText (P5-74)', () => {
 
   it('spreadsheetRows is the node reader without the node', () => {
     const rows = spreadsheetRows(
-      workbook({ S: [['a', 'b'], [1, 2]] }),
+      workbook({
+        S: [
+          ['a', 'b'],
+          [1, 2],
+        ],
+      }),
       'xlsx',
       {},
       LIMITS,

@@ -129,7 +129,9 @@ describe('Assistant data table tools (P5-69)', () => {
     expect(schema.result).toContain('"name":"qty"');
     const events = await eventsOf(h.viewer, schema.threadId);
     const artifact = events.find((e) => e.type === 'artifact');
-    expect(artifact?.payload).toMatchObject({ artifact: { type: 'data-table', id: table.id, name: table.name } });
+    expect(artifact?.payload).toMatchObject({
+      artifact: { type: 'data-table', id: table.id, name: table.name },
+    });
 
     // like keeps the service's rule: a value without % matches anywhere in the text
     const rows = await h.callTool(h.viewer, 'query_data_table_rows', {
@@ -306,7 +308,9 @@ describe('Assistant data table tools (P5-69)', () => {
       name: 'comment',
     });
     expect(rename.card.details.facts).toContainEqual({ label: 'New name', value: 'comment' });
-    expect(JSON.parse(await approveCard(h.editor, rename.turn, rename.card))).toMatchObject({ name: 'comment' });
+    expect(JSON.parse(await approveCard(h.editor, rename.turn, rename.card))).toMatchObject({
+      name: 'comment',
+    });
 
     const drop = await cardFor(h.editor, 'delete_data_table_column', {
       dataTableId: table.id,
@@ -360,7 +364,13 @@ describe('Assistant data table tools (P5-69)', () => {
     expect(listed.result).not.toContain(foreign);
     // the id appears because the model asked for it; nothing else of the other workspace does
     const sent = JSON.stringify(h.fake.requests);
-    for (const value of [CANARY.dataTable, CANARY.workspace, CANARY.workflow, CANARY.secret, h.other.tenantId]) {
+    for (const value of [
+      CANARY.dataTable,
+      CANARY.workspace,
+      CANARY.workflow,
+      CANARY.secret,
+      h.other.tenantId,
+    ]) {
       expect(sent, `${value} reached the model`).not.toContain(value);
     }
     // the other workspace's table is untouched

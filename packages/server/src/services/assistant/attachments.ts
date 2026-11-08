@@ -29,7 +29,8 @@ const SIGNATURES: Record<string, (head: Buffer) => boolean> = {
   'image/png': (h) => h.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])),
   'image/jpeg': (h) => h[0] === 0xff && h[1] === 0xd8 && h[2] === 0xff,
   'image/gif': (h) => h.subarray(0, 4).toString('latin1') === 'GIF8',
-  'image/webp': (h) => h.subarray(0, 4).toString('latin1') === 'RIFF' && h.subarray(8, 12).toString('latin1') === 'WEBP',
+  'image/webp': (h) =>
+    h.subarray(0, 4).toString('latin1') === 'RIFF' && h.subarray(8, 12).toString('latin1') === 'WEBP',
 };
 
 function isZip(head: Buffer): boolean {
@@ -106,7 +107,8 @@ export function validateAttachments(list: AssistantUpload[] | undefined): void {
         `"${name}" does not look like a ${type} file: use the extension ${extensions.join(' or ')}`,
       );
     }
-    if (!BASE64.test(file.data)) throw ApiError.badRequest(`"${name}" could not be read: its data is not base64`);
+    if (!BASE64.test(file.data))
+      throw ApiError.badRequest(`"${name}" could not be read: its data is not base64`);
     const check = SIGNATURES[type];
     if (check && !check(Buffer.from(file.data.slice(0, 24), 'base64'))) {
       throw ApiError.badRequest(`"${name}" is not a real ${type} file`);
@@ -147,7 +149,11 @@ export async function attachmentImages(
   const parts: AiImagePart[] = [];
   for (const file of images) {
     const bytes = await store.getBuffer(file.binary);
-    parts.push({ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType: baseType(file.mimeType) });
+    parts.push({
+      type: 'image',
+      data: Buffer.from(bytes).toString('base64'),
+      mimeType: baseType(file.mimeType),
+    });
   }
   return parts;
 }

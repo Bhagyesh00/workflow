@@ -49,7 +49,11 @@ const toolNames = (index: number): string[] => {
 
 async function credential(type: string, data: Record<string, unknown>, user = h.owner) {
   const created = await user.client.data<{ id: string }>(
-    user.client.post('/rest/credentials', { name: `${type} ${Math.random().toString(36).slice(2, 8)}`, type, data }),
+    user.client.post('/rest/credentials', {
+      name: `${type} ${Math.random().toString(36).slice(2, 8)}`,
+      type,
+      data,
+    }),
   );
   return created.id;
 }
@@ -106,7 +110,9 @@ describe('the model', () => {
     const body = await h.admin.client.data<SettingsBody>(Promise.resolve(response));
     expect(body).toMatchObject({ credentialId: openAiId, model: 'gpt-4o', modelSet: true });
     const rows = await h.ctx.repos.audit.list(h.tenantId, 50);
-    const row = rows.find((r) => r.action === 'tenant.settings_updated' && JSON.stringify(r.metadata).includes('model'));
+    const row = rows.find(
+      (r) => r.action === 'tenant.settings_updated' && JSON.stringify(r.metadata).includes('model'),
+    );
     expect(row).toBeTruthy();
     expect(JSON.stringify(row)).not.toContain('gpt-4o');
     await patch({ credentialId: h.modelCredentialId, model: HARNESS_MODEL.model });
@@ -134,8 +140,11 @@ describe('the model', () => {
 
   it('shows members the Assistant link flag only once a model is set', async () => {
     const featureOf = async () =>
-      (await h.viewer.client.data<{ features: { assistant: unknown } }>(h.viewer.client.get('/rest/settings')))
-        .features.assistant;
+      (
+        await h.viewer.client.data<{ features: { assistant: unknown } }>(
+          h.viewer.client.get('/rest/settings'),
+        )
+      ).features.assistant;
     expect(await featureOf()).toEqual({ enabled: true, modelSet: true });
     expect((await patch({ credentialId: null })).statusCode).toBe(200);
     expect((await settingsOf()).modelSet).toBe(false);
@@ -182,7 +191,14 @@ describe('permissions', () => {
 
   it('allows always_allow on fetchUrl, webSearch and mcpRead, and blocked anywhere', async () => {
     const body = await h.admin.client.data<SettingsBody>(
-      patch({ permissions: { fetchUrl: 'always_allow', webSearch: 'always_allow', mcpRead: 'always_allow', runWorkflow: 'blocked' } }),
+      patch({
+        permissions: {
+          fetchUrl: 'always_allow',
+          webSearch: 'always_allow',
+          mcpRead: 'always_allow',
+          runWorkflow: 'blocked',
+        },
+      }),
     );
     expect(body.permissions).toMatchObject({
       fetchUrl: 'always_allow',

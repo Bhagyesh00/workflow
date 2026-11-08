@@ -133,7 +133,11 @@ describe('Assistant workspace and credential tools (P5-69)', () => {
       expect.arrayContaining([fresh, old]),
     );
     const audit = await h.ctx.repos.audit.list(h.tenantId, 200);
-    expect(audit.some((r) => r.action === 'workflow.updated' && r.resourceId === wf.id && r.userId === h.editor.userId)).toBe(true);
+    expect(
+      audit.some(
+        (r) => r.action === 'workflow.updated' && r.resourceId === wf.id && r.userId === h.editor.userId,
+      ),
+    ).toBe(true);
   });
 
   it('folders: create, move a workflow in, list, delete with a card every time', async () => {
@@ -147,7 +151,10 @@ describe('Assistant workspace and credential tools (P5-69)', () => {
     expect(folder).toMatchObject({ name, parentFolderId: null });
 
     const wf = await makeWorkflow();
-    const moved = await cardFor(h.editor, 'move_workflow_to_folder', { workflowId: wf.id, folderId: folder.id });
+    const moved = await cardFor(h.editor, 'move_workflow_to_folder', {
+      workflowId: wf.id,
+      folderId: folder.id,
+    });
     expect(moved.card.details.facts).toContainEqual({ label: 'Move to', value: name });
     expect((await getWorkflow(wf.id)).folderId).toBeNull();
     expect(JSON.parse(await approveCard(h.editor, moved.turn, moved.card))).toEqual({ moved: [wf.id] });
@@ -157,7 +164,10 @@ describe('Assistant workspace and credential tools (P5-69)', () => {
     expect(listed.result).toContain('source="folders"');
     expect(unwrap(listed.result).data.map((f: { id: string }) => f.id)).toEqual([folder.id]);
 
-    const drop = await cardFor(h.editor, 'delete_folder', { folderId: folder.id, transferToFolderId: 'root' });
+    const drop = await cardFor(h.editor, 'delete_folder', {
+      folderId: folder.id,
+      transferToFolderId: 'root',
+    });
     expect(drop.card.allowSession).toBe(false);
     expect(drop.card.details.facts).toEqual([
       { label: 'Folder', value: name },
@@ -191,7 +201,10 @@ describe('Assistant workspace and credential tools (P5-69)', () => {
         .create(
           h.tenantId,
           { id, workflowId, workflowName: 'W', mode, status, startedAt: new Date() },
-          { workflowData: { id: workflowId, name: 'W', nodes: [], connections: {}, settings: {} }, runOptions: {} },
+          {
+            workflowData: { id: workflowId, name: 'W', nodes: [], connections: {}, settings: {} },
+            runOptions: {},
+          },
         )
         .then(() => id);
     };
@@ -280,7 +293,10 @@ describe('Assistant workspace and credential tools (P5-69)', () => {
     ]);
     expect(JSON.stringify(card)).not.toContain(SECRET);
     expect((await h.owner.client.get(`/rest/credentials/${cred.id}`)).statusCode).toBe(200);
-    expect(JSON.parse(await approveCard(h.editor, turn, card))).toEqual({ deleted: true, credentialId: cred.id });
+    expect(JSON.parse(await approveCard(h.editor, turn, card))).toEqual({
+      deleted: true,
+      credentialId: cred.id,
+    });
     expect((await h.owner.client.get(`/rest/credentials/${cred.id}`)).statusCode).toBe(404);
     const audit = await h.ctx.repos.audit.list(h.tenantId, 300);
     const row = audit.find((r) => r.action === 'credential.deleted' && r.resourceId === cred.id);
@@ -314,10 +330,18 @@ describe('Assistant workspace and credential tools (P5-69)', () => {
     expect((await getWorkflow(own.id)).folderId).toBeNull();
     // the id is in the model's own call; nothing else of the other workspace is in a request
     const sent = JSON.stringify(h.fake.requests);
-    for (const value of [CANARY.workspace, CANARY.workflow, CANARY.credential, CANARY.secret, 'Other folder']) {
+    for (const value of [
+      CANARY.workspace,
+      CANARY.workflow,
+      CANARY.credential,
+      CANARY.secret,
+      'Other folder',
+    ]) {
       expect(sent, `${value} reached the model`).not.toContain(value);
     }
-    expect((await h.other.owner.client.get(`/rest/credentials/${h.other.credentialId}`)).statusCode).toBe(200);
+    expect((await h.other.owner.client.get(`/rest/credentials/${h.other.credentialId}`)).statusCode).toBe(
+      200,
+    );
   });
 
   it('a seeded secret never appears in a request to the model or in an event', async () => {

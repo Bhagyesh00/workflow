@@ -11,11 +11,7 @@ import { z } from 'zod';
 import type { ServerContext } from '../../../context';
 import { deleteExecution, executionListQuery, listExecutions } from '../../../routes/executions';
 import { createTag, tagDTO } from '../../../routes/resources';
-import {
-  folderCreateSchema,
-  folderDeleteSchema,
-  folderListQuerySchema,
-} from '../../folders';
+import { folderCreateSchema, folderDeleteSchema, folderListQuerySchema } from '../../folders';
 import { assertNotArchived } from '../../workflow-rules';
 import type { AssistantCaller, AssistantRunScope, AssistantToolDefinition } from '../types';
 
@@ -53,7 +49,11 @@ async function findTestExecutions(ctx: ServerContext, tenantId: string, workflow
   return { ids, skippedActive, more };
 }
 
-async function workflowName(ctx: ServerContext, caller: AssistantCaller, workflowId: string): Promise<string> {
+async function workflowName(
+  ctx: ServerContext,
+  caller: AssistantCaller,
+  workflowId: string,
+): Promise<string> {
   return (await ctx.workflows.get(caller.tenant.id, workflowId)).name;
 }
 
@@ -197,7 +197,11 @@ const listFolders: AssistantToolDefinition<z.output<typeof listFoldersInput>> = 
 
 const createFolderInput = z.object({
   name: z.string().trim().min(1).max(128),
-  parentFolderId: z.uuid().nullable().optional().describe('The parent folder; null or left out for the top level'),
+  parentFolderId: z
+    .uuid()
+    .nullable()
+    .optional()
+    .describe('The parent folder; null or left out for the top level'),
 });
 
 const createFolder: AssistantToolDefinition<z.output<typeof createFolderInput>> = {
@@ -287,7 +291,9 @@ const moveWorkflowToFolder: AssistantToolDefinition<z.output<typeof moveInput>> 
   grantKey: () => 'moveWorkflowToFolder',
   async approval(ctx, caller, input) {
     const name = await workflowName(ctx, caller, input.workflowId);
-    const target = input.folderId ? (await ctx.folders.get(caller.tenant.id, input.folderId)).name : 'Top level';
+    const target = input.folderId
+      ? (await ctx.folders.get(caller.tenant.id, input.folderId)).name
+      : 'Top level';
     return {
       title: 'Move a workflow',
       resourceName: name,

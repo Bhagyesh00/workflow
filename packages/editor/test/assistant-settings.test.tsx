@@ -30,8 +30,16 @@ function as(role: Role) {
 }
 
 async function seedCredentials() {
-  const model = await credentialsApi.create({ name: 'My model key', type: 'openAiApi', data: { apiKey: 'k' } });
-  const brave = await credentialsApi.create({ name: 'My Brave key', type: 'braveSearchApi', data: { apiKey: 'b' } });
+  const model = await credentialsApi.create({
+    name: 'My model key',
+    type: 'openAiApi',
+    data: { apiKey: 'k' },
+  });
+  const brave = await credentialsApi.create({
+    name: 'My Brave key',
+    type: 'braveSearchApi',
+    data: { apiKey: 'b' },
+  });
   const other = await credentialsApi.create({ name: 'Unrelated Redis', type: 'redis', data: {} });
   return { model, brave, other };
 }
@@ -98,14 +106,17 @@ describe('Settings > Assistant: the model', () => {
     expect(await screen.findByRole('link', { name: 'Assistant' }, WAIT)).toBeTruthy();
   });
 
-  it("only offers credentials that fit and says when the server refuses", async () => {
+  it('only offers credentials that fit and says when the server refuses', async () => {
     const user = userEvent.setup();
     as('admin');
     noModel();
     const { model } = await seedCredentials();
     server.use(
       http.patch('/rest/assistant/settings', () =>
-        HttpResponse.json({ error: { code: 'bad_request', message: 'The AI credential was not found' } }, { status: 400 }),
+        HttpResponse.json(
+          { error: { code: 'bad_request', message: 'The AI credential was not found' } },
+          { status: 400 },
+        ),
       ),
     );
     renderApp('/settings/assistant');
@@ -119,13 +130,18 @@ describe('Settings > Assistant: the model', () => {
 });
 
 describe('Settings > Assistant: who sees it', () => {
-  it.each(['editor', 'viewer'] as const)('tells an %s who can change it and asks the server for nothing', async (role) => {
-    as(role);
-    renderApp('/settings/assistant');
-    expect(await screen.findByText('Only admins can change the Assistant settings.', undefined, WAIT)).toBeTruthy();
-    expect(screen.queryByRole('table', { name: 'Assistant permissions' })).toBeNull();
-    expect(sent('GET', '/assistant/settings')).toHaveLength(0);
-  });
+  it.each(['editor', 'viewer'] as const)(
+    'tells an %s who can change it and asks the server for nothing',
+    async (role) => {
+      as(role);
+      renderApp('/settings/assistant');
+      expect(
+        await screen.findByText('Only admins can change the Assistant settings.', undefined, WAIT),
+      ).toBeTruthy();
+      expect(screen.queryByRole('table', { name: 'Assistant permissions' })).toBeNull();
+      expect(sent('GET', '/assistant/settings')).toHaveLength(0);
+    },
+  );
 
   it('refuses a viewer and an editor on the demo server as the real one does', async () => {
     as('editor');
@@ -161,14 +177,20 @@ describe('Settings > Assistant: permissions', () => {
     await user.selectOptions(select, 'blocked');
     await waitFor(() => expect(sent('PATCH', '/assistant/settings')).toHaveLength(1));
     expect(sent('PATCH', '/assistant/settings')[0].body).toEqual({ permissions: { runWorkflow: 'blocked' } });
-    await waitFor(() => expect((screen.getByLabelText('Run workflows') as HTMLSelectElement).value).toBe('blocked'));
+    await waitFor(() =>
+      expect((screen.getByLabelText('Run workflows') as HTMLSelectElement).value).toBe('blocked'),
+    );
     await user.selectOptions(screen.getByLabelText('Search the web'), 'always_allow');
-    await waitFor(() => expect((screen.getByLabelText('Search the web') as HTMLSelectElement).value).toBe('always_allow'));
+    await waitFor(() =>
+      expect((screen.getByLabelText('Search the web') as HTMLSelectElement).value).toBe('always_allow'),
+    );
   });
 
   it('refuses always_allow on a tool outside the three, as the server does', async () => {
     as('admin');
-    await expect(assistantApi.patchSettings({ permissions: { runWorkflow: 'always_allow' } })).rejects.toThrow();
+    await expect(
+      assistantApi.patchSettings({ permissions: { runWorkflow: 'always_allow' } }),
+    ).rejects.toThrow();
     const dto = await assistantApi.settings();
     expect(dto.permissions.runWorkflow).toBe('require_approval');
   });
@@ -183,7 +205,9 @@ describe('Settings > Assistant: the other settings', () => {
     expect(toggle.getAttribute('aria-checked')).toBe('true');
     await user.click(toggle);
     await waitFor(() =>
-      expect(screen.getByRole('switch', { name: 'Turn the Assistant on' }).getAttribute('aria-checked')).toBe('false'),
+      expect(screen.getByRole('switch', { name: 'Turn the Assistant on' }).getAttribute('aria-checked')).toBe(
+        'false',
+      ),
     );
     expect(sent('PATCH', '/assistant/settings')[0].body).toEqual({ enabled: false });
     expect((await settingsApi.get()).features.assistant).toEqual({ enabled: false, modelSet: true });
@@ -198,10 +222,14 @@ describe('Settings > Assistant: the other settings', () => {
     await waitFor(() => expect(within(select).getByRole('option', { name: 'My Brave key' })).toBeTruthy());
     expect(within(select).queryByRole('option', { name: 'Unrelated Redis' })).toBeNull();
     await user.selectOptions(select, brave.id);
-    await waitFor(() => expect((screen.getByLabelText('Search key') as HTMLSelectElement).value).toBe(brave.id));
+    await waitFor(() =>
+      expect((screen.getByLabelText('Search key') as HTMLSelectElement).value).toBe(brave.id),
+    );
     expect(sent('PATCH', '/assistant/settings')[0].body).toEqual({ searchCredentialId: brave.id });
     await user.selectOptions(screen.getByLabelText('Search key'), '__off');
-    await waitFor(() => expect((screen.getByLabelText('Search key') as HTMLSelectElement).value).toBe('__off'));
+    await waitFor(() =>
+      expect((screen.getByLabelText('Search key') as HTMLSelectElement).value).toBe('__off'),
+    );
     expect(sent('PATCH', '/assistant/settings')[1].body).toEqual({ searchDisabled: true });
   });
 
@@ -213,7 +241,9 @@ describe('Settings > Assistant: the other settings', () => {
     await user.click(toggle);
     await waitFor(() =>
       expect(
-        screen.getByRole('switch', { name: 'Let the Assistant use MCP servers' }).getAttribute('aria-checked'),
+        screen
+          .getByRole('switch', { name: 'Let the Assistant use MCP servers' })
+          .getAttribute('aria-checked'),
       ).toBe('true'),
     );
     expect(sent('PATCH', '/assistant/settings')[0].body).toEqual({ mcpAccessEnabled: true });
@@ -227,7 +257,9 @@ describe('Settings > Assistant: the other settings', () => {
     expect(toggle.getAttribute('aria-checked')).toBe('true');
     await user.click(toggle);
     await waitFor(() =>
-      expect(screen.getByRole('switch', { name: 'Send parameter values' }).getAttribute('aria-checked')).toBe('false'),
+      expect(screen.getByRole('switch', { name: 'Send parameter values' }).getAttribute('aria-checked')).toBe(
+        'false',
+      ),
     );
     expect(sent('PATCH', '/assistant/settings')[0].body).toEqual({ allowSendingParameterValues: false });
     first.unmount();
@@ -239,9 +271,15 @@ describe('Settings > Assistant: the other settings', () => {
     };
     server.use(http.get('/rest/assistant/settings', () => HttpResponse.json({ data: locked })));
     renderApp('/settings/assistant');
-    const off = (await screen.findByRole('switch', { name: 'Send parameter values' }, WAIT)) as HTMLButtonElement;
+    const off = (await screen.findByRole(
+      'switch',
+      { name: 'Send parameter values' },
+      WAIT,
+    )) as HTMLButtonElement;
     expect(off.getAttribute('aria-checked')).toBe('false');
     expect(off.disabled).toBe(true);
-    expect(screen.getByText('Your server turned this off, so the model never sees parameter values.')).toBeTruthy();
+    expect(
+      screen.getByText('Your server turned this off, so the model never sees parameter values.'),
+    ).toBeTruthy();
   });
 });
