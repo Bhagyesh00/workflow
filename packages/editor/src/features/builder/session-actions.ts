@@ -3,6 +3,7 @@
  * (WorkflowEditorPage), L2's Accept and the panel's "Clear chat" call these; the server holds the chat
  * (`aiApi`), the store shows it.
  */
+import { isApiError } from '../../api/client';
 import { aiApi } from '../../api/endpoints';
 import { useBuilderStore } from '../../stores/builder-store';
 import { toast } from '../../stores/ui-store';
@@ -30,7 +31,9 @@ export async function onVersionRestored(workflowId: string, versionId: string): 
       store.setQuestions(null);
       store.setPlan(null);
     }
-  } catch {
+  } catch (error) {
+    // every /ai/* route answers 404 while the builder is off (AI_ENABLED, the default): no chat to update
+    if (isApiError(error, 404)) return;
     toast.error("Couldn't update the chat for the restored version");
   }
 }

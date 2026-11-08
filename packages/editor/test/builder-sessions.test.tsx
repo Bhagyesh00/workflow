@@ -6,7 +6,8 @@
  */
 import { act } from '@testing-library/react';
 import type { BuilderMessage } from '@workflow/workflow';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../src/api/client';
 import { aiApi } from '../src/api/endpoints';
 import { seedDemoAiSession } from '../src/demo/mock-ai';
 import {
@@ -70,10 +71,54 @@ describe('version restore', () => {
     expect(backend().requests.some((r) => r.path === '/ai/build/truncate-messages')).toBe(false);
   });
 
+  it('with the builder off (every /ai route 404s) a restore shows no error; other failures still say so', async () => {
+    const sessions = vi.spyOn(aiApi, 'sessions');
+    try {
+      sessions.mockRejectedValueOnce(new ApiError(404, 'not_found', 'Not found'));
+      await onVersionRestored(workflowId, 'v1');
+      expect(useToastStore.getState().toasts).toEqual([]);
+      expect(useBuilderStore.getState().messages.length).toBe(4);
+      sessions.mockRejectedValueOnce(new ApiError(500, 'internal', 'Server error'));
+      await onVersionRestored(workflowId, 'v1');
+      const titles = useToastStore.getState().toasts.map((t) => t.title);
+      expect(titles).toEqual(["Couldn't update the chat for the restored version"]);
+    } finally {
+      sessions.mockRestore();
+    }
+  });
+
   it('restoring the newest version removes nothing', async () => {
     await onVersionRestored(workflowId, 'v2');
     expect((await aiApi.sessions(workflowId)).messages.length).toBe(4);
     expect(backend().requests.some((r) => r.path === '/ai/build/truncate-messages')).toBe(false);
+  });
+});
+
+describe('chat history', () => {
+  it("a history answer that lands after another workflow opened is dropped, not shown in that one's panel", async () => {
+    act(() => useBuilderStore.getState().reset());
+    let answer!: () => void;
+    const held = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const real = aiApi.sessions;
+    const sessions = vi.spyOn(aiApi, 'sessions').mockImplementationOnce(async (id) => {
+      await held;
+      return real(id);
+    });
+    try {
+      const loading = useBuilderStore.getState().loadHistory(workflowId);
+      // the user opens workflow B: the page resets the builder while meta.id is still this workflow
+      act(() => useBuilderStore.getState().reset());
+      answer();
+      await loading;
+      expect(useBuilderStore.getState().messages).toEqual([]);
+      // without a reset in between, the same answer fills the panel
+      await useBuilderStore.getState().loadHistory(workflowId);
+      expect(useBuilderStore.getState().messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4']);
+    } finally {
+      sessions.mockRestore();
+    }
   });
 });
 
