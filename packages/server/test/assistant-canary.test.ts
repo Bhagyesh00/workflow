@@ -3,6 +3,8 @@
  * secret-shaped value in a tool result and an environment value never appear in any request body the
  * fake model received, in `assistant_messages` or in `assistant_events`; the second tenant's names, ids
  * and secret never do; an `sk-` key in the user's own text is redacted before the model and the table.
+ * The model calls real built-in read tools (workflows, credentials, data tables, resolved parameters on
+ * a node with `$env`, and the other tenant's workflow and table ids), so each check can fail.
  * And no server source file imports `@workflow/nodes-ai` at run time (types only).
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -10,8 +12,14 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import type { AssistantToolDefinition } from '../src/services/assistant/types';
-import { type AssistantHarness, CANARY, createAssistantHarness } from './fakes/assistant-harness';
+import {
+  type AssistantHarness,
+  CANARY,
+  createAssistantHarness,
+  toolResultOf,
+} from './fakes/assistant-harness';
 import type { FakeLlmStep } from './fakes/fake-llm';
+import { chain, createWorkflow, node, waitForExecution } from './helpers';
 
 const ENV_CANARY = 'env-canary-value-7f3a91';
 const USER_KEY = 'sk-proj-UserPastedKey0123456789abcdefXYZ';
@@ -62,18 +70,65 @@ describe('Assistant canaries', () => {
   });
 
   it('keeps secrets, env values and the other tenant out of requests, messages and events', async () => {
-    const threadId = await h.createThread(h.owner);
-    queue(
-      h,
-      { toolCalls: [{ id: 'leak_1', name: 'read_settings', arguments: {} }] },
-      { text: `Here is what I found. Also ${RESULT_SECRET}` },
+    // a workflow of this tenant whose parameters hold the model credential's key and an `$env` read,
+    // run once, so the built-in read tools below have something that could leak
+    const envFlow = await createWorkflow(h.owner.client, {
+      name: 'Env flow',
+      nodes: [
+        node('Start', 'core.manualTrigger'),
+        node(
+          'Env',
+          'core.set',
+          {
+            mode: 'manual',
+            includeOtherFields: false,
+            assignments: {
+              assignments: [
+                { id: 'a1', name: 'canary', value: '={{ $env.ASSISTANT_TEST_CANARY }}', type: 'string' },
+              ],
+            },
+            // read only in raw mode: the run never evaluates it, get_workflow shows it
+            jsonOutput: JSON.stringify({ apiKey: modelKey }),
+          },
+          [200, 0],
+        ),
+      ],
+      connections: chain('Start', 'Env'),
+    });
+    const { executionId } = await h.owner.client.data<{ executionId: string }>(
+      h.owner.client.post(`/rest/workflows/${envFlow.id}/run`, {}),
     );
+    await waitForExecution(h.ctx, h.tenantId, executionId);
+
+    const threadId = await h.createThread(h.owner);
+    const calls = [
+      { id: 'leak_1', name: 'read_settings', arguments: {} },
+      { id: 'wf_list', name: 'list_workflows', arguments: {} },
+      { id: 'wf_own', name: 'get_workflow', arguments: { workflowId: envFlow.id } },
+      { id: 'wf_other', name: 'get_workflow', arguments: { workflowId: h.other.workflowId } },
+      { id: 'cred_list', name: 'list_credentials', arguments: {} },
+      { id: 'dt_list', name: 'list_data_tables', arguments: {} },
+      { id: 'dt_other', name: 'query_data_table_rows', arguments: { dataTableId: h.other.dataTableId } },
+      { id: 'resolved', name: 'get_resolved_node_parameters', arguments: { executionId, nodeName: 'Env' } },
+    ];
+    queue(h, { toolCalls: calls }, { text: `Here is what I found. Also ${RESULT_SECRET}` });
     await h.chat(
       h.owner,
       threadId,
       `My key is ${USER_KEY}, keep it safe. Show the workflow "${CANARY.workflow}"`,
     );
     await h.waitForStatus(h.owner, threadId, 'idle');
+    // every call really ran a tool: each has a result, the other tenant's ids are not found
+    const results = Object.fromEntries(calls.map((c) => [c.id, toolResultOf(h.fake.requests, c.id) ?? '']));
+    for (const call of calls) expect(results[call.id], call.id).not.toBe('');
+    for (const id of ['leak_1', 'wf_list', 'wf_own', 'cred_list', 'dt_list', 'resolved']) {
+      expect(results[id], id).not.toMatch(/^Error:/);
+    }
+    expect(results.wf_other).toMatch(/^Error:/);
+    expect(results.dt_other).toMatch(/^Error:/);
+    expect(results.wf_own).toContain('Env flow');
+    expect(results.cred_list).toContain('Assistant model');
+    for (const id of ['wf_other', 'dt_other']) expect(results[id]).not.toContain(CANARY.workflow);
     queue(h, { text: 'Second answer.' });
     await h.chat(h.owner, threadId, `And the credential ${h.other.credentialId}?`);
     await h.waitForStatus(h.owner, threadId, 'idle');
@@ -104,14 +159,15 @@ describe('Assistant canaries', () => {
       ]) {
         expect(text, `${secret} in ${where}`).not.toContain(secret);
       }
-      for (const value of [
-        CANARY.workspace,
-        CANARY.credential,
-        CANARY.dataTable,
-        h.other.tenantId,
-        h.other.workflowId,
-      ]) {
+      // the other tenant's workflow and table ids are in the model's own calls (it asked for them), so
+      // they are checked in the results below; its names and tenant id appear nowhere
+      for (const value of [CANARY.workspace, CANARY.credential, CANARY.dataTable, h.other.tenantId]) {
         expect(text, `${value} in ${where}`).not.toContain(value);
+      }
+    }
+    for (const call of calls) {
+      for (const value of [CANARY.workflow, CANARY.secret, ENV_CANARY, modelKey]) {
+        expect(results[call.id], `${value} in ${call.id}`).not.toContain(value);
       }
     }
     // the user's key was redacted, not dropped: the rest of the text is there
