@@ -218,6 +218,14 @@
 | MCP OAuth2 credential with discovery and dynamic registration                                                             | M2  | ✅                             |
 | Builder plan mode: questions and a plan before it builds                                                                  | M2  | ✅                             |
 | Builder sessions: chat history, truncate and compaction                                                                   | M2  | ✅                             |
+| Assistant chat: threads, live replies, stop, event replay, compaction                                                     | M2  | ✅                             |
+| Assistant approvals: cards, session grants, per-tool permissions, 24 h timeout                                            | M2  | ✅                             |
+| Assistant tools: workflows, runs, data tables, folders, tags, credentials, nodes                                          | M2  | ✅                             |
+| Assistant builds workflows as drafts with review and Accept                                                               | M2  | ✅                             |
+| Assistant settings and first-run setup                                                                                    | M2  | ✅                             |
+| Assistant MCP servers (outside tools with approval)                                                                       | M2  | ✅                             |
+| Assistant web research: search and page fetch with domain approval                                                        | M2  | ✅                             |
+| Assistant attachments: PDF, DOCX, XLSX, HTML, text and images                                                             | M2  | ✅                             |
 
 ### 1.13 Users, access and authentication
 
