@@ -104,13 +104,15 @@ describe('Settings > MCP (P5-15)', () => {
     expect(screen.queryByText('Copy this key now')).toBeNull();
   });
 
-  it('the connect dialog gives the OAuth URL of the workspace', async () => {
+  it('the connect dialog gives the OAuth URL of the workspace on the MCP base URL', async () => {
     const user = userEvent.setup();
     const mock = signedIn();
+    // MCP_BASE_URL is another host than the editor's
+    mcpDemoState(backend()).mcpBaseUrl = 'https://mcp.example.com';
     renderApp('/settings/mcp');
     await user.click(await screen.findByRole('button', { name: /Connect/ }));
     const url = await screen.findByLabelText('Server URL');
-    expect(url.textContent).toBe(`${window.location.origin}/mcp-server/${mock.tenants[0].slug}/http`);
+    expect(url.textContent).toBe(`https://mcp.example.com/mcp-server/${mock.tenants[0].slug}/http`);
   });
 
   it('an admin flips one workflow and then all of them', async () => {

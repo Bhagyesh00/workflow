@@ -114,8 +114,10 @@ export function McpSettingsPage() {
   }
 
   const current = settings.data;
-  const tenantSlug = me.data?.tenant.slug ?? '';
-  const serverUrl = `${window.location.origin}/mcp-server/${encodeURIComponent(tenantSlug)}/http`;
+  // the server's URL on the MCP base URL: the editor's own origin may be another host
+  const serverUrl =
+    current.serverUrl ??
+    `${window.location.origin}/mcp-server/${encodeURIComponent(me.data?.tenant.slug ?? '')}/http`;
   const canSwitch = isAdmin && !current.managedByEnv;
 
   return (

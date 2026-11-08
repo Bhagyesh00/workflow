@@ -15,8 +15,8 @@ import type { AuthContext } from '../../http/auth';
 import { ApiError } from '../../http/errors';
 import type { TenantSettings } from '../../plans';
 import { escapeLike } from '../../repositories/executions';
-import { isUuid } from '../../repositories/util';
-import { MCP_KEY_AUDIENCE, MCP_KEY_LABEL } from './types';
+import { isUuid, now } from '../../repositories/util';
+import { MCP_KEY_AUDIENCE, MCP_KEY_LABEL, mcpServerUrl } from './types';
 import { isAvailableInMcp } from './workflow-gate';
 
 export interface McpSettingsDTO {
@@ -24,6 +24,8 @@ export interface McpSettingsDTO {
   /** set by the environment (`MCP_MANAGED_BY_ENV`): the page shows it read only */
   managedByEnv: boolean;
   autoExposeNewWorkflows: boolean;
+  /** the tenant MCP server's URL (`mcpServerUrl`, on the MCP base URL): what a client connects to */
+  serverUrl: string;
 }
 
 export interface McpSettingsPatch {
@@ -118,11 +120,12 @@ function maskedKey(prefix: string): string {
 export class McpSettingsService {
   constructor(readonly ctx: ServerContext) {}
 
-  private dto(tenant: Pick<TenantRow, 'settings'>): McpSettingsDTO {
+  private dto(tenant: Pick<TenantRow, 'settings' | 'slug'>): McpSettingsDTO {
     return {
       mcpAccessEnabled: mcpAccessEnabled(this.ctx.config, tenant),
       managedByEnv: this.ctx.config.mcp.managedByEnv,
       autoExposeNewWorkflows: mcpSettingsOf(tenant).autoExposeNewWorkflows === true,
+      serverUrl: mcpServerUrl(this.ctx.config, tenant.slug),
     };
   }
 
@@ -256,6 +259,8 @@ export class McpSettingsService {
       .update(workflows)
       .set({
         settings: sql`jsonb_set(coalesce(${workflows.settings}, '{}'::jsonb), '{availableInMCP}', ${value}, true)`,
+        // no new versionId (as n8n): a stale editor save keeps this flag (WorkflowService.update)
+        updatedAt: now(),
       })
       .where(and(...conditions))
       .returning({ id: workflows.id });

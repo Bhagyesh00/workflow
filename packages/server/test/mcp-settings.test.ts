@@ -65,11 +65,17 @@ describe('settings', () => {
       mcpAccessEnabled: false,
       managedByEnv: false,
       autoExposeNewWorkflows: false,
+      serverUrl: user.url,
     });
     const patched = await user.client.data(
       user.client.patch('/rest/mcp/settings', { mcpAccessEnabled: true, autoExposeNewWorkflows: true }),
     );
-    expect(patched).toEqual({ mcpAccessEnabled: true, managedByEnv: false, autoExposeNewWorkflows: true });
+    expect(patched).toEqual({
+      mcpAccessEnabled: true,
+      managedByEnv: false,
+      autoExposeNewWorkflows: true,
+      serverUrl: user.url,
+    });
     const tenant = await server.ctx.repos.tenants.get(user.tenant.id);
     expect(tenant?.settings).toMatchObject({
       timezone: 'Europe/Berlin',
@@ -106,6 +112,7 @@ describe('settings', () => {
         mcpAccessEnabled: true,
         managedByEnv: true,
         autoExposeNewWorkflows: false,
+        serverUrl: user.url,
       });
       const res = await user.client.patch('/rest/mcp/settings', { mcpAccessEnabled: false });
       expect(res.statusCode).toBe(409);
@@ -225,5 +232,52 @@ describe('workflows and toggle-access', () => {
     await setRole(user.tenant.id, user.user.id, 'editor');
     expect((await toggle({ availableInMCP: true, allWorkflows: true })).statusCode).toBe(403);
     expect(await flagOf(user.tenant.id, one.id)).toBe(false);
+  });
+
+  it('a toggle keeps its versionId and survives a stale editor save and a restore; a save that changes the flag applies it', async () => {
+    const user = await signup();
+    const wf = await simple(user.client, 'Shared', { settings: { availableInMCP: true } });
+    const opened = await user.client.data(user.client.get(`/rest/workflows/${wf.id}`));
+    const toggle = (availableInMCP: boolean) =>
+      user.client.data(
+        user.client.patch('/rest/mcp/workflows/toggle-access', { availableInMCP, workflowIds: [wf.id] }),
+      );
+    expect(await toggle(false)).toEqual({ updatedCount: 1 });
+    const row = await server.ctx.repos.workflows.get(user.tenant.id, wf.id);
+    expect(row?.versionId).toBe(opened.versionId);
+    expect(row!.updatedAt.getTime()).toBeGreaterThan(new Date(opened.updatedAt).getTime());
+
+    // an editor that opened it before the toggle saves its old settings with the old versionId
+    const saved = await user.client.data(
+      user.client.patch(`/rest/workflows/${wf.id}`, {
+        versionId: opened.versionId,
+        name: 'Shared v2',
+        settings: opened.settings,
+      }),
+    );
+    expect(saved.name).toBe('Shared v2');
+    expect(await flagOf(user.tenant.id, wf.id)).toBe(false);
+    // the saved version holds the kept flag
+    const version = await server.ctx.repos.versions.get(user.tenant.id, wf.id, saved.versionId);
+    expect((version?.settings as { availableInMCP?: boolean } | undefined)?.availableInMCP).toBe(false);
+
+    // a restore of the version from before the toggle keeps the current flag
+    await user.client.data(user.client.post(`/rest/workflows/${wf.id}/versions/${opened.versionId}/restore`));
+    expect(await flagOf(user.tenant.id, wf.id)).toBe(false);
+    expect((await server.ctx.repos.workflows.get(user.tenant.id, wf.id))?.name).toBe('Shared');
+
+    // a save that changes the flag on purpose (it differs from the version the client read): applied
+    const save = async (availableInMCP: boolean) => {
+      const latest = await user.client.data(user.client.get(`/rest/workflows/${wf.id}`));
+      await user.client.data(
+        user.client.patch(`/rest/workflows/${wf.id}`, {
+          versionId: latest.versionId,
+          settings: { ...latest.settings, availableInMCP },
+        }),
+      );
+      return flagOf(user.tenant.id, wf.id);
+    };
+    expect(await save(true)).toBe(true);
+    expect(await save(false)).toBe(false);
   });
 });

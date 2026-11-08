@@ -43,6 +43,8 @@ export interface McpDemoState {
   /** when set, the approve reply carries this redirect instead of the flow's (tests the client-side check) */
   forcedRedirectUrl: string | null;
   managedByEnv: boolean;
+  /** the server's MCP base URL (`MCP_BASE_URL`); null: the page's own origin */
+  mcpBaseUrl: string | null;
 }
 
 const states = new WeakMap<MockBackend, McpDemoState>();
@@ -77,19 +79,26 @@ export function mcpDemoState(backend: MockBackend): McpDemoState {
       ]),
       forcedRedirectUrl: null,
       managedByEnv: false,
+      mcpBaseUrl: null,
     };
     states.set(backend, state);
   }
   return state;
 }
 
-function settingsOf(state: McpDemoState, tenantId: string): McpSettings {
-  let settings = state.settings.get(tenantId);
+/** the tenant MCP server's URL, as the server's `mcpServerUrl` */
+function serverUrlOf(state: McpDemoState, slug: string): string {
+  return `${state.mcpBaseUrl ?? globalThis.location?.origin ?? ''}/mcp-server/${encodeURIComponent(slug)}/http`;
+}
+
+function settingsOf(state: McpDemoState, tenant: { id: string; slug: string }): McpSettings {
+  let settings = state.settings.get(tenant.id);
   if (!settings) {
     settings = { mcpAccessEnabled: false, managedByEnv: state.managedByEnv, autoExposeNewWorkflows: false };
-    state.settings.set(tenantId, settings);
+    state.settings.set(tenant.id, settings);
   }
   settings.managedByEnv = state.managedByEnv;
+  settings.serverUrl = serverUrlOf(state, tenant.slug);
   return settings;
 }
 
@@ -128,12 +137,12 @@ export function registerMcpRoutes(backend: MockBackend): void {
 
   backend.on('GET', '/mcp/settings', () => {
     const { tenant } = backend.auth();
-    return { ...settingsOf(state(), tenant.id) };
+    return { ...settingsOf(state(), tenant) };
   });
 
   backend.on('PATCH', '/mcp/settings', ({ body }) => {
     const { tenant } = backend.requireRole('admin');
-    const settings = settingsOf(state(), tenant.id);
+    const settings = settingsOf(state(), tenant);
     if (settings.managedByEnv) {
       throw new HttpError(409, 'conflict', 'MCP access is set by the server environment');
     }
@@ -239,7 +248,7 @@ export function registerMcpRoutes(backend: MockBackend): void {
     const details: McpConsentDetails = {
       clientName: flow.clientName,
       tenantName: tenant.name,
-      resource: `${globalThis.location?.origin ?? ''}/mcp-server/${tenant.slug}/http`,
+      resource: serverUrlOf(state(), tenant.slug),
       scopes: [...flow.scopes],
       redirectHost: new URL(flow.redirectUri).host,
     };
