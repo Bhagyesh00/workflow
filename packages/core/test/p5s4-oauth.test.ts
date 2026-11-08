@@ -150,6 +150,28 @@ describe('oauth2Request 401 on a full response (finding 5)', () => {
     expect(saved[0]?.oauthTokenData?.refresh_token).toBe('new-refresh');
   });
 
+  it('releases the unread streamed body of the first 401 before the retry', async () => {
+    let cancelled = false;
+    // like HttpClient's streamed body: an unstarted generator that cancels its reader in `finally`
+    async function* unread() {
+      try {
+        yield new Uint8Array([1]);
+        yield new Uint8Array([2]);
+      } finally {
+        cancelled = true;
+      }
+    }
+    const http = scriptedHttp([full(401, unread()), { access_token: 'new-access' }, full(200, 'ok')]);
+    const response = await oauth2Request<{ statusCode: number }>(
+      http.client,
+      pkce(),
+      { ...mcpPost, method: 'GET', responseType: 'stream' },
+      async () => {},
+    );
+    expect(response.statusCode).toBe(200);
+    await vi.waitFor(() => expect(cancelled).toBe(true));
+  });
+
   it('retries only once: a second 401 is returned as it is', async () => {
     const http = scriptedHttp([full(401), { access_token: 'new-access' }, full(401, 'still no')]);
     const response = await oauth2Request<{ statusCode: number }>(

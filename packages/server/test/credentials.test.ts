@@ -122,6 +122,50 @@ describe('credentials', () => {
     expect((await client.get(`/rest/credentials/${created.id}`)).statusCode).toBe(404);
   });
 
+  it('redacts header values of Multiple Headers Auth and keeps them on a save with the sentinel', async () => {
+    const { client, tenant } = await signup(server.app);
+    const headers = {
+      values: [
+        { name: 'X-API-Key', value: 'header-secret-1' },
+        { name: 'X-Team', value: 'header-secret-2' },
+        { name: 'X-Ref', value: '={{ $vars.ref }}' },
+      ],
+    };
+    const created = await client.data(
+      client.post('/rest/credentials', {
+        name: 'Headers',
+        type: 'httpMultipleHeadersAuth',
+        data: { headers },
+      }),
+    );
+    const read = await client.get(`/rest/credentials/${created.id}`);
+    expect(read.statusCode).toBe(200);
+    expect(read.body).not.toContain('header-secret');
+    expect(read.json().data.data.headers).toEqual({
+      values: [
+        { name: 'X-API-Key', value: '__REDACTED__' },
+        { name: 'X-Team', value: '__REDACTED__' },
+        { name: 'X-Ref', value: '={{ $vars.ref }}' },
+      ],
+    });
+
+    // the form sends the redacted data back with one header renamed and one value replaced
+    const sent = read.json().data.data.headers as { values: Array<{ name: string; value: string }> };
+    sent.values[0].name = 'X-Api-Key';
+    sent.values[1].value = 'rotated';
+    sent.values.push({ name: 'X-New', value: '__REDACTED__' });
+    await client.data(client.patch(`/rest/credentials/${created.id}`, { data: { headers: sent } }));
+    const row = await server.ctx.repos.credentials.get(tenant.id, created.id);
+    expect(server.ctx.credentials.decrypt(row!).headers).toEqual({
+      values: [
+        { name: 'X-Api-Key', value: 'header-secret-1' },
+        { name: 'X-Team', value: 'rotated' },
+        { name: 'X-Ref', value: '={{ $vars.ref }}' },
+        { name: 'X-New' },
+      ],
+    });
+  });
+
   it('decrypts credentials with type defaults inside executions', async () => {
     const { client, tenant } = await signup(server.app);
     const credential = await client.data(

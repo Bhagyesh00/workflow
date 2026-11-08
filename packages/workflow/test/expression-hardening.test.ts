@@ -215,9 +215,11 @@ describe('allocation budget (R19c)', () => {
     ]) {
       expectFastError(() => evaluate(doubling(body), {}, 1000), /allocation|exceeds|time limit/, 2000);
     }
+    // this case ends on the 1000 ms time limit, so it gets the doubling cases' 2000 ms budget
     expectFastError(
       () => evaluate('={{ String.raw({ raw: { length: 5e7 } }).length }}'),
       /allocation|exceeds|time limit/,
+      2000,
     );
     expectFastError(
       () =>

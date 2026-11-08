@@ -5,6 +5,7 @@ import type { WorkflowNode } from '@workflow/workflow';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { executionsApi } from '../src/api/endpoints';
 import { useCommandRegistry } from '../src/features/command-bar/commands';
+import { useBuilderStore } from '../src/stores/builder-store';
 import { useUiStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
 import { backend, signedIn } from './backend';
@@ -325,6 +326,35 @@ describe('command bar in the editor', () => {
         hidden,
       ).toBe(false);
     expect(titles.some((t) => t.startsWith('Download workflow'))).toBe(true);
+  });
+
+  it('a streaming builder turn hides the write commands until it ends', async () => {
+    const wf = backend().seedWorkflow({ name: 'Greeter', nodes: [trigger, code], connections: {} });
+    await openEditor(wf.id);
+    act(() => useBuilderStore.getState().setStreaming(true));
+    try {
+      await openBar();
+      await userEvent.setup().click(screen.getByRole('tab', { name: 'Actions' }));
+      await inBar().findByRole('option', { name: /Download workflow/ });
+      const titles = optionTitles();
+      for (const hidden of [
+        'Add node',
+        'Add sticky note',
+        'Test workflow',
+        'Tidy up workflow',
+        'Rename workflow',
+        'Publish workflow',
+      ])
+        expect(
+          titles.some((t) => t.startsWith(hidden)),
+          hidden,
+        ).toBe(false);
+      expect(useCommandRegistry.getState().nodeAdder).toBeNull();
+      act(() => useBuilderStore.getState().setStreaming(false));
+      await inBar().findByRole('option', { name: /Add sticky note/ });
+    } finally {
+      act(() => useBuilderStore.getState().setStreaming(false));
+    }
   });
 });
 

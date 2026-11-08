@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { WorkflowNode } from '@workflow/workflow';
 import { describe, expect, it } from 'vitest';
@@ -6,7 +6,7 @@ import { REDACTED } from '../src/api/types';
 import { ErrorPanel } from '../src/components/ndv/DataPanes';
 import { useWorkflowStore } from '../src/stores/workflow-store';
 import { backend, signedIn } from './backend';
-import { renderApp } from './utils';
+import { renderApp, withProviders } from './utils';
 
 const trigger: WorkflowNode = {
   id: 't',
@@ -145,7 +145,8 @@ describe('executions', () => {
   });
 
   it('opens failed node details with the structured error', () => {
-    render(
+    // the app always has a QueryClient; the error panel reads the builder feature and the role (P5-65)
+    withProviders(
       <ErrorPanel
         error={{
           name: 'NodeApiError',

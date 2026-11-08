@@ -365,7 +365,10 @@ export interface FormAuthHelper {
   canExecute(userId: string, workflowId: string): Promise<boolean>;
 }
 
-/** auth of the MCP Server Trigger: OAuth Bearer tokens issued for `resource` (the trigger's URL) */
+/**
+ * auth of the MCP Server Trigger: OAuth Bearer tokens issued for `resource`. `resource` is the trigger's
+ * request path or URL; only its path counts, and the host builds the resource on its MCP base URL.
+ */
 export interface McpAuthHelper {
   /** the user and workspace role of a valid token for `resource`; null when the token is not valid */
   verifyAccessToken(token: string, resource: string): Promise<{ user: FormUser; role: string } | null>;

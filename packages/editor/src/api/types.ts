@@ -84,8 +84,8 @@ export interface SettingsPatchBody {
   brand?: Partial<Brand>;
   timezone?: string;
   workflowReviews?: { enabled: boolean };
-  /** P5-09: the credential must be this workspace's, the node type a chat model node */
-  ai?: TenantAiSettings;
+  /** P5-09: the credential must be this workspace's, the node type a chat model node; null removes the setup */
+  ai?: TenantAiSettings | null;
 }
 
 export interface Tag {
@@ -841,6 +841,8 @@ export interface McpSettings {
   /** set by the environment (MCP_MANAGED_BY_ENV): the page shows it read only */
   managedByEnv: boolean;
   autoExposeNewWorkflows: boolean;
+  /** the tenant MCP server's URL on the MCP base URL (MCP_BASE_URL): what a client connects to */
+  serverUrl?: string;
 }
 
 /** PATCH /mcp/settings (admin) */

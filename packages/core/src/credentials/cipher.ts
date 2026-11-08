@@ -6,7 +6,7 @@
  * Format: `v1.<keyId>.<iv b64url>.<tag b64url>.<ciphertext b64url>`
  */
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
-import { splitTemplate } from '@workflow/workflow';
+import { type NodeProperty, type NodePropertyCollection, splitTemplate } from '@workflow/workflow';
 
 export interface MasterKey {
   id: string;
@@ -99,27 +99,93 @@ export function isCredentialExpression(value: unknown): value is string {
   );
 }
 
-/** An expression stays visible: it is a reference such as `={{ $secrets.vault.key }}`, not the secret. */
-export function redactCredentialData(
-  data: Record<string, unknown>,
-  secretFields: Set<string>,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(data)) {
-    const hide = secretFields.has(k) && v !== '' && v !== undefined && v !== null;
-    out[k] = hide && !isCredentialExpression(v) ? REDACTED : v;
+type Data = Record<string, unknown>;
+
+const isPlainObject = (value: unknown): value is Data =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const redactValue = (value: unknown): unknown =>
+  value === '' || value === undefined || value === null || isCredentialExpression(value) ? value : REDACTED;
+
+/** the value of one property with its password-typed values redacted, also inside (fixed) collections */
+function redactProperty(value: unknown, property: NodeProperty): unknown {
+  if (property.typeOptions?.password) return redactValue(value);
+  if (!isPlainObject(value)) return value;
+  if (property.type === 'collection') {
+    const options = (property.options ?? []).filter((o): o is NodeProperty => 'type' in o);
+    return redactProperties(value, options);
+  }
+  if (property.type !== 'fixedCollection') return value;
+  const out: Data = { ...value };
+  for (const option of property.options ?? []) {
+    if (!('values' in option) || !(option.name in value)) continue;
+    const { values } = option as NodePropertyCollection;
+    const entry = value[option.name];
+    const redactEntry = (item: unknown) => (isPlainObject(item) ? redactProperties(item, values) : item);
+    out[option.name] = Array.isArray(entry) ? entry.map(redactEntry) : redactEntry(entry);
   }
   return out;
 }
 
-/** Merge an update from the browser, keeping stored secrets where the client sent the sentinel. */
+function redactProperties(data: Data, properties: readonly NodeProperty[]): Data {
+  const out: Data = { ...data };
+  for (const property of properties) {
+    if (property.name in out) out[property.name] = redactProperty(out[property.name], property);
+  }
+  return out;
+}
+
+/**
+ * An expression stays visible: it is a reference such as `={{ $secrets.vault.key }}`, not the secret.
+ * With `properties` (the credential type's), password-typed values inside a collection or fixedCollection
+ * are redacted too, such as the header values of Multiple Headers Auth.
+ */
+export function redactCredentialData(
+  data: Record<string, unknown>,
+  secretFields: Set<string>,
+  properties?: readonly NodeProperty[],
+): Record<string, unknown> {
+  let out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data)) {
+    out[k] = secretFields.has(k) ? redactValue(v) : v;
+  }
+  if (properties) {
+    const nested = properties.filter(
+      (p) => (p.type === 'collection' || p.type === 'fixedCollection') && !secretFields.has(p.name),
+    );
+    out = redactProperties(out, nested);
+  }
+  return out;
+}
+
+/** a nested value from the browser with each sentinel replaced by the stored value at the same place */
+function restoreNested(incoming: unknown, stored: unknown): unknown {
+  if (Array.isArray(incoming)) {
+    const from = Array.isArray(stored) ? stored : [];
+    return incoming.map((item, i) => (item === REDACTED ? from[i] : restoreNested(item, from[i])));
+  }
+  if (!isPlainObject(incoming)) return incoming;
+  const from = isPlainObject(stored) ? stored : {};
+  const out: Data = { ...incoming };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v !== REDACTED) out[k] = restoreNested(v, from[k]);
+    else if (k in from) out[k] = from[k];
+    else delete out[k];
+  }
+  return out;
+}
+
+/**
+ * Merge an update from the browser, keeping stored secrets where the client sent the sentinel, also inside
+ * nested objects and lists (matched by key and position).
+ */
 export function mergeRedacted(
   stored: Record<string, unknown>,
   incoming: Record<string, unknown>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...incoming };
   for (const [k, v] of Object.entries(incoming)) {
-    if (v === REDACTED) out[k] = stored[k];
+    out[k] = v === REDACTED ? stored[k] : restoreNested(v, stored[k]);
   }
   return out;
 }

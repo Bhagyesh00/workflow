@@ -1,9 +1,11 @@
+import { QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import type { Connections, RunData, TaskData } from '@workflow/workflow';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LogPanel } from '../src/components/workflow/LogPanel';
 import { useToastStore, useUiStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
+import { testQueryClient } from './utils';
 
 const connections: Connections = {
   Trigger: { main: [[{ node: 'Agent', type: 'main', index: 0 }]] },
@@ -100,8 +102,15 @@ function agentRun(t0 = 1000): RunData {
 const onFocusNode = vi.fn();
 const baseProps = { logs: [], onClear: vi.fn(), onClose: vi.fn(), onFocusNode };
 
+const queryClient = testQueryClient();
+
+/** the app always has a QueryClient; the error panel reads the builder feature and the role (P5-65) */
 function panel(runData: RunData) {
-  return <LogPanel {...baseProps} runData={runData} />;
+  return (
+    <QueryClientProvider client={queryClient}>
+      <LogPanel {...baseProps} runData={runData} />
+    </QueryClientProvider>
+  );
 }
 
 const treeitem = (name: string) =>

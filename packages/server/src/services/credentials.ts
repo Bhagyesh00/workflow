@@ -90,9 +90,10 @@ export class CredentialService {
     return this.cipher.encrypt(data, { tenantId, credentialId });
   }
 
-  /** stored data with secrets replaced by `__REDACTED__` */
+  /** stored data with secrets replaced by `__REDACTED__`, also inside (fixed) collections */
   redacted(row: CredentialRow): DataObject {
-    return redactCredentialData(this.decrypt(row), this.secretFields(row.type));
+    const properties = this.types.getResolved(row.type)?.properties ?? [];
+    return redactCredentialData(this.decrypt(row), this.secretFields(row.type), properties);
   }
 
   /**
@@ -191,9 +192,15 @@ export class CredentialService {
   }
 }
 
-/** never persist the redaction sentinel itself */
+/** never persist the redaction sentinel itself, also inside (fixed) collections */
 function stripSentinels(data: DataObject): DataObject {
   const out: DataObject = {};
-  for (const [k, v] of Object.entries(data)) if (v !== REDACTED) out[k] = v;
+  for (const [k, v] of Object.entries(data)) if (v !== REDACTED) out[k] = stripNested(v);
   return out;
+}
+
+function stripNested(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => (item === REDACTED ? '' : stripNested(item)));
+  if (typeof value !== 'object' || value === null) return value;
+  return stripSentinels(value as DataObject);
 }

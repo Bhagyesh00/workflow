@@ -236,8 +236,23 @@ export async function oauth2Request<T>(
     (response as { statusCode?: unknown } | null)?.statusCode === 401 &&
     tokenData?.refresh_token
   ) {
+    releaseBody((response as { body?: unknown }).body);
     await refresh();
     return (await http.request<T>(withToken(), signal)) as T;
   }
   return response as T;
+}
+
+/**
+ * Let go of an unread streamed body (the 401 answer before a retry), so its connection is freed now and not
+ * at garbage collection. `return()` on an unstarted generator skips its `finally`, where the body is
+ * cancelled: one `next()` starts it first. Not awaited, so a server that never sends a byte delays nothing.
+ */
+function releaseBody(body: unknown): void {
+  if (typeof body !== 'object' || body === null || !(Symbol.asyncIterator in body)) return;
+  const iterator = (body as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+  void iterator
+    .next()
+    .then(() => iterator.return?.())
+    .catch(() => undefined);
 }

@@ -10,6 +10,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { ReactFlowInstance } from '@xyflow/react';
 import { useEffect, useMemo } from 'react';
 import { useMe } from '../../api/queries';
+import { useBuilderStore } from '../../stores/builder-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { addNodeFromDescription } from '../editor/add-node';
@@ -37,6 +38,9 @@ const SECTION = 'Workflow';
 
 export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput): void {
   const readOnly = useWorkflowStore((s) => s.readOnly);
+  const streaming = useBuilderStore((s) => s.streaming);
+  // a streaming builder turn owns the canvas: lock edit commands like read only
+  const locked = readOnly || streaming;
   const workflowId = useWorkflowStore((s) => s.meta.id);
   const published = useWorkflowStore((s) => s.meta.active);
   const archived = useWorkflowStore((s) => s.meta.isArchived);
@@ -46,7 +50,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
 
   // nodes can be added while the workflow is editable; the picked node is selected, not opened
   useEffect(() => {
-    if (readOnly) return;
+    if (locked) return;
     const { setNodeAdder } = useCommandRegistry.getState();
     setNodeAdder((description, parameters) =>
       addNodeFromDescription(description, {
@@ -57,7 +61,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
       }),
     );
     return () => setNodeAdder(null);
-  }, [readOnly, flow, deps.descriptions]);
+  }, [locked, flow, deps.descriptions]);
 
   const commands = useMemo<Command[]>(() => {
     const store = () => useWorkflowStore.getState();
@@ -66,7 +70,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
     const list: Command[] = [];
     const add = (command: Omit<Command, 'description'>) => list.push({ ...command, description: SECTION });
 
-    if (!readOnly) {
+    if (!locked) {
       add({
         id: 'add-node',
         title: 'Add node',
@@ -127,7 +131,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
             run: () => openCredential(target.id),
           })),
       });
-    if (!readOnly) {
+    if (!locked) {
       add({
         id: 'test-workflow',
         title: 'Test workflow',
@@ -142,7 +146,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
       });
     }
     add({ id: 'select-all', title: 'Select all', run: () => store().selectAll() });
-    if (!readOnly) {
+    if (!locked) {
       add({
         id: 'rename-workflow',
         title: 'Rename workflow',
@@ -162,7 +166,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
       keywords: ['settings', 'timezone', 'error workflow'],
       run: () => ui().setSettingsOpen(true),
     });
-    if (!readOnly) {
+    if (!locked) {
       add({
         id: 'duplicate-workflow',
         title: 'Duplicate workflow',
@@ -178,7 +182,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
       keywords: ['export', 'json'],
       run: () => downloadWorkflow(),
     });
-    if (!readOnly) {
+    if (!locked) {
       add({
         id: 'import-file',
         title: 'Import from file',
@@ -233,7 +237,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
             await deleteArchivedWorkflow(workflowId, actionDeps);
           },
         });
-      } else if (!readOnly) {
+      } else if (!locked) {
         add({
           id: 'archive-workflow',
           title: 'Archive workflow',
@@ -244,7 +248,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
       }
     }
     return list;
-  }, [deps, flow, execute, queryClient, readOnly, workflowId, published, archived, viewer, nodes]);
+  }, [deps, flow, execute, queryClient, locked, workflowId, published, archived, viewer, nodes]);
 
   useEffect(() => registerCommands('editor', commands), [commands]);
 }
