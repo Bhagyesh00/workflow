@@ -214,6 +214,39 @@ describe('files', () => {
     vi.unstubAllGlobals();
   });
 
+  it('revokes the preview URLs of the chips it replaces, and the picker ones after a send', async () => {
+    const real = { create: URL.createObjectURL, revoke: URL.revokeObjectURL };
+    let n = 0;
+    const live = new Set<string>();
+    Object.assign(URL, {
+      createObjectURL: () => {
+        n += 1;
+        live.add(`blob:test/${n}`);
+        return `blob:test/${n}`;
+      },
+      revokeObjectURL: (url: string) => {
+        live.delete(url);
+      },
+    });
+    try {
+      const { target, area } = mount({ allowFileUploads: true });
+      attach(target, [png()]);
+      attach(target, [new File(['y'], 'b.png', { type: 'image/png' })]);
+      // two chips on screen and two live URLs: the first render's URL was revoked
+      expect(target.querySelectorAll('.chat-files .chat-file-preview')).toHaveLength(2);
+      expect(live.size).toBe(2);
+      area.value = 'look';
+      key(area, 'Enter');
+      await flush();
+      await flush();
+      expect(target.querySelectorAll('.chat-files .chat-file')).toHaveLength(0);
+      // only the previews inside the sent message are left
+      expect(live.size).toBe(target.querySelectorAll('.chat-message-from-user .chat-file-preview').length);
+    } finally {
+      Object.assign(URL, { createObjectURL: real.create, revokeObjectURL: real.revoke });
+    }
+  });
+
   it('puts the accept list on the file input', () => {
     const { target } = mount({ allowFileUploads: true, allowedFilesMimeTypes: 'image/*,.csv' });
     expect(target.querySelector('input[type="file"]')?.getAttribute('accept')).toBe('image/*,.csv');

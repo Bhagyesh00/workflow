@@ -331,6 +331,74 @@ describe('wait frame', () => {
     await send(target, 'two');
     expect(calls.map((c) => c.url)).toEqual([WEBHOOK, RESUME, RESUME]);
   });
+
+  it('drops the resume URL when the run no longer waits (409), so the next message starts a new run', async () => {
+    const { target, calls } = mount({}, (_c, index) => {
+      if (index === 0) return ndjson([`${JSON.stringify({ type: 'wait', resumeUrl: RESUME })}\n`]);
+      if (index === 1) return json({ message: 'The execution is not waiting' }, 409);
+      return json({ output: 'new run' });
+    });
+    await send(target, 'one');
+    await send(target, 'two');
+    expect(target.querySelector('.chat-message-error')?.textContent).toBe('The execution is not waiting');
+    // the text stays in the input, the person sends it again
+    expect((target.querySelector('textarea') as HTMLTextAreaElement).value).toBe('two');
+    await send(target, 'two');
+    await send(target, 'three');
+    expect(calls.map((c) => c.url)).toEqual([WEBHOOK, RESUME, WEBHOOK, WEBHOOK]);
+  });
+
+  it('keeps the resume URL after a 429', async () => {
+    const { target, calls } = mount({}, (_c, index) => {
+      if (index === 0) return ndjson([`${JSON.stringify({ type: 'wait', resumeUrl: RESUME })}\n`]);
+      if (index === 1) return json({ message: 'Slow down' }, 429);
+      return json({ output: 'ok' });
+    });
+    await send(target, 'one');
+    await send(target, 'two');
+    await send(target, 'two');
+    expect(calls.map((c) => c.url)).toEqual([WEBHOOK, RESUME, RESUME]);
+  });
+
+  it('newSession during a reply: the old stream writes nothing and its wait frame sets no resume URL', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const enc = new TextEncoder();
+    const meta = { nodeId: 'a', nodeName: 'a', runIndex: 0, itemIndex: 0, timestamp: 1 };
+    const line = (frame: unknown) => enc.encode(`${JSON.stringify(frame)}\n`);
+    const slow = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(line({ type: 'item', content: 'first', metadata: meta }));
+            await gate;
+            controller.enqueue(line({ type: 'item', content: 'late', metadata: meta }));
+            controller.enqueue(line({ type: 'wait', resumeUrl: RESUME }));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/x-ndjson' } },
+      );
+    const { chat, target, calls } = mount({}, (_c, index) =>
+      index === 0 ? slow() : json({ output: 'fresh' }),
+    );
+    const area = target.querySelector('textarea') as HTMLTextAreaElement;
+    area.value = 'start';
+    area.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await flush();
+    await flush();
+    chat.newSession('sess-2');
+    release();
+    await flush();
+    await flush();
+    await flush();
+    expect(botTexts(target)).toEqual([]);
+    await send(target, 'hello');
+    expect(calls.map((c) => c.url)).toEqual([WEBHOOK, WEBHOOK]);
+    expect(botTexts(target)).toEqual(['fresh']);
+  });
 });
 
 describe('origin helper', () => {

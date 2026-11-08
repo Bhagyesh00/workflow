@@ -139,8 +139,8 @@
 }
 
 .chat-layout [hidden] {
-  /* biome-ignore lint/complexity/noImportantStyles: the hidden attribute must win over the display rules of the components */
-  display: none !important;
+  /* two classes of specificity beat the one-class display rules of the components */
+  display: none;
 }
 
 /* window mode: a floating panel and its toggle button */

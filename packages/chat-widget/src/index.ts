@@ -74,8 +74,10 @@ export interface ChatOptions {
   allowedFilesMimeTypes?: string;
   enableStreaming?: boolean;
   enableMessageActions?: boolean;
-  // biome-ignore lint/suspicious/noConfusingVoidType: the contract lets the hook return nothing or an override
-  beforeMessageSent?(message: string): void | ChatRequestOverride | Promise<void | ChatRequestOverride>;
+  /** May return an override for this request, or nothing (`undefined`, or no return at all). */
+  beforeMessageSent?(
+    message: string,
+  ): ChatRequestOverride | undefined | Promise<ChatRequestOverride | undefined>;
   afterMessageSent?(message: string, response?: unknown): void;
   /** Seam for the editor demo and tests; `credentials: 'omit'` is always set on top of it. */
   fetch?: typeof fetch;
@@ -110,6 +112,11 @@ export interface ChatInstance {
   newSession(id?: string): void;
 }
 
+/** A 4xx reply to the stored resume URL that a retry cannot fix (not 408 or 429). */
+function isDeadResume(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
 function resolveTarget(target: string | HTMLElement | undefined): HTMLElement {
   if (typeof target === 'object' && target !== null) return target;
   const selector = target ?? '#chat';
@@ -136,6 +143,8 @@ export function createChat(options: ChatOptions): ChatInstance {
   let resumeUrl: string | undefined;
   let blocked = false;
   let disposed = false;
+  /** counts the sessions: a reply that started in an earlier one must not touch the current one */
+  let generation = 0;
   const userHistory: string[] = [];
 
   const layout = createLayout({
@@ -206,7 +215,7 @@ export function createChat(options: ChatOptions): ChatInstance {
   applyDisabled();
   target.appendChild(layout.root);
 
-  function streamHandlers() {
+  function streamHandlers(stale: () => boolean) {
     const open = new Map<string, BotMessage>();
     const texts: string[] = [];
     let first = true;
@@ -220,10 +229,12 @@ export function createChat(options: ChatOptions): ChatInstance {
       texts,
       handlers: {
         open(key: string) {
+          if (stale()) return;
           reveal();
           open.set(key, messages.addBot());
         },
         append(key: string, text: string) {
+          if (stale()) return;
           reveal();
           open.get(key)?.append(text);
         },
@@ -235,35 +246,40 @@ export function createChat(options: ChatOptions): ChatInstance {
           open.delete(key);
         },
         error(text: string) {
+          if (stale()) return;
           reveal();
           messages.addError(text);
         },
         wait(url: string) {
           // the next POST carries the page and auth headers: only the webhook's own origin may get it
-          if (hasWebhookOrigin(url, options.webhookUrl)) resumeUrl = url;
+          if (!stale() && hasWebhookOrigin(url, options.webhookUrl)) resumeUrl = url;
         },
       },
     };
   }
 
   /** Reads one reply and returns what `afterMessageSent` gets. Throws a ChatRequestError for a failure. */
-  async function consume(response: Response, htmlIsError: boolean): Promise<unknown> {
+  async function consume(response: Response, htmlIsError: boolean, session: number): Promise<unknown> {
+    const stale = () => session !== generation;
     const contentType = response.headers.get('content-type') ?? '';
     if (!response.ok) {
       throw new ChatRequestError(
         errorTextOf(response.status, await response.text().catch(() => ''), contentType),
       );
     }
+    // The reply Content-Type decides, not enableStreaming (the reference widget reads only that option),
+    // so a trigger and a widget that disagree still work.
     if (contentType.includes('ndjson')) {
-      const stream = streamHandlers();
+      const stream = streamHandlers(stale);
       try {
         await readStream(response, stream.handlers);
       } finally {
-        messages.setTyping(false);
+        if (!stale()) messages.setTyping(false);
       }
       return stream.texts.join('\n\n');
     }
     const raw = await response.text();
+    if (stale()) return undefined;
     const reply = parseReply(raw, contentType);
     messages.setTyping(false);
     if (reply.kind === 'html') {
@@ -279,6 +295,8 @@ export function createChat(options: ChatOptions): ChatInstance {
   }
 
   async function deliver(text: string, files: File[]): Promise<boolean> {
+    const session = generation;
+    const stale = () => session !== generation;
     const userMessage = messages.addUser(text, files);
     userHistory.push(text);
     messages.setTyping(true);
@@ -290,17 +308,22 @@ export function createChat(options: ChatOptions): ChatInstance {
       } catch {
         override = undefined;
       }
+      if (stale()) return false;
+      const resumeTarget = resumeUrl;
       const response = await api.send({
         sessionId,
         message: text,
         files: files.length > 0 ? files : undefined,
         metadata: options.metadata,
-        url: resumeUrl,
+        url: resumeTarget,
         override,
       });
-      // the stored resume URL is used once
-      if (response.ok) resumeUrl = undefined;
-      const result = await consume(response, true);
+      if (stale()) return false;
+      // the stored resume URL is used once. When the run no longer waits (409, 404, 403 ...) the URL is dead
+      // for good: dropping it lets the next message start a new run. A 408, 429 or 5xx may pass, so it stays.
+      if (response.ok || (resumeTarget && isDeadResume(response.status))) resumeUrl = undefined;
+      const result = await consume(response, true, session);
+      if (stale()) return false;
       try {
         options.afterMessageSent?.(text, result);
       } catch {
@@ -308,6 +331,7 @@ export function createChat(options: ChatOptions): ChatInstance {
       }
       return true;
     } catch (error) {
+      if (stale()) return false;
       // the text stays in the input so the person can send it again
       userMessage.remove();
       userHistory.pop();
@@ -318,10 +342,15 @@ export function createChat(options: ChatOptions): ChatInstance {
   }
 
   async function runButton(spec: ButtonSpec): Promise<void> {
+    const session = generation;
     messages.setTyping(true);
     try {
-      await consume(await api.get(spec.link), false);
+      const response = await api.get(spec.link);
+      // the click answers the wait the stored URL belongs to; a new wait comes as a frame in this reply
+      if (response.ok && session === generation) resumeUrl = undefined;
+      await consume(response, false, session);
     } catch (error) {
+      if (session !== generation) throw error;
       messages.setTyping(false);
       messages.addError(error instanceof ChatRequestError ? error.message : ERROR_MESSAGES.failed);
       throw error;
@@ -373,6 +402,7 @@ export function createChat(options: ChatOptions): ChatInstance {
       layout.root.remove();
     },
     newSession(id) {
+      generation += 1;
       sessionId = id?.trim() ? id : newSessionId();
       writeFragmentSession(sessionId);
       resumeUrl = undefined;

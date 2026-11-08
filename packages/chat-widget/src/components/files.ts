@@ -72,15 +72,27 @@ export function createFilePicker(options: {
   const spec = options.allowedMimeTypes?.trim();
   if (spec && spec !== '*') input.setAttribute('accept', spec);
   let selected: File[] = [];
+  /** preview URLs of the chips now on screen: a re-render and clear() revoke them */
+  let previews: string[] = [];
+  const previewBlobs: BlobTracker = {
+    ...options.blobs,
+    create(file) {
+      const url = options.blobs.create(file);
+      if (url) previews.push(url);
+      return url;
+    },
+  };
 
   function render(): void {
+    for (const url of previews) options.blobs.revoke(url);
+    previews = [];
     clear(row);
     row.hidden = selected.length === 0;
     for (const file of selected) {
       row.appendChild(
         fileChip(
           file,
-          options.blobs,
+          previewBlobs,
           () => {
             selected = selected.filter((f) => f !== file);
             render();

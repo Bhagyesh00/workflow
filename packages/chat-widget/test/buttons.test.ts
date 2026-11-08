@@ -243,6 +243,52 @@ describe('with-buttons messages', () => {
     expect(area.disabled).toBe(true);
   });
 
+  it('a click answers the wait: the next typed message goes to the webhook, not to the stored resume URL', async () => {
+    const RESUME = 'http://localhost:3000/webhook-waiting/exec-9?signature=s';
+    const meta = { nodeId: 'n', nodeName: 'n', runIndex: 0, itemIndex: 0, timestamp: 1 };
+    const approval = {
+      type: 'with-buttons',
+      text: 'Approve?',
+      buttons: [{ text: 'Approve', link: APPROVE }],
+    };
+    const posts: string[] = [];
+    const fetchFake = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'GET') return json({ output: 'Done' });
+      posts.push(String(url));
+      if (posts.length === 1) {
+        return ndjson([
+          { type: 'item', content: JSON.stringify(approval), metadata: meta },
+          { type: 'wait', resumeUrl: RESUME },
+        ]);
+      }
+      // what the server answers when the run is over
+      return String(url) === RESUME
+        ? json({ message: 'The execution is not waiting' }, 409)
+        : json({ output: 'new run' });
+    });
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    mounted.push(
+      createChat({
+        webhookUrl: WEBHOOK,
+        target,
+        mode: 'fullscreen',
+        loadPreviousSession: false,
+        sessionId: 's',
+        fetch: fetchFake as unknown as typeof fetch,
+      }),
+    );
+    const area = target.querySelector('textarea') as HTMLTextAreaElement;
+    await ask(area);
+    (target.querySelector('.chat-button') as HTMLButtonElement).click();
+    await flush();
+    await flush();
+    await flush();
+    await ask(area);
+    expect(posts).toEqual([WEBHOOK, WEBHOOK]);
+    expect(target.querySelector('.chat-message-error')).toBeNull();
+  });
+
   it('writes button text as text', async () => {
     const { target, area } = mount(
       { type: 'with-buttons', text: 't', buttons: [{ text: '<img src=x onerror=alert(1)>', link: APPROVE }] },
