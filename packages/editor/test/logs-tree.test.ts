@@ -123,6 +123,29 @@ describe('buildLogsTree', () => {
     expect(agent?.tokens).toEqual({ inputTokens: 3, outputTokens: 4 });
   });
 
+  it('puts each model run under the agent tool call it belongs to (two calls, one model run each)', () => {
+    const nested: Connections = {
+      ...connections,
+      ToolAgent: { ai_tool: [[{ node: 'Agent', type: 'ai_tool', index: 0 }]] },
+      InnerModel: { ai_languageModel: [[{ node: 'ToolAgent', type: 'ai_languageModel', index: 0 }]] },
+    };
+    // a sub-node run is stamped when it is logged: each model run comes before its tool call
+    const runData: RunData = {
+      Agent: [main(1000, 500)],
+      InnerModel: [
+        sub(1010, 'ai_languageModel', usage(3, 4), 'ToolAgent'),
+        sub(1030, 'ai_languageModel', usage(5, 6), 'ToolAgent'),
+      ],
+      ToolAgent: [sub(1020, 'ai_tool', { r: 1 }), sub(1040, 'ai_tool', { r: 2 })],
+    };
+    const [agent] = buildLogsTree(runData, nested);
+    const [first, second] = agent?.children ?? [];
+    expect(first?.children.map((c) => c.id)).toEqual(['InnerModel#0']);
+    expect(second?.children.map((c) => c.id)).toEqual(['InnerModel#1']);
+    expect(first?.tokens).toEqual({ inputTokens: 3, outputTokens: 4 });
+    expect(second?.tokens).toEqual({ inputTokens: 5, outputTokens: 6 });
+  });
+
   it('reads tokens only from numbers', () => {
     expect(
       ownTokens(sub(1, 'ai_languageModel', { tokenUsage: { inputTokens: 'x', outputTokens: -3 } })),

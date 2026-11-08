@@ -1,7 +1,8 @@
 /**
  * The run as a tree of node runs for the Logs tab (P5-60). Main runs come in start order; the runs
  * of sub-nodes (models, tools, memory, parsers) sit under the run of the node they feed, matched by
- * time: a sub-node run belongs to the latest run of its parent that started before it.
+ * time: a sub-node run belongs to the latest run of its parent that started before it (a sub-node
+ * parent is logged after its children, so there it is the earliest run that starts at or after it).
  * Tokens come from `data[type][0][0].json.tokenUsage` (what the chat model nodes log) and are summed
  * up the tree.
  */
@@ -107,9 +108,19 @@ export function buildLogsTree(runData: RunData, connections: Connections): LogNo
     const parentName = previous && link.parents.includes(previous) ? previous : link.parents[0];
     const candidates = (parentName ? nodes.get(parentName) : undefined) ?? [];
     let parent: LogNode | undefined;
-    for (const run of candidates) {
-      if (run === node) continue;
-      if (run.start <= node.start && (!parent || run.start >= parent.start)) parent = run;
+    if (links.has(parentName ?? '')) {
+      // a sub-node parent is logged after its children (stamped when its call ends): the earliest one
+      // that starts at or after this run is the call it belongs to
+      for (const run of candidates) {
+        if (run === node) continue;
+        if (run.start >= node.start && (!parent || run.start < parent.start)) parent = run;
+      }
+    }
+    if (!parent) {
+      for (const run of candidates) {
+        if (run === node) continue;
+        if (run.start <= node.start && (!parent || run.start >= parent.start)) parent = run;
+      }
     }
     parent ??= candidates.find((run) => run !== node);
     if (parent) parent.children.push(node);
