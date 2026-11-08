@@ -27,11 +27,12 @@ import {
   type WorkflowNode,
   type WorkflowNodeGroup,
 } from '@workflow/workflow';
+import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { Config } from '../config';
 import type { ServerContext } from '../context';
 import type { Database } from '../db/client';
-import type { TenantRow, WorkflowRow } from '../db/schema';
+import { type TenantRow, type WorkflowRow, workflows } from '../db/schema';
 import { ApiError } from '../http/errors';
 import { decodeCursor, encodeCursor, page } from '../http/pagination';
 import type {
@@ -48,6 +49,7 @@ import type { ActiveWorkflowManager, ValidationIssue } from './active-workflows'
 import type { ExecutionService } from './executions';
 import type { FavoriteService } from './favorites';
 import type { FormTokenService } from './form-tokens';
+import { isAvailableInMcp } from './mcp/workflow-gate';
 import type { PublishHistoryService } from './publish-history';
 import { TEST_WEBHOOK_TTL_MS, type TestWebhookStore } from './test-webhooks';
 import { closeBounded } from './trigger-retry';
@@ -57,6 +59,30 @@ import type { WorkflowReviewService } from './workflow-reviews';
 import { assertDeletable, assertFolderInTenant, assertNotArchived } from './workflow-rules';
 
 type CreateInput = z.output<typeof workflowCreateSchema>;
+type WorkflowSettings = NonNullable<z.output<typeof workflowUpdateSchema>['settings']>;
+
+/**
+ * `settings.availableInMCP` changes outside versioning (MCP toggle-access, as n8n), so a save keeps
+ * the stored flag unless the client changed it: its value differs from the one in the snapshot of
+ * the version the client read (`expected`). `keep` (a restore) always keeps the stored flag.
+ */
+async function withStoredMcpAccess(
+  repos: Repositories,
+  tenantId: string,
+  id: string,
+  settings: WorkflowSettings,
+  stored: Record<string, unknown>,
+  { expected, keep }: { expected?: string; keep: boolean },
+): Promise<WorkflowSettings> {
+  if (!keep) {
+    const read = expected ? await repos.versions.get(tenantId, id, expected) : undefined;
+    if (!read || isAvailableInMcp(settings) !== isAvailableInMcp(read.settings)) return settings;
+  }
+  const { availableInMCP: _sent, ...rest } = settings;
+  return typeof stored.availableInMCP === 'boolean'
+    ? { ...rest, availableInMCP: stored.availableInMCP }
+    : rest;
+}
 type UpdateInput = z.output<typeof workflowUpdateSchema>;
 type RunInput = z.output<typeof runSchema>;
 type WorkflowData = z.output<typeof workflowDataSchema>;
@@ -261,7 +287,7 @@ export class WorkflowService {
     input: Omit<UpdateInput, 'versionId'> & { versionId?: string },
     actor: Actor,
     message?: string,
-    options: { publishIfActive?: boolean } = {},
+    options: { publishIfActive?: boolean; keepMcpAccess?: boolean } = {},
   ): Promise<WorkflowDTO & { activationError?: { message: string; details?: unknown } }> {
     const { versionId: expected, tagIds, versionMessage, autosaved, ...patch } = input;
     const existing = await this.get(tenantId, id);
@@ -293,9 +319,22 @@ export class WorkflowService {
     let previous: WorkflowRow | undefined;
     const row = await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
-      previous = await repos.workflows.get(tenantId, id);
+      // locked, so a parallel MCP toggle-access waits and the stored flag read here is current
+      [previous] = await tx
+        .select()
+        .from(workflows)
+        .where(and(eq(workflows.tenantId, tenantId), eq(workflows.id, id)))
+        .for('update');
+      const settings =
+        patch.settings && previous
+          ? await withStoredMcpAccess(repos, tenantId, id, patch.settings, previous.settings, {
+              expected,
+              keep: options.keepMcpAccess === true,
+            })
+          : patch.settings;
       const updated = await repos.workflows.update(tenantId, id, expected, {
         ...patch,
+        settings,
         versionId: newVersionId,
       });
       if (!updated) throw ApiError.notFound('Workflow');
@@ -557,6 +596,8 @@ export class WorkflowService {
       },
       actor,
       `Restored version ${versionId}`,
+      // MCP access is not part of a version: a restore keeps the current flag
+      { keepMcpAccess: true },
     );
   }
 

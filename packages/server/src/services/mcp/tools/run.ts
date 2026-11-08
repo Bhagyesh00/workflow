@@ -203,6 +203,12 @@ async function definitionFor(
 
 const workflowId = z.uuid().describe('The id of the workflow');
 
+/** the run's mode, as n8n: manual in manual mode; else form and schedule give trigger, the rest webhook */
+function runMode(mode: 'manual' | 'production', kind: McpTriggerKind): 'manual' | 'trigger' | 'webhook' {
+  if (mode === 'manual') return 'manual';
+  return kind === 'schedule' || kind === 'form' ? 'trigger' : 'webhook';
+}
+
 const executeWorkflow: McpToolDefinition<{
   workflowId: string;
   executionMode: 'manual' | 'production';
@@ -216,7 +222,12 @@ const executeWorkflow: McpToolDefinition<{
   minRole: 'editor',
   input: z.object({
     workflowId,
-    executionMode: z.enum(['manual', 'production']).default('production'),
+    // required, no default (as n8n): a client must say whether it means a live run
+    executionMode: z
+      .enum(['manual', 'production'])
+      .describe(
+        'Use "manual" to test the current draft; use "production" only to run the published workflow on purpose',
+      ),
     triggerNodeName: z.string().min(1).max(256).optional(),
     inputs: inputsSchema.optional(),
   }),
@@ -230,8 +241,7 @@ const executeWorkflow: McpToolDefinition<{
         tenantId: caller.tenant.id,
         workflow: definition,
         workflowId: row.id,
-        mode:
-          input.executionMode === 'manual' ? 'manual' : trigger.kind === 'schedule' ? 'trigger' : 'webhook',
+        mode: runMode(input.executionMode, trigger.kind),
         startNode: trigger.node.name,
         triggerItems: items,
         userId: caller.user.id,
