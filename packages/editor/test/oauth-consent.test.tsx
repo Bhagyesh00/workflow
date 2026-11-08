@@ -8,8 +8,9 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setCurrentTenant } from '../src/api/client';
-import { consentNavigation, consentRedirectProblem } from '../src/pages/OAuthConsentPage';
+import { redirectUriProblem } from '../src/components/settings/McpRedirectUris';
 import { DEMO_CONSENT_FLOW, mcpDemoState } from '../src/demo/mock-mcp';
+import { consentNavigation, consentRedirectProblem } from '../src/pages/OAuthConsentPage';
 import { backend, signedIn } from './backend';
 import { renderApp } from './utils';
 
@@ -161,5 +162,17 @@ describe('consentRedirectProblem', () => {
     expect(consentRedirectProblem('http://client.example.com/cb', 'client.example.com')).not.toBeNull();
     expect(consentRedirectProblem('https://client.example.com/cb', 'other.example.com')).not.toBeNull();
     expect(consentRedirectProblem('', 'x')).not.toBeNull();
+  });
+
+  it('follows a reply longer than 2048 characters: the limit is for registered URIs only', () => {
+    // a registered URI plus code, a long percent-encoded state and iss
+    const state = encodeURIComponent(JSON.stringify({ returnTo: `/path/${'a/'.repeat(500)}` }));
+    const reply = `https://client.example.com/oauth/callback?code=${'c'.repeat(43)}&state=${state}&iss=x`;
+    expect(reply.length).toBeGreaterThan(2048);
+    expect(consentRedirectProblem(reply, 'client.example.com')).toBeNull();
+    expect(redirectUriProblem(reply)).toBe('A redirect URI may have at most 2048 characters');
+    expect(
+      consentRedirectProblem(`javascript:alert(1)//${'a'.repeat(3000)}`, 'client.example.com'),
+    ).not.toBeNull();
   });
 });

@@ -36,12 +36,11 @@ async function copyText(text: string, what: string) {
 function CopyBox({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-start gap-2">
-      <pre
-        aria-label={label}
-        className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-all rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-xs"
-      >
-        {value}
-      </pre>
+      <figure aria-label={label} className="m-0 min-w-0 flex-1">
+        <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-xs">
+          {value}
+        </pre>
+      </figure>
       <Button size="sm" icon={<Copy size={14} />} aria-label={`Copy ${label}`} onClick={() => void copyText(value, label)}>
         Copy
       </Button>

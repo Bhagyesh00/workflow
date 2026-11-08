@@ -7,14 +7,14 @@
  * it showed.
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { type ReactNode, useEffect, useState } from 'react';
+import { type ReactNode, useState } from 'react';
 import { Navigate, useSearchParams } from 'react-router';
 import { errorMessage, isApiError } from '../api/client';
 import { consentApi } from '../api/endpoints';
 import { useMe } from '../api/queries';
-import type { McpConsentResult } from '../api/types';
-import { BrandMark } from '../components/shell/BrandMark';
+import type { McpConsentDetails, McpConsentResult } from '../api/types';
 import { redirectUriProblem } from '../components/settings/McpRedirectUris';
+import { BrandMark } from '../components/shell/BrandMark';
 import { Button } from '../components/ui/Button';
 import { Checkbox } from '../components/ui/Field';
 import { Callout, PageLoader } from '../components/ui/misc';
@@ -40,9 +40,12 @@ export const consentNavigation = {
   },
 };
 
-/** why the page will not follow `url`, or null when it may: the registration rule, and the host shown to the user */
+/**
+ * why the page will not follow `url`, or null when it may: the registration rule without its length limit (the
+ * reply adds `code`, `state` and `iss` to the registered URI), and the host shown to the user
+ */
 export function consentRedirectProblem(url: string, expectedHost: string): string | null {
-  const problem = redirectUriProblem(url);
+  const problem = redirectUriProblem(url, { checkLength: false });
   if (problem) return problem;
   let host: string;
   try {
@@ -76,14 +79,11 @@ export function OAuthConsentPage() {
     retry: false,
     staleTime: Number.POSITIVE_INFINITY,
   });
-  const [picked, setPicked] = useState<string[] | null>(null);
+  // the user's picks belong to the details they were made on: new details start from all their scopes
+  const [picked, setPicked] = useState<{ of: McpConsentDetails; scopes: string[] } | null>(null);
   const [blocked, setBlocked] = useState<string | null>(null);
   const [leaving, setLeaving] = useState<string | null>(null);
-  const scopes = picked ?? details.data?.scopes ?? [];
-
-  useEffect(() => {
-    setPicked(null);
-  }, [details.data]);
+  const scopes = (picked && picked.of === details.data ? picked.scopes : details.data?.scopes) ?? [];
 
   const decide = useMutation({
     mutationFn: (approved: boolean) =>
@@ -151,7 +151,12 @@ export function OAuthConsentPage() {
   }
   const working = decide.isPending;
   const toggleScope = (scope: string, on: boolean) =>
-    setPicked(on ? info.scopes.filter((s) => s === scope || scopes.includes(s)) : scopes.filter((s) => s !== scope));
+    setPicked({
+      of: info,
+      scopes: on
+        ? info.scopes.filter((s) => s === scope || scopes.includes(s))
+        : scopes.filter((s) => s !== scope),
+    });
 
   return (
     <CenteredCard>

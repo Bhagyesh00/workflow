@@ -10,11 +10,15 @@ const LOOPBACK = /^(localhost|::1|127(\.\d{1,3}){3})$/;
 /**
  * Why a redirect URI is refused, or null: the rule of the server's client registration (no `javascript:`,
  * `data:`, `vbscript:`, `file:`, no fragment, no spaces, absolute, no user name, http only on loopback).
- * The consent page applies it to the address it is about to leave for.
+ * The consent page applies it to the address it is about to leave for, without the length rule
+ * (`checkLength: false`): that address adds `code`, `state` and `iss` to a URI of up to 2048 characters.
  */
-export function redirectUriProblem(uri: string): string | null {
+export function redirectUriProblem(
+  uri: string,
+  { checkLength = true }: { checkLength?: boolean } = {},
+): string | null {
   if (!uri) return 'A redirect URI must not be empty';
-  if (uri.length > 2048) return 'A redirect URI may have at most 2048 characters';
+  if (checkLength && uri.length > 2048) return 'A redirect URI may have at most 2048 characters';
   const lower = uri.trim().toLowerCase();
   if (REFUSED_SCHEMES.some((scheme) => lower.startsWith(scheme))) return 'This redirect URI scheme is not allowed';
   if (uri.includes('#')) return 'A redirect URI must not have a fragment';

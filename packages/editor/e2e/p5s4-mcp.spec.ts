@@ -46,11 +46,11 @@ test('an admin turns MCP on, connects with the key and shares a workflow', async
   await expect(row).toHaveAttribute('aria-checked', 'true');
 
   await page.getByRole('button', { name: /Connect/ }).click();
-  const url = (await page.getByLabel('Server URL').textContent()) ?? '';
+  const url = (await page.getByLabel('Server URL', { exact: true }).textContent()) ?? '';
   expect(url).toMatch(/\/mcp-server\/[^/]+\/http$/);
 
   await page.getByRole('tab', { name: 'Access token' }).click();
-  const key = (await page.getByLabel('MCP key').textContent()) ?? '';
+  const key = (await page.getByLabel('MCP key', { exact: true }).textContent()) ?? '';
   expect(key).toMatch(/^wfk_/);
 
   const unauthorized = await page.request.post(url, {
