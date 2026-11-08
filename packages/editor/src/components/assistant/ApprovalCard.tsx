@@ -111,7 +111,7 @@ export function ApprovalCard({ confirmation }: ApprovalCardProps) {
           {facts.map((fact) => (
             <div key={fact.key} className="contents">
               <dt className="text-ink-2">{fact.label}</dt>
-              <dd className="m-0 min-w-0 break-words text-ink">{fact.value}</dd>
+              <dd className="m-0 min-w-0 whitespace-pre-wrap break-words text-ink">{fact.value}</dd>
             </div>
           ))}
         </dl>
