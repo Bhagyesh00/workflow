@@ -8,9 +8,9 @@
  * every time). Every service call takes the run's tenant and actor.
  */
 import {
+  ASSISTANT_PREVIEW,
   type AssistantApprovalDetails,
   type AssistantArtifact,
-  ASSISTANT_PREVIEW,
   DATA_TABLE_COLUMN_TYPES,
   DATA_TABLE_ERRORS,
   type DataTableFilter,
@@ -18,13 +18,13 @@ import {
   type DataTableRowInput,
 } from '@workflow/workflow';
 import { z } from 'zod';
+import type { ServerContext } from '../../../context';
 import {
   dataTableColumnSchema,
   dataTableFilterSchema,
   dataTableNameSchema,
   dataTableRowSchema,
 } from '../../../routes/data-tables';
-import type { ServerContext } from '../../../context';
 import { approvalPreview } from '../approvals';
 import type { AssistantCaller, AssistantRunScope, AssistantToolDefinition } from '../types';
 
