@@ -63,6 +63,12 @@ function credentialSlot(
   return { slot, parameters };
 }
 
+/** whether a credential of `credentialType` fills a credential slot of the model node `nodeType` */
+export function credentialFitsModel(ctx: ServerContext, nodeType: string, credentialType: string): boolean {
+  const slots = ctx.registries.nodeTypes.get(nodeType)?.description.credentials ?? [];
+  return credentialSlot(ctx, slots, credentialType) !== undefined;
+}
+
 /**
  * The tenant's builder model. Refusals (L1): no setting `Set an AI model in Settings first`, no AI
  * package `The AI nodes are not installed`, no tool calling or a completion model

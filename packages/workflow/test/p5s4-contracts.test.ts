@@ -269,8 +269,18 @@ describe('workflow lint (moved from the editor)', () => {
     expect(filled).toEqual([]);
   });
 
-  it('lintForBuilder gives the lintWorkflow issues in C0', () => {
-    expect(lintForBuilder(graph, lookup)).toEqual(lintWorkflow(graph, lookup));
+  // was a C0 pin (equal to lintWorkflow); L1 added codes and the builder checks on top
+  it('lintForBuilder holds every lintWorkflow issue plus the builder checks', () => {
+    const base = lintWorkflow(graph, lookup);
+    expect(base.length).toBeGreaterThan(0);
+    const builder = lintForBuilder(graph, lookup);
+    expect(builder).toEqual(expect.arrayContaining(base.map((issue) => expect.objectContaining(issue))));
+    expect(builder.find((i) => i.message === '"Channel" is required')?.code).toBe(
+      'node-missing-required-parameter',
+    );
+    const empty = { nodes: [], connections: {} };
+    expect(lintWorkflow(empty, lookup).some((i) => i.code === 'workflow-has-no-nodes')).toBe(false);
+    expect(lintForBuilder(empty, lookup).map((i) => i.code)).toContain('workflow-has-no-nodes');
   });
 
   it('keeps the port and graph helpers', () => {

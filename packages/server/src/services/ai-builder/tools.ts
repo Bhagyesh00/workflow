@@ -25,7 +25,12 @@ import type { ServerContext } from '../../context';
 import type { TenantRow } from '../../db/schema';
 import { workflowWebhooks } from '../webhook-paths';
 import { executionContext, sanitizeForModel, wrapUntrusted } from './context';
-import type { BuilderConnectionInput, BuilderDraft, BuilderDraftNodeInput } from './draft';
+import {
+  type BuilderConnectionInput,
+  type BuilderDraft,
+  type BuilderDraftNodeInput,
+  MAX_CONNECTION_INDEX,
+} from './draft';
 
 /** what every builder tool gets; `ctx` and `tenant` are frozen, L1 may add fields */
 export interface BuilderToolDeps {
@@ -81,7 +86,7 @@ const OBJECT = (properties: Record<string, JsonSchema>, required: string[] = [])
   ...(required.length ? { required } : {}),
 });
 const STRING: JsonSchema = { type: 'string' };
-const INTEGER: JsonSchema = { type: 'integer', minimum: 0 };
+const INTEGER: JsonSchema = { type: 'integer', minimum: 0, maximum: MAX_CONNECTION_INDEX };
 const CONNECTION: JsonSchema = OBJECT(
   {
     from: {
@@ -221,13 +226,25 @@ function withoutCredentials(nodes: unknown): { nodes: BuilderDraftNodeInput[]; d
   return { nodes: clean, dropped };
 }
 
-function issueView(issue: DoctorIssue) {
+/** issue codes whose message quotes a parameter value: a fixed text when data values are off */
+const VALUE_MESSAGES: Record<string, (message: string) => string> = {
+  'node-invalid-options-value': (message) => {
+    const label = /^("[^"]*") has the value /.exec(message)?.[1];
+    return `${label ?? 'A parameter'} has a value that is not one of its options`;
+  },
+  'webhook-path-conflict': () => 'Another webhook node in this workflow listens on the same method and path',
+  'webhook-path-in-use': () => 'The webhook path is used by another active workflow',
+  'webhook-invalid': () => 'A webhook node has an invalid method or path',
+};
+
+function issueView(issue: DoctorIssue, sendValues: boolean) {
+  const hide = !sendValues && issue.code ? VALUE_MESSAGES[issue.code] : undefined;
   return {
     severity: issue.severity,
     ...(issue.code ? { code: issue.code } : {}),
     ...(issue.node ? { node: issue.node } : {}),
-    message: issue.message,
-    ...(issue.hint ? { hint: issue.hint } : {}),
+    message: redactSecrets(hide ? hide(issue.message) : issue.message),
+    ...(issue.hint ? { hint: redactSecrets(issue.hint) } : {}),
   };
 }
 
@@ -469,7 +486,7 @@ export function createBuilderTools(draft: BuilderDraft, deps: BuilderToolDeps): 
           ? 'The draft is valid.'
           : 'The draft has errors. Fix each one (see the hints), then validate again.';
         // messages name nodes and parameters of the user's workflow: data, never instructions
-        return `${head}\n${wrapUntrusted('validation', JSON.stringify(result.issues.map(issueView)))}`;
+        return `${head}\n${wrapUntrusted('validation', JSON.stringify(result.issues.map((issue) => issueView(issue, deps.sendValues !== false))))}`;
       },
     ),
   ];

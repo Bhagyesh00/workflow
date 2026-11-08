@@ -43,8 +43,16 @@ export class BuilderDraftError extends Error {
 }
 
 const MAX_NAME = 128;
+/** the highest output or input index a connection may use (a bound keeps one call from filling the heap) */
+export const MAX_CONNECTION_INDEX = 31;
 const GRID_X = 240;
 const CONNECTION_TYPES = new Set<string>(Object.values(ConnectionTypes));
+/** names that would reach Object.prototype through `connections[name]` */
+const RESERVED_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+
+function assertNameAllowed(name: string): void {
+  if (RESERVED_NAMES.has(name)) throw new BuilderDraftError(`"${name}" can't be used as a node name`);
+}
 
 function versionsOf(description: NodeTypeDescription): number[] {
   return Array.isArray(description.version) ? description.version : [description.version];
@@ -82,6 +90,7 @@ export class BuilderDraft {
   /** `wanted`, or `wanted 2`, `wanted 3`... when the name is taken */
   private uniqueName(wanted: string): string {
     const base = wanted.trim().slice(0, MAX_NAME) || 'Node';
+    assertNameAllowed(base);
     const taken = new Set(this.current.nodes.map((n) => n.name));
     if (!taken.has(base)) return base;
     for (let i = 2; ; i++) {
@@ -112,6 +121,7 @@ export class BuilderDraft {
       if (input.parameters !== undefined && !isPlainObject(input.parameters)) {
         throw new BuilderDraftError(`The parameters of "${input.name ?? input.type}" must be an object`);
       }
+      if (typeof input.name === 'string') assertNameAllowed(input.name.trim().slice(0, MAX_NAME));
       return { input, description: nodeType.description };
     });
     const added: WorkflowNode[] = [];
@@ -182,6 +192,7 @@ export class BuilderDraft {
     const wanted = String(newName ?? '').trim();
     if (!wanted) throw new BuilderDraftError('The new name must not be empty');
     if (wanted.length > MAX_NAME) throw new BuilderDraftError(`Names are at most ${MAX_NAME} characters`);
+    assertNameAllowed(wanted);
     if (wanted === name) return;
     if (this.current.nodes.some((n) => n.name === wanted)) {
       throw new BuilderDraftError(`A node named "${wanted}" already exists`);
@@ -196,18 +207,20 @@ export class BuilderDraft {
     if (!item || typeof item.from !== 'string' || typeof item.to !== 'string') {
       throw new BuilderDraftError('A connection needs "from" and "to" node names');
     }
+    // a stored workflow can still hold such a name; it never becomes a key of `connections`
+    assertNameAllowed(item.from);
+    assertNameAllowed(item.to);
     this.find(item.from);
     this.find(item.to);
     if (item.from === item.to) throw new BuilderDraftError('A node cannot connect to itself');
     const type = item.type ?? 'main';
     if (!CONNECTION_TYPES.has(type)) throw new BuilderDraftError(`Unknown connection type "${type}"`);
-    return {
-      from: item.from,
-      to: item.to,
-      type,
-      outputIndex: index(item.outputIndex),
-      inputIndex: index(item.inputIndex),
-    };
+    const outputIndex = index(item.outputIndex);
+    const inputIndex = index(item.inputIndex);
+    if (outputIndex > MAX_CONNECTION_INDEX || inputIndex > MAX_CONNECTION_INDEX) {
+      throw new BuilderDraftError(`Output and input indexes are at most ${MAX_CONNECTION_INDEX}`);
+    }
+    return { from: item.from, to: item.to, type, outputIndex, inputIndex };
   }
 
   /**
@@ -216,8 +229,11 @@ export class BuilderDraft {
    */
   connectNodes(items: BuilderConnectionInput[]): void {
     const checked = items.map((item) => this.checkConnection(item));
+    const connections = this.current.connections;
     for (const { from, to, type, outputIndex, inputIndex } of checked) {
-      const byType = (this.current.connections[from] ??= {});
+      // own keys only: `from` and `type` were checked, this keeps a lookup off the prototype chain too
+      if (!Object.hasOwn(connections, from) || !connections[from]) connections[from] = {};
+      const byType = connections[from];
       const outputs = (byType[type as ConnectionType] ??= []);
       while (outputs.length <= outputIndex) outputs.push([]);
       const dests = (outputs[outputIndex] ??= []);

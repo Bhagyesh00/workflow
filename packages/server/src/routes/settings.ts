@@ -19,7 +19,7 @@ import { decodeCursor, encodeCursor } from '../http/pagination';
 import { nodeSchema } from '../http/schemas';
 import { currentPeriod, effectiveLimits, PLANS, type TenantSettings } from '../plans';
 import { isUuid } from '../repositories/util';
-import { isBuilderModelNode } from '../services/ai-builder/model';
+import { CREDENTIAL_MISMATCH, credentialFitsModel, isBuilderModelNode } from '../services/ai-builder/model';
 import { hasRole } from '../services/auth';
 
 const settingsPatch = z.object({
@@ -157,6 +157,10 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
       if (!credential) throw ApiError.badRequest('The AI credential was not found in this workspace');
       if (!isBuilderModelNode(registries.nodeTypes, body.ai.nodeType)) {
         throw ApiError.badRequest(`"${body.ai.nodeType}" is not a chat model node type`);
+      }
+      // the same refusal the builder gives at its first turn, now when the setting is saved
+      if (!credentialFitsModel(ctx, body.ai.nodeType, credential.type)) {
+        throw ApiError.badRequest(CREDENTIAL_MISMATCH);
       }
     }
     const next: TenantSettings = {

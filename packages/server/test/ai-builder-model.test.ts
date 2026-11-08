@@ -159,6 +159,30 @@ describe('loadBuilderModel', () => {
     expect(http.requests).toEqual([]);
   });
 
+  it('PATCH /settings refuses a credential that does not fit the model node, with the same text', async () => {
+    const owner = await signup(server.app);
+    const credentialOf = async (type: string) =>
+      (
+        await owner.client.data<{ id: string }>(
+          owner.client.post('/rest/credentials', { name: `${type} cred`, type, data: { apiKey: 'k' } }),
+        )
+      ).id;
+    const anthropic = await credentialOf('anthropicApi');
+    const res = await owner.client.patch('/rest/settings', {
+      ai: { credentialId: anthropic, nodeType: 'ai.lmChatOpenAi', model: 'gpt-4o-mini' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toBe(CREDENTIAL_MISMATCH);
+    const settings = await owner.client.data(owner.client.get('/rest/settings'));
+    expect(settings.ai).toBeUndefined();
+    // a fitting credential is saved
+    const openAi = await credentialOf('openAiApi');
+    const ok = await owner.client.patch('/rest/settings', {
+      ai: { credentialId: openAi, nodeType: 'ai.lmChatOpenAi', model: 'gpt-4o-mini' },
+    });
+    expect(ok.statusCode).toBe(200);
+  });
+
   it('refuses when the AI nodes are not installed', async () => {
     const bare = await createTestServer({ AI_ENABLED: 'true' }, { reset: false, startMain: false });
     try {
