@@ -10,11 +10,15 @@
  * The recording model wraps the guarded model. Before each call, in this order: it saves a `tool-error`
  * result for any call of the last answer that has none (`runAgent` answers an unknown name and invalid
  * arguments itself, so `toAiTools` never sees them); it stops with `AssistantTurnStop` when this run
- * holds an open card; it compacts when the thread is over the limit, and after a compaction in this turn
+ * holds an open card or a gate of this turn wrote one (answered meanwhile or not: the settle resumes it);
+ * it compacts when the thread is over the limit, and after a compaction in this turn
  * it sends the stored view (system text with fresh notes, unsummarized messages, the turn's own user
  * message from the request) in place of `runAgent`'s fixed array. After each answer it rewrites a tool
  * call id the thread already holds, saves the assistant message and emits `text-block` and `tool-call`.
  * When the turn ends in any way, every call still without a result gets one. No message text is logged.
+ *
+ * The model's copy of the turn's text (never the stored message) ends with a manifest of the turn's files
+ * (`assistantTurnInput`): index, name, type and how to read each one.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
@@ -35,10 +39,11 @@ import type { ServerContext } from '../../context';
 import { ApiError } from '../../http/errors';
 import type { TenantSettings } from '../../plans';
 import type { AssistantMessageRow } from '../../repositories/assistant-threads';
+import { wrapUntrusted } from '../ai-builder/context';
 import { type BuilderModel, BuilderModelError, NO_AI_PACKAGE } from '../ai-builder/model';
 import type { AiRuntime } from '../ai-builder/runtime';
 import type { Actor } from '../workflows';
-import { attachmentImages } from './attachments';
+import { attachmentImages, isImageAttachment } from './attachments';
 import { compactIfNeeded, contentText } from './compaction';
 import { type AssistantEventLog, redactDeep } from './events';
 import { openMcpTools } from './mcp';
@@ -46,7 +51,7 @@ import { loadAssistantModel } from './model';
 import { guardModel } from './model-guard';
 import { assistantSystemPrompt } from './prompt';
 import { ASSISTANT_HEARTBEAT_MS, ASSISTANT_RUN_LOST } from './sweep';
-import { toAiTools } from './tool-adapter';
+import { type ToolGate, toAiTools } from './tool-adapter';
 import { assistantTools } from './tools';
 import {
   type AssistantRunScope,
@@ -284,6 +289,44 @@ export interface AssistantTurn {
   announce?: boolean;
 }
 
+/** the files a turn's manifest lists by name; more get one "and N more" line */
+export const ASSISTANT_MANIFEST_FILES = 10;
+/** what the model is asked when the person sent files without any text (our own text) */
+export const ASSISTANT_FILES_ONLY_TEXT =
+  'The person sent files without a message. Look at the first file (index 0) and give a short summary of it.';
+
+/** a file name or type as one clean line: control characters and newlines gone, cut to `max` */
+function manifestText(value: string, max: number): string {
+  return redactSecrets(String(value ?? '').replace(/[\p{Cc}\u2028\u2029]+/gu, ' '))
+    .trim()
+    .slice(0, max);
+}
+
+/**
+ * The text `runAgent` gets for a turn: the person's text (or `ASSISTANT_FILES_ONLY_TEXT` when they sent
+ * only files), then one line per file in send order (`index: name (type): how to read it`). The index is
+ * `parse_file`'s `attachmentIndex`, images included. Names and types are the person's or a third party's
+ * text, so they come cleaned, cut and inside `wrapUntrusted`.
+ */
+export function assistantTurnInput(
+  text: string,
+  files: ReadonlyArray<{ fileName: string; mimeType: string }>,
+): string {
+  if (files.length === 0) return text;
+  const lines = files.slice(0, ASSISTANT_MANIFEST_FILES).map((file, index) => {
+    const how = isImageAttachment(file)
+      ? 'an image, shown to you with this message'
+      : 'read it with parse_file';
+    return `${index}: ${manifestText(file.fileName, 200)} (${manifestText(file.mimeType, 100)}): ${how}`;
+  });
+  if (files.length > ASSISTANT_MANIFEST_FILES) {
+    lines.push(`... and ${files.length - ASSISTANT_MANIFEST_FILES} more`);
+  }
+  const head = text.trim() ? text : ASSISTANT_FILES_ONLY_TEXT;
+  const list = wrapUntrusted('attached-files', lines.join('\n'));
+  return `${head}\n\nAttached files (index: name (type): how to read it):\n${list}`;
+}
+
 /** the text a client sees for a failed turn: our own refusals as written, other errors redacted */
 export function turnErrorText(error: unknown): string {
   if (error instanceof BuilderModelError || error instanceof ApiError) return error.message;
@@ -410,7 +453,16 @@ export async function executeTurn(run: AssistantRun, turn: AssistantTurn): Promi
     const opened = await openMcpTools(ctx, scope);
     mcp = opened;
     const defs = [...assistantTools(scope.role, scope.settings, turn.extraTools), ...opened.tools];
-    const tools = toAiTools(ctx, defs, scope, ctx.assistantApprovals);
+    // a card written in this turn stops it at the next model call, even when it was answered meanwhile
+    let cardWritten = false;
+    const gate: ToolGate = {
+      gate: async (...args) => {
+        const decision = await ctx.assistantApprovals.gate(...args);
+        if (decision.decision === 'suspended') cardWritten = true;
+        return decision;
+      },
+    };
+    const tools = toAiTools(ctx, defs, scope, gate);
     const toolNames = tools.map((tool) => tool.name);
     const timezone = ((scope.tenant.settings ?? {}) as TenantSettings).timezone;
     const systemText = async () =>
@@ -476,7 +528,9 @@ export async function executeTurn(run: AssistantRun, turn: AssistantTurn): Promi
             });
           }
         }
-        // 2. a card of this run waits (or was approved and waits for the settle): the turn stops here
+        // 2. a card of this run waits, or was answered meanwhile (approved, denied, expired) and waits for
+        // the settle: the turn stops here, so the model never reads the placeholder as the answer
+        if (cardWritten) throw new AssistantTurnStop();
         const open = await ctx.repos.assistantConfirmations.listOpenForRun(tenantId, threadId, runId);
         if (open.length) throw new AssistantTurnStop();
         // 3. a long turn shrinks between calls
@@ -533,7 +587,7 @@ export async function executeTurn(run: AssistantRun, turn: AssistantTurn): Promi
       memory,
       sessionId: threadId,
       systemMessage: await systemText(),
-      input: turn.input,
+      input: assistantTurnInput(turn.input, turn.attachments),
       ...(images.length ? { attachments: images } : {}),
       maxIterations: ASSISTANT_MAX_ITERATIONS,
       toolErrorBehavior: 'feedback',
