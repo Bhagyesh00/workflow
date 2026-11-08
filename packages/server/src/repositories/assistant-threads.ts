@@ -6,7 +6,21 @@
  * column, so a bad id is simply not found.
  */
 import type { AssistantEvent, AssistantTask } from '@workflow/workflow';
-import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  getTableColumns,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  sql,
+} from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import {
   type AssistantStoredAttachment,
@@ -57,6 +71,16 @@ export interface OpenToolCall {
 
 const threads = assistantThreads;
 const messages = assistantMessages;
+
+/**
+ * A message row as read back: `content` as node-postgres parsed the jsonb, with no second `JSON.parse`
+ * (drizzle's jsonb reader parses any string again, so a message that is itself JSON text, `null` or
+ * `"approved"`, would come back changed). Writes keep the column's `JSON.stringify`.
+ */
+const messageRow = {
+  ...getTableColumns(messages),
+  content: sql<AssistantMessageRow['content']>`${messages.content}`,
+};
 const events = assistantEvents;
 const cards = assistantPendingConfirmations;
 
@@ -188,7 +212,7 @@ export class AssistantThreadRepository {
         name: message.name ?? null,
         attachments: message.attachments ?? null,
       })
-      .returning();
+      .returning(messageRow);
     return row;
   }
 
@@ -203,7 +227,7 @@ export class AssistantThreadRepository {
     if (!options.includeSummarized) conditions.push(eq(messages.summarized, false));
     if (options.afterSeq !== undefined) conditions.push(gt(messages.seq, options.afterSeq));
     const query = this.db
-      .select()
+      .select(messageRow)
       .from(messages)
       .where(and(...conditions))
       .orderBy(asc(messages.seq));
@@ -463,6 +487,31 @@ export class AssistantThreadRepository {
       .where(and(eq(events.tenantId, tenantId), eq(events.threadId, threadId), gt(events.id, afterId)))
       .orderBy(asc(events.id))
       .limit(limit);
+  }
+
+  /**
+   * The thread's stored `tasks-update` and `artifact` events with `id <= uptoId`, in id order (the
+   * messages page folds them per run).
+   */
+  async listFoldEvents(
+    tenantId: string,
+    threadId: string,
+    uptoId: number,
+  ): Promise<Array<{ runId: string | null; event: AssistantEvent }>> {
+    if (!isUuid(tenantId) || !isUuid(threadId) || uptoId <= 0) return [];
+    const rows = await this.db
+      .select({ runId: events.runId, payload: events.payload })
+      .from(events)
+      .where(
+        and(
+          eq(events.tenantId, tenantId),
+          eq(events.threadId, threadId),
+          inArray(events.type, ['tasks-update', 'artifact']),
+          lte(events.id, uptoId),
+        ),
+      )
+      .orderBy(asc(events.id));
+    return rows.map((row) => ({ runId: row.runId, event: row.payload }));
   }
 
   /** the thread's highest event id; 0 when it has none */

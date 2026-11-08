@@ -11,12 +11,14 @@
  * logged.
  */
 import {
+  type AssistantArtifact,
   type AssistantConfirmation,
   type AssistantEvent,
   type AssistantMessageDTO,
   type AssistantMessagesPage,
   type AssistantSendMessage,
   type AssistantStatusDTO,
+  type AssistantTask,
   type AssistantThreadDTO,
   redactSecrets,
 } from '@workflow/workflow';
@@ -68,6 +70,8 @@ export const ASSISTANT_RUN_ACTIVE = 'A run is already active for this thread';
 export const ASSISTANT_TOO_MANY_RUNS = 'Too many Assistant runs are active right now. Try again in a moment.';
 /** the reason stored on cards a cancel denies */
 export const ASSISTANT_CANCEL_REASON = 'The person stopped the run';
+/** the ids a stream remembers as sent, so a live event published twice or also replayed goes out once */
+export const ASSISTANT_SENT_IDS = 1000;
 /** how long a delete or a cancel waits for this process's run to end */
 const STOP_WAIT_MS = 10_000;
 
@@ -110,6 +114,68 @@ function messageDto(row: AssistantMessageRow): AssistantMessageDTO {
     summarized: row.summarized,
     createdAt: iso(row.createdAt),
   };
+}
+
+interface RunFold {
+  tasks?: AssistantTask[];
+  artifacts?: AssistantArtifact[];
+}
+
+function artifactKey(artifact: AssistantArtifact): string {
+  return artifact.type === 'draft' ? `draft:${artifact.draftId}` : `${artifact.type}:${artifact.id}`;
+}
+
+/** `into` with `from` on top: the later task list wins, artifacts once per id with the later name */
+function mergeFold(into: RunFold, from: RunFold): RunFold {
+  const artifacts = new Map((into.artifacts ?? []).map((a) => [artifactKey(a), a]));
+  for (const artifact of from.artifacts ?? []) {
+    artifacts.delete(artifactKey(artifact));
+    artifacts.set(artifactKey(artifact), artifact);
+  }
+  const tasks = from.tasks ?? into.tasks;
+  return {
+    ...(tasks ? { tasks } : {}),
+    ...(artifacts.size ? { artifacts: [...artifacts.values()] } : {}),
+  };
+}
+
+/**
+ * The task list and artifacts of each run, folded from its stored events (n8n folds its agent trees the
+ * same way), by the id of the run's last assistant message. A run with no assistant message (a settle that
+ * stopped at a new card) hands its fold to the next run that has one, else to the thread's last one.
+ */
+export function foldRuns(
+  rows: AssistantMessageRow[],
+  stored: Array<{ runId: string | null; event: AssistantEvent }>,
+): Map<string, RunFold> {
+  const byRun = new Map<string, RunFold>();
+  for (const { runId, event } of stored) {
+    if (!runId) continue;
+    const fold = byRun.get(runId) ?? {};
+    if (event.type === 'tasks-update') byRun.set(runId, mergeFold(fold, { tasks: event.payload.tasks }));
+    else if (event.type === 'artifact')
+      byRun.set(runId, mergeFold(fold, { artifacts: [event.payload.artifact] }));
+  }
+  const lastOfRun = new Map<string, string>();
+  let lastAssistant: string | undefined;
+  for (const row of rows) {
+    if (row.role !== 'assistant') continue;
+    lastAssistant = row.id;
+    if (row.runId) lastOfRun.set(row.runId, row.id);
+  }
+  const out = new Map<string, RunFold>();
+  let carry: RunFold = {};
+  for (const [runId, fold] of byRun) {
+    const messageId = lastOfRun.get(runId);
+    carry = mergeFold(carry, fold);
+    if (!messageId) continue;
+    out.set(messageId, mergeFold(out.get(messageId) ?? {}, carry));
+    carry = {};
+  }
+  if ((carry.tasks || carry.artifacts) && lastAssistant) {
+    out.set(lastAssistant, mergeFold(out.get(lastAssistant) ?? {}, carry));
+  }
+  return out;
 }
 
 /** a card row as the client's card, when no stored `confirmation-request` event has it */
@@ -211,8 +277,11 @@ export class AssistantService {
     // the cursor first: an event stored after it is streamed again rather than missed
     const lastEventId = await this.repo.lastEventId(thread.tenantId, thread.id);
     const rows = await this.repo.listMessages(thread.tenantId, thread.id, { includeSummarized: true });
+    const folded = foldRuns(rows, await this.repo.listFoldEvents(thread.tenantId, thread.id, lastEventId));
     return {
-      messages: rows.filter((row) => row.role !== 'system').map(messageDto),
+      messages: rows
+        .filter((row) => row.role !== 'system')
+        .map((row) => ({ ...messageDto(row), ...folded.get(row.id) })),
       nextEventId: lastEventId + 1,
     };
   }
@@ -306,8 +375,12 @@ export class AssistantService {
     const run = this.startRun(key);
     if (!thread.title.trim() && text.trim()) {
       const title = text.trim().slice(0, ASSISTANT_TITLE_CHARS);
-      await this.repo.setTitle(tenantId, thread.id, title);
-      run.emit({ type: 'thread-title-updated', runId, payload: { title } });
+      try {
+        await this.repo.setTitle(tenantId, thread.id, title);
+        run.emit({ type: 'thread-title-updated', runId, payload: { title } });
+      } catch {
+        // the title is cosmetic: the run started above must still be tracked, finished and released
+      }
     }
     this.track(
       run,
@@ -427,13 +500,19 @@ export class AssistantService {
     onEvent: (event: AssistantEvent) => void,
   ): Promise<() => void> {
     const thread = await this.own(auth, threadId);
-    let lastSent = Number.isFinite(afterId) && afterId > 0 ? Math.floor(afterId) : 0;
+    // the replay cursor only: two writers of one thread can publish id N+1 before N, so a live event is
+    // dropped only when this stream already sent that id (the last `ASSISTANT_SENT_IDS` are kept)
+    let cursor = Number.isFinite(afterId) && afterId > 0 ? Math.floor(afterId) : 0;
+    const sent = new Set<number>();
+    const sentOrder: number[] = [];
     let replaying = true;
     const buffer: AssistantEvent[] = [];
     const deliver = (event: AssistantEvent) => {
       if (typeof event.id === 'number') {
-        if (event.id <= lastSent) return;
-        lastSent = event.id;
+        if (sent.has(event.id)) return;
+        sent.add(event.id);
+        sentOrder.push(event.id);
+        if (sentOrder.length > ASSISTANT_SENT_IDS) sent.delete(sentOrder.shift() as number);
       }
       onEvent(event);
     };
@@ -444,8 +523,11 @@ export class AssistantService {
     });
     try {
       for (;;) {
-        const page = await this.events.replay(thread.tenantId, thread.id, lastSent, ASSISTANT_REPLAY_PAGE);
-        for (const event of page) deliver(event);
+        const page = await this.events.replay(thread.tenantId, thread.id, cursor, ASSISTANT_REPLAY_PAGE);
+        for (const event of page) {
+          cursor = Math.max(cursor, event.id ?? 0);
+          deliver(event);
+        }
         if (page.length < ASSISTANT_REPLAY_PAGE) break;
       }
     } catch (error) {
@@ -538,21 +620,19 @@ export class AssistantService {
   }
 
   /**
-   * Finishes the run; a turn that stopped for a card that was approved meanwhile (no pending one left)
-   * hands it to the settle, which the holder of the lock must cover.
+   * Finishes the run; a turn that stopped for a card answered meanwhile (no pending one left: approved,
+   * denied or expired) hands it to the settle, which the holder of the lock must cover, since the answer's
+   * own settle found the lock taken. A cancelled run never resumes.
    */
   private async end(run: AssistantRun, outcome: TurnOutcome): Promise<void> {
     await run.finish(outcome);
-    if (outcome.status !== 'suspended' || this.closed) return;
-    const { tenantId, userId, threadId, runId, actor } = run.key;
+    if (outcome.status !== 'suspended' || this.closed || run.signal.aborted) return;
+    const { tenantId, userId, threadId, actor } = run.key;
     const cards = this.deps.repos.assistantConfirmations;
     try {
       const pending = await cards.listPending(tenantId, userId, threadId);
       if (pending.length) return;
-      const open = await cards.listOpenForRun(tenantId, threadId, runId);
-      if (open.some((row) => row.status === 'approved')) {
-        void this.settleConfirmations(tenantId, userId, threadId, actor).catch(() => {});
-      }
+      void this.settleConfirmations(tenantId, userId, threadId, actor).catch(() => {});
     } catch {
       /* the next answer or the sweep settles it */
     }

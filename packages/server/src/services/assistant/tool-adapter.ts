@@ -7,7 +7,8 @@
  * is false is dropped, so a forged call to it gets `runAgent`'s unknown-tool answer.
  *
  * A failed call stores `Error: <text>` as its result (the same text `runAgent` gives the model) and
- * emits `tool-error`; a gated call stores the gate's placeholder until L3 replaces it.
+ * emits `tool-error`; a handler's own error text goes through `shapeToolError` (redact, cap, wrap) like a
+ * result, the adapter's refusals stay plain. A gated call stores the gate's placeholder until L3 replaces it.
  */
 import { randomUUID } from 'node:crypto';
 import {
@@ -24,6 +25,9 @@ import { hasRole } from '../auth';
 import type { AssistantApprovals } from './approvals';
 import { redactDeep } from './events';
 import type { AssistantRunScope, AssistantToolDefinition } from './types';
+
+/** the part of the approvals a call uses (the run wraps it to see a card it wrote) */
+export type ToolGate = Pick<AssistantApprovals, 'gate'>;
 
 /** what the model reads when the caller lost the role a tool needs during the turn */
 export const ASSISTANT_TOOL_NO_ACCESS = 'You no longer have access to this tool';
@@ -42,6 +46,14 @@ export function toolParameters(def: AssistantToolDefinition): JsonSchema {
 function errorText(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
   return redactSecrets(text || 'The tool failed');
+}
+
+/**
+ * What the model sees of a handler's error: its text shaped like a result (`shapeToolResult`), since a
+ * thrown message can carry outside text (an MCP server's error, a remote error body).
+ */
+export function shapeToolError(def: AssistantToolDefinition, error: unknown): string {
+  return shapeToolResult(def, errorText(error));
 }
 
 /** zod issues as one short line the model can act on */
@@ -81,7 +93,7 @@ async function invokeTool(
   ctx: ServerContext,
   def: AssistantToolDefinition,
   run: AssistantRunScope,
-  approvals: AssistantApprovals,
+  approvals: ToolGate,
   args: DataObject,
   toolCallId: string,
 ): Promise<string> {
@@ -118,7 +130,7 @@ async function invokeTool(
   } catch (error) {
     if (error instanceof ToolCallError) throw error;
     if (run.signal.aborted) throw error;
-    return fail(errorText(error));
+    return fail(shapeToolError(def, error));
   }
   if (run.signal.aborted) throw run.signal.reason ?? new Error('The run was stopped');
 
@@ -140,7 +152,7 @@ export function toAiTools(
   ctx: ServerContext,
   defs: AssistantToolDefinition[],
   run: AssistantRunScope,
-  approvals: AssistantApprovals,
+  approvals: ToolGate,
 ): AiTool[] {
   const seen = new Set<string>();
   const tools: AiTool[] = [];

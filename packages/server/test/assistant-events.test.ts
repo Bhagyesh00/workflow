@@ -6,9 +6,11 @@
  */
 import { type AssistantEvent, isDurableAssistantEvent } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AuthContext } from '../src/http/auth';
 import { AssistantEventLog, assistantChannel } from '../src/services/assistant/events';
 import { type AssistantHarness, createAssistantHarness, parseSseEvents } from './fakes/assistant-harness';
 import type { FakeLlmStep } from './fakes/fake-llm';
+import { waitFor } from './helpers';
 
 function queue(h: AssistantHarness, ...steps: FakeLlmStep[]) {
   // the fake reads by request count: fill the places of requests already made (provider retries)
@@ -175,6 +177,35 @@ describe('Assistant events', () => {
       expect(res.status).toBe(404);
     } finally {
       await h.setSettings({});
+    }
+  });
+
+  it('sends a live event published after a newer one (two writers), and each id once', async () => {
+    const threadId = await h.createThread(h.owner);
+    const auth = {
+      tenant: await h.ctx.repos.tenants.get(h.tenantId),
+      user: await h.ctx.repos.users.get(h.owner.userId),
+      role: 'owner',
+    } as AuthContext;
+    const seen: AssistantEvent[] = [];
+    const off = await h.ctx.assistant.subscribe(auth, threadId, 0, (event) => seen.push(event));
+    try {
+      const resolved = (id: number): AssistantEvent => ({
+        type: 'confirmation-resolved',
+        id,
+        runId: null,
+        payload: { requestId: `card-${id}`, toolCallId: `call-${id}`, outcome: 'approved' },
+      });
+      const channel = assistantChannel(h.tenantId, threadId);
+      // the run's id 41 reaches the bus before the confirm route's id 40, then 41 comes again
+      await h.ctx.bus.publish(channel, resolved(900_041));
+      await h.ctx.bus.publish(channel, resolved(900_040));
+      await h.ctx.bus.publish(channel, resolved(900_041));
+      await waitFor(async () => seen.length >= 2);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(seen.map((e) => e.id)).toEqual([900_041, 900_040]);
+    } finally {
+      off();
     }
   });
 });
