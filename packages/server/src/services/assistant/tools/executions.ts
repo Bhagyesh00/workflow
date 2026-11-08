@@ -10,7 +10,8 @@
  * items from `triggerPinData` (data, never evaluated), waits 5 minutes by default and 10 at most, stops
  * the run on timeout and reports a parked run as `waiting`. `run_node` maps n8n's three input modes onto
  * `workflows.run` (`destinationNode`, `runData`, `dirtyNodeNames`, `pinData`; a tool sub-node through
- * `agentRequest`) and says which nodes really ran in this run.
+ * `agentRequest`) and says which nodes really ran in this run. Its card names the earlier nodes that run
+ * for real; its grant names the mode (none for a chain run), so one mode's grant never covers another.
  */
 import {
   ASSISTANT_PREVIEW,
@@ -464,8 +465,10 @@ const runWorkflowTool: AssistantToolDefinition<RunWorkflowInput> = {
   // n8n: a run always waits for the person; no "always allow this session"
   grantKey: () => null,
   async approval(ctx, caller, input): Promise<ApprovalCopy> {
-    const { row, workflow } = await runnableWorkflow(ctx, caller, input.workflowId);
+    const { row, definition, workflow } = await runnableWorkflow(ctx, caller, input.workflowId);
     const trigger = startTrigger(workflow, input.triggerNodeName);
+    // data the trigger cannot take (Form fields inside `formFields`) is refused before any card
+    triggerPinData(definition, trigger.name, input.inputData);
     const rows = inputRows(input.inputData);
     return {
       title: 'Run workflow',
@@ -535,6 +538,79 @@ const MODE_NOTES: Record<RunNodeMode, string> = {
   tool: 'The tool ran with the given arguments; the agent it belongs to did not run.',
 };
 
+/**
+ * The thread grant a run_node card covers: the mode is in it, so a grant from a mocked or tool run never
+ * covers a run whose earlier nodes really run. A chain run gets none (as `run_workflow`: it runs the
+ * unpinned nodes before the target, and that set changes with the workflow); a reused run names its
+ * execution, since what replays and what runs again depends on it.
+ */
+export function runNodeGrantKey(input: RunNodeInput): string | null {
+  const mode = runNodeMode(input);
+  if (mode === 'chain') return null;
+  const scope = mode === 'reused-execution' ? `${mode}:${input.reuseExecutionId}` : mode;
+  return `run_node:${input.workflowId}:${scope}:${input.nodeName}`;
+}
+
+/** names on a card, as many as fit in 400 characters, then a count of the rest */
+function nameList(names: string[]): string {
+  const shown: string[] = [];
+  let length = 0;
+  for (const name of names) {
+    if (length + name.length > 400) break;
+    shown.push(name);
+    length += name.length + 2;
+  }
+  const rest = names.length - shown.length;
+  if (!rest) return shown.join(', ');
+  return shown.length ? `${shown.join(', ')} and ${rest} more` : `${rest} nodes`;
+}
+
+/** what a run_node card says about the nodes before the target, read from the saved workflow */
+async function runNodeFacts(
+  ctx: ServerContext,
+  caller: AssistantCaller,
+  input: RunNodeInput,
+  definition: WorkflowDefinition,
+  workflow: Workflow,
+): Promise<Array<{ label: string; value: string }>> {
+  const mode = runNodeMode(input);
+  if (mode === 'tool') {
+    return [
+      { label: 'Before the target', value: 'Nothing else runs: the agent the tool belongs to does not run' },
+    ];
+  }
+  if (mode === 'mocked') {
+    return [
+      { label: 'Before the target', value: 'The nodes before it do not run: they get placeholder data' },
+    ];
+  }
+  const pinned = new Set(Object.keys(definition.pinData ?? {}));
+  let earlier = workflow
+    .getParentNodes(input.nodeName, 'main')
+    .filter((name) => !pinned.has(name) && !workflow.nodes[name]?.disabled)
+    .reverse();
+  if (mode === 'reused-execution') {
+    const replayed = (await loadExecution(ctx, caller, input.reuseExecutionId as string)).runData;
+    earlier = earlier.filter((name) => !replayed[name]?.length);
+    if (!earlier.length) {
+      return [
+        {
+          label: 'Before the target',
+          value: 'The nodes before it replay their output from that execution and do not run',
+        },
+      ];
+    }
+  }
+  if (!earlier.length) return [{ label: 'Before the target', value: 'No other node runs' }];
+  return [
+    { label: 'Also runs for real', value: nameList(earlier) },
+    {
+      label: 'Note',
+      value: `The ${earlier.length === 1 ? 'node' : `${earlier.length} nodes`} before the target really run: what they send or change happens again`,
+    },
+  ];
+}
+
 /** polls the row until the run ends or parks, the timeout passes or the turn stops; stops it then */
 async function waitForRun(
   ctx: ServerContext,
@@ -594,12 +670,14 @@ const runNodeTool: AssistantToolDefinition<RunNodeInput> = {
   }),
   minRole: 'editor',
   permission: 'runWorkflow',
-  grantKey: (input) => `run_node:${input.workflowId}:${input.nodeName}`,
+  grantKey: runNodeGrantKey,
   async approval(ctx, caller, input): Promise<ApprovalCopy> {
-    const { row, workflow } = await runnableWorkflow(ctx, caller, input.workflowId);
+    const { row, definition, workflow } = await runnableWorkflow(ctx, caller, input.workflowId);
     if (!workflow.nodes[input.nodeName]) throw new Error(`Node '${input.nodeName}' is not in the workflow`);
     if (input.reuseExecutionId) await executionRow(ctx, caller, input.reuseExecutionId);
     const mode = runNodeMode(input);
+    const given =
+      mode === 'mocked' ? inputRows(input.mockInput) : mode === 'tool' ? [input.toolArguments ?? {}] : [];
     return {
       title: 'Run a node',
       resourceName: `${row.name}: ${input.nodeName}`,
@@ -610,8 +688,11 @@ const runNodeTool: AssistantToolDefinition<RunNodeInput> = {
           { label: 'Node', value: input.nodeName },
           { label: 'Input', value: mode },
           ...(input.reuseExecutionId ? [{ label: 'Replays execution', value: input.reuseExecutionId }] : []),
+          ...(await runNodeFacts(ctx, caller, input, definition, workflow)),
           { label: 'Stops after', value: minutes(input.timeout) },
         ],
+        // the invented input or the tool's arguments the target runs with
+        ...(given.length ? { preview: inputPreview(given) } : {}),
       },
     };
   },

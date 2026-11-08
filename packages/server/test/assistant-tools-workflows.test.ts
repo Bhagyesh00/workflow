@@ -7,8 +7,8 @@
  * archive, unarchive, unpublish, restore (never publishes) and version rename go through cards.
  */
 import type { AssistantConfirmation } from '@workflow/workflow';
-import type { Role } from '../src/db/schema';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { Role } from '../src/db/schema';
 import {
   type AssistantHarness,
   CANARY,
@@ -159,7 +159,8 @@ describe('Assistant workflow tools (P5-69)', () => {
   it("another tenant's workflow id is not found and its name never appears, for reads and writes", async () => {
     for (const name of ['get_workflow', 'list_workflow_versions', 'validate_workflow']) {
       const call = await callTool(h.owner, name, { workflowId: h.other.workflowId });
-      expect(call.result, name).toMatch(/^Error: .*not found/i);
+      // an untrusted tool's error comes back wrapped like its result (tool-adapter's shapeToolError)
+      expect(call.result, name).toMatch(/^Error: .*not found/is);
     }
     // a write: the card copy reads the row, so no card is made
     const write = await callTool(h.owner, 'archive_workflow', { workflowId: h.other.workflowId });
