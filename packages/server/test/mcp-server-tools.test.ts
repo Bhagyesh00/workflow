@@ -244,12 +244,27 @@ describe('tool table (drift)', () => {
     const listed = (await rpcCall(owner.url, viewer.key, 'tools/list')).result.tools.map(
       (t: { name: string }) => t.name,
     );
+    // the own read tools plus L9's support tools (node search and details, format reference, validate):
+    // read only, no write, no run, no secret
+    const builderReadTools = [
+      'get_node_types',
+      'get_workflow_best_practices',
+      'get_workflow_format_reference',
+      'search_nodes',
+      'validate_node_config',
+      'validate_workflow',
+    ];
     expect(listed.sort()).toEqual(
-      Object.entries(EXPECTED)
-        .filter(([, e]) => e.minRole === 'viewer')
-        .map(([name]) => name)
-        .sort(),
+      [
+        ...Object.entries(EXPECTED)
+          .filter(([, e]) => e.minRole === 'viewer')
+          .map(([name]) => name),
+        ...builderReadTools,
+      ].sort(),
     );
+    for (const tool of MCP_BUILDER_TOOLS.filter((t) => builderReadTools.includes(t.name))) {
+      expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+    }
     const viewerAtOwner = { url: owner.url, key: viewer.key };
     const run = await call(viewerAtOwner, 'execute_workflow', { workflowId: wf.id, executionMode: 'manual' });
     expect(run.rpcError?.code).toBe(-32602);
@@ -366,6 +381,10 @@ describe('tools', () => {
     expect(
       (await call(user, 'execute_workflow', { workflowId: manual.id, executionMode: 'production' })).text,
     ).toContain('has no published (active) version');
+    // executionMode is required (as n8n): no default to a live run
+    const noMode = await call(user, 'execute_workflow', { workflowId: manual.id });
+    expect(noMode.isError).toBe(true);
+    expect(noMode.text).toContain('executionMode');
     const started = await ok(user, 'execute_workflow', { workflowId: manual.id, executionMode: 'manual' });
     expect((await waitForExecution(server.ctx, user.tenant.id, started.executionId)).status).toBe('success');
     expect(
@@ -429,7 +448,36 @@ describe('tools', () => {
       triggerNodeName: 'Hook B',
       inputs: { type: 'webhook', webhookData: { body: { via: 'b' } } },
     });
-    expect((await waitForExecution(server.ctx, user.tenant.id, b.executionId)).status).toBe('success');
+    const bRun = await waitForExecution(server.ctx, user.tenant.id, b.executionId);
+    expect([bRun.status, bRun.mode]).toEqual(['success', 'webhook']);
+    // a form trigger runs in production with the mode n8n gives it: trigger
+    const form = await createWorkflow(user.client, {
+      name: 'Form',
+      nodes: [
+        node(
+          'Form',
+          'core.formTrigger',
+          {
+            formTitle: 'Sign up',
+            path: `f-${randomUUID().slice(0, 6)}`,
+            formFields: { values: [{ fieldLabel: 'Name', fieldType: 'text' }] },
+          },
+          [0, 0],
+          { webhookId: randomUUID() },
+        ),
+        setNode('Set', 'n', 1),
+      ],
+      connections: chain('Form', 'Set'),
+      settings: { availableInMCP: true },
+    });
+    await user.client.data(user.client.post(`/rest/workflows/${form.id}/activate`));
+    const formRun = await ok(user, 'execute_workflow', {
+      workflowId: form.id,
+      executionMode: 'production',
+      inputs: { type: 'form', formData: { Name: 'Ada' } },
+    });
+    const formRow = await waitForExecution(server.ctx, user.tenant.id, formRun.executionId);
+    expect([formRow.status, formRow.mode]).toEqual(['success', 'trigger']);
 
     const credential = await user.client.data(
       user.client.post('/rest/credentials', {

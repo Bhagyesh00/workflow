@@ -786,6 +786,19 @@ describe('update_workflow', () => {
     expect(stale.text).toContain(first.versionId);
     expect((await details(user, made.workflowId)).name).toBe('Second');
 
+    // an output or input index past 31 is refused by the input schema
+    for (const index of [{ outputIndex: 32 }, { inputIndex: 1000 }]) {
+      for (const type of ['connect', 'disconnect']) {
+        const tooFar = await call(user, 'update_workflow', {
+          workflowId: made.workflowId,
+          versionId: first.versionId,
+          operations: [{ type, from: 'Webhook', to: 'Set', ...index }],
+        });
+        expect(tooFar.isError, `${type} ${JSON.stringify(index)}`).toBe(true);
+      }
+    }
+    expect((await details(user, made.workflowId)).versionId).toBe(first.versionId);
+
     const other = await signup();
     const foreign = await call(other, 'update_workflow', {
       workflowId: made.workflowId,
