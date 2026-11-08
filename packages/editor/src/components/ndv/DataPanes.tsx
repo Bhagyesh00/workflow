@@ -7,13 +7,27 @@ import type {
   RunData,
   WorkflowNode,
 } from '@workflow/workflow';
-import { Braces, Copy, GitCompareArrows, Pencil, Pin, PinOff, Play, Table2, Workflow } from 'lucide-react';
+import {
+  Braces,
+  Copy,
+  GitCompareArrows,
+  Pencil,
+  Pin,
+  PinOff,
+  Play,
+  Sparkles,
+  Table2,
+  Workflow,
+} from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { useAiBuilderFeature, useMe } from '../../api/queries';
+import { openBuilderForError } from '../../features/builder/error-entry';
 import { compareItems } from '../../lib/data';
 import { getNodeOutput } from '../../lib/expression-context';
 import { formatDuration, plural } from '../../lib/format';
 import type { NodePorts } from '../../lib/ports';
 import { getAncestors, getMainParents, type WorkflowGraph } from '../../lib/workflow-ops';
+import { useWorkflowStore } from '../../stores/workflow-store';
 import { CodeEditor } from '../code/CodeEditor';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
@@ -164,6 +178,13 @@ export function InputPane({
 /** Structured, actionable errors (NF-15): code, hint, item, parameter and the failing HTTP call. */
 export function ErrorPanel({ error }: { error: ExecutionErrorShape }) {
   const [showStack, setShowStack] = useState(false);
+  const aiBuilder = useAiBuilderFeature();
+  const role = useMe().data?.role;
+  const readOnly = useWorkflowStore((s) => s.readOnly);
+  const fixTarget = error.node; // the engine and the demo run set it on every node error
+  // P5-65: editors and above, when the builder is on
+  const canFixWithAi =
+    aiBuilder.enabled && role !== undefined && role !== 'viewer' && !readOnly && !!fixTarget;
   const facts: Array<[string, string]> = [];
   if (error.itemIndex !== undefined) facts.push(['Item', String(error.itemIndex + 1)]);
   if (error.parameter) facts.push(['Parameter', error.parameter]);
@@ -180,6 +201,13 @@ export function ErrorPanel({ error }: { error: ExecutionErrorShape }) {
         <Callout tone="info" title="How to fix it">
           {error.hint}
         </Callout>
+      )}
+      {canFixWithAi && fixTarget && (
+        <div>
+          <Button size="sm" onClick={() => void openBuilderForError(fixTarget, error.message)}>
+            <Sparkles className="h-3.5 w-3.5" aria-hidden /> Fix with AI
+          </Button>
+        </div>
       )}
       {facts.length > 0 && (
         <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-1 rounded-lg border border-line bg-surface px-3 py-2 text-xs">
