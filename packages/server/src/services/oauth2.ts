@@ -6,12 +6,19 @@
  */
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto';
 import { type CredentialCipher, type HttpClient, resolveCredentialUrl } from '@workflow/core';
-import { assertCredentialUrlAllowed, type DataObject, getCredentialAllowedDomains } from '@workflow/workflow';
+import {
+  assertCredentialUrlAllowed,
+  CredentialDomainError,
+  type DataObject,
+  getCredentialAllowedDomains,
+} from '@workflow/workflow';
 import type { Config } from '../config';
+import type { CredentialRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
 import { hasRole } from './auth';
 import type { CredentialService } from './credentials';
+import { MCP_OAUTH2_TYPE, McpDiscoveryError, McpOAuthDiscovery, mcpClientMetadata } from './oauth2-discovery';
 import { credentialReadErrorText } from './secrets/resolver';
 
 const STATE_TTL_MS = 10 * 60_000;
@@ -46,6 +53,11 @@ export class OAuth2Service {
 
   get callbackUrl(): string {
     return `${this.config.baseUrl}/rest/oauth2/callback`;
+  }
+
+  /** P5-18: the public Client ID Metadata Document of this instance (no secret in it) */
+  clientMetadata(): Record<string, unknown> {
+    return mcpClientMetadata(this.config.baseUrl, this.callbackUrl);
   }
 
   private sign(payload: StatePayload): string {
@@ -120,8 +132,65 @@ export class OAuth2Service {
     return resolved;
   }
 
+  /**
+   * P5-18: an MCP OAuth2 credential with automatic registration finds its authorization server from its
+   * resource URL and becomes its client again on every Connect (RFC 9728, RFC 8414, then CIMD or RFC 7591,
+   * all in oauth2-discovery.ts on the guarded client). The found URLs and the client go into the stored
+   * credential through `saveData`; the returned data is the read this authorize URL is built from.
+   * Tokens already stored stay until the callback replaces them.
+   */
+  private async connectMcpClient(
+    tenantId: string,
+    row: CredentialRow,
+    data: DataObject,
+  ): Promise<DataObject> {
+    const resourceUrl = String(data.resourceUrl ?? '').trim();
+    if (!resourceUrl) {
+      throw ApiError.badRequest('The credential needs a resource URL: the endpoint of the MCP server');
+    }
+    try {
+      const discovery = new McpOAuthDiscovery(
+        this.http,
+        getCredentialAllowedDomains(data, { userUrl: false }),
+      );
+      const server = await discovery.discover(resourceUrl);
+      const scope = String(data.scope ?? '').trim() || server.scopesSupported.join(' ');
+      const client = await discovery.client(server, {
+        baseUrl: this.config.baseUrl,
+        callbackUrl: this.callbackUrl,
+        scope: scope || undefined,
+      });
+      const found: DataObject = {
+        authUrl: server.authorizationEndpoint,
+        accessTokenUrl: server.tokenEndpoint,
+        clientId: client.clientId,
+        authentication: client.authentication,
+      };
+      const stored = { ...this.credentials.decrypt(row), ...found };
+      if (client.clientSecret) stored.clientSecret = client.clientSecret;
+      else delete stored.clientSecret;
+      await this.credentials.saveData(tenantId, row.id, stored);
+      const next: DataObject = { ...data, ...found, scope };
+      if (client.clientSecret) next.clientSecret = client.clientSecret;
+      else delete next.clientSecret;
+      return next;
+    } catch (error) {
+      // these texts name a host or a rule, never a secret or a response body
+      if (error instanceof McpDiscoveryError || error instanceof CredentialDomainError) {
+        throw ApiError.badRequest(error.message);
+      }
+      throw ApiError.badRequest("Couldn't find the authorization server of the MCP server");
+    }
+  }
+
   async authorizeUrl(tenantId: string, userId: string, credentialId: string): Promise<string> {
-    const { row, data } = await this.loadOAuth2(tenantId, credentialId);
+    const loaded = await this.loadOAuth2(tenantId, credentialId);
+    const { row } = loaded;
+    let { data } = loaded;
+    const mcp = this.credentials.types.isA(row.type, MCP_OAUTH2_TYPE);
+    if (mcp && data.useDynamicClientRegistration !== false) {
+      data = await this.connectMcpClient(tenantId, row, data);
+    }
     if (!data.authUrl || !data.clientId) {
       throw ApiError.badRequest('The credential needs an authorization URL and a client ID');
     }
@@ -156,6 +225,9 @@ export class OAuth2Service {
     }
     for (const [k, v] of new URLSearchParams(String(data.authQueryParameters ?? '')))
       url.searchParams.set(k, v);
+    // RFC 8707: the MCP server the token is for, on the authorize call as on every token call
+    const resource = mcp ? String(data.resourceUrl ?? '').trim() : '';
+    if (resource) url.searchParams.set('resource', resource);
     url.searchParams.set('state', this.sign(payload));
     return url.toString();
   }
@@ -184,6 +256,10 @@ export class OAuth2Service {
       code,
       redirect_uri: this.callbackUrl,
     };
+    if (this.credentials.types.isA(row.type, MCP_OAUTH2_TYPE)) {
+      const resource = String(data.resourceUrl ?? '').trim();
+      if (resource) body.resource = resource;
+    }
     if (payload.v) {
       body.code_verifier = this.cipher.decrypt<string>(payload.v, {
         tenantId: payload.t,

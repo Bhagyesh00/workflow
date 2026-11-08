@@ -202,6 +202,15 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     }
   });
 
+  // P5-18: the Client ID Metadata Document an MCP authorization server fetches when our URL is the client
+  // id. Public by design (no session): it holds only this instance's name and callback URL.
+  app.get('/oauth2/mcp-client-metadata', async (_request, reply) =>
+    reply
+      .header('content-type', 'application/json; charset=utf-8')
+      .header('cache-control', 'public, max-age=300')
+      .send(ctx.oauth2.clientMetadata()),
+  );
+
   app.get('/oauth2/authorize', async (request) => {
     const auth = requireRole(request, 'editor');
     const { credentialId } = parse(z.object({ credentialId: z.uuid() }), request.query);

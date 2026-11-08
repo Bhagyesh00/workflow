@@ -10,7 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { credentialsApi, secretsApi } from '../../api/endpoints';
 import { queryKeys, useCredentialTypes, useSettings } from '../../api/queries';
-import type { CredentialTestResult } from '../../api/types';
+import type { CredentialTestResult, CredentialTypeDescription } from '../../api/types';
 import { setIn } from '../../lib/workflow-ops';
 import { toast } from '../../stores/ui-store';
 import type { CompletionData } from '../code/completions';
@@ -36,6 +36,23 @@ export interface CredentialModalProps {
 export const OAUTH2_CHANNEL = 'wf-oauth2';
 /** how long a sign-in may take before the modal stops listening for its result */
 const OAUTH2_WAIT_MS = 10 * 60_000;
+
+/** P5-18: the MCP OAuth2 type; with Register Client Automatically on, the server finds these values itself */
+const MCP_OAUTH2_TYPE = 'mcpOAuth2Api';
+const AUTO_REGISTERED_FIELDS = new Set(['authUrl', 'accessTokenUrl', 'clientId', 'clientSecret']);
+
+/** whether the type `name` is `target` or extends it (through any parent) */
+export function credentialTypeIsA(
+  get: (name: string) => CredentialTypeDescription | undefined,
+  name: string,
+  target: string,
+  seen = new Set<string>(),
+): boolean {
+  if (name === target) return true;
+  if (seen.has(name)) return false;
+  seen.add(name);
+  return (get(name)?.extends ?? []).some((parent) => credentialTypeIsA(get, parent, target, seen));
+}
 
 /** Interpret the message the OAuth2 callback page posts to its opener. */
 export function interpretOAuthMessage(data: unknown): { ok: boolean; message?: string } | null {
@@ -73,6 +90,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
   const typeDescription = credentialTypes.get(typeName);
   const isOAuth = Boolean(typeDescription?.isOAuth2 || typeDescription?.isOAuth1);
   const properties = useMemo(() => credentialTypes.properties(typeName), [credentialTypes, typeName]);
+  const isMcpOAuth2 = credentialTypeIsA(credentialTypes.get, typeName, MCP_OAUTH2_TYPE);
 
   const [name, setName] = useState('');
   const [data, setData] = useState<NodeParameters>({});
@@ -233,6 +251,14 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
     [node, data, savedId, hasConnections, hasExpression, secrets],
   );
 
+  // P5-18: with automatic registration (the default) the fixed client fields are found by the server on
+  // Connect, so the form does not ask for them; what is stored is still sent back unchanged
+  const autoRegistration = isMcpOAuth2 && data.useDynamicClientRegistration !== false;
+  const shownProperties = useMemo(
+    () => (autoRegistration ? properties.filter((p) => !AUTO_REGISTERED_FIELDS.has(p.name)) : properties),
+    [autoRegistration, properties],
+  );
+
   const loading = Boolean(credentialId) && existing.isLoading;
   const loadFailed = Boolean(credentialId) && existing.isError;
   return (
@@ -321,7 +347,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
             )}
           </FormField>
           <ParameterContext.Provider value={context}>
-            <ParameterList properties={properties} values={data} path={[]} />
+            <ParameterList properties={shownProperties} values={data} path={[]} />
           </ParameterContext.Provider>
           {isOAuth && !savedId && (
             <Callout tone="info">Save the credential first, then connect your account.</Callout>
