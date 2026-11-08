@@ -1527,6 +1527,118 @@ const chat: NodeTypeDescription = {
   ],
 };
 
+/** the webhook path of every MCP Server Trigger hook: the node's `path` parameter, served verbatim */
+const MCP_TRIGGER_PATH = '={{$parameter["path"]}}';
+
+/**
+ * P5-03: the MCP Server Trigger as nodes-ai serves it (McpTrigger.node.ts): a trigger with a Tools input
+ * and no output; its hooks are the `mcp` URL family (`/mcp/<slug>/<path>`, `/mcp-test/<slug>/<path>`).
+ */
+const mcpTrigger: NodeTypeDescription = {
+  name: 'ai.mcpTrigger',
+  displayName: 'MCP Server Trigger',
+  description: 'Expose workflow tools as an MCP Server endpoint',
+  icon: 'lucide:server',
+  group: ['trigger'],
+  version: 1,
+  defaults: { name: 'MCP Server Trigger' },
+  inputs: [{ type: 'ai_tool', displayName: 'Tools' }],
+  outputs: [],
+  categories: ['AI', 'Triggers'],
+  alias: ['mcp', 'model context protocol', 'mcp server', 'tools server'],
+  activationMessage:
+    'You can now connect your MCP Clients to the URL, using SSE or Streamable HTTP transports.',
+  credentials: [
+    { name: 'httpBearerAuth', required: true, displayOptions: { show: { authentication: ['bearerAuth'] } } },
+    { name: 'httpHeaderAuth', required: true, displayOptions: { show: { authentication: ['headerAuth'] } } },
+  ],
+  webhooks: (
+    [
+      ['setup', 'GET'],
+      ['default', 'POST'],
+      ['sessionEnd', 'DELETE'],
+    ] as const
+  ).map(([name, httpMethod]) => ({
+    name,
+    httpMethod,
+    path: MCP_TRIGGER_PATH,
+    responseMode: 'onReceived',
+    isFullPath: true,
+    nodeType: 'mcp' as const,
+  })),
+  properties: [
+    {
+      displayName: 'Authentication',
+      name: 'authentication',
+      type: 'options',
+      default: 'none',
+      description: 'How MCP clients prove who they are',
+      options: [
+        { name: 'None', value: 'none' },
+        {
+          name: 'Workspace sign-in',
+          value: 'n8nOAuth2',
+          description: 'MCP clients sign in with a workspace account (OAuth)',
+        },
+        { name: 'Bearer Auth', value: 'bearerAuth' },
+        { name: 'Header Auth', value: 'headerAuth' },
+      ],
+    },
+    {
+      displayName: 'Require Workflow Execute Permission',
+      name: 'requireExecuteAccess',
+      type: 'boolean',
+      default: true,
+      description: 'Whether the signed-in user must be allowed to run this workflow',
+      displayOptions: { show: { authentication: ['n8nOAuth2'] } },
+    },
+    {
+      displayName: 'Include User in Output',
+      name: 'includeUserInOutput',
+      type: 'boolean',
+      default: true,
+      description: 'Whether the output item carries the signed-in user (id, email, first and last name)',
+      displayOptions: { show: { authentication: ['n8nOAuth2'] } },
+    },
+    {
+      displayName: 'Path',
+      name: 'path',
+      type: 'string',
+      default: '',
+      required: true,
+      placeholder: 'my-tools',
+      description: 'The path of this MCP server, after /mcp/',
+    },
+    {
+      displayName: 'Instructions',
+      name: 'instructions',
+      type: 'string',
+      default: '',
+      typeOptions: { rows: 4 },
+      description: 'Sent to MCP clients when they connect: how and when to use these tools',
+    },
+  ],
+};
+
+/**
+ * P5-16: the MCP Client node (main in, main out) as nodes-ai serves it in C0 (McpClient.node.ts). Its
+ * properties come with lanes L12 and L13; it has no tool variant (`ai.mcpClientTool` is the sub-node).
+ */
+const mcpClient: NodeTypeDescription = {
+  name: 'ai.mcpClient',
+  displayName: 'MCP Client',
+  description: 'Call a tool of a Model Context Protocol server',
+  icon: 'lucide:plug',
+  group: ['transform'],
+  version: 1,
+  defaults: { name: 'MCP Client' },
+  inputs: ['main'],
+  outputs: ['main'],
+  categories: ['AI', 'Tools'],
+  alias: ['mcp', 'model context protocol', 'call tool'],
+  properties: [],
+};
+
 /** P5-02 demo dataset: the rows the Evaluation Trigger reads in the demo (a manual run gets the first) */
 export const demoEvaluationRows: Array<Record<string, string>> = [
   { question: 'Where is my order 1042?', expected: 'Order 1042 shipped on Monday and arrives on Thursday.' },
@@ -1767,6 +1879,8 @@ export const demoNodeTypes: NodeTypeDescription[] = [
   executionData,
   chatTrigger,
   chat,
+  mcpTrigger,
+  mcpClient,
   resourceMapperDemo,
   kitchenSink,
 ];
@@ -1890,6 +2004,90 @@ export const demoCredentialTypes: CredentialTypeDescription[] = [
     hasAuthenticate: false,
     isOAuth2: false,
     isOAuth1: true,
+  },
+  {
+    // P5-17: nodes-base http.credentials.ts; every row's value is a secret
+    name: 'httpMultipleHeadersAuth',
+    displayName: 'Multiple Headers Auth',
+    icon: 'lucide:key-round',
+    properties: [
+      {
+        displayName: 'Headers',
+        name: 'headers',
+        type: 'fixedCollection',
+        default: { values: [] },
+        placeholder: 'Add header',
+        typeOptions: { multipleValues: true },
+        options: [
+          {
+            displayName: 'Header',
+            name: 'values',
+            values: [
+              { displayName: 'Name', name: 'name', type: 'string', default: '', placeholder: 'X-API-Key' },
+              {
+                displayName: 'Value',
+                name: 'value',
+                type: 'string',
+                default: '',
+                typeOptions: { password: true },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    hasAuthenticate: true,
+    isOAuth2: false,
+    isOAuth1: false,
+  },
+  {
+    // P5-18: nodes-ai ai.credentials.ts, resolved as GET /credential-types sends it (parent fields first)
+    name: 'mcpOAuth2Api',
+    displayName: 'MCP OAuth2 API',
+    icon: 'lucide:key-square',
+    extends: ['oAuth2Api'],
+    properties: [
+      { displayName: 'Client ID', name: 'clientId', type: 'string', default: '' },
+      {
+        displayName: 'Client Secret',
+        name: 'clientSecret',
+        type: 'string',
+        default: '',
+        typeOptions: { password: true },
+      },
+      { displayName: 'Authorization URL', name: 'authUrl', type: 'string', default: '' },
+      { displayName: 'Scope', name: 'scope', type: 'string', default: '' },
+      {
+        displayName: 'Register Client Automatically',
+        name: 'useDynamicClientRegistration',
+        type: 'boolean',
+        default: true,
+        description:
+          'Whether to find the authorization server from the MCP server and register this app with it, instead of entering a client ID and URLs',
+      },
+      {
+        displayName: 'Resource URL',
+        name: 'resourceUrl',
+        type: 'string',
+        default: '',
+        placeholder: 'https://mcp.example.com/mcp',
+        description: 'The MCP server endpoint the token is for. Sent as the resource of every token request.',
+      },
+      { displayName: 'grantType', name: 'grantType', type: 'hidden', default: 'pkce' },
+      {
+        displayName: 'Authentication',
+        name: 'authentication',
+        type: 'options',
+        default: 'body',
+        options: [
+          { name: 'Send as Basic Auth Header', value: 'header' },
+          { name: 'Send Client Credentials in Body', value: 'body' },
+        ],
+      },
+    ],
+    hasAuthenticate: false,
+    isOAuth2: true,
+    isOAuth1: false,
   },
 ];
 

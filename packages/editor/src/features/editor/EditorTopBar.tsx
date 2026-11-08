@@ -16,12 +16,13 @@ import {
   MoreHorizontal,
   Rocket,
   Settings2,
+  Sparkles,
   Stethoscope,
   Trash2,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { useMe } from '../../api/queries';
+import { useAiBuilderFeature, useMe } from '../../api/queries';
 import type { PublishBody } from '../../api/types';
 import { Button, IconButton } from '../../components/ui/Button';
 import { cx } from '../../components/ui/cx';
@@ -30,6 +31,7 @@ import { Menu } from '../../components/ui/Menu';
 import { Badge, Kbd } from '../../components/ui/misc';
 import { TagsEditor } from '../../components/workflow/TagsEditor';
 import type { DoctorIssue } from '../../lib/doctor';
+import { useBuilderStore } from '../../stores/builder-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { AutosaveStatus } from './AutosaveStatus';
@@ -76,6 +78,7 @@ export function EditorTopBar({
   const tagsRequested = useUiStore((s) => s.tagsEditRequested);
   // archive / restore / delete follow the role, not the archived read-only state
   const canWrite = useMe().data?.role !== 'viewer';
+  const aiBuilder = useAiBuilderFeature();
   const [name, setDraftName] = useState(meta.name);
   const nameRef = useRef<HTMLInputElement>(null);
   useEffect(() => setDraftName(meta.name), [meta.name]);
@@ -147,6 +150,24 @@ export function EditorTopBar({
           >
             <FlaskConical size={15} />
             <span className="hidden lg:inline">Evaluations</span>
+          </button>
+        )}
+        {/* P5-09: the AI builder's panel; editors and above, when the builder is on */}
+        {aiBuilder.enabled && canWrite && !readOnly && (
+          <button
+            type="button"
+            onClick={() => useBuilderStore.getState().setOpen(sidePanel !== 'builder')}
+            aria-pressed={sidePanel === 'builder'}
+            aria-label="Build with AI"
+            className={cx(
+              'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-sm font-semibold',
+              sidePanel === 'builder'
+                ? 'bg-brand-soft text-brand'
+                : 'text-ink-2 hover:bg-surface-3 hover:text-ink',
+            )}
+          >
+            <Sparkles size={15} />
+            <span className="hidden lg:inline">Build with AI</span>
           </button>
         )}
       </div>

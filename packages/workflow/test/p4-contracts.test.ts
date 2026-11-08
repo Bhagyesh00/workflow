@@ -144,7 +144,7 @@ describe('$execution.resumeFormUrl', () => {
 
 describe('contract types (checked by tsc, this package includes test/)', () => {
   it('descriptions', () => {
-    expectTypeOf<WebhookDescription['nodeType']>().toEqualTypeOf<'form' | undefined>();
+    expectTypeOf<WebhookDescription['nodeType']>().toEqualTypeOf<'form' | 'mcp' | undefined>();
     expectTypeOf<NodeCredentialDescription['testedBy']>().toEqualTypeOf<string | undefined>();
     expectTypeOf<NonNullable<ResourceLocatorMode['typeOptions']>['allowNewResource']>().toEqualTypeOf<
       { label: string; url: string } | undefined

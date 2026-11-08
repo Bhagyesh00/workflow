@@ -13,6 +13,7 @@ import type { WebhookRequest } from '@workflow/workflow';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerContext } from '../context';
 import { errorBody } from '../http/errors';
+import { mcpCorsHeaders, mcpHostAllowed } from '../http/mcp-http';
 import { SESSION_COOKIE } from '../services/auth';
 import { normalizePath } from '../services/webhook-paths';
 import {
@@ -44,7 +45,8 @@ function parseJson(text: string): unknown {
   }
 }
 
-function parseForm(text: string): Record<string, unknown> {
+/** an `application/x-www-form-urlencoded` body (repeated keys become arrays); exported for the MCP OAuth routes */
+export function parseForm(text: string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of new URLSearchParams(text)) {
     if (BLOCKED_KEYS.has(k)) continue;
@@ -260,6 +262,19 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
   const handle = (mode: Mode, kind: WebhookKind) => async (request: FastifyRequest, reply: FastifyReply) => {
     const params = request.params as { tenantSlug: string; '*'?: string };
     const path = normalizePath(params['*'] ?? '');
+    if (kind === 'mcp') {
+      // P5-03: DNS rebinding guard, before anything else; MCP preflights answer for any origin, never with credentials
+      if (!mcpHostAllowed(request, ctx.config)) {
+        return send(reply, {
+          statusCode: 403,
+          headers: {},
+          body: errorBody('forbidden', 'The Host header does not match the MCP base URL'),
+        });
+      }
+      if (request.method === 'OPTIONS') {
+        return send(reply, { statusCode: 204, headers: mcpCorsHeaders(request.headers) });
+      }
+    }
     if (request.method === 'OPTIONS') {
       return send(
         reply,
@@ -274,11 +289,12 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
     );
   };
 
-  const waiting = (kind: WebhookKind) => async (request: FastifyRequest, reply: FastifyReply) => {
-    const { executionId } = request.params as { executionId: string };
-    const path = normalizePath((request.params as { '*'?: string })['*'] ?? '');
-    return respond(reply, () => ctx.webhooks.handleWaiting(executionId, incomingOf(request, path), kind));
-  };
+  const waiting =
+    (kind: Exclude<WebhookKind, 'mcp'>) => async (request: FastifyRequest, reply: FastifyReply) => {
+      const { executionId } = request.params as { executionId: string };
+      const path = normalizePath((request.params as { '*'?: string })['*'] ?? '');
+      return respond(reply, () => ctx.webhooks.handleWaiting(executionId, incomingOf(request, path), kind));
+    };
 
   app.all('/webhook/:tenantSlug/*', handle('production', 'webhook'));
   app.all('/webhook-test/:tenantSlug/*', handle('test', 'webhook'));
@@ -288,4 +304,7 @@ export async function webhookPlugin(app: FastifyInstance, opts: { ctx: ServerCon
   app.all('/form-test/:tenantSlug/*', handle('test', 'form'));
   app.all('/form-waiting/:executionId', waiting('form'));
   app.all('/form-waiting/:executionId/*', waiting('form'));
+  // P5-03: MCP Server Trigger endpoints (`ENDPOINT_MCP`, `ENDPOINT_MCP_TEST`; default /mcp and /mcp-test)
+  app.all(`/${ctx.config.mcp.endpoint}/:tenantSlug/*`, handle('production', 'mcp'));
+  app.all(`/${ctx.config.mcp.endpointTest}/:tenantSlug/*`, handle('test', 'mcp'));
 }

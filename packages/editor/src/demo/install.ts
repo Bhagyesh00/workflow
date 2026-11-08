@@ -3,12 +3,35 @@
  * so the product can be reviewed in any browser without running the server. Data lives in the
  * page and resets on reload.
  */
+import { type BuildStreamConnector, setBuildStreamConnector } from '../api/ai-stream';
 import { setChatFetch } from '../api/chat-transport';
 import { setTransport } from '../api/client';
 import { setPushConnector } from '../api/push';
 import { demoGroupedWorkflow } from './fixtures';
+import { demoBuildChunks } from './mock-ai';
 import { MockBackend } from './mock-backend';
 import { demoChatFetch } from './mock-chat';
+
+/** pause between two scripted builder chunks, so the demo panel shows progress as a stream would */
+const DEMO_BUILD_CHUNK_MS = 300;
+
+/** what an aborted fetch rejects with: the signal's reason (an AbortError unless the caller gave one) */
+function aborted(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The build was stopped', 'AbortError');
+}
+
+/**
+ * P5-09: the demo's builder turn. No model and no server: it plays mock-ai's scripted chunks for the request,
+ * one every DEMO_BUILD_CHUNK_MS, and rejects like an aborted fetch when `signal` aborts (Stop, Discard, reset).
+ */
+export const demoBuildStream: BuildStreamConnector = async (body, onChunk, signal) => {
+  for (const chunk of demoBuildChunks(body)) {
+    if (signal.aborted) throw aborted(signal);
+    await new Promise((resolve) => setTimeout(resolve, DEMO_BUILD_CHUNK_MS));
+    if (signal.aborted) throw aborted(signal);
+    onChunk(chunk);
+  }
+};
 
 export function seedDemo(backend: MockBackend): void {
   backend.createAccount({
@@ -253,6 +276,8 @@ export function installDemo(): MockBackend {
   setTransport((request) => backend.handle(request));
   // S3: the canvas chat panel posts to test chat URLs through this fetch (no server in the demo)
   setChatFetch(demoChatFetch(backend));
+  // S4: the AI builder's turns play scripted chunks (mock-ai) instead of POST /ai/build
+  setBuildStreamConnector(demoBuildStream);
   setPushConnector((onEvent, onStatus) => {
     onStatus('open');
     const unsubscribe = backend.subscribe(onEvent);

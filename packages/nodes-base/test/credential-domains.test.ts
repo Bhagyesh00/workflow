@@ -133,6 +133,7 @@ describe('credential fields', () => {
   it.each([
     'httpBasicAuth',
     'httpHeaderAuth',
+    'httpMultipleHeadersAuth',
     'httpQueryAuth',
     'httpBearerAuth',
     'httpCustomAuth',
@@ -315,6 +316,73 @@ describe('HTTP Request', () => {
       },
     );
     expect(r.status).toBe('error');
+    expect(first.seen).toHaveLength(0);
+  });
+});
+
+describe('Multiple Headers Auth (P5-17)', () => {
+  const headers = (rows: Array<{ name: string; value: string }>, extra: DataObject = {}): DataObject => ({
+    headers: { values: rows },
+    ...extra,
+  });
+  const send = (creds: DataObject) =>
+    runNode(
+      'core.httpRequest',
+      {
+        url: `${first.url}/data`,
+        authentication: 'predefinedCredentialType',
+        nodeCredentialType: 'httpMultipleHeadersAuth',
+      },
+      [{ json: {} }],
+      { services: services(), creds: { httpMultipleHeadersAuth: creds } },
+    );
+
+  it('sends every header, with a lower-cased name', async () => {
+    const r = await send(
+      headers([
+        { name: 'X-Api-Key', value: 'k-123' },
+        { name: 'Authorization', value: 'Bearer t-9' },
+      ]),
+    );
+    expect(r.status).toBe('success');
+    expect(r.outputs[0]).toEqual([{ host: 'first', auth: 'k-123', bearer: 'Bearer t-9' }]);
+  });
+
+  it('authenticate lower-cases names, skips empty names and replaces a header of any case', async () => {
+    const type = credentialTypes.getResolved('httpMultipleHeadersAuth')!;
+    expect(typeof type.authenticate).toBe('function');
+    const authenticate = type.authenticate as Exclude<
+      typeof type.authenticate,
+      { type: 'generic' } | undefined
+    >;
+    const next = await authenticate(
+      headers([
+        { name: ' X-One ', value: '1' },
+        { name: '', value: 'dropped' },
+        { name: 'Accept', value: 'text/plain' },
+      ]),
+      { url: 'https://api.example.com', headers: { ACCEPT: 'application/json', 'x-keep': 'k' } },
+    );
+    expect(next.headers).toEqual({ 'x-keep': 'k', 'x-one': '1', accept: 'text/plain' });
+    const none = { url: 'https://api.example.com' };
+    expect(await authenticate(headers([]), none)).toBe(none);
+    expect(await authenticate({}, none)).toBe(none);
+  });
+
+  it('the value field is a password, and the credential is held to its domains', async () => {
+    const collection = credentialTypes.getResolved('httpMultipleHeadersAuth')!.properties[0];
+    expect(collection?.name).toBe('headers');
+    expect(collection?.type).toBe('fixedCollection');
+    const value = collection?.options?.[0] as { values?: Array<{ name: string; typeOptions?: DataObject }> };
+    expect(value.values?.find((v) => v.name === 'value')?.typeOptions?.password).toBe(true);
+    const r = await send(
+      headers([{ name: 'X-Api-Key', value: 'k-123' }], {
+        allowedHttpRequestDomains: 'domains',
+        allowedDomains: 'example.com',
+      }),
+    );
+    expect(r.status).toBe('error');
+    expect(String(r.error?.message)).toContain('Domain not allowed');
     expect(first.seen).toHaveLength(0);
   });
 });

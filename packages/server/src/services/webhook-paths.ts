@@ -19,6 +19,7 @@ import {
   type Workflow,
   type WorkflowNode,
 } from '@workflow/workflow';
+import type { Config } from '../config';
 
 export interface NodeWebhook {
   nodeName: string;
@@ -44,9 +45,34 @@ export function evaluateDescriptionValue(value: string | undefined, parameters: 
   return current;
 }
 
-/** the URL family of a hook: `/form`, `/form-test` for a form hook, else `/webhook`, `/webhook-test` */
-export function webhookUrlBase(description: Pick<WebhookDescription, 'nodeType'>): 'webhook' | 'form' {
-  return description.nodeType === 'form' ? 'form' : 'webhook';
+/**
+ * The URL family of a hook: `/form`, `/form-test` for a form hook, `/mcp`, `/mcp-test` (the
+ * `config.mcp` endpoints) for an MCP Server Trigger hook, else `/webhook`, `/webhook-test`.
+ */
+export function webhookUrlBase(
+  description: Pick<WebhookDescription, 'nodeType'>,
+): 'webhook' | 'form' | 'mcp' {
+  if (description.nodeType === 'form') return 'form';
+  if (description.nodeType === 'mcp') return 'mcp';
+  return 'webhook';
+}
+
+/**
+ * The public URL of a hook. `/webhook` and `/form` hooks live on `config.baseUrl` with `-test` for
+ * test URLs; MCP hooks live on `config.mcp.baseUrl` under `config.mcp.endpoint` or `endpointTest`.
+ */
+export function hookUrl(
+  config: Pick<Config, 'baseUrl' | 'mcp'>,
+  description: Pick<WebhookDescription, 'nodeType'>,
+  test: boolean,
+  slug: string,
+  path: string,
+): string {
+  const family = webhookUrlBase(description);
+  if (family === 'mcp') {
+    return `${config.mcp.baseUrl}/${test ? config.mcp.endpointTest : config.mcp.endpoint}/${slug}/${path}`;
+  }
+  return `${config.baseUrl}/${family}${test ? '-test' : ''}/${slug}/${path}`;
 }
 
 export function normalizePath(path: string): string {

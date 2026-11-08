@@ -36,7 +36,15 @@ export function SettingsLayout() {
     { to: '/settings/api-keys', label: 'API keys' },
     { to: '/settings/variables', label: 'Variables' },
     { to: '/settings/security', label: 'Security' },
-    ...(canManage(me.data?.role) ? [{ to: '/settings/external-secrets', label: 'External secrets' }] : []),
+    ...(canManage(me.data?.role)
+      ? [
+          { to: '/settings/external-secrets', label: 'External secrets' },
+          // P5-09: the builder's model; admins only
+          { to: '/settings/ai', label: 'AI' },
+        ]
+      : []),
+    // P5-04: every role (the page shows each role what it may do; the MCP key is per user)
+    { to: '/settings/mcp', label: 'MCP' },
   ];
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-8 md:flex-row">

@@ -13,10 +13,12 @@ import {
   UserRepository,
 } from './accounts';
 import { AnnotationRepository } from './annotations';
+import { BuilderSessionRepository } from './builder-sessions';
 import { DataTableRepository } from './data-tables';
 import { ExecutionRepository } from './executions';
 import { FavoriteRepository } from './favorites';
 import { FolderRepository } from './folders';
+import { McpOAuthRepository } from './mcp-oauth';
 import { PublishHistoryRepository } from './publish-history';
 import {
   AuditRepository,
@@ -67,6 +69,10 @@ export interface Repositories {
   secrets: SecretConnectionRepository;
   /** P5-02 (L8) */
   testRuns: TestRunRepository;
+  /** P5-66 (L6) */
+  builderSessions: BuilderSessionRepository;
+  /** P5-14 (L10) */
+  mcpOAuth: McpOAuthRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -97,11 +103,27 @@ export function createRepositories(db: DbOrTx): Repositories {
     dataTables: new DataTableRepository(db),
     secrets: new SecretConnectionRepository(db),
     testRuns: new TestRunRepository(db),
+    builderSessions: new BuilderSessionRepository(db),
+    mcpOAuth: new McpOAuthRepository(db),
   };
 }
 
 export type { AnnotationFilter, AnnotationVote, ExecutionAnnotationDTO } from './annotations';
+export type { BuilderSessionPatch, BuilderSessionRow } from './builder-sessions';
 export type { FavoriteResourceType } from './favorites';
+export type {
+  OAuthAccessTokenInsert,
+  OAuthAccessTokenRow,
+  OAuthAuthorizationCodeInsert,
+  OAuthAuthorizationCodeRow,
+  OAuthClientInsert,
+  OAuthClientRow,
+  OAuthRefreshTokenInsert,
+  OAuthRefreshTokenRow,
+  OAuthSweepResult,
+  OAuthUserConsentInsert,
+  OAuthUserConsentRow,
+} from './mcp-oauth';
 export type { PublishEvent, PublishTimelineEntry } from './publish-history';
 export type { AuditEntry } from './resources';
 export type {

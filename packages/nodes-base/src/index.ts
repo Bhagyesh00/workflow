@@ -20,6 +20,7 @@ import {
   httpBearerAuth,
   httpCustomAuth,
   httpHeaderAuth,
+  httpMultipleHeadersAuth,
   httpQueryAuth,
   webhookSigningSecret,
 } from './credentials/http.credentials';
@@ -194,6 +195,7 @@ export const nodes: NodeType[] = [...coreNodes, ...appNodes];
 export const credentials: CredentialType[] = [
   httpBasicAuth,
   httpHeaderAuth,
+  httpMultipleHeadersAuth,
   httpQueryAuth,
   httpBearerAuth,
   httpCustomAuth,

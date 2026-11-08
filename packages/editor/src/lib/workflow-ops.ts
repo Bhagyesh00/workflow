@@ -6,7 +6,9 @@ import {
   type Connection,
   type Connections,
   type ConnectionType,
+  type GraphConnectionRef,
   type Item,
+  listConnections,
   type NodeConnections,
   renameNodeInDefinition,
   type StickyNote,
@@ -17,6 +19,13 @@ import {
 } from '@workflow/workflow';
 import { newId } from './ids';
 
+// moved to `@workflow/workflow` (workflow-lint.ts) in Phase 5 S4; the editor keeps its names
+export { getAncestors, getMainParents } from '@workflow/workflow';
+export { listConnections };
+
+/** one cable as a flat record (`GraphConnectionRef` of `@workflow/workflow`) */
+export type ConnectionRef = GraphConnectionRef;
+
 export interface WorkflowGraph {
   nodes: WorkflowNode[];
   connections: Connections;
@@ -24,15 +33,6 @@ export interface WorkflowGraph {
   stickyNotes: StickyNote[];
   /** canvas groups (P3-04); members are node ids */
   nodeGroups: WorkflowNodeGroup[];
-}
-
-export interface ConnectionRef {
-  source: string;
-  sourceType: ConnectionType;
-  sourceIndex: number;
-  target: string;
-  targetType: ConnectionType;
-  targetIndex: number;
 }
 
 export type ParameterPath = Array<string | number>;
@@ -317,28 +317,6 @@ export function connectionId(ref: ConnectionRef): string {
   );
 }
 
-/** Every connection as a flat list (the order is stable: source, type, output, destination). */
-export function listConnections(connections: Connections): ConnectionRef[] {
-  const result: ConnectionRef[] = [];
-  for (const [source, byType] of Object.entries(connections)) {
-    for (const [type, outputs] of Object.entries(byType) as [ConnectionType, Array<Connection[] | null>][]) {
-      (outputs ?? []).forEach((dests, sourceIndex) => {
-        for (const d of dests ?? []) {
-          result.push({
-            source,
-            sourceType: type,
-            sourceIndex,
-            target: d.node,
-            targetType: d.type,
-            targetIndex: d.index,
-          });
-        }
-      });
-    }
-  }
-  return result;
-}
-
 /**
  * Replace the cable `ref` with `source -> node -> target` (node uses main input/output 0). A node
  * put on a cable between two members of one group joins that group.
@@ -372,38 +350,6 @@ export function insertNodeOnConnection(
     targetIndex: ref.targetIndex,
   });
   return next;
-}
-
-/** Immediate main parents of `name`, ordered by input index. */
-export function getMainParents(
-  connections: Connections,
-  name: string,
-): Array<{ node: string; outputIndex: number; inputIndex: number }> {
-  return listConnections(connections)
-    .filter((c) => c.target === name && c.targetType === 'main')
-    .map((c) => ({ node: c.source, outputIndex: c.sourceIndex, inputIndex: c.targetIndex }))
-    .sort((a, b) => a.inputIndex - b.inputIndex);
-}
-
-/** All ancestors reachable through main connections, nearest first. */
-export function getAncestors(connections: Connections, name: string): string[] {
-  const all = listConnections(connections).filter((c) => c.targetType === 'main');
-  const result: string[] = [];
-  const seen = new Set([name]);
-  let frontier = [name];
-  while (frontier.length) {
-    const next: string[] = [];
-    for (const n of frontier) {
-      for (const c of all) {
-        if (c.target !== n || seen.has(c.source)) continue;
-        seen.add(c.source);
-        result.push(c.source);
-        next.push(c.source);
-      }
-    }
-    frontier = next;
-  }
-  return result;
 }
 
 // ---------------------------------------------------------------------------------------------

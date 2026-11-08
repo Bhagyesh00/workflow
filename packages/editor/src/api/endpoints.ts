@@ -21,6 +21,8 @@ import type {
 } from '@workflow/workflow';
 import { ApiError, api, buildUrl, getCurrentTenant, request } from './client';
 import type {
+  AiSessionDTO,
+  AiUsageSettingsBody,
   AnnotationPatchBody,
   AnnotationTag,
   AnnotationVote,
@@ -55,6 +57,19 @@ import type {
   ListenTestTriggerResult,
   ListenTestWebhookOptions,
   ListenTestWebhookResult,
+  McpApiKey,
+  McpConsentDecisionBody,
+  McpConsentDetails,
+  McpConsentResult,
+  McpInstanceStats,
+  McpOAuthClient,
+  McpRedirectUris,
+  McpSettings,
+  McpSettingsPatchBody,
+  McpToggleAccessBody,
+  McpToggleAccessResult,
+  McpWorkflowSummary,
+  McpWorkflowsQuery,
   Me,
   Member,
   MoveWorkflowsBody,
@@ -499,4 +514,54 @@ export const secretsApi = {
 export const formAuthApi = {
   /** P4-16: `returnTo` is the form to go back to; the session cookie names the user */
   issueCode: (returnTo: string) => api.post<FormAuthCode>('/form-auth/code', { returnTo }),
+};
+
+/**
+ * P5-09, P5-66: the AI builder's chat history (the turn itself streams through api/ai-stream.ts).
+ * Every call is for the signed-in user on one workflow; editor role or above.
+ */
+export const aiApi = {
+  sessions: (workflowId: string) => api.post<AiSessionDTO>('/ai/sessions', { workflowId }),
+  /** removes `messageId` and every later message */
+  truncate: (workflowId: string, messageId: string) =>
+    api.post<{ ok: true }>('/ai/build/truncate-messages', { workflowId, messageId }),
+  clear: (workflowId: string) => api.post<{ ok: true }>('/ai/build/clear-session', { workflowId }),
+  /** the version Accept saved; tags the last message with it */
+  acceptedVersion: (workflowId: string, versionId: string) =>
+    api.post<{ ok: true }>('/ai/build/accepted-version', { workflowId, versionId }),
+  /** admin */
+  usageSettings: (body: AiUsageSettingsBody) => api.post<AiUsageSettingsBody>('/ai/usage-settings', body),
+};
+
+/** P5-04, P5-14, P5-15: the workspace's MCP server settings, the caller's MCP key and the OAuth clients */
+export const mcpApi = {
+  settings: () => api.get<McpSettings>('/mcp/settings'),
+  /** admin */
+  patchSettings: (body: McpSettingsPatchBody) => api.patch<McpSettings>('/mcp/settings', body),
+  /** the caller's own key; the whole key only when just created */
+  apiKey: () => api.get<McpApiKey>('/mcp/api-key'),
+  rotateApiKey: () => api.post<McpApiKey>('/mcp/api-key/rotate'),
+  /** editor or above: the workflows the caller can edit */
+  workflows: (query: McpWorkflowsQuery = {}) =>
+    api.get<McpWorkflowSummary[]>('/mcp/workflows', { search: query.search, folderId: query.folderId }),
+  /** admin */
+  toggleAccess: (body: McpToggleAccessBody) =>
+    api.patch<McpToggleAccessResult>('/mcp/workflows/toggle-access', body),
+  /** admin */
+  redirectUris: () => api.get<McpRedirectUris>('/mcp/oauth/allowed-redirect-uris'),
+  /** admin */
+  patchRedirectUris: (allowedRedirectUris: string[]) =>
+    api.patch<McpRedirectUris>('/mcp/oauth/allowed-redirect-uris', { allowedRedirectUris }),
+  /** admin */
+  clients: () => api.get<McpOAuthClient[]>('/mcp/oauth-clients'),
+  /** admin: revokes the client's tokens too */
+  deleteClient: (clientId: string) => api.delete<{ ok: true }>(`/mcp/oauth-clients/${enc(clientId)}`),
+  /** admin */
+  stats: () => api.get<McpInstanceStats>('/mcp/instance-stats'),
+};
+
+/** P5-14: the OAuth consent page (`/oauth/consent?flow=...`); `flow` is the signed flow token */
+export const consentApi = {
+  details: (flow: string) => api.get<McpConsentDetails>('/consent/details', { flow }),
+  approve: (body: McpConsentDecisionBody) => api.post<McpConsentResult>('/consent/approve', body),
 };

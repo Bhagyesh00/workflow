@@ -29,6 +29,8 @@ export interface OAuth2Data extends DataObject {
   authentication?: 'header' | 'body';
   /** `'true'`: a token call only goes to an https URL. A credential type fixes it with a hidden field. */
   httpsOnlyTokenUrl?: string;
+  /** RFC 8707 resource indicator: sent as `resource` on every token call when set (MCP OAuth binds the token to it) */
+  resourceUrl?: string;
   oauthTokenData?: {
     access_token: string;
     refresh_token?: string;
@@ -142,11 +144,14 @@ export async function requestOAuth2Token(
     grant.type === 'refresh_token'
       ? { grant_type: 'refresh_token', refresh_token: grant.refreshToken }
       : { grant_type: 'client_credentials', ...(data.scope ? { scope: data.scope } : {}) };
+  const resource = data.resourceUrl ? resolveCredentialUrl(data.resourceUrl, data) : '';
+  if (resource) body.resource = resource;
   const headers: Record<string, string> = { accept: 'application/json' };
   let auth: HttpRequestOptions['auth'];
   if (data.authentication === 'body') {
     body.client_id = data.clientId ?? '';
-    body.client_secret = data.clientSecret ?? '';
+    // a public client (dynamic registration, PKCE) has no secret: an empty `client_secret=` fails its refresh
+    if (data.clientSecret) body.client_secret = data.clientSecret;
   } else {
     auth = { username: data.clientId ?? '', password: data.clientSecret ?? '' };
   }
@@ -176,7 +181,10 @@ export async function requestOAuth2Token(
 
 /**
  * Perform an OAuth2-authenticated request; refreshes the token when expired or on 401 and
- * reports the new token data through `onTokenRefresh` so it can be persisted.
+ * reports the new token data through `onTokenRefresh` so it can be persisted. A request with
+ * `returnFullResponse` and `ignoreHttpStatusErrors` (the MCP client) gets no thrown error on a 401:
+ * when its status is 401 and a refresh token exists, the token is refreshed and the request retried once;
+ * without a refresh token the 401 response is returned unchanged.
  */
 export async function oauth2Request<T>(
   http: HttpClient,
@@ -211,8 +219,9 @@ export async function oauth2Request<T>(
     ...request,
     headers: { ...(request.headers ?? {}), authorization: `Bearer ${tokenData!.access_token}` },
   });
+  let response: unknown;
   try {
-    return (await http.request<T>(withToken(), signal)) as T;
+    response = await http.request<T>(withToken(), signal);
   } catch (error) {
     if (error instanceof HttpError && error.statusCode === 401) {
       await refresh();
@@ -220,4 +229,15 @@ export async function oauth2Request<T>(
     }
     throw error;
   }
+  // outside the try: a failing token call during this refresh throws as it is, and is not retried
+  if (
+    request.returnFullResponse &&
+    request.ignoreHttpStatusErrors &&
+    (response as { statusCode?: unknown } | null)?.statusCode === 401 &&
+    tokenData?.refresh_token
+  ) {
+    await refresh();
+    return (await http.request<T>(withToken(), signal)) as T;
+  }
+  return response as T;
 }

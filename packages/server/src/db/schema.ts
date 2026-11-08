@@ -4,6 +4,7 @@
  * (`pnpm db:generate`) into `packages/server/migrations`.
  */
 import type {
+  BuilderMessage,
   DataObject,
   EvaluationMetrics,
   TestCaseErrorCode,
@@ -128,8 +129,16 @@ export const apiKeys = pgTable(
     scopes: text('scopes').array().notNull().default(sql`'{}'::text[]`),
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
     createdAt: createdAt(),
+    /**
+     * P5-04: who the key is for, `public-api` (the API keys page) or `mcp-server-api` (the MCP
+     * server); a key works only on its own audience
+     */
+    audience: text('audience').notNull().default('public-api'),
   },
-  (t) => [index('api_keys_tenant_idx').on(t.tenantId)],
+  (t) => [
+    index('api_keys_tenant_idx').on(t.tenantId),
+    index('api_keys_tenant_user_audience_idx').on(t.tenantId, t.userId, t.audience),
+  ],
 );
 
 /** workflow folders (P3-07); a folder may sit inside another folder of the same tenant */
@@ -801,6 +810,131 @@ export const testCaseExecutions = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index('test_case_executions_run_idx').on(t.testRunId, t.runIndex)],
+);
+
+/** P5-14: how an MCP OAuth client authenticates at the token endpoint (RFC 7591) */
+export type OAuthClientAuthMethod = 'none' | 'client_secret_post' | 'client_secret_basic';
+
+/**
+ * MCP OAuth clients registered per workspace (P5-14, RFC 7591). `id` is the public client id; only the
+ * SHA-256 of a client secret is stored.
+ */
+export const oauthClients = pgTable(
+  'oauth_clients',
+  {
+    id: text('id').primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    redirectUris: jsonb('redirect_uris').$type<string[]>().notNull(),
+    grantTypes: jsonb('grant_types').$type<string[]>().notNull(),
+    tokenEndpointAuthMethod: text('token_endpoint_auth_method').$type<OAuthClientAuthMethod>().notNull(),
+    clientSecretHash: text('client_secret_hash'),
+    clientSecretExpiresAt: timestamp('client_secret_expires_at', { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index('oauth_clients_tenant_idx').on(t.tenantId)],
+);
+
+/** P5-14: authorization codes, stored as SHA-256, single use (`used`), 10 minutes */
+export const oauthAuthorizationCodes = pgTable('oauth_authorization_codes', {
+  codeHash: text('code_hash').primaryKey(),
+  tenantId: uuid('tenant_id')
+    .notNull()
+    .references(() => tenants.id, { onDelete: 'cascade' }),
+  clientId: text('client_id')
+    .notNull()
+    .references(() => oauthClients.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  redirectUri: text('redirect_uri').notNull(),
+  codeChallenge: text('code_challenge').notNull(),
+  codeChallengeMethod: text('code_challenge_method').notNull(),
+  state: text('state'),
+  /** the MCP server or trigger URL the code is bound to (RFC 8707) */
+  resource: text('resource').notNull(),
+  scope: text('scope').array().notNull().default(sql`'{}'::text[]`),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  used: boolean('used').notNull().default(false),
+});
+
+/** columns shared by the access and the refresh token tables (P5-14); tokens stored as SHA-256 */
+const oauthTokenColumns = () => ({
+  tokenHash: text('token_hash').primaryKey(),
+  tenantId: uuid('tenant_id')
+    .notNull()
+    .references(() => tenants.id, { onDelete: 'cascade' }),
+  clientId: text('client_id')
+    .notNull()
+    .references(() => oauthClients.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  resource: text('resource').notNull(),
+  scope: text('scope').array().notNull().default(sql`'{}'::text[]`),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  createdAt: createdAt(),
+});
+
+export const oauthAccessTokens = pgTable('oauth_access_tokens', oauthTokenColumns(), (t) => [
+  index('oauth_access_tokens_tenant_user_idx').on(t.tenantId, t.userId),
+  index('oauth_access_tokens_expires_idx').on(t.expiresAt),
+]);
+
+export const oauthRefreshTokens = pgTable('oauth_refresh_tokens', oauthTokenColumns(), (t) => [
+  index('oauth_refresh_tokens_tenant_user_idx').on(t.tenantId, t.userId),
+  index('oauth_refresh_tokens_expires_idx').on(t.expiresAt),
+]);
+
+/** P5-14: the scopes a user granted a client, one row per user and client */
+export const oauthUserConsents = pgTable(
+  'oauth_user_consents',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    clientId: text('client_id')
+      .notNull()
+      .references(() => oauthClients.id, { onDelete: 'cascade' }),
+    scope: text('scope').array().notNull().default(sql`'{}'::text[]`),
+    grantedAt: timestamp('granted_at', { withTimezone: true }).notNull().default(nowMs),
+  },
+  (t) => [unique('oauth_user_consents_tenant_user_client_unique').on(t.tenantId, t.userId, t.clientId)],
+);
+
+/**
+ * The AI builder chat of one user on one workflow (P5-66). `previous_summary` holds the compacted
+ * history; `allowed_web_domains` the hosts the user approved for web fetch in this session (P5-64).
+ */
+export const workflowBuilderSessions = pgTable(
+  'workflow_builder_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    workflowId: uuid('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    messages: jsonb('messages').$type<BuilderMessage[]>().notNull().default([]),
+    previousSummary: text('previous_summary'),
+    activeVersionCardId: text('active_version_card_id'),
+    resumeAfterRestoreMessageId: text('resume_after_restore_message_id'),
+    allowedWebDomains: jsonb('allowed_web_domains').$type<string[]>().notNull().default([]),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique('workflow_builder_sessions_tenant_workflow_user_unique').on(t.tenantId, t.workflowId, t.userId),
+  ],
 );
 
 export type Role = 'owner' | 'admin' | 'editor' | 'viewer';

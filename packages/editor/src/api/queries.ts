@@ -15,7 +15,7 @@ import {
   variablesApi,
   workflowsApi,
 } from './endpoints';
-import type { CredentialTypeDescription, NodeTypeDescription, Settings } from './types';
+import type { AiBuilderFeature, CredentialTypeDescription, NodeTypeDescription, Settings } from './types';
 
 export const queryKeys = {
   me: ['me'] as const,
@@ -57,6 +57,17 @@ export const queryKeys = {
   testRun: (workflowId: string, id: string) => ['workflow', workflowId, 'test-runs', id] as const,
   testRunCases: (workflowId: string, id: string) =>
     ['workflow', workflowId, 'test-runs', id, 'cases'] as const,
+  /** P5-66: this user's builder chat on one workflow */
+  aiSession: (workflowId: string) => ['workflow', workflowId, 'ai-session'] as const,
+  /** P5-04, P5-14, P5-15: invalidating `mcp` refreshes every MCP query (prefix match) */
+  mcp: ['mcp'] as const,
+  mcpSettings: ['mcp', 'settings'] as const,
+  mcpApiKey: ['mcp', 'api-key'] as const,
+  mcpWorkflows: (query: object = {}) => ['mcp', 'workflows', query] as const,
+  mcpRedirectUris: ['mcp', 'redirect-uris'] as const,
+  mcpClients: ['mcp', 'oauth-clients'] as const,
+  mcpStats: ['mcp', 'instance-stats'] as const,
+  consentDetails: (flow: string) => ['oauth-consent', flow] as const,
 };
 
 export function createQueryClient(): QueryClient {
@@ -108,6 +119,21 @@ export function useSettings(): Settings {
     staleTime: 5 * 60_000,
   });
   return data ?? DEFAULT_SETTINGS;
+}
+
+const AI_BUILDER_OFF: AiBuilderFeature = { enabled: false, setup: false };
+
+/** `settings.features.aiBuilder`, typed (`Settings.features` is a free record); off until it loads */
+export function aiBuilderFeatureOf(settings: Pick<Settings, 'features'>): AiBuilderFeature {
+  const value = settings.features.aiBuilder;
+  if (!value || typeof value !== 'object') return AI_BUILDER_OFF;
+  const { enabled, setup } = value as Partial<AiBuilderFeature>;
+  return { enabled: enabled === true, setup: setup === true };
+}
+
+/** P5-09: whether the AI builder is on (AI_ENABLED) and has a model set for the workspace */
+export function useAiBuilderFeature(): AiBuilderFeature {
+  return aiBuilderFeatureOf(useSettings());
 }
 
 export interface NodeTypeIndex {

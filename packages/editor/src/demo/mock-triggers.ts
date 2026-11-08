@@ -7,6 +7,41 @@ import { HttpError } from './mock-http';
 
 const LISTEN_MS = 120_000;
 
+/** P5-03: the MCP Server Trigger's node type */
+export const DEMO_MCP_TRIGGER_TYPE = 'ai.mcpTrigger';
+
+/** the URL family of a hook, as the server's `webhookUrlBase` (services/webhook-paths.ts) */
+export type DemoHookFamily = 'webhook' | 'form' | 'mcp';
+
+/** The URL family of a trigger's hooks: `/form` for a Form Trigger, `/mcp` for an MCP Server Trigger, else `/webhook`. */
+export function demoHookFamily(nodeType: string): DemoHookFamily {
+  if (nodeType === 'core.formTrigger') return 'form';
+  if (nodeType === DEMO_MCP_TRIGGER_TYPE) return 'mcp';
+  return 'webhook';
+}
+
+/**
+ * A hook's public URL in the demo, as the server's `hookUrl`: `<origin>/<family>[-test]/<slug>/<path>`. MCP hooks
+ * use the server's default `ENDPOINT_MCP` (`mcp`) and `ENDPOINT_MCP_TEST` (`mcp-test`) on the same origin
+ * (MCP_BASE_URL unset).
+ */
+export function demoHookUrl(
+  origin: string,
+  family: DemoHookFamily,
+  test: boolean,
+  slug: string,
+  path: string,
+): string {
+  return `${origin}/${family}${test ? '-test' : ''}/${slug}/${path}`;
+}
+
+/** The HTTP method the demo lists for a trigger's URL: a form's page (GET), MCP's Streamable HTTP POST, else the node's. */
+export function demoHookMethod(family: DemoHookFamily, httpMethod: unknown): string {
+  if (family === 'form') return 'GET';
+  if (family === 'mcp') return 'POST';
+  return String(httpMethod ?? 'POST');
+}
+
 type Listening = Map<string, { nodeName: string; expiresAt: number }>;
 
 function listeningOf(backend: MockBackend): Listening {

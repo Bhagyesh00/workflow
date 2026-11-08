@@ -383,7 +383,14 @@ export const testNodes: NodeType[] = [
   vectorStoreMemoryNode,
 ];
 export const nodeTypes = new NodeTypes([...nodes, ...testNodes]);
-export const credentialTypes = new CredentialTypes(credentials);
+/**
+ * nodes-ai's credentials plus nodes-base `oAuth2Api`, the parent of `mcpOAuth2Api`: `getResolved` drops a
+ * missing parent without an error, so without it `mcpOAuth2Api` would lose its OAuth2 fields and `isA`
+ */
+export const credentialTypes = new CredentialTypes([
+  ...credentials,
+  ...baseCredentials.filter((c) => c.name === 'oAuth2Api'),
+]);
 /** nodes-ai, nodes-base and the test nodes with their tool variants, as a server registers them */
 export const toolNodeTypes = new NodeTypes(withToolVariants([...nodes, ...baseNodes, ...testNodes]));
 export const toolCredentialTypes = new CredentialTypes([...credentials, ...baseCredentials]);

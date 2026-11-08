@@ -56,6 +56,16 @@ const EvaluationsPage = lazy(() =>
 const EvaluationRunPage = lazy(() =>
   import('./pages/EvaluationRunPage').then((m) => ({ default: m.EvaluationRunPage })),
 );
+// P5-09, P5-14, P5-15
+const AiSettingsPage = lazy(() =>
+  import('./pages/AiSettingsPage').then((m) => ({ default: m.AiSettingsPage })),
+);
+const McpSettingsPage = lazy(() =>
+  import('./pages/McpSettingsPage').then((m) => ({ default: m.McpSettingsPage })),
+);
+const OAuthConsentPage = lazy(() =>
+  import('./pages/OAuthConsentPage').then((m) => ({ default: m.OAuthConsentPage })),
+);
 
 function Lazy({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<PageLoader />}>{children}</Suspense>;
@@ -69,6 +79,16 @@ export const routes: RouteObject[] = [
   { path: '/invitations/:token', element: <AcceptInvitationPage />, errorElement: <RouteErrorPage /> },
   // P4-16: signed-out visitors of a protected form land here; outside the server's /form/ prefix
   { path: '/form-auth', element: <FormSignInPage />, errorElement: <RouteErrorPage /> },
+  // P5-14: an MCP client's OAuth consent; outside the app shell, the page sends a signed-out visitor to /signin
+  {
+    path: '/oauth/consent',
+    element: (
+      <Lazy>
+        <OAuthConsentPage />
+      </Lazy>
+    ),
+    errorElement: <RouteErrorPage />,
+  },
   {
     path: '/',
     element: <AppShell />,
@@ -146,6 +166,22 @@ export const routes: RouteObject[] = [
           { path: 'variables', element: <VariablesSettingsPage /> },
           { path: 'security', element: <SecuritySettingsPage /> },
           { path: 'external-secrets', element: <SecretsSettingsPage /> },
+          {
+            path: 'ai',
+            element: (
+              <Lazy>
+                <AiSettingsPage />
+              </Lazy>
+            ),
+          },
+          {
+            path: 'mcp',
+            element: (
+              <Lazy>
+                <McpSettingsPage />
+              </Lazy>
+            ),
+          },
         ],
       },
       { path: '*', element: <NotFoundPage /> },

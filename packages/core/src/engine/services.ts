@@ -18,6 +18,7 @@ import type {
   InstanceLimits,
   Item,
   Logger,
+  McpAuthHelper,
   NodeCredentialRef,
   NodeType,
   RunCodeOptions,
@@ -152,6 +153,8 @@ export interface ExecutionServices {
   dataTables?: DataTableAccess;
   /** user auth for forms (`getFormAuth()` on the webhook context) */
   formAuth?: FormAuthHelper;
+  /** OAuth token checks and execute access for the MCP Server Trigger (`getMcpAuth()` on the webhook context) */
+  mcpAuth?: McpAuthHelper;
   /** signs and checks the tokens forms hand out (`signFormToken`, `verifyFormToken`) */
   formTokens?: {
     sign(payload: DataObject, ttlSeconds: number): string;

@@ -8,6 +8,7 @@
 import { useEffect, useRef } from 'react';
 import { create } from 'zustand';
 import { useSettings } from '../../api/queries';
+import { useBuilderStore } from '../../stores/builder-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { type EditorDeps, saveWorkflow } from './editor-actions';
@@ -34,7 +35,15 @@ const setIdle = () => setStatus(IDLE);
 
 function eligible(): boolean {
   const s = useWorkflowStore.getState();
-  return !!s.meta.id && s.dirty && !s.readOnly && !s.meta.isArchived && !useUiStore.getState().saveConflict;
+  return (
+    !!s.meta.id &&
+    s.dirty &&
+    !s.readOnly &&
+    !s.meta.isArchived &&
+    !useUiStore.getState().saveConflict &&
+    // P5-62: an AI draft under review is saved only by Accept
+    !useBuilderStore.getState().reviewing
+  );
 }
 
 export function useAutosave(deps: EditorDeps): void {

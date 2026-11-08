@@ -11,6 +11,8 @@ import { createLogger, type PinoLogger } from './logger';
 import { buildRegistries, loadNodePackages, type Registries } from './node-packages';
 import { createRepositories, type Repositories } from './repositories';
 import { ActiveWorkflowManager } from './services/active-workflows';
+import { AiBuilderService } from './services/ai-builder/builder';
+import type { AiRuntime } from './services/ai-builder/runtime';
 import { AnnotationService } from './services/annotations';
 import { AuthService } from './services/auth';
 import { MemoryBus, type MessageBus, PushService, RedisBus } from './services/bus';
@@ -24,6 +26,9 @@ import { FormAuthService } from './services/form-auth';
 import { FormTokenService } from './services/form-tokens';
 import { HistoryCompactionService } from './services/history-compaction';
 import { Pruner, WaitTracker } from './services/maintenance';
+import { createMcpAuthHelper } from './services/mcp/oauth/tokens';
+import { createMcpSessionStore, type McpSessionStore } from './services/mcp-sessions';
+import { McpTriggerService } from './services/mcp-trigger';
 import { Metrics } from './services/metrics';
 import { OAuth1Service } from './services/oauth1';
 import { OAuth2Service } from './services/oauth2';
@@ -94,6 +99,12 @@ export interface ServerContext {
   formTokens: FormTokenService;
   /** P5-02 (L8): evaluation test runs; init and sweep in startMain, stopped in close */
   evaluations: EvaluationService;
+  /** P5-03 (L7): MCP Server Trigger transports and runs; closed in close */
+  mcpTrigger: McpTriggerService;
+  /** P5-03 (L7): MCP trigger sessions (Redis in queue mode, else memory); sweep started in startMain */
+  mcpSessions: McpSessionStore;
+  /** P5-09 (L1): the AI workflow builder; closed in close */
+  aiBuilder: AiBuilderService;
   /** start leader duties (triggers, wait tracker, pruning) on mains */
   startMain(): Promise<void>;
   /** consume the execution queue (queue mode workers) */
@@ -124,6 +135,8 @@ export interface ContextOptions {
   migrate?: boolean;
   /** added to the six built-in secret providers (tests add a fake vault) */
   secretProviderTypes?: SecretProviderType[];
+  /** P5-09: the builder's agent runtime (tests pass one); default loads `@workflow/nodes-ai` when installed */
+  aiRuntime?: AiRuntime;
 }
 
 export async function createContext(options: ContextOptions): Promise<ServerContext> {
@@ -195,6 +208,10 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const formAuth = new FormAuthService(serviceDeps);
   const formTokens = new FormTokenService(serviceDeps);
   const evaluations = new EvaluationService(serviceDeps);
+  const mcpSessions = createMcpSessionStore({ config, logger, redis });
+  const mcpTrigger = new McpTriggerService({ ...serviceDeps, sessions: mcpSessions });
+  const mcpAuth = createMcpAuthHelper(serviceDeps.context);
+  const aiBuilder = new AiBuilderService(serviceDeps, options.aiRuntime);
 
   const metrics = new Metrics({
     queueDepth: queue ? () => queue.depth() : undefined,
@@ -242,6 +259,8 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     logger,
     formTokens,
     formAuth,
+    mcpTrigger,
+    mcpAuth,
   });
   const workflows = new WorkflowService({
     config,
@@ -301,6 +320,9 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     formAuth,
     formTokens,
     evaluations,
+    mcpTrigger,
+    mcpSessions,
+    aiBuilder,
 
     async startMain() {
       if (started) return;
@@ -318,6 +340,8 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       // outside the regular-mode block: in queue mode it closes only runs no main touched for 5 minutes
       const interrupted = await evaluations.sweepInterrupted();
       if (interrupted > 0) logger.warn({ interrupted }, 'Marked test runs of a previous run as interrupted');
+      // P5-03: idle MCP trigger sessions end on every main (each holds its own streams)
+      mcpSessions.startSweep();
       await leadership.start(
         async () => {
           logger.info('This instance is the leader: starting triggers, wait tracker and pruning');
@@ -357,6 +381,9 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       await activeWorkflows.close().catch(() => {});
       await queue?.close().catch(() => {});
       await evaluations.close().catch(() => {});
+      await aiBuilder.close().catch(() => {});
+      await mcpTrigger.close().catch(() => {});
+      await mcpSessions.close().catch(() => {});
       await executions.close().catch(() => {});
       await testWebhooks.close().catch(() => {});
       await secrets.stop().catch(() => {});

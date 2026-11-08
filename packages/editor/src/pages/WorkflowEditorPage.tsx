@@ -2,13 +2,14 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { NodeParameters, NodeTypeDescription, WorkflowSettings } from '@workflow/workflow';
 import { ReactFlowProvider, useReactFlow } from '@xyflow/react';
-import { LayoutGrid, Plus, StickyNote } from 'lucide-react';
+import { LayoutGrid, Plus, Sparkles, StickyNote } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-router';
 import { errorMessage, isApiError } from '../api/client';
 import { executionsApi, workflowsApi } from '../api/endpoints';
-import { queryKeys, useMe, useNodeTypes } from '../api/queries';
+import { queryKeys, useAiBuilderFeature, useMe, useNodeTypes } from '../api/queries';
 import type { PublishBody } from '../api/types';
+import { BuilderPanel } from '../components/assistant/BuilderPanel';
 import type { CanvasActions } from '../components/canvas/actions';
 import { FlowCanvas } from '../components/canvas/FlowCanvas';
 import { NodeCreator } from '../components/canvas/NodeCreator';
@@ -23,6 +24,7 @@ import { DoctorPanel } from '../components/workflow/DoctorPanel';
 import { LogPanel } from '../components/workflow/LogPanel';
 import { VersionsPanel } from '../components/workflow/VersionsPanel';
 import { WorkflowSettingsModal } from '../components/workflow/WorkflowSettingsModal';
+import { onVersionRestored } from '../features/builder/session-actions';
 import { useEditorCommands } from '../features/command-bar/editor-commands';
 import { addNodeFromDescription } from '../features/editor/add-node';
 import { CanvasContextMenu } from '../features/editor/CanvasContextMenu';
@@ -57,6 +59,7 @@ import {
 import { issuesByNode, lintWorkflow } from '../lib/doctor';
 import { isTriggerDescription } from '../lib/ports';
 import { getMainParents, getNode } from '../lib/workflow-ops';
+import { useBuilderStore } from '../stores/builder-store';
 import { useChatStore } from '../stores/chat-store';
 import { useRunStore } from '../stores/run-store';
 import { toast, useUiStore } from '../stores/ui-store';
@@ -85,6 +88,14 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
   const [saving, setSaving] = useState(false);
   const [activating, setActivating] = useState(false);
   const dirtyNodes = useDirtyNodes();
+  // P5-09, P5-62: the builder's entry (editors and above) and its canvas lock while a turn streams
+  const aiBuilder = useAiBuilderFeature();
+  const canWrite = useMe().data?.role !== 'viewer';
+  const builderStreaming = useBuilderStore((s) => s.streaming);
+  useEffect(() => {
+    useBuilderStore.getState().setDeps({ ...deps, flow });
+    return () => useBuilderStore.getState().setDeps(null);
+  }, [deps, flow]);
 
   const graph = useMemo(
     () => ({ nodes, connections, pinData, stickyNotes, nodeGroups }),
@@ -224,7 +235,7 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
             runningNodes={runningNodes}
             selection={selection}
             issues={issueMap}
-            readOnly={readOnly}
+            readOnly={readOnly || builderStreaming}
             actions={actions}
             fitKey={loadCount}
             onSelectionChange={(sel) => store().select(sel)}
@@ -264,6 +275,14 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
                   <p className="max-w-64 text-sm text-ink-2">
                     Pick a trigger: a schedule, a webhook, an app event or a manual start.
                   </p>
+                  {aiBuilder.enabled && canWrite && (
+                    <Button
+                      icon={<Sparkles size={15} />}
+                      onClick={() => useBuilderStore.getState().setOpen(true)}
+                    >
+                      Build with AI
+                    </Button>
+                  )}
                 </div>
               </div>
             )}
@@ -319,6 +338,9 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
         {ui.sidePanel === 'doctor' && (
           <DoctorPanel issues={issues} onClose={() => ui.setSidePanel(null)} onFocusNode={focusNode} />
         )}
+        {ui.sidePanel === 'builder' && (
+          <BuilderPanel onClose={() => useBuilderStore.getState().setOpen(false)} />
+        )}
         {ui.sidePanel === 'versions' && (
           <VersionsPanel
             workflowId={meta.id}
@@ -336,6 +358,9 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
               try {
                 const dto = await workflowsApi.restoreVersion(meta.id!, versionId);
                 store().load(dto);
+                // the restored version replaces a builder draft; the chat goes back to that version (P5-66)
+                useBuilderStore.getState().clearReview();
+                void onVersionRestored(meta.id!, versionId);
                 toast.success('Version restored');
                 reportDeactivation(dto);
               } catch (error) {
@@ -542,11 +567,18 @@ export function WorkflowEditorPage() {
     useChatStore.getState().newSession();
   }, [isNew]);
 
+  // P5-62: another workflow never gets this one's builder stream or draft; the redirect from `new` to the
+  // row it just created keeps them (`meta.id === id`, as `alreadyOpen`), which the first send relies on
+  useEffect(() => {
+    if (useWorkflowStore.getState().meta.id !== id) useBuilderStore.getState().reset();
+  }, [id]);
+
   useEffect(
     () => () => {
       useWorkflowStore.getState().reset();
       useRunStore.getState().reset();
       useChatStore.getState().newSession();
+      useBuilderStore.getState().reset();
       useUiStore.setState({
         ndvNode: null,
         sidePanel: null,

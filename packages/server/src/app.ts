@@ -6,6 +6,8 @@ import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import type { ServerContext } from './context';
 import { checkCsrf, checkTenant, loadSession, TENANT_HEADER } from './http/auth';
 import { handleError } from './http/errors';
+import { registerAiRoutes } from './routes/ai';
+import { registerAiSessionRoutes } from './routes/ai-sessions';
 import { registerAnnotationTagRoutes } from './routes/annotation-tags';
 import { registerAuthRoutes } from './routes/auth';
 import { registerChatWidgetRoutes } from './routes/chat-widget';
@@ -16,6 +18,11 @@ import { registerExecutionRoutes } from './routes/executions';
 import { registerFavoriteRoutes } from './routes/favorites';
 import { registerFolderRoutes } from './routes/folders';
 import { registerFormAuthRoutes } from './routes/form-auth';
+import { registerMcpConsentRoutes } from './routes/mcp-consent';
+import { mcpOAuthPlugin } from './routes/mcp-oauth';
+import { registerMcpOAuthClientRoutes } from './routes/mcp-oauth-clients';
+import { registerMcpServerRoutes } from './routes/mcp-server';
+import { registerMcpSettingsRoutes } from './routes/mcp-settings';
 import { publicApiPlugin } from './routes/public-api';
 import { registerPushRoutes } from './routes/push';
 import { registerResourceRoutes } from './routes/resources';
@@ -100,6 +107,9 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
   registerHealthRoutes(app, ctx);
   // P5-56: the chat widget's script and styles, outside /rest (no session, no CSRF)
   await registerChatWidgetRoutes(app, ctx);
+  // P5-04, P5-14: tenant MCP server and MCP OAuth server, outside /rest (Bearer only: no session, no CSRF, no cookie)
+  await registerMcpServerRoutes(app, ctx);
+  await app.register(mcpOAuthPlugin, { ctx });
 
   // editor API: session cookie + CSRF checks
   await app.register(
@@ -144,6 +154,12 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerFormAuthRoutes(rest, ctx);
       // Phase 5: evaluation test runs (P5-02)
       registerEvaluationRoutes(rest, ctx);
+      // Phase 5 S4: AI workflow builder (P5-09, P5-66), MCP settings, OAuth clients and consent (P5-04, P5-14, P5-15)
+      registerAiRoutes(rest, ctx);
+      registerAiSessionRoutes(rest, ctx);
+      registerMcpSettingsRoutes(rest, ctx);
+      registerMcpOAuthClientRoutes(rest, ctx);
+      registerMcpConsentRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );

@@ -5,6 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { HttpClient } from '@workflow/core';
@@ -23,6 +24,7 @@ import { Redis } from 'ioredis';
 import { buildApp } from '../src/app';
 import { type Config, loadConfig } from '../src/config';
 import { createContext, type ServerContext } from '../src/context';
+import type { AiRuntime } from '../src/services/ai-builder/runtime';
 import type { SecretProviderType } from '../src/services/secrets/types';
 
 export const BASE_URL = 'http://localhost:5678';
@@ -345,6 +347,12 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'workflow_builder_sessions',
+  'oauth_user_consents',
+  'oauth_refresh_tokens',
+  'oauth_access_tokens',
+  'oauth_authorization_codes',
+  'oauth_clients',
   'test_case_executions',
   'test_runs',
   'data_table_rows',
@@ -408,6 +416,8 @@ export async function createTestServer(
     /** appended after the built-in and test packages */
     nodePackages?: NodePackage[];
     secretProviderTypes?: SecretProviderType[];
+    /** P5-09: the builder's agent runtime (`createContext`'s `aiRuntime`) */
+    aiRuntime?: AiRuntime;
   } = {},
 ): Promise<TestServer> {
   const config = testConfig(overrides);
@@ -415,6 +425,7 @@ export async function createTestServer(
     config,
     nodePackages: [nodesBasePackage, testPackage, ...(options.nodePackages ?? [])],
     secretProviderTypes: options.secretProviderTypes,
+    aiRuntime: options.aiRuntime,
     // local test servers (credential test, OAuth2 token endpoint) live on 127.0.0.1
     http:
       options.http ??
@@ -433,6 +444,42 @@ export async function createTestServer(
       await rm(config.binaryData.dir, { recursive: true, force: true });
     },
   };
+}
+
+/** a free TCP port on 127.0.0.1 (the OS picks it; closed again before the caller listens on it) */
+export async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      server.close(() => (port ? resolve(port) : reject(new Error('No free port'))));
+    });
+  });
+}
+
+/**
+ * P5-03, P5-04, P5-14: a test server listening on a free port of 127.0.0.1, with `BASE_URL` and
+ * `MCP_BASE_URL` both `http://127.0.0.1:<port>`, so real MCP clients pass the Host check. `url` is that
+ * base URL. Overrides win (pass `MCP_ACCESS_ENABLED: 'true'` for the tenant server); `close()` stops
+ * the listener and the context. A `TestClient` for `/rest` calls needs `new TestClient(app, url)`.
+ */
+export async function startMcpTestServer(
+  overrides: Record<string, string> = {},
+  options: Parameters<typeof createTestServer>[1] = {},
+): Promise<TestServer & { url: string; port: number }> {
+  const port = await freePort();
+  const url = `http://127.0.0.1:${port}`;
+  const server = await createTestServer({ BASE_URL: url, MCP_BASE_URL: url, ...overrides }, options);
+  try {
+    await server.app.listen({ port, host: '127.0.0.1' });
+  } catch (error) {
+    await server.close();
+    throw error;
+  }
+  return { ...server, url, port };
 }
 
 // ---------------------------------------------------------------------------------------------

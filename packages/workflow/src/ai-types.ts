@@ -4,6 +4,7 @@
  * Provider-neutral on purpose: no SDK types leak into the contract.
  */
 import type { DataObject } from './interfaces';
+import type { McpCallResult } from './mcp-protocol';
 
 export type JsonSchema = DataObject;
 
@@ -100,6 +101,14 @@ export interface AiTool extends AiToolDefinition {
   /** the tool can stop the run to wait (it may throw `ToolSuspension`) */
   canWait?: boolean;
   invoke(args: DataObject, options?: { signal?: AbortSignal; toolCallId?: string }): Promise<unknown>;
+  /**
+   * A tool that keeps a server's content array (an MCP Client tool): the raw MCP result instead of
+   * the flattened text `invoke` gives. The MCP Server Trigger prefers it when present.
+   */
+  invokeRaw?(
+    args: DataObject,
+    options?: { signal?: AbortSignal; toolCallId?: string },
+  ): Promise<McpCallResult>;
 }
 
 export interface AiMemory {

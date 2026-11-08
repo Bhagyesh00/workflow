@@ -162,6 +162,8 @@ export interface WorkflowSettings {
   executionTimeout?: number;
   callerPolicy?: CallerPolicy;
   callerIds?: string[];
+  /** the workspace MCP server may list, read and run this workflow (n8n's `availableInMCP`) */
+  availableInMCP?: boolean;
 }
 
 export interface WorkflowDefinition {
@@ -383,8 +385,11 @@ export interface WebhookDescription {
   isFullPath?: boolean;
   /** hide URL panel in the editor */
   ndvHideUrl?: boolean;
-  /** `form`: the hook is served under `/form`, `/form-test` and `/form-waiting` instead of `/webhook` */
-  nodeType?: 'form';
+  /**
+   * `form`: the hook is served under `/form`, `/form-test` and `/form-waiting` instead of `/webhook`.
+   * `mcp`: the hook is served under `/mcp` and `/mcp-test` (MCP Server Trigger), not `/webhook`.
+   */
+  nodeType?: 'form' | 'mcp';
 }
 
 /** value of a `filter` parameter (IF / Filter / Switch conditions) */

@@ -10,9 +10,12 @@ import {
   Workflow,
 } from '@workflow/workflow';
 import { describe, expect, it } from 'vitest';
-import { credentials, nodes, nodesAiPackage } from '../src';
+import { createMcpConnection, credentials, nodes, nodesAiPackage } from '../src';
+import { McpClientToolNode } from '../src/nodes/tools/McpClientTool.node';
 import { escapeForScript, renderChatPage } from '../src/nodes/trigger/chat-page';
-import { FakeHttpClient, node, nodeTypes, services, toolNodeTypes } from './harness';
+import { checkWorkspaceSignIn } from '../src/nodes/trigger/mcp-trigger-signin';
+import { callMcpTool, MCP_REDACTED, mcpToolDescriptors, redactMcpHeaders } from '../src/shared/mcp-server';
+import { credentialTypes, FakeHttpClient, node, nodeTypes, services, toolNodeTypes } from './harness';
 
 /** credential types used by AI nodes but owned by other packages (nodes-base) */
 const EXTERNAL_CREDENTIALS = new Set([
@@ -21,6 +24,7 @@ const EXTERNAL_CREDENTIALS = new Set([
   'httpBasicAuth',
   'httpHeaderAuth',
   'httpBearerAuth',
+  'httpMultipleHeadersAuth',
   'aws',
   'awsAssumeRole',
   'googleApi',
@@ -35,6 +39,8 @@ const NO_TEST = new Set([
   'azureEntraCognitiveServicesOAuth2Api',
   'googleVertexAiApi',
   'searXngApi',
+  // S4: n8n's MCP OAuth2 has no test request (the token comes from the sign-in flow)
+  'mcpOAuth2Api',
 ]);
 
 describe('package', () => {
@@ -108,6 +114,9 @@ describe('package', () => {
       'alibabaCloud',
       'minimax',
       'databricksAiAgent',
+      // S4: MCP Server Trigger and MCP Client
+      'mcpTrigger',
+      'mcpClient',
     ].map((n) => `ai.${n}`);
     expect(nodes.map((n) => n.description.name)).toEqual(expect.arrayContaining(required));
     expect(credentials.map((c) => c.name).sort()).toEqual(
@@ -143,6 +152,7 @@ describe('package', () => {
         'xataApi',
         'searXngApi',
         'wolframAlphaApi',
+        'mcpOAuth2Api',
       ].sort(),
     );
   });
@@ -201,6 +211,91 @@ describe('package', () => {
         /^(=\{\{\$credentials\.\w+\}\}\/|=\{\{\$credentials\.databaseEndpoint\}\}:|https:\/\/)/,
       );
     }
+  });
+});
+
+describe('S4 MCP contracts', () => {
+  const description = (name: string) => nodes.find((n) => n.description.name === name)!.description;
+
+  it('MCP Server Trigger: a trigger with a Tools input, no output and three MCP hooks', () => {
+    const d = description('ai.mcpTrigger');
+    expect(d.displayName).toBe('MCP Server Trigger');
+    expect(d.description).toBe('Expose workflow tools as an MCP Server endpoint');
+    expect(d.group).toEqual(['trigger']);
+    expect(d.inputs).toEqual([{ type: 'ai_tool', displayName: 'Tools' }]);
+    expect(d.outputs).toEqual([]);
+    expect(d.activationMessage).toBe(
+      'You can now connect your MCP Clients to the URL, using SSE or Streamable HTTP transports.',
+    );
+    expect(
+      d.webhooks?.map((w) => [w.name, w.httpMethod, w.path, w.responseMode, w.isFullPath, w.nodeType]),
+    ).toEqual([
+      ['setup', 'GET', '={{$parameter["path"]}}', 'onReceived', true, 'mcp'],
+      ['default', 'POST', '={{$parameter["path"]}}', 'onReceived', true, 'mcp'],
+      ['sessionEnd', 'DELETE', '={{$parameter["path"]}}', 'onReceived', true, 'mcp'],
+    ]);
+    expect(new Set(d.webhooks?.map((w) => w.name)).size).toBe(3);
+    expect(d.credentials?.map((c) => [c.name, c.displayOptions?.show?.authentication])).toEqual([
+      ['httpBearerAuth', ['bearerAuth']],
+      ['httpHeaderAuth', ['headerAuth']],
+    ]);
+    const prop = (name: string) => d.properties.find((p) => p.name === name);
+    expect(prop('authentication')?.default).toBe('none');
+    expect(prop('authentication')?.options?.map((o) => [(o as { value: string }).value, o.name])).toEqual([
+      ['none', 'None'],
+      ['n8nOAuth2', 'Workspace sign-in'],
+      ['bearerAuth', 'Bearer Auth'],
+      ['headerAuth', 'Header Auth'],
+    ]);
+    expect(prop('requireExecuteAccess')?.default).toBe(true);
+    expect(prop('includeUserInOutput')?.default).toBe(true);
+    expect(prop('path')?.required).toBe(true);
+    expect(prop('instructions')?.type).toBe('string');
+    const type = nodes.find((n) => n.description.name === 'ai.mcpTrigger')!;
+    expect(typeof type.webhook).toBe('function');
+    expect(typeof type.execute).toBe('function');
+  });
+
+  it('MCP Client: main in and out, and no tool variant of its own', () => {
+    const d = description('ai.mcpClient');
+    expect(d.inputs).toEqual(['main']);
+    expect(d.outputs).toEqual(['main']);
+    expect(d.usableAsTool).toBeUndefined();
+    expect(nodeTypes.get('ai.mcpClient')).toBeDefined();
+  });
+
+  it('ai.mcpClientTool is still the original sub-node after withToolVariants', () => {
+    expect(toolNodeTypes.get('ai.mcpClientTool')).toBe(McpClientToolNode);
+    expect(toolNodeTypes.get('ai.mcpClientTool')?.description.outputs).toEqual(['ai_tool']);
+  });
+
+  it('mcpOAuth2Api extends oAuth2Api: PKCE, body auth, automatic registration and a resource URL', () => {
+    const type = credentialTypes.getResolved('mcpOAuth2Api')!;
+    expect(type.extends).toEqual(['oAuth2Api']);
+    expect(credentialTypes.isA('mcpOAuth2Api', 'oAuth2Api')).toBe(true);
+    expect(type.test).toBeUndefined();
+    const prop = (name: string) => type.properties.find((p) => p.name === name);
+    expect(prop('grantType')).toMatchObject({ type: 'hidden', default: 'pkce' });
+    expect(prop('authentication')?.default).toBe('body');
+    expect(prop('useDynamicClientRegistration')).toMatchObject({ type: 'boolean', default: true });
+    expect(prop('resourceUrl')).toMatchObject({ type: 'string', default: '' });
+    // inherited from oAuth2Api: the token lives in oauthTokenData, not in the S1 token cache
+    for (const name of ['clientId', 'clientSecret', 'authUrl', 'accessTokenUrl', 'scope', 'oauthTokenData']) {
+      expect(prop(name), name).toBeDefined();
+    }
+    expect(type.properties.map((p) => p.name).slice(-2)).toEqual([
+      'allowedHttpRequestDomains',
+      'allowedDomains',
+    ]);
+  });
+
+  it('exports the seams the lanes fill', () => {
+    expect(typeof createMcpConnection).toBe('function');
+    expect(typeof checkWorkspaceSignIn).toBe('function');
+    expect(typeof mcpToolDescriptors).toBe('function');
+    expect(typeof callMcpTool).toBe('function');
+    expect(typeof redactMcpHeaders).toBe('function');
+    expect(MCP_REDACTED).toBe('**hidden**');
   });
 });
 

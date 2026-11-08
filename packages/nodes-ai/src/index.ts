@@ -13,10 +13,12 @@ import { outputParserNodes } from './nodes/output-parsers/output-parsers.nodes';
 import { RerankerCohereNode } from './nodes/rerankers/RerankerCohere.node';
 import { retrieverNodes } from './nodes/retrievers/retrievers.nodes';
 import { textSplitterNodes } from './nodes/text-splitters/text-splitters.nodes';
+import { McpClientNode } from './nodes/tools/McpClient.node';
 import { McpClientToolNode } from './nodes/tools/McpClientTool.node';
 import { toolNodes } from './nodes/tools/tools.nodes';
 import { ChatNode } from './nodes/trigger/Chat.node';
 import { ChatTriggerNode } from './nodes/trigger/ChatTrigger.node';
+import { McpTriggerNode } from './nodes/trigger/McpTrigger.node';
 import { vectorStoreNodes } from './nodes/vector-stores/vector-stores.nodes';
 import { vendorNodes } from './nodes/vendors';
 
@@ -29,10 +31,12 @@ export const nodes: NodeType[] = [
   ...retrieverNodes,
   ChatTriggerNode,
   ChatNode,
+  McpTriggerNode,
   ...chatModelNodes,
   ...memoryNodes,
   ...toolNodes,
   McpClientToolNode,
+  McpClientNode,
   ...embeddingsNodes,
   ...vectorStoreNodes,
   RerankerCohereNode,
@@ -53,4 +57,5 @@ export { type ChatModelCapabilities, capabilitiesOf, HttpChatModel } from './sha
 export { databricksGatewayUrl } from './shared/databricks';
 export { validateJsonSchema } from './shared/json-schema';
 export { McpClient } from './shared/mcp-client';
+export { createMcpConnection, type McpConnectionInput } from './shared/mcp-connect';
 export { redactSecrets } from './shared/utils';

@@ -35,6 +35,63 @@ export const httpHeaderAuth: CredentialType = {
   },
 };
 
+/** the `{ name, value }` rows of a Multiple Headers Auth credential (`headers.values`) */
+export function multipleHeadersOf(credentials: DataObject): Record<string, string> {
+  const collection = credentials.headers;
+  const rows = isPlainObject(collection) && Array.isArray(collection.values) ? collection.values : [];
+  const out: Record<string, string> = {};
+  for (const row of rows) {
+    if (!isPlainObject(row)) continue;
+    const name = String(row.name ?? '')
+      .trim()
+      .toLowerCase();
+    if (!name) continue;
+    out[name] = row.value === undefined || row.value === null ? '' : String(row.value);
+  }
+  return out;
+}
+
+/** several headers sent on every request (the MCP Client Tool's "Multiple Headers Auth") */
+export const httpMultipleHeadersAuth: CredentialType = {
+  name: 'httpMultipleHeadersAuth',
+  displayName: 'Multiple Headers Auth',
+  icon: 'lucide:key-round',
+  properties: [
+    {
+      displayName: 'Headers',
+      name: 'headers',
+      type: 'fixedCollection',
+      default: { values: [] },
+      placeholder: 'Add header',
+      typeOptions: { multipleValues: true },
+      options: [
+        {
+          displayName: 'Header',
+          name: 'values',
+          values: [
+            { displayName: 'Name', name: 'name', type: 'string', default: '', placeholder: 'X-API-Key' },
+            {
+              displayName: 'Value',
+              name: 'value',
+              type: 'string',
+              default: '',
+              typeOptions: { password: true },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+  async authenticate(credentials, request) {
+    const headers = multipleHeadersOf(credentials);
+    if (Object.keys(headers).length === 0) return request;
+    const kept = Object.fromEntries(
+      Object.entries(request.headers ?? {}).filter(([key]) => !(key.toLowerCase() in headers)),
+    );
+    return { ...request, headers: { ...kept, ...headers } };
+  },
+};
+
 export const httpQueryAuth: CredentialType = {
   name: 'httpQueryAuth',
   displayName: 'Query Auth',

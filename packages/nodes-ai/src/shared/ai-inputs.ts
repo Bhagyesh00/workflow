@@ -21,9 +21,11 @@ import {
   NodeOperationError,
   type NodeProperty,
   type SupplyDataContext,
+  type WebhookContext,
 } from '@workflow/workflow';
 
-type AnyContext = ExecuteContext | SupplyDataContext;
+/** the webhook context too: the MCP Server Trigger reads its tools with `getTools(ctx, 0)` in `webhook` */
+type AnyContext = ExecuteContext | SupplyDataContext | WebhookContext;
 
 /** Memory as supplied by this package's memory nodes: bound to the session key of the item. */
 export interface SessionMemory extends AiMemory {

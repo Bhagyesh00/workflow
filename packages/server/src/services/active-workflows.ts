@@ -46,7 +46,7 @@ import { loadPublishedDefinition, publishedDefinition } from './published-workfl
 import type { Leadership } from './queue';
 import { TEST_TRIGGER_TTL_MS, TEST_WEBHOOK_TTL_MS } from './test-webhooks';
 import { closeBounded, TriggerRetryQueue } from './trigger-retry';
-import { type NodeWebhook, nodeWebhooks, webhookUrlBase, workflowWebhooks } from './webhook-paths';
+import { hookUrl, type NodeWebhook, nodeWebhooks, workflowWebhooks } from './webhook-paths';
 import { assertNotArchived } from './workflow-rules';
 
 export interface ValidationIssue {
@@ -1027,9 +1027,7 @@ export class ActiveWorkflowManager {
       getNodeWebhookUrl: (name: string) => {
         const type = this.deps.nodeTypes.get(node.type)!;
         const match = nodeWebhooks(workflow, node, type).find((h) => h.webhookName === name) ?? hook;
-        const urlBase = webhookUrlBase(match.description);
-        const prefix = testUrls ? `${urlBase}-test` : urlBase;
-        return `${this.deps.config.baseUrl}/${prefix}/${tenant.slug}/${match.path}`;
+        return hookUrl(this.deps.config, match.description, testUrls, tenant.slug, match.path);
       },
       getWebhookName: () => hook.webhookName,
     };

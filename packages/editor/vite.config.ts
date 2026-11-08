@@ -53,6 +53,14 @@ export default defineConfig(({ mode }) => ({
       '^/form/': proxyTarget,
       '^/form-test/': proxyTarget,
       '^/form-waiting/': proxyTarget,
+      // P5-03, P5-04, P5-14: MCP trigger URLs, the workspace MCP server, its OAuth server and metadata.
+      // `changeOrigin` sends the server's own Host, which the MCP Host check (MCP_BASE_URL) accepts;
+      // `cors: false` above lets an MCP client's preflight reach the server.
+      '^/mcp/': proxyTarget,
+      '^/mcp-test/': proxyTarget,
+      '^/mcp-server/': proxyTarget,
+      '^/mcp-oauth/': proxyTarget,
+      '^/\\.well-known/': proxyTarget,
     },
   },
   build: {

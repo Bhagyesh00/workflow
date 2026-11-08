@@ -56,6 +56,7 @@ import {
   isExpression,
   isHitlVariant,
   isPlainObject,
+  type McpAuthHelper,
   type NodeType,
   type WebhookRequest,
   type WebhookResponse,
@@ -71,6 +72,7 @@ import type { PinoLogger } from '../logger';
 import type { Repositories } from '../repositories';
 import type { PushService } from './bus';
 import type { ExecutionObserver, ExecutionOutcome, ExecutionService, StartedExecution } from './executions';
+import type { McpTriggerService } from './mcp-trigger';
 import type { Metrics } from './metrics';
 import { loadPublishedDefinition } from './published-workflow';
 import { findTestWebhook, type TestWebhookStore } from './test-webhooks';
@@ -139,8 +141,8 @@ const json = (statusCode: number, body: unknown, headers: Record<string, string>
 const notRegistered = (method: string, path: string) =>
   json(404, errorBody('not_found', `The webhook "${method} ${path}" is not registered`));
 
-/** which URL family a request came in on: `/webhook*` or `/form*` */
-export type WebhookKind = 'webhook' | 'form';
+/** which URL family a request came in on: `/webhook*`, `/form*` or the MCP trigger's `/mcp*` (P5-03) */
+export type WebhookKind = 'webhook' | 'form' | 'mcp';
 
 const FORM_TOO_LARGE =
   'The files you are trying to upload are too large. Please reduce the total size and try again.';
@@ -306,6 +308,10 @@ export interface WebhookServiceDeps {
   logger: PinoLogger;
   formTokens: NonNullable<ExecutionServices['formTokens']>;
   formAuth: FormAuthHelper;
+  /** P5-03 (L7): the MCP Server Trigger's transports, sessions and runs */
+  mcpTrigger: McpTriggerService;
+  /** P5-14 (L10): the trigger's workspace sign-in (`WebhookContext.getMcpAuth`) */
+  mcpAuth: McpAuthHelper;
 }
 
 interface RunInput {
@@ -614,7 +620,8 @@ export class WebhookService {
   async handleWaiting(
     executionId: string,
     incoming: IncomingWebhook,
-    kind: WebhookKind = 'webhook',
+    /** resume URLs exist for `/webhook-waiting` and `/form-waiting` only (an MCP trigger never waits) */
+    kind: Exclude<WebhookKind, 'mcp'> = 'webhook',
   ): Promise<WebhookReply> {
     const { repos, nodeTypes, executions, logger } = this.deps;
     const notFound = (message: string) =>
@@ -860,7 +867,12 @@ export class WebhookService {
     input: Parameters<ExecutionService['buildServices']>[0],
   ): Promise<ExecutionServices> {
     const services = await this.deps.executions.buildServices(input);
-    return { ...services, formTokens: this.deps.formTokens, formAuth: this.deps.formAuth };
+    return {
+      ...services,
+      formTokens: this.deps.formTokens,
+      formAuth: this.deps.formAuth,
+      mcpAuth: this.deps.mcpAuth,
+    };
   }
 
   private async run(input: RunInput): Promise<WebhookReply> {

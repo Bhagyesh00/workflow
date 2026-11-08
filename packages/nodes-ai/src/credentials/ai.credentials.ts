@@ -204,6 +204,47 @@ export const qdrantApi: CredentialType = {
   test: { request: { url: '={{$credentials.url}}/collections' } },
 };
 
+/**
+ * MCP OAuth2 (P5-18): OAuth2 against an MCP server's authorization server. With automatic registration the
+ * server finds the endpoints from the resource (RFC 9728, RFC 8414) and registers a public client; tokens
+ * live in `oauthTokenData` and every token call carries `resource` (RFC 8707). No `test` request, as n8n.
+ */
+export const mcpOAuth2Api: CredentialType = {
+  name: 'mcpOAuth2Api',
+  displayName: 'MCP OAuth2 API',
+  icon: 'lucide:key-square',
+  extends: ['oAuth2Api'],
+  properties: [
+    {
+      displayName: 'Register Client Automatically',
+      name: 'useDynamicClientRegistration',
+      type: 'boolean',
+      default: true,
+      description:
+        'Whether to find the authorization server from the MCP server and register this app with it, instead of entering a client ID and URLs',
+    },
+    {
+      displayName: 'Resource URL',
+      name: 'resourceUrl',
+      type: 'string',
+      default: '',
+      placeholder: 'https://mcp.example.com/mcp',
+      description: 'The MCP server endpoint the token is for. Sent as the resource of every token request.',
+    },
+    { displayName: 'grantType', name: 'grantType', type: 'hidden', default: 'pkce' },
+    {
+      displayName: 'Authentication',
+      name: 'authentication',
+      type: 'options',
+      default: 'body',
+      options: [
+        { name: 'Send as Basic Auth Header', value: 'header' },
+        { name: 'Send Client Credentials in Body', value: 'body' },
+      ],
+    },
+  ],
+};
+
 export const aiCredentials: CredentialType[] = [
   openAiApi,
   anthropicApi,
@@ -216,4 +257,5 @@ export const aiCredentials: CredentialType[] = [
   azureEntraCognitiveServicesOAuth2Api,
   googleVertexAiApi,
   ...ragCredentials,
+  mcpOAuth2Api,
 ];

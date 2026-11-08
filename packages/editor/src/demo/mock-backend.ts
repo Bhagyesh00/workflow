@@ -22,6 +22,7 @@ import {
 } from '@workflow/workflow';
 import type { ApiRequest, ApiResponse } from '../api/client';
 import type {
+  AiBuilderFeature,
   ApiKey,
   CredentialSummary,
   ExecutionDetail,
@@ -46,6 +47,7 @@ import {
   demoNodeTypes,
   demoResourceMapping,
 } from './fixtures';
+import { registerAiRoutes } from './mock-ai';
 import { filterExecutionList, registerAnnotationRoutes } from './mock-annotations';
 import { registerChatRoutes } from './mock-chat';
 import { registerDataTableRoutes, searchDataTables } from './mock-data-tables';
@@ -53,10 +55,17 @@ import { DEMO_EVALUATION_CONCURRENCY_LIMIT, registerEvaluationRoutes } from './m
 import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
 import { registerFormAuthRoutes } from './mock-form-auth';
 import { copy, HttpError, now, page } from './mock-http';
+import { registerMcpRoutes } from './mock-mcp';
 import { registerPublishRoutes } from './mock-publish';
 import { registerReviewRoutes } from './mock-reviews';
 import { registerSecretRoutes } from './mock-secrets';
-import { registerTriggerListenRoutes } from './mock-triggers';
+import {
+  DEMO_MCP_TRIGGER_TYPE,
+  demoHookFamily,
+  demoHookMethod,
+  demoHookUrl,
+  registerTriggerListenRoutes,
+} from './mock-triggers';
 import { type SimulationInput, type SimulationResult, simulateExecution } from './simulator';
 
 /** body field `agentRequest` of POST /workflows/:id/run (P5-76 Test a tool) */
@@ -177,6 +186,8 @@ export interface MockBackendOptions {
   autoWebhookMs?: number;
   brand?: Settings['brand'];
   signupEnabled?: boolean;
+  /** P5-09: `features.aiBuilder` of GET /settings; on and set up when left out */
+  aiBuilder?: AiBuilderFeature;
 }
 
 type Handler = (ctx: {
@@ -186,6 +197,9 @@ type Handler = (ctx: {
 }) => unknown | Promise<unknown>;
 
 export { HttpError };
+
+/** P5-09: the demo builder is on and has a model (`features.aiBuilder`) */
+const DEMO_AI_BUILDER: AiBuilderFeature = { enabled: true, setup: true };
 
 /** P3-13: the n8n messages of GET /from-url */
 const NOT_JSON = 'The URL does not point to valid JSON file!';
@@ -229,6 +243,8 @@ export class MockBackend {
     registerFormAuthRoutes(this);
     registerChatRoutes(this);
     registerEvaluationRoutes(this);
+    registerAiRoutes(this);
+    registerMcpRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -813,7 +829,7 @@ export class MockBackend {
         webhookBaseUrl: typeof window === 'undefined' ? 'http://localhost' : window.location.origin,
         timezone: 'Europe/Berlin',
         limits: { executionTimeoutMax: 3600 },
-        features: { demo: true },
+        features: { demo: true, aiBuilder: copy(this.options.aiBuilder ?? DEMO_AI_BUILDER) },
         autosaveEnabled: true,
         evaluationConcurrencyLimit: DEMO_EVALUATION_CONCURRENCY_LIMIT,
         workflowReviews: copy(
@@ -1013,8 +1029,9 @@ export class MockBackend {
         setTimeout(() => this.receiveTestWebhook(wf.id), this.options.autoWebhookMs);
       const { tenant } = this.auth();
       const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
-      const isForm = node.type === 'core.formTrigger';
-      const testUrl = `${origin}/${isForm ? 'form-test' : 'webhook-test'}/${tenant.slug}/${hookPath(node)}`;
+      const family = demoHookFamily(node.type);
+      const isForm = family === 'form';
+      const testUrl = demoHookUrl(origin, family, true, tenant.slug, hookPath(node));
       return {
         testUrl,
         expiresAt: new Date(expiresAt).toISOString(),
@@ -1028,16 +1045,20 @@ export class MockBackend {
       const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
       return wf.nodes
         .filter(
-          (n) => n.type === 'core.webhook' || n.type === 'core.formTrigger' || n.type === CHAT_TRIGGER_TYPE,
+          (n) =>
+            n.type === 'core.webhook' ||
+            n.type === 'core.formTrigger' ||
+            n.type === CHAT_TRIGGER_TYPE ||
+            n.type === DEMO_MCP_TRIGGER_TYPE,
         )
         .map((n) => {
           const path = hookPath(n);
-          const isForm = n.type === 'core.formTrigger';
+          const family = demoHookFamily(n.type);
           return {
             nodeName: n.name,
-            method: isForm ? 'GET' : String(n.parameters.httpMethod ?? 'POST'),
-            testUrl: `${origin}/${isForm ? 'form-test' : 'webhook-test'}/${tenant.slug}/${path}`,
-            productionUrl: `${origin}/${isForm ? 'form' : 'webhook'}/${tenant.slug}/${path}`,
+            method: demoHookMethod(family, n.parameters.httpMethod),
+            testUrl: demoHookUrl(origin, family, true, tenant.slug, path),
+            productionUrl: demoHookUrl(origin, family, false, tenant.slug, path),
           };
         });
     });

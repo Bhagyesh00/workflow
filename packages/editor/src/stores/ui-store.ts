@@ -16,7 +16,8 @@ export interface CreatorContext {
   position?: [number, number];
 }
 
-export type SidePanel = 'creator' | 'doctor' | 'versions' | null;
+/** `builder` is the AI workflow builder's chat (P5-09) */
+export type SidePanel = 'creator' | 'doctor' | 'versions' | 'builder' | null;
 
 /** tab of the bottom log panel; `chat` shows only when the workflow has a chat trigger (P5-59, P5-60) */
 export type LogPanelTab = 'logs' | 'console' | 'timeline' | 'chat';

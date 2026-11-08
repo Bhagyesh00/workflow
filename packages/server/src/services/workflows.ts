@@ -42,6 +42,7 @@ import type {
   workflowDataSchema,
   workflowUpdateSchema,
 } from '../http/schemas';
+import type { TenantSettings } from '../plans';
 import { createRepositories, type Repositories, type TagRef } from '../repositories';
 import type { ActiveWorkflowManager, ValidationIssue } from './active-workflows';
 import type { ExecutionService } from './executions';
@@ -50,7 +51,7 @@ import type { FormTokenService } from './form-tokens';
 import type { PublishHistoryService } from './publish-history';
 import { TEST_WEBHOOK_TTL_MS, type TestWebhookStore } from './test-webhooks';
 import { closeBounded } from './trigger-retry';
-import { nodeWebhooks, webhookUrlBase } from './webhook-paths';
+import { hookUrl, nodeWebhooks, webhookUrlBase } from './webhook-paths';
 import { cloneDefinition, toDefinition, toDTO, type WorkflowDTO } from './workflow-model';
 import type { WorkflowReviewService } from './workflow-reviews';
 import { assertDeletable, assertFolderInTenant, assertNotArchived } from './workflow-rules';
@@ -194,11 +195,19 @@ export class WorkflowService {
     await assertFolderInTenant(this.repos, tenantId, input.folderId);
     const id = randomUUID();
     const versionId = randomUUID();
+    const settings: NonNullable<CreateInput['settings']> = { ...(input.settings ?? {}) };
+    // P5-04: a new workflow is available in MCP when the tenant auto exposes new workflows (unless the input says)
+    if (settings.availableInMCP === undefined) {
+      const tenant = await this.repos.tenants.get(tenantId);
+      if ((tenant?.settings as TenantSettings | null | undefined)?.mcp?.autoExposeNewWorkflows === true) {
+        settings.availableInMCP = true;
+      }
+    }
     const content = {
       name: input.name,
       nodes: input.nodes,
       connections: input.connections,
-      settings: input.settings ?? {},
+      settings,
       pinData: input.pinData ?? {},
       stickyNotes: input.stickyNotes ?? [],
       nodeGroups: input.nodeGroups ?? [],
@@ -823,7 +832,7 @@ export class WorkflowService {
       ),
     ];
     return {
-      testUrl: `${base}/${webhookUrlBase(hooks[0].description)}-test/${tenant.slug}/${hooks[0].path}`,
+      testUrl: hookUrl(this.deps.config, hooks[0].description, true, tenant.slug, hooks[0].path),
       expiresAt: new Date(expiresAt).toISOString(),
       formTestUrls,
       ...(chatTestToken ? { chatTestToken } : {}),
@@ -936,7 +945,6 @@ export class WorkflowService {
   async webhookUrls(tenant: TenantRow, id: string) {
     const row = await this.get(tenant.id, id);
     const workflow = new Workflow(toDefinition(row), this.deps.nodeTypes);
-    const base = this.deps.config.baseUrl;
     const urls: Array<{ nodeName: string; method: string; testUrl: string; productionUrl: string }> = [];
     for (const node of sortByPosition(Object.values(workflow.nodes))) {
       const type = this.deps.nodeTypes.get(node.type);
@@ -946,8 +954,8 @@ export class WorkflowService {
           urls.push({
             nodeName: node.name,
             method: hook.method,
-            testUrl: `${base}/${webhookUrlBase(hook.description)}-test/${tenant.slug}/${hook.path}`,
-            productionUrl: `${base}/${webhookUrlBase(hook.description)}/${tenant.slug}/${hook.path}`,
+            testUrl: hookUrl(this.deps.config, hook.description, true, tenant.slug, hook.path),
+            productionUrl: hookUrl(this.deps.config, hook.description, false, tenant.slug, hook.path),
           });
         }
       } catch {

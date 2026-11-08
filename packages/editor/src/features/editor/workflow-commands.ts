@@ -7,6 +7,7 @@ import { workflowsApi } from '../../api/endpoints';
 import type { WorkflowDTO } from '../../api/types';
 import { downloadJson, safeFileName } from '../../lib/format';
 import { withFreshWebhookIds } from '../../lib/workflow-ops';
+import { refuseWhileReviewing } from '../../stores/builder-store';
 import { toast } from '../../stores/ui-store';
 import { toWorkflowBody, useWorkflowStore } from '../../stores/workflow-store';
 import type { EditorDeps } from './editor-actions';
@@ -37,6 +38,8 @@ export function addStickyAt(
 
 /** Save a copy of the open workflow (fresh webhook ids) and open it. */
 export async function duplicateWorkflow(deps: Pick<EditorDeps, 'navigate'>): Promise<WorkflowDTO | null> {
+  // P5-62: a copy would save the AI draft under review
+  if (refuseWhileReviewing()) return null;
   try {
     const s = useWorkflowStore.getState();
     const body = toWorkflowBody(s);

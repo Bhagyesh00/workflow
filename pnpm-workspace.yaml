@@ -7,5 +7,13 @@ onlyBuiltDependencies:
   - "@biomejs/biome"
 
 # bson 7.3.4 (2026-11-05) is under the 14-day rule; mongodb 7.7.0 accepts ^7.3.2. Drop when mongodb moves on.
+# S4 (owner 2026-11-08): the MCP test clients' newest transitives are under the 14-day rule, so they are pinned to releases
+# at least 14 days old (hono 4.13.14 clears 2026-11-08 07:19 UTC). Drop each line once the newer release is 14 days old.
 overrides:
   bson: 7.3.3
+  hono: 4.13.13
+  express-rate-limit: 8.7.1
+  '@hono/node-server': 2.1.5
+  jose: 6.2.13
+  qs: 6.16.1
+  encodeurl: 2.0.0

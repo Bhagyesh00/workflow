@@ -19,6 +19,8 @@ import { decodeCursor, encodeCursor } from '../http/pagination';
 import { nodeSchema } from '../http/schemas';
 import { currentPeriod, effectiveLimits, PLANS, type TenantSettings } from '../plans';
 import { isUuid } from '../repositories/util';
+import { isBuilderModelNode } from '../services/ai-builder/model';
+import { hasRole } from '../services/auth';
 
 const settingsPatch = z.object({
   brand: z
@@ -45,7 +47,26 @@ const settingsPatch = z.object({
     .optional(),
   /** P3-19 */
   workflowReviews: z.object({ enabled: z.boolean() }).optional(),
+  /**
+   * P5-09: the AI builder's model (admin, as the route); the credential must be this tenant's and the
+   * node type a chat model node (`isBuilderModelNode`); `null` removes the setup
+   */
+  ai: z
+    .object({
+      credentialId: z.string().min(1).max(64),
+      nodeType: z.string().min(1).max(128),
+      model: z.string().trim().min(1).max(256),
+      allowSendingParameterValues: z.boolean().optional(),
+    })
+    .nullable()
+    .optional(),
 });
+
+/** P5-09: whether the AI builder is on for this instance and set up (a model chosen) for this tenant */
+function aiBuilderFeature(enabled: boolean, settings: TenantSettings) {
+  const ai = settings.ai;
+  return { enabled, setup: Boolean(ai?.credentialId && ai.nodeType && ai.model) };
+}
 
 const optionsSchema = z.object({
   nodeType: z.string().min(1),
@@ -112,6 +133,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
           workflowValidation: true,
           webhookIdempotency: true,
           ssrfProtection: config.ssrf.enabled,
+          aiBuilder: aiBuilderFeature(config.ai.enabled, tenantSettings),
         },
         ...(usage
           ? { usage: { period: usage.period, executions: usage.executions, executionMs: usage.executionMs } }
@@ -120,6 +142,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         workflowReviews: { enabled: tenantSettings.workflowReviews?.enabled === true },
         /** P5-11: read only, the editor caps the "run in parallel" slider with it; PATCH never takes it */
         evaluationConcurrencyLimit: config.evaluationConcurrencyLimit,
+        /** P5-09: the builder's model setup, admins only (it names a credential) */
+        ...(auth && hasRole(auth.role, 'admin') && tenantSettings.ai ? { ai: tenantSettings.ai } : {}),
       },
     };
   });
@@ -128,6 +152,13 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
     const auth = requireRole(request, 'admin');
     const body = parse(settingsPatch, request.body);
     const current = (auth.tenant.settings ?? {}) as TenantSettings;
+    if (body.ai) {
+      const credential = await repos.credentials.get(auth.tenant.id, body.ai.credentialId);
+      if (!credential) throw ApiError.badRequest('The AI credential was not found in this workspace');
+      if (!isBuilderModelNode(registries.nodeTypes, body.ai.nodeType)) {
+        throw ApiError.badRequest(`"${body.ai.nodeType}" is not a chat model node type`);
+      }
+    }
     const next: TenantSettings = {
       ...current,
       ...(body.brand ? { brand: { ...(current.brand ?? {}), ...body.brand } } : {}),
@@ -135,7 +166,22 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
       ...(body.workflowReviews
         ? { workflowReviews: { ...(current.workflowReviews ?? {}), ...body.workflowReviews } }
         : {}),
+      ...(body.ai
+        ? {
+            ai: {
+              credentialId: body.ai.credentialId,
+              nodeType: body.ai.nodeType,
+              model: body.ai.model,
+              ...(body.ai.allowSendingParameterValues !== undefined
+                ? { allowSendingParameterValues: body.ai.allowSendingParameterValues }
+                : current.ai?.allowSendingParameterValues !== undefined
+                  ? { allowSendingParameterValues: current.ai.allowSendingParameterValues }
+                  : {}),
+            },
+          }
+        : {}),
     };
+    if (body.ai === null) delete next.ai;
     const tenant = await repos.tenants.updateSettings(auth.tenant.id, next as Record<string, unknown>);
     await repos.audit.add(auth.tenant.id, {
       userId: auth.user.id,
@@ -150,6 +196,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         timezone: next.timezone ?? null,
         autosaveEnabled: !config.autosaveDisabled,
         workflowReviews: { enabled: next.workflowReviews?.enabled === true },
+        aiBuilder: aiBuilderFeature(config.ai.enabled, next),
+        ...(next.ai ? { ai: next.ai } : {}),
       },
     };
   });

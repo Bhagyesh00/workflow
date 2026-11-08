@@ -49,6 +49,13 @@ export interface TenantSettings {
   limits?: Partial<PlanLimits>;
   /** P3-19: review requests before publish (admins turn it on; off by default) */
   workflowReviews?: { enabled?: boolean };
+  /**
+   * P5-09: the AI workflow builder's model (admins set it): a chat model credential of this tenant, the
+   * chat model node type that uses it (`isBuilderModelNode`) and the model id
+   */
+  ai?: { credentialId: string; nodeType: string; model: string; allowSendingParameterValues?: boolean };
+  /** P5-04, P5-14: the tenant MCP server (off by default), auto expose of new workflows, OAuth redirect allow list */
+  mcp?: { enabled?: boolean; autoExposeNewWorkflows?: boolean; allowedRedirectUris?: string[] };
 }
 
 export function effectiveLimits(plan: string, settings: TenantSettings | null | undefined): PlanLimits {

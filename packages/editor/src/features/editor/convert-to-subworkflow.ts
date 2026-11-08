@@ -15,6 +15,7 @@ import {
 import { errorMessage } from '../../api/client';
 import { workflowsApi } from '../../api/endpoints';
 import type { WorkflowDTO } from '../../api/types';
+import { refuseWhileReviewing } from '../../stores/builder-store';
 import { toast } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import type { EditorDeps } from './editor-actions';
@@ -84,6 +85,8 @@ export async function convertToSubWorkflow(
 ): Promise<ConvertToSubWorkflowResult | null> {
   const store = useWorkflowStore.getState();
   if (store.readOnly) return null;
+  // P5-62: converting creates and publishes a workflow from the AI draft under review
+  if (refuseWhileReviewing()) return null;
   const name = input.name.trim();
   const nameError = subWorkflowNameError(name);
   if (nameError) {

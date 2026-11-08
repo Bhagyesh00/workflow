@@ -4,6 +4,7 @@ import path from 'node:path';
 import fastifyStatic from '@fastify/static';
 import { sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { Config } from '../config';
 import type { ServerContext } from '../context';
 import { errorBody } from '../http/errors';
 
@@ -20,11 +21,22 @@ const RESERVED = [
   '/chat-widget',
   '/healthz',
   '/metrics',
+  // P5-03, P5-04, P5-14: MCP trigger, tenant MCP server, MCP OAuth server and its discovery documents
+  '/mcp',
+  '/mcp-test',
+  '/mcp-server',
+  '/mcp-oauth',
+  '/.well-known',
 ];
 
-function isReserved(url: string): boolean {
+/** RESERVED plus the MCP trigger endpoints of the config (`ENDPOINT_MCP`, `ENDPOINT_MCP_TEST`) */
+export function reservedPaths(config: Pick<Config, 'mcp'>): string[] {
+  return [...new Set([...RESERVED, `/${config.mcp.endpoint}`, `/${config.mcp.endpointTest}`])];
+}
+
+function isReserved(url: string, reserved: string[]): boolean {
   const pathname = url.split('?')[0];
-  return RESERVED.some((p) => pathname === p || pathname.startsWith(`${p}/`) || pathname.startsWith(`${p}?`));
+  return reserved.some((p) => pathname === p || pathname.startsWith(`${p}/`) || pathname.startsWith(`${p}?`));
 }
 
 export function registerHealthRoutes(app: FastifyInstance, ctx: ServerContext): void {
@@ -114,8 +126,9 @@ export async function registerEditor(app: FastifyInstance, ctx: ServerContext): 
     });
   }
 
+  const reserved = reservedPaths(ctx.config);
   const spa = async (request: FastifyRequest, reply: FastifyReply) => {
-    if ((request.method === 'GET' || request.method === 'HEAD') && !isReserved(request.url)) {
+    if ((request.method === 'GET' || request.method === 'HEAD') && !isReserved(request.url, reserved)) {
       const accept = String(request.headers.accept ?? '');
       if (!accept || accept.includes('text/html') || accept.includes('*/*')) {
         if (hasEditor) return reply.header('cache-control', 'no-cache').sendFile('index.html');

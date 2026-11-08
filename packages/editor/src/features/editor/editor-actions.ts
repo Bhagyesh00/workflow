@@ -20,6 +20,7 @@ import { executionsApi, workflowsApi } from '../../api/endpoints';
 import type { ActivationErrorDetail, WorkflowDTO, WorkflowPatchBody } from '../../api/types';
 import { deriveNodePorts, isTriggerDescription } from '../../lib/ports';
 import { getAncestors } from '../../lib/workflow-ops';
+import { refuseWhileReviewing, useBuilderStore } from '../../stores/builder-store';
 import { type RanDefinition, useRunStore } from '../../stores/run-store';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { toWorkflowBody, useWorkflowStore, type WorkflowState } from '../../stores/workflow-store';
@@ -40,6 +41,11 @@ export interface SaveOptions {
    * the header status with the retry countdown. A manual save keeps its toast.
    */
   onError?: (message: string) => void;
+  /**
+   * P5-62: this save is the AI builder's Accept (or the conflict dialog's "Keep mine" during a review).
+   * Without it, no save runs while a draft is under review (finding 2 of the S4 plan).
+   */
+  builderAccept?: boolean;
 }
 
 function patchBody(options: SaveOptions = {}): WorkflowPatchBody {
@@ -75,6 +81,8 @@ export function saveWorkflow(deps: EditorDeps, options: SaveOptions = {}): Promi
 async function doSave(deps: EditorDeps, options: SaveOptions): Promise<WorkflowDTO | null> {
   const store = useWorkflowStore.getState();
   if (store.readOnly) return null;
+  // a draft under review is saved only by Accept: Save, Ctrl S, listen, publish and the canvas chat stop here
+  if (!options.builderAccept && refuseWhileReviewing()) return null;
   const revision = store.revision;
   try {
     if (!store.meta.id) {
@@ -119,6 +127,8 @@ export async function reloadLatest(): Promise<void> {
   try {
     const dto = await workflowsApi.get(id);
     useWorkflowStore.getState().load(dto);
+    // their version replaces a builder draft: the review ends
+    useBuilderStore.getState().clearReview();
     useUiStore.getState().setSaveConflict(false);
     toast.info('Loaded the latest version');
   } catch (error) {
@@ -134,8 +144,12 @@ export async function overwriteLatest(deps: EditorDeps): Promise<WorkflowDTO | n
     const latest = await workflowsApi.get(store.meta.id);
     useWorkflowStore.setState((s) => ({ meta: { ...s.meta, versionId: latest.versionId } }));
     useUiStore.getState().setSaveConflict(false);
-    const saved = await saveWorkflow(deps);
-    if (saved) toast.success('Saved your version');
+    // during a review "Keep mine" accepts the draft
+    const saved = await saveWorkflow(deps, { builderAccept: useBuilderStore.getState().reviewing });
+    if (saved) {
+      useBuilderStore.getState().clearReview();
+      toast.success('Saved your version');
+    }
     return saved;
   } catch (error) {
     toast.error('Could not save the workflow', errorMessage(error));

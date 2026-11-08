@@ -74,6 +74,8 @@ export const settingsSchema = z
     executionTimeout: z.number().int().min(0).optional(),
     callerPolicy: z.enum(['any', 'none', 'sameProject', 'allowList']).optional(),
     callerIds: z.array(z.string()).optional(),
+    /** P5-03, P5-04: the workflow is reachable from MCP (tenant server tools, trigger) */
+    availableInMCP: z.boolean().optional(),
   })
   .loose();
 

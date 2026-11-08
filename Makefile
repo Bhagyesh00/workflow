@@ -42,6 +42,8 @@ start: export PORT := $(SERVER_PORT)
 start: export EDITOR_PORT := $(EDITOR_PORT)
 start: export WORKFLOW_SERVER_URL := http://localhost:$(SERVER_PORT)
 start: export BASE_URL := http://localhost:$(EDITOR_PORT)
+start: export MCP_BASE_URL := http://localhost:$(SERVER_PORT)
+start: export AI_ENABLED := true
 start: db-migrate
 	pnpm --filter @workflow/chat-widget build
 	pnpm --parallel --filter @workflow/server --filter @workflow/editor dev

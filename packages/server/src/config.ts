@@ -72,6 +72,12 @@ const PYTHON_BUILTINS_DENY = [
 const int = (fallback: number, min = 0) => z.coerce.number().int().min(min).default(fallback);
 /** a non-negative number that may have a fraction (e.g. 0.25 hours) */
 const num = (fallback: number) => z.coerce.number().min(0).default(fallback);
+/** one URL path segment (letters, digits, `-`, `_`), as the MCP trigger endpoints */
+const endpointSegment = (fallback: string) =>
+  z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/, 'must be one path segment of letters, digits, - or _')
+    .default(fallback);
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -159,6 +165,35 @@ const envSchema = z.object({
   DISABLE_PUBLIC_CHAT_TRIGGER: bool(false),
   /** P5-02: evaluation cases run at once per workspace; read as at most 10 */
   CONCURRENCY_EVALUATION_LIMIT: int(5, 1),
+  /** P5-04: the public origin MCP clients reach (default BASE_URL); its host is the only one MCP routes accept */
+  MCP_BASE_URL: z.url().optional(),
+  /** P5-04: when true, MCP access is set by MCP_ACCESS_ENABLED and the settings page cannot change it */
+  MCP_MANAGED_BY_ENV: bool(false),
+  MCP_ACCESS_ENABLED: bool(false),
+  /** P5-13: the build tools of the MCP server */
+  MCP_BUILDER_ENABLED: bool(true),
+  /** P5-14: OAuth clients per workspace */
+  MCP_MAX_REGISTERED_CLIENTS: int(5000, 1),
+  /** P5-03: path segments of the MCP Server Trigger's production and test URLs */
+  ENDPOINT_MCP: endpointSegment('mcp'),
+  ENDPOINT_MCP_TEST: endpointSegment('mcp-test'),
+  /** P5-03, P5-04: an MCP session unused this long is closed; the sweep runs every interval */
+  MCP_SERVER_SESSION_IDLE_TTL_MS: int(900000, 1),
+  MCP_SERVER_SESSION_SWEEP_INTERVAL_MS: int(300000, 1),
+  /** P5-04: requests per window and client on the MCP server */
+  MCP_SERVER_RATE_LIMIT: int(100, 1),
+  /** P5-14: requests per 5 minutes and client on each OAuth server route */
+  OAUTH_SERVER_REGISTER_RATE_LIMIT: int(10, 1),
+  OAUTH_SERVER_AUTHORIZE_RATE_LIMIT: int(50, 1),
+  OAUTH_SERVER_TOKEN_RATE_LIMIT: int(20, 1),
+  OAUTH_SERVER_REVOKE_RATE_LIMIT: int(30, 1),
+  OAUTH_SERVER_WELL_KNOWN_RATE_LIMIT: int(100, 1),
+  /** P5-09: the AI workflow builder; off by default as n8n (`make start` turns it on) */
+  AI_ENABLED: bool(false),
+  /** P5-09: the longest builder turn, seconds */
+  AI_TIMEOUT_MAX: int(3600, 1),
+  /** P5-09: when false, parameter values are not sent to the model */
+  AI_ALLOW_SENDING_PARAMETER_VALUES: bool(true),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -240,6 +275,39 @@ export interface Config {
   disablePublicChatTrigger: boolean;
   /** P5-02: CONCURRENCY_EVALUATION_LIMIT, 1 to 10 (MAX_EVALUATION_CONCURRENCY) */
   evaluationConcurrencyLimit: number;
+  /** P5-03, P5-04, P5-13, P5-14: MCP_*, ENDPOINT_MCP*, OAUTH_SERVER_* */
+  mcp: {
+    /** MCP_BASE_URL or baseUrl, without trailing slash; MCP URLs and the Host check use it */
+    baseUrl: string;
+    managedByEnv: boolean;
+    accessEnabled: boolean;
+    builderEnabled: boolean;
+    /** per workspace */
+    maxRegisteredClients: number;
+    /** ENDPOINT_MCP, one path segment */
+    endpoint: string;
+    /** ENDPOINT_MCP_TEST, one path segment */
+    endpointTest: string;
+    sessionIdleTtlMs: number;
+    sessionSweepMs: number;
+    /** MCP_SERVER_RATE_LIMIT */
+    rateLimit: number;
+    /** OAUTH_SERVER_*_RATE_LIMIT, requests per 5 minutes */
+    oauthRateLimits: {
+      register: number;
+      authorize: number;
+      token: number;
+      revoke: number;
+      wellKnown: number;
+    };
+  };
+  /** P5-09: AI_* */
+  ai: {
+    enabled: boolean;
+    /** AI_TIMEOUT_MAX, seconds */
+    timeoutMaxS: number;
+    allowSendingParameterValues: boolean;
+  };
 }
 
 export class ConfigError extends Error {
@@ -286,6 +354,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
   if (e.BINARY_DATA_MODE === 's3') {
     throw new ConfigError('BINARY_DATA_MODE=s3 is not supported by this build; use filesystem or inline');
+  }
+
+  if (e.ENDPOINT_MCP === e.ENDPOINT_MCP_TEST) {
+    throw new ConfigError('ENDPOINT_MCP and ENDPOINT_MCP_TEST must differ');
   }
 
   const encryptionKeys = e.ENCRYPTION_KEYS ? parseEncryptionKeys(e.ENCRYPTION_KEYS) : [devKey()];
@@ -380,6 +452,30 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     chatWidgetDist: path.resolve(e.CHAT_WIDGET_DIST ?? path.join(PACKAGE_DIR, '..', 'chat-widget', 'dist')),
     disablePublicChatTrigger: e.DISABLE_PUBLIC_CHAT_TRIGGER,
     evaluationConcurrencyLimit: Math.min(e.CONCURRENCY_EVALUATION_LIMIT, MAX_EVALUATION_CONCURRENCY),
+    mcp: {
+      baseUrl: e.MCP_BASE_URL ? e.MCP_BASE_URL.replace(/\/+$/, '') : baseUrl,
+      managedByEnv: e.MCP_MANAGED_BY_ENV,
+      accessEnabled: e.MCP_ACCESS_ENABLED,
+      builderEnabled: e.MCP_BUILDER_ENABLED,
+      maxRegisteredClients: e.MCP_MAX_REGISTERED_CLIENTS,
+      endpoint: e.ENDPOINT_MCP,
+      endpointTest: e.ENDPOINT_MCP_TEST,
+      sessionIdleTtlMs: e.MCP_SERVER_SESSION_IDLE_TTL_MS,
+      sessionSweepMs: e.MCP_SERVER_SESSION_SWEEP_INTERVAL_MS,
+      rateLimit: e.MCP_SERVER_RATE_LIMIT,
+      oauthRateLimits: {
+        register: e.OAUTH_SERVER_REGISTER_RATE_LIMIT,
+        authorize: e.OAUTH_SERVER_AUTHORIZE_RATE_LIMIT,
+        token: e.OAUTH_SERVER_TOKEN_RATE_LIMIT,
+        revoke: e.OAUTH_SERVER_REVOKE_RATE_LIMIT,
+        wellKnown: e.OAUTH_SERVER_WELL_KNOWN_RATE_LIMIT,
+      },
+    },
+    ai: {
+      enabled: e.AI_ENABLED,
+      timeoutMaxS: e.AI_TIMEOUT_MAX,
+      allowSendingParameterValues: e.AI_ALLOW_SENDING_PARAMETER_VALUES,
+    },
   };
 }
 

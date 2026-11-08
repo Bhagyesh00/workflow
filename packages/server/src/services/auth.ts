@@ -9,6 +9,7 @@ import type { Database } from '../db/client';
 import type { Role, TenantRow, UserRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import { createRepositories, type Repositories } from '../repositories';
+import { PUBLIC_API_AUDIENCE } from '../repositories/accounts';
 
 export const SESSION_COOKIE = 'wf_session';
 export const SESSION_TTL_MS = 14 * 86_400_000;
@@ -269,8 +270,17 @@ export class AuthService {
   // -------------------------------------------------------------------------------------------
   // API keys: `wfk_<prefix>_<secret>`
 
-  /** empty scopes = every route the user's role allows */
-  async createApiKey(tenantId: string, userId: string, name: string, scopes: string[] = []) {
+  /**
+   * empty scopes = every route the user's role allows; `audience` says where the key works
+   * (`public-api` for /api/v1, `mcp-server-api` for the tenant MCP server) and nowhere else
+   */
+  async createApiKey(
+    tenantId: string,
+    userId: string,
+    name: string,
+    scopes: string[] = [],
+    audience: string = PUBLIC_API_AUDIENCE,
+  ) {
     const prefix = randomBytes(4).toString('hex');
     const key = `wfk_${prefix}_${randomToken(32)}`;
     const row = await this.repos.apiKeys.create({
@@ -280,6 +290,7 @@ export class AuthService {
       prefix,
       keyHash: sha256(key),
       scopes,
+      audience,
     });
     return {
       id: row.id,
@@ -291,11 +302,14 @@ export class AuthService {
     };
   }
 
-  /** resolve an API key to its tenant, user and the user's current role */
-  async authenticateApiKey(key: string) {
+  /**
+   * resolve an API key to its tenant, user and the user's current role; a key of another audience
+   * (an MCP key on the public API, a public key on the MCP server) is refused like an unknown key
+   */
+  async authenticateApiKey(key: string, audience: string = PUBLIC_API_AUDIENCE) {
     if (!/^wfk_[0-9a-f]{8}_[A-Za-z0-9_-]{20,}$/.test(key)) return undefined;
     const row = await this.repos.apiKeys.getByHash(sha256(key));
-    if (!row) return undefined;
+    if (!row || row.audience !== audience) return undefined;
     const membership = await this.repos.memberships.get(row.tenantId, row.userId);
     if (!membership) return undefined;
     const [user, tenant] = await Promise.all([

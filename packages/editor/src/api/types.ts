@@ -3,6 +3,7 @@
  * contract exactly; the server is built against the same document.
  */
 import type {
+  BuilderMessage,
   Connections,
   CredentialTypeDescription,
   DataObject,
@@ -74,6 +75,8 @@ export interface Settings {
   workflowReviews: { enabled: boolean };
   /** read only (P5-11): how many evaluation cases run at once at most; the server caps a run to it */
   evaluationConcurrencyLimit?: number;
+  /** P5-09: the AI builder's model; admins only (the credential id never reaches a lower role) */
+  ai?: TenantAiSettings;
 }
 
 /** body of PATCH /settings (admin) */
@@ -81,6 +84,8 @@ export interface SettingsPatchBody {
   brand?: Partial<Brand>;
   timezone?: string;
   workflowReviews?: { enabled: boolean };
+  /** P5-09: the credential must be this workspace's, the node type a chat model node */
+  ai?: TenantAiSettings;
 }
 
 export interface Tag {
@@ -782,4 +787,148 @@ export interface TestRunStartBody {
 /** answer of POST /workflows/:workflowId/test-runs/new (202) */
 export interface TestRunStartResult {
   testRunId: string;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 5 S4: AI workflow builder (P5-09, P5-62..66) and MCP (P5-03, 04, 13, 14, 15)
+
+/** `features.aiBuilder` of GET /settings: `enabled` = AI_ENABLED, `setup` = a model is set for the workspace */
+export interface AiBuilderFeature {
+  enabled: boolean;
+  setup: boolean;
+}
+
+/** `TenantSettings.ai` (server plans.ts): the chat model node and credential the builder uses */
+export interface TenantAiSettings {
+  credentialId: string;
+  /** a chat model node type, `ai.lmChat...` */
+  nodeType: string;
+  model: string;
+  /** send parameter values (redacted, trimmed) to the model, not only the structure; default true */
+  allowSendingParameterValues?: boolean;
+}
+
+/** answer of POST /ai/sessions `{ workflowId }`: this user's chat on this workflow */
+export interface AiSessionDTO {
+  workflowId: string;
+  messages: BuilderMessage[];
+  /** the message whose version card is the accepted one (`accepted-version`) */
+  activeVersionCardId: string | null;
+  /** set by a version restore: the chat goes on from this message */
+  resumeAfterRestoreMessageId: string | null;
+}
+
+/** POST /ai/build/truncate-messages: removes this message and every later one */
+export interface AiTruncateBody {
+  workflowId: string;
+  messageId: string;
+}
+
+/** POST /ai/build/accepted-version: the version Accept saved */
+export interface AiAcceptedVersionBody {
+  workflowId: string;
+  versionId: string;
+}
+
+/** POST /ai/usage-settings (admin) */
+export interface AiUsageSettingsBody {
+  allowSendingParameterValues: boolean;
+}
+
+/** GET /mcp/settings (server services/mcp/settings.ts `McpSettingsDTO`) */
+export interface McpSettings {
+  mcpAccessEnabled: boolean;
+  /** set by the environment (MCP_MANAGED_BY_ENV): the page shows it read only */
+  managedByEnv: boolean;
+  autoExposeNewWorkflows: boolean;
+}
+
+/** PATCH /mcp/settings (admin) */
+export interface McpSettingsPatchBody {
+  mcpAccessEnabled?: boolean;
+  autoExposeNewWorkflows?: boolean;
+}
+
+/** GET /mcp/api-key and POST /mcp/api-key/rotate: the caller's own MCP key (server `McpApiKeyDTO`) */
+export interface McpApiKey {
+  id: string;
+  name: string;
+  prefix: string;
+  /** the whole key only in the reply that created it; else `wfk_<prefix>_...` */
+  key: string;
+  /** true when `key` is the whole key, shown this once */
+  revealed: boolean;
+  createdAt: string;
+}
+
+/** a row of GET /mcp/workflows (the workflows the caller can edit) */
+export interface McpWorkflowSummary {
+  id: string;
+  name: string;
+  active: boolean;
+  availableInMCP: boolean;
+  folderId: string | null;
+  updatedAt: string;
+}
+
+/** GET /mcp/workflows query */
+export interface McpWorkflowsQuery {
+  search?: string;
+  folderId?: string;
+}
+
+/** PATCH /mcp/workflows/toggle-access (admin); `workflowIds` at most 100 */
+export interface McpToggleAccessBody {
+  availableInMCP: boolean;
+  workflowIds?: string[];
+  folderId?: string;
+  allWorkflows?: boolean;
+}
+
+/** answer of PATCH /mcp/workflows/toggle-access */
+export interface McpToggleAccessResult {
+  updatedCount: number;
+}
+
+/** GET and PATCH /mcp/oauth/allowed-redirect-uris (admin) */
+export interface McpRedirectUris {
+  allowedRedirectUris: string[];
+}
+
+/** a row of GET /mcp/oauth-clients (admin) */
+export interface McpOAuthClient {
+  id: string;
+  name: string;
+  redirectUris: string[];
+  createdAt: string;
+}
+
+/** GET /mcp/instance-stats (admin) */
+export interface McpInstanceStats {
+  registeredClients: number;
+  maxRegisteredClients: number;
+}
+
+/** GET /consent/details?flow= (server services/mcp/oauth/consent.ts `McpConsentDetails`) */
+export interface McpConsentDetails {
+  clientName: string;
+  /** the workspace that grants access */
+  tenantName: string;
+  /** the server or trigger URL the token is bound to */
+  resource: string;
+  scopes: string[];
+  /** the host the browser goes back to */
+  redirectHost: string;
+}
+
+/** POST /consent/approve */
+export interface McpConsentDecisionBody {
+  flow: string;
+  approved: boolean;
+  scopes?: string[];
+}
+
+/** answer of POST /consent/approve: where the browser goes (checked before it navigates) */
+export interface McpConsentResult {
+  redirectUrl: string;
 }

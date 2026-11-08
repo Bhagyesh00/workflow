@@ -745,6 +745,7 @@ export function createWebhookContext(
     },
     verifyFormToken: (token) => services.formTokens?.verify(token) ?? null,
     getFormAuth: () => services.formAuth,
+    getMcpAuth: () => services.mcpAuth,
     async getInputConnectionData(type, itemIndex) {
       if (!callbacks) throw new NodeOperationError(node, 'Sub-nodes are not available here');
       return callbacks.getInputConnectionData(type, itemIndex);

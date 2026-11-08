@@ -265,39 +265,81 @@ export class InvitationRepository {
   }
 }
 
+/** what a key list shows: never the hash */
+const apiKeyListColumns = {
+  id: apiKeys.id,
+  name: apiKeys.name,
+  prefix: apiKeys.prefix,
+  scopes: apiKeys.scopes,
+  audience: apiKeys.audience,
+  lastUsedAt: apiKeys.lastUsedAt,
+  createdAt: apiKeys.createdAt,
+};
+
+/** P5-04: the audience of a key on the API keys page; MCP keys use `mcp-server-api` */
+export const PUBLIC_API_AUDIENCE = 'public-api';
+
 export class ApiKeyRepository {
   constructor(private readonly db: DbOrTx) {}
 
+  /** `audience` defaults to `public-api` in the database when the input leaves it out (P5-04) */
   async create(input: typeof apiKeys.$inferInsert) {
     const [row] = await this.db.insert(apiKeys).values(input).returning();
     return row;
   }
 
-  async list(tenantId: string, userId: string) {
+  /** the user's keys of one audience; the API keys page lists `public-api` only, so an MCP key never shows */
+  async list(tenantId: string, userId: string, audience: string = PUBLIC_API_AUDIENCE) {
     return this.db
-      .select({
-        id: apiKeys.id,
-        name: apiKeys.name,
-        prefix: apiKeys.prefix,
-        scopes: apiKeys.scopes,
-        lastUsedAt: apiKeys.lastUsedAt,
-        createdAt: apiKeys.createdAt,
-      })
+      .select(apiKeyListColumns)
       .from(apiKeys)
-      .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId)))
+      .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId), eq(apiKeys.audience, audience)))
       .orderBy(desc(apiKeys.createdAt));
   }
 
-  async delete(tenantId: string, userId: string, id: string): Promise<boolean> {
+  /** deletes one key of the given audience, so the API keys page cannot delete an MCP key */
+  async delete(
+    tenantId: string,
+    userId: string,
+    id: string,
+    audience: string = PUBLIC_API_AUDIENCE,
+  ): Promise<boolean> {
     if (!isUuid(id)) return false;
     const rows = await this.db
       .delete(apiKeys)
-      .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId), eq(apiKeys.id, id)))
+      .where(
+        and(
+          eq(apiKeys.tenantId, tenantId),
+          eq(apiKeys.userId, userId),
+          eq(apiKeys.id, id),
+          eq(apiKeys.audience, audience),
+        ),
+      )
       .returning({ id: apiKeys.id });
     return rows.length > 0;
   }
 
-  /** lookup by sha256(key); the hash is the capability */
+  /** P5-04: the user's newest key of one audience (the MCP key: one per user), without its hash */
+  async getForUser(tenantId: string, userId: string, audience: string) {
+    const [row] = await this.db
+      .select(apiKeyListColumns)
+      .from(apiKeys)
+      .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId), eq(apiKeys.audience, audience)))
+      .orderBy(desc(apiKeys.createdAt))
+      .limit(1);
+    return row;
+  }
+
+  /** P5-04: deletes every key of the user in one audience (MCP key rotate and revoke); true when any went */
+  async deleteForUser(tenantId: string, userId: string, audience: string): Promise<boolean> {
+    const rows = await this.db
+      .delete(apiKeys)
+      .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId), eq(apiKeys.audience, audience)))
+      .returning({ id: apiKeys.id });
+    return rows.length > 0;
+  }
+
+  /** lookup by sha256(key); the hash is the capability. The row holds `audience`: the caller checks it */
   async getByHash(keyHash: string) {
     const [row] = await this.db.select().from(apiKeys).where(eq(apiKeys.keyHash, keyHash));
     return row;

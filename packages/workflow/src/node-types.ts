@@ -321,6 +321,11 @@ export interface WebhookContext extends BaseContext {
   verifyFormToken(token: string): DataObject | null;
   /** n8n user auth for forms; undefined where the host has none */
   getFormAuth(): FormAuthHelper | undefined;
+  /**
+   * MCP Server Trigger auth (Bearer tokens of the workspace's MCP OAuth server); undefined where the
+   * host has none. Optional so hand-built contexts stay valid.
+   */
+  getMcpAuth?(): McpAuthHelper | undefined;
   /** resolves sub-nodes (memory, tools...) attached to the webhook node via `type`, as in `ExecuteContext` */
   getInputConnectionData(type: ConnectionType, itemIndex: number): Promise<unknown>;
   /** the Chat Trigger of this workflow (this node when it is one); null when there is none */
@@ -358,6 +363,16 @@ export interface FormAuthHelper {
   verifyToken(token: string): Promise<FormUser | null>;
   /** whether the user may run this workflow */
   canExecute(userId: string, workflowId: string): Promise<boolean>;
+}
+
+/** auth of the MCP Server Trigger: OAuth Bearer tokens issued for `resource` (the trigger's URL) */
+export interface McpAuthHelper {
+  /** the user and workspace role of a valid token for `resource`; null when the token is not valid */
+  verifyAccessToken(token: string, resource: string): Promise<{ user: FormUser; role: string } | null>;
+  /** whether the user may run this workflow */
+  canExecute(userId: string, workflowId: string): Promise<boolean>;
+  /** the `WWW-Authenticate` value of a 401 for `resource` (Bearer with `resource_metadata`) */
+  challenge(resource: string): string;
 }
 
 export interface WebhookResponseData {
