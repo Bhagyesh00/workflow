@@ -12,6 +12,7 @@ import { createLogger } from '../src/logger';
 import {
   createMcpSessionStore,
   MCP_TENANT_SESSION_CAP,
+  McpSessionLimitError,
   type McpSessionRecord,
   type McpSessionStore,
 } from '../src/services/mcp-sessions';
@@ -112,6 +113,34 @@ describe('memory store', () => {
     expect(await store.get(other)).toBeDefined();
   });
 
+  it('never evicts a held session (a call in flight, an open stream); all held refuses a new one', async () => {
+    store = createMcpSessionStore({ config, logger });
+    const ids: string[] = [];
+    for (let i = 0; i < MCP_TENANT_SESSION_CAP; i++) ids.push(await store.create(record()));
+    // the least recently used one has a call running
+    store.hold(ids[0]);
+    await store.create(record());
+    expect(await store.get(ids[0])).toBeDefined();
+    expect(await store.get(ids[1])).toBeUndefined();
+    // two holds need two releases
+    store.hold(ids[0]);
+    store.release(ids[0]);
+    await store.create(record());
+    expect(await store.get(ids[0])).toBeDefined();
+    expect(await store.get(ids[2])).toBeUndefined();
+    store.release(ids[0]);
+    await store.create(record());
+    expect(await store.get(ids[0])).toBeUndefined();
+    // every session held: nothing may go, so the new one is refused
+    await store.close();
+    store = createMcpSessionStore({ config, logger });
+    const held: string[] = [];
+    for (let i = 0; i < MCP_TENANT_SESSION_CAP; i++) held.push(await store.create(record()));
+    for (const id of held) store.hold(id);
+    await expect(store.create(record())).rejects.toBeInstanceOf(McpSessionLimitError);
+    expect(await store.create(record({ tenantId: 't2' }))).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
   it('counts a tenant SSE streams', async () => {
     store = createMcpSessionStore({ config, logger });
     await store.create(record({ transport: 'sse' }));
@@ -155,6 +184,33 @@ describe('Redis store (queue mode)', () => {
     expect(await b.delete(id)).toBe(true);
     expect(await a.get(id)).toBeUndefined();
     expect(await a.delete(id)).toBe(false);
+  });
+
+  it('a touch never brings back a session deleted while it ran', async () => {
+    const store = createMcpSessionStore({ config, logger, redis });
+    const tenant = randomUUID();
+    const id = await store.create(record({ tenantId: tenant, transport: 'sse' }));
+    // the stream closes on another main between the touch's read and its write
+    const get = redis.get.bind(redis);
+    const spy = vi.spyOn(redis, 'get').mockImplementationOnce(async (key) => {
+      const raw = await get(key);
+      await redis.del(key);
+      await redis.zrem(`${prefix}:mcp-streams:${tenant}`, id);
+      return raw;
+    });
+    try {
+      expect(await store.touch(id)).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await store.get(id)).toBeUndefined();
+    expect(await store.countStreams(tenant)).toBe(0);
+    // a live session is still touched, its stream entry kept
+    const live = await store.create(record({ tenantId: tenant, transport: 'sse' }));
+    expect(await store.touch(live)).toBe(true);
+    expect(await redis.pttl(`${prefix}:mcp-session:${live}`)).toBeGreaterThan(0);
+    expect(await store.countStreams(tenant)).toBe(1);
+    await store.delete(live);
   });
 
   it('expires idle sessions and counts streams per tenant', async () => {

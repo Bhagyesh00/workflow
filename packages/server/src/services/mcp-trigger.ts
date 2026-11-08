@@ -5,7 +5,11 @@
  * the answers that need no run: `initialize`, `server/discover`, `tools/list`), then owns sessions
  * (`Mcp-Session-Id`, legacy SSE with `?sessionId=` and bus channel `mcp-session:<id>`), `ping`, notifications
  * (202), DELETE, and `tools/call`: `claim()`, then one execution with `{ ...baseItem, mcpToolCall, mcpMessageId }`
- * whose `lastNodeOutput` answers the POST. Every reply carries `mcpCorsHeaders`.
+ * whose `lastNodeOutput` answers the POST. Every reply carries `mcpCorsHeaders`. For `tools/list` the node is called
+ * a second time under `MCP_TOOLS_LIST_HOOK` with sub-nodes that get the base item `{ body, headers, user? }`, the
+ * item a tool sees at a call (n8n's tool input). A POST of a legacy SSE session gets 202 once its session, auth and
+ * subject are checked; its answer (or a JSON-RPC error) goes out on the stream when ready, so a long tool run never
+ * holds the POST open.
  *
  * Revisions: a 2025 client opens a session with `initialize` (Streamable HTTP) or the GET stream (legacy SSE); a
  * 2026-07-28 client sends `server/discover` and requests with a `_meta` envelope and routing headers, without a
@@ -32,6 +36,7 @@ import {
   type JsonRpcResponse,
   MCP_ERRORS,
   MCP_LEGACY_REVISIONS,
+  MCP_TOOLS_LIST_HOOK,
   type McpAuthHelper,
   type McpCallResult,
   mcpCompleteResult,
@@ -52,7 +57,7 @@ import { ApiError } from '../http/errors';
 import { mcpCorsHeaders } from '../http/mcp-http';
 import type { ExecutionOutcome, StartedExecution } from './executions';
 import { createMcpAuthHelper } from './mcp/oauth/tokens';
-import type { McpSessionRecord, McpSessionStore } from './mcp-sessions';
+import { McpSessionLimitError, type McpSessionRecord, type McpSessionStore } from './mcp-sessions';
 import type { NodeWebhook } from './webhook-paths';
 import { fromWebhookResponse, header, type IncomingWebhook, WebhookBodyError, type WebhookReply } from './webhooks';
 
@@ -104,6 +109,7 @@ const TEXTS = {
   tooLarge: 'Request body too large',
   parse: 'Parse error',
   tooManyStreams: 'Too many open MCP streams for this workspace',
+  tooManySessions: 'Too many open MCP sessions for this workspace',
   internal: 'Internal error',
   timedOut: 'The workflow did not respond in time',
   noResult: 'The tool gave no result',
@@ -119,6 +125,9 @@ const rpc = (statusCode: number, body: JsonRpcResponse, headers: Record<string, 
 });
 
 const accepted = (): WebhookReply => ({ statusCode: 202, headers: {} });
+
+/** what a POST's message gets: a reply sent as it is (a used-up test URL), or its answer (none for a notification) */
+type Answered = { reply: WebhookReply } | { answer?: JsonRpcResponse };
 
 /** the tool name a node gets (nodes-ai `toToolName`): what maps a called tool back to its sub-node */
 function toolNameOf(name: string): string {
@@ -154,22 +163,27 @@ export class McpTriggerService {
     try {
       reply = await this.route(input);
     } catch (error) {
-      // no message text in the log: it can hold a caller's data
-      this.deps.logger.warn(
-        {
-          tenantId: input.tenant.id,
-          workflowId: input.workflowId,
-          node: input.node.name,
-          error: (error as Error)?.name,
-        },
-        'MCP trigger request failed',
-      );
-      // details help while testing in the editor; production callers get the generic JSON-RPC error
-      const message =
-        input.mode === 'manual' ? redactSecrets((error as Error)?.message || TEXTS.internal) : TEXTS.internal;
-      reply = rpc(500, mcpError(null, MCP_ERRORS.INTERNAL, message));
+      reply = rpc(500, mcpError(null, MCP_ERRORS.INTERNAL, this.failure(input, error)));
     }
     return { ...reply, headers: { ...cors, ...reply.headers } };
+  }
+
+  /** logs a failed request and returns the text its caller gets */
+  private failure(input: McpTriggerRequest, error: unknown): string {
+    // no message text in the log: it can hold a caller's data
+    this.deps.logger.warn(
+      {
+        tenantId: input.tenant.id,
+        workflowId: input.workflowId,
+        node: input.node.name,
+        error: (error as Error)?.name,
+      },
+      'MCP trigger request failed',
+    );
+    // details help while testing in the editor; production callers get the generic JSON-RPC error
+    return input.mode === 'manual'
+      ? redactSecrets((error as Error)?.message || TEXTS.internal)
+      : TEXTS.internal;
   }
 
   /** ends held SSE streams and bus subscriptions */
@@ -206,11 +220,14 @@ export class McpTriggerService {
     });
   }
 
-  /** the node's `webhook`: auth, and for `tools/list` only the connected tools (sub-nodes), closed in `finally` */
+  /**
+   * the node's `webhook`: auth and the answers that need no run. With `toolInput` (the base item of a `tools/list`
+   * request) it runs under `MCP_TOOLS_LIST_HOOK` with sub-nodes that see that item, closed in `finally`.
+   */
   private async callNode(
     input: McpTriggerRequest,
     request: WebhookRequest,
-    withTools: boolean,
+    toolInput?: DataObject,
   ): Promise<WebhookResponseData> {
     const ctx = this.deps.context();
     const workflow = new Workflow(input.definition, ctx.registries.nodeTypes);
@@ -230,12 +247,10 @@ export class McpTriggerService {
       evaluator: this.evaluator,
       signal: AbortSignal.timeout(60_000),
     };
-    // at list time a tool sees the request as `$json.body`, the same as the base item of a call
-    const subNodes = withTools
-      ? createWebhookSubNodes(deps, { json: { body: (request.body ?? {}) as DataObject[keyof DataObject] } })
-      : undefined;
+    const subNodes = toolInput ? createWebhookSubNodes(deps, { json: toolInput }) : undefined;
+    const webhookName = toolInput ? MCP_TOOLS_LIST_HOOK : input.hook.webhookName;
     try {
-      return await type.webhook(createWebhookContext(deps, request, input.hook.webhookName, subNodes?.callbacks));
+      return await type.webhook(createWebhookContext(deps, request, webhookName, subNodes?.callbacks));
     } finally {
       await subNodes?.close();
     }
@@ -305,9 +320,15 @@ export class McpTriggerService {
       return rpc(400, mcpError(id, MCP_ERRORS.INVALID_REQUEST, TEXTS.noSession));
     }
 
-    const result = await this.callNode(input, request, parsed.kind === 'request' && message?.method === 'tools/list');
-    const refusal = this.refusalOf(result);
+    let result = await this.callNode(input, request);
+    let refusal = this.refusalOf(result);
     if (refusal) return refusal;
+    if (parsed.kind === 'request' && parsed.message.method === 'tools/list' && result.workflowData) {
+      // the tools see the request's base item, as at a call; the node checks auth again under the list hook
+      result = await this.callNode(input, request, (result.workflowData[0]?.[0]?.json ?? {}) as DataObject);
+      refusal = this.refusalOf(result);
+      if (refusal) return refusal;
+    }
     const subject = this.subjectOf(result);
     if (session && sessionId && session.subjectHash !== subject) {
       return session.transport === 'sse'
@@ -315,45 +336,94 @@ export class McpTriggerService {
         : rpc(404, mcpError(id, MCP_ERRORS.INVALID_REQUEST, TEXTS.sessionNotFound));
     }
     if (sessionId) await sessions.touch(sessionId);
+    const request_ = parsed.kind === 'request' ? parsed.message : undefined;
 
-    let answer: JsonRpcResponse | undefined;
-    if (result.webhookResponse && !result.workflowData) {
-      answer = result.webhookResponse.body as JsonRpcResponse;
-    } else if (parsed.kind === 'request') {
-      const base = (result.workflowData?.[0]?.[0]?.json ?? {}) as DataObject;
-      const request_ = parsed.message;
-      if (request_.method === 'ping') {
-        answer = mcpResult(id, modern ? mcpCompleteResult(request_.method, {}) : {});
-      } else if (request_.method === 'tools/call') {
-        const call = await this.callTool(input, request_, base, sessionId, modern);
-        if ('reply' in call) return call.reply;
-        answer = call.answer;
-      } else {
-        answer = mcpError(id, MCP_ERRORS.METHOD_NOT_FOUND, TEXTS.methodNotFound);
-      }
+    if (session?.transport === 'sse' && sessionId) {
+      // the stream carries the answer: 202 now, so a long tool run never holds the POST open
+      void this.answerOnStream(input, sessionId, id, () =>
+        this.answerOf(input, result, request_, sessionId, modern),
+      );
+      return accepted();
     }
+    const answered = await this.answerOf(input, result, request_, sessionId, modern);
+    if ('reply' in answered) return answered.reply;
+    const { answer } = answered;
 
     // initialize opens a Streamable HTTP session (an SSE session already exists)
     if (initialize && !session && answer && !answer.error) {
       const negotiated = (answer.result as DataObject | undefined)?.protocolVersion;
-      const newId = await sessions.create({
-        tenantId: input.tenant.id,
-        workflowId: input.workflowId,
-        nodeName: input.node.name,
-        subjectHash: subject,
-        protocolVersion: typeof negotiated === 'string' ? negotiated : MCP_LEGACY_REVISIONS[0],
-        transport: 'http',
-      });
+      let newId: string;
+      try {
+        newId = await sessions.create({
+          tenantId: input.tenant.id,
+          workflowId: input.workflowId,
+          nodeName: input.node.name,
+          subjectHash: subject,
+          protocolVersion: typeof negotiated === 'string' ? negotiated : MCP_LEGACY_REVISIONS[0],
+          transport: 'http',
+        });
+      } catch (error) {
+        if (!(error instanceof McpSessionLimitError)) throw error;
+        return rpc(429, mcpError(id, MCP_ERRORS.INTERNAL, TEXTS.tooManySessions));
+      }
       return rpc(200, answer, { 'mcp-session-id': newId });
     }
     // notifications and a client's responses need no answer
     if (!answer) return accepted();
-    if (session?.transport === 'sse' && sessionId) {
-      // the main holding the stream writes it; the message is the answer only
-      await this.deps.context().bus.publish(mcpSessionChannel(sessionId), { message: answer });
-      return accepted();
-    }
     return rpc(200, answer);
+  }
+
+  /** the answer of a message the node did not answer itself: ping, a tool call, or method not found */
+  private async answerOf(
+    input: McpTriggerRequest,
+    result: WebhookResponseData,
+    message: JsonRpcRequest | undefined,
+    sessionId: string | undefined,
+    modern: boolean,
+  ): Promise<Answered> {
+    if (result.webhookResponse && !result.workflowData) {
+      return { answer: result.webhookResponse.body as JsonRpcResponse };
+    }
+    if (!message) return {};
+    if (message.method === 'ping') {
+      return { answer: mcpResult(message.id, modern ? mcpCompleteResult(message.method, {}) : {}) };
+    }
+    if (message.method === 'tools/call') {
+      const base = (result.workflowData?.[0]?.[0]?.json ?? {}) as DataObject;
+      return this.callTool(input, message, base, sessionId, modern);
+    }
+    return { answer: mcpError(message.id, MCP_ERRORS.METHOD_NOT_FOUND, TEXTS.methodNotFound) };
+  }
+
+  /**
+   * An SSE POST's answer, sent after its 202: the main holding the stream writes it (the bus message is the answer
+   * only). A failure or a used-up test URL goes out as a JSON-RPC error. Never throws.
+   */
+  private async answerOnStream(
+    input: McpTriggerRequest,
+    sessionId: string,
+    id: JsonRpcId | null,
+    work: () => Promise<Answered>,
+  ): Promise<void> {
+    let answer: JsonRpcResponse | undefined;
+    try {
+      const answered = await work();
+      if ('reply' in answered) {
+        // the used-up test URL's text names the URL
+        const text = (answered.reply.body as { error?: { message?: unknown } } | undefined)?.error?.message;
+        answer = mcpError(id, MCP_ERRORS.INTERNAL, typeof text === 'string' ? text : TEXTS.internal);
+      } else {
+        answer = answered.answer;
+      }
+    } catch (error) {
+      answer = mcpError(id, MCP_ERRORS.INTERNAL, this.failure(input, error));
+    }
+    if (!answer) return;
+    try {
+      await this.deps.context().bus.publish(mcpSessionChannel(sessionId), { message: answer });
+    } catch (error) {
+      this.failure(input, error);
+    }
   }
 
   // -------------------------------------------------------------------------------------------
@@ -365,7 +435,7 @@ export class McpTriggerService {
     base: DataObject,
     sessionId: string | undefined,
     modern: boolean,
-  ): Promise<{ reply: WebhookReply } | { answer: JsonRpcResponse }> {
+  ): Promise<Answered> {
     const params = message.params ?? {};
     const toolName = params.name;
     const args = params.arguments === undefined ? {} : params.arguments;
@@ -391,7 +461,8 @@ export class McpTriggerService {
         mcpMessageId: message.id,
       },
     };
-    // a running call keeps its session alive past the idle TTL
+    // a running call keeps its session alive past the idle TTL, and the tenant cap never evicts it
+    if (sessionId) this.deps.sessions.hold(sessionId);
     const keepAlive = sessionId
       ? setInterval(() => {
           this.deps.sessions.touch(sessionId).catch(() => {});
@@ -444,6 +515,7 @@ export class McpTriggerService {
       return done(result as unknown as McpCallResult);
     } finally {
       if (keepAlive) clearInterval(keepAlive);
+      if (sessionId) this.deps.sessions.release(sessionId);
     }
   }
 
@@ -469,20 +541,28 @@ export class McpTriggerService {
 
   private async openStream(input: McpTriggerRequest, request: WebhookRequest): Promise<WebhookReply> {
     const { sessions } = this.deps;
-    const result = await this.callNode(input, request, false);
+    const result = await this.callNode(input, request);
     const refusal = this.refusalOf(result);
     if (refusal) return refusal;
     if ((await sessions.countStreams(input.tenant.id)) >= MCP_TENANT_STREAM_CAP) {
       return rpc(429, mcpError(null, MCP_ERRORS.INTERNAL, TEXTS.tooManyStreams));
     }
-    const sessionId = await sessions.create({
-      tenantId: input.tenant.id,
-      workflowId: input.workflowId,
-      nodeName: input.node.name,
-      subjectHash: this.subjectOf(result),
-      protocolVersion: SSE_REVISION,
-      transport: 'sse',
-    });
+    let sessionId: string;
+    try {
+      sessionId = await sessions.create({
+        tenantId: input.tenant.id,
+        workflowId: input.workflowId,
+        nodeName: input.node.name,
+        subjectHash: this.subjectOf(result),
+        protocolVersion: SSE_REVISION,
+        transport: 'sse',
+      });
+    } catch (error) {
+      if (!(error instanceof McpSessionLimitError)) throw error;
+      return rpc(429, mcpError(null, MCP_ERRORS.INTERNAL, TEXTS.tooManySessions));
+    }
+    // an open stream is never evicted by the tenant cap
+    sessions.hold(sessionId);
     const stream = new PassThrough();
     const write = (chunk: string) => {
       if (!stream.destroyed && !stream.writableEnded) stream.write(chunk);
@@ -505,6 +585,7 @@ export class McpTriggerService {
       clearInterval(keepAlive);
       unsubscribe?.();
       this.streams.delete(sessionId);
+      sessions.release(sessionId);
       sessions.delete(sessionId).catch(() => {});
       if (!stream.destroyed) stream.end();
     };
@@ -539,7 +620,7 @@ export class McpTriggerService {
   // DELETE: end a Streamable HTTP session
 
   private async endSession(input: McpTriggerRequest, request: WebhookRequest): Promise<WebhookReply> {
-    const result = await this.callNode(input, request, false);
+    const result = await this.callNode(input, request);
     const refusal = this.refusalOf(result);
     if (refusal) return refusal;
     const sessionId = header(request.headers, 'mcp-session-id');

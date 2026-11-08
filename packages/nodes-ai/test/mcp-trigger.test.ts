@@ -1,6 +1,7 @@
 /**
  * P5-03 MCP Server Trigger, node side: the protocol helpers of shared/mcp-server.ts, the node's `webhook`
- * (auth, `initialize`, `server/discover`, `tools/list` with sub-nodes, the base item of every other message)
+ * (auth, `initialize`, `server/discover`, `tools/list` under MCP_TOOLS_LIST_HOOK with sub-nodes that see the base item,
+ * the base item of every other message)
  * and its `execute` (one tool call inside a run, arguments as data).
  */
 import { type ContextDeps, createWebhookContext, createWebhookSubNodes, NodeTypes } from '@workflow/core';
@@ -10,6 +11,8 @@ import {
   ExpressionEvaluator,
   MCP_ERRORS,
   MCP_LATEST_REVISION,
+  MCP_TOOLS_LIST_HOOK,
+  type McpAuthHelper,
   type NodeType,
   ToolSuspension,
   type WebhookRequest,
@@ -23,6 +26,9 @@ import { callMcpTool, MCP_REDACTED, mcpToolDescriptors, redactMcpHeaders } from 
 import { connect, node, run, services, toolNodeTypes } from './harness';
 
 /** a tool that answers with the arguments it received, so a test sees exactly what reached it */
+/** the items the echo tool's sub-node got, in order: what a tool sees as `$json` */
+const supplied: DataObject[] = [];
+
 const echoToolNode: NodeType = {
   description: {
     name: 'test.echoTool',
@@ -38,6 +44,7 @@ const echoToolNode: NodeType = {
   },
   async supplyData(ctx) {
     const item = ctx.getInputData()[0]?.json ?? {};
+    supplied.push(item);
     return {
       response: {
         kind: 'tool',
@@ -93,7 +100,7 @@ const CREDS = {
 async function callWebhook(
   parameters: DataObject,
   request: Partial<WebhookRequest>,
-  options: { webhookName?: string; subNodes?: boolean } = {},
+  options: { webhookName?: string; toolInput?: DataObject; mcpAuth?: McpAuthHelper } = {},
 ): Promise<WebhookResponseData> {
   const triggerNode = trigger(parameters);
   const workflow = new Workflow(
@@ -103,7 +110,7 @@ async function callWebhook(
   const deps: ContextDeps = {
     workflow,
     node: triggerNode,
-    services: services({ creds: CREDS, mode: 'webhook', nodeTypes: types }),
+    services: services({ creds: CREDS, mode: 'webhook', nodeTypes: types, mcpAuth: options.mcpAuth }),
     evaluator: new ExpressionEvaluator(),
     signal: new AbortController().signal,
   };
@@ -116,10 +123,11 @@ async function callWebhook(
     body: {},
     ...request,
   };
-  const body = full.body;
-  const subNodes = options.subNodes ? createWebhookSubNodes(deps, { json: { body } as DataObject }) : undefined;
+  // the server's second call for tools/list: sub-nodes that see the request's base item
+  const subNodes = options.toolInput ? createWebhookSubNodes(deps, { json: options.toolInput }) : undefined;
+  const webhookName = options.toolInput ? MCP_TOOLS_LIST_HOOK : (options.webhookName ?? 'default');
   try {
-    const ctx = createWebhookContext(deps, full, options.webhookName ?? 'default', subNodes?.callbacks);
+    const ctx = createWebhookContext(deps, full, webhookName, subNodes?.callbacks);
     return await McpTriggerNode.webhook!(ctx);
   } finally {
     await subNodes?.close();
@@ -131,6 +139,22 @@ const rpc = (method: string, params?: DataObject, id: number | string = 1) => ({
   id,
   method,
   ...(params ? { params } : {}),
+});
+
+/** the JSON-RPC result of the node's own answer */
+const resultOf = (response: WebhookResponseData) =>
+  ((response.webhookResponse?.body ?? {}) as { result?: DataObject }).result ?? {};
+
+/** the base item the node hands on */
+const baseOf = (response: WebhookResponseData) => response.workflowData?.[0]?.[0]?.json ?? {};
+
+const USER = { id: 'u1', email: 'ada@example.com', firstName: 'Ada', lastName: 'Lovelace' };
+
+/** a host's workspace sign-in that accepts one token for one resource */
+const signIn = (allowed = true): McpAuthHelper => ({
+  verifyAccessToken: async (token) => (token === 'good-token' ? { user: USER, role: 'editor' } : null),
+  canExecute: async () => allowed,
+  challenge: (resource) => `Bearer resource_metadata="${resource}/meta"`,
 });
 
 describe('shared/mcp-server.ts', () => {
@@ -224,7 +248,7 @@ describe('MCP Server Trigger webhook', () => {
     });
     // 2026 has no initialize: a client asking for it gets the newest 2025 revision
     const latest = await callWebhook({}, { body: rpc('initialize', { protocolVersion: MCP_LATEST_REVISION }) });
-    expect((latest.webhookResponse?.body as { result: DataObject }).result.protocolVersion).toBe('2025-11-25');
+    expect(resultOf(latest).protocolVersion).toBe('2025-11-25');
   });
 
   it('answers server/discover for 2026 clients', async () => {
@@ -237,13 +261,21 @@ describe('MCP Server Trigger webhook', () => {
     });
   });
 
-  it('lists the connected tools only with sub-nodes, seeing the body as $json.body', async () => {
-    const result = await callWebhook({}, { body: rpc('tools/list') }, { subNodes: true });
-    const tools = (result.webhookResponse?.body as { result: { tools: DataObject[] } }).result.tools;
+  it('lists the connected tools under the list hook; the tools see the base item, as at a call', async () => {
+    const request = { body: rpc('tools/list'), headers: { host: 'h', authorization: 'Bearer abc' } };
+    // the first call hands the server the base item and builds no tool
+    const first = await callWebhook({}, request);
+    expect(first.webhookResponse).toBeUndefined();
+    const base = baseOf(first);
+    expect(base).toEqual({ body: rpc('tools/list'), headers: { host: 'h', authorization: MCP_REDACTED } });
+    supplied.length = 0;
+    const result = await callWebhook({}, request, { toolInput: base });
+    const tools = resultOf(result).tools as DataObject[];
     expect(tools.map((t) => t.name)).toEqual(['Calculator', 'Shout', 'echo']);
     expect(tools[0].inputSchema).toMatchObject({ type: 'object', required: ['input'] });
-    // without sub-nodes (ping, notifications) the node builds no tool
-    await expect(callWebhook({}, { body: rpc('tools/list') })).rejects.toThrow('Sub-nodes are not available here');
+    // n8n's tool input: body and redacted headers, not the body alone
+    expect(supplied).toEqual([base]);
+    expect(result.customData).toEqual({ mcpSubject: '' });
   });
 
   it('hands every other message to the run as the base item, auth headers redacted', async () => {
@@ -282,7 +314,7 @@ describe('MCP Server Trigger webhook', () => {
       body: rpc('ping'),
       headers: { authorization: 'Bearer secret-bearer-token' },
     });
-    expect((ok.workflowData?.[0][0].json.headers as DataObject).authorization).toBe(MCP_REDACTED);
+    expect((baseOf(ok).headers as DataObject).authorization).toBe(MCP_REDACTED);
     expect(ok.customData?.mcpSubject).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(ok)).not.toContain('secret-bearer-token');
   });
@@ -306,10 +338,57 @@ describe('MCP Server Trigger webhook', () => {
     expect(bearer.customData?.mcpSubject).not.toBe(ok.customData?.mcpSubject);
   });
 
-  it('refuses workspace sign-in until the OAuth check exists', async () => {
-    const result = await callWebhook({ authentication: 'n8nOAuth2' }, { body: rpc('ping') });
+  it('workspace sign-in: a host without the sign-in helper refuses with 401, never 500', async () => {
+    const result = await callWebhook(
+      { authentication: 'n8nOAuth2' },
+      { body: rpc('ping'), headers: { authorization: 'Bearer good-token' } },
+    );
     expect(result.workflowData).toBeUndefined();
     expect(result.webhookResponse?.statusCode).toBe(401);
+    expect(result.webhookResponse?.headers?.['www-authenticate']).toBe('Bearer realm="MCP Server"');
+    expect(JSON.stringify(result.webhookResponse?.body)).not.toMatch(/stack|at .*\.ts/);
+  });
+
+  it('workspace sign-in: a valid token passes, the user in the item and in what the tools see at list', async () => {
+    const parameters = { authentication: 'n8nOAuth2' };
+    const refused = await callWebhook(
+      parameters,
+      { body: rpc('ping'), headers: { authorization: 'Bearer bad-token' } },
+      { mcpAuth: signIn() },
+    );
+    expect(refused.webhookResponse?.statusCode).toBe(401);
+    const request = { body: rpc('tools/list'), headers: { authorization: 'Bearer good-token' } };
+    const ok = await callWebhook(parameters, request, { mcpAuth: signIn() });
+    const base = baseOf(ok);
+    expect(base).toEqual({ body: rpc('tools/list'), headers: { authorization: MCP_REDACTED }, user: USER });
+    expect(ok.customData?.mcpSubject).toMatch(/^[0-9a-f]{64}$/);
+    supplied.length = 0;
+    const listed = await callWebhook(parameters, request, { mcpAuth: signIn(), toolInput: base });
+    expect((resultOf(listed).tools as DataObject[]).map((t) => t.name)).toContain('echo');
+    expect(supplied).toEqual([base]);
+    // without the right to run the workflow: 403
+    const forbidden = await callWebhook(parameters, request, { mcpAuth: signIn(false) });
+    expect(forbidden.webhookResponse?.statusCode).toBe(403);
+    // the user stays out of the item when the node says so
+    const hidden = await callWebhook({ ...parameters, includeUserInOutput: false }, request, {
+      mcpAuth: signIn(),
+    });
+    expect(baseOf(hidden)).not.toHaveProperty('user');
+  });
+
+  it('refuses an unknown authentication value instead of serving it open', async () => {
+    for (const authentication of ['basicAuth', 'NONE']) {
+      const result = await callWebhook(
+        { authentication },
+        { body: rpc('tools/call', { name: 'Calculator' }) },
+      );
+      expect(result.workflowData).toBeUndefined();
+      expect(result.webhookResponse?.statusCode).toBe(500);
+      expect(result.webhookResponse?.body).toEqual({
+        error: 'server_error',
+        error_description: "Couldn't check the MCP client: the authentication method is unknown",
+      });
+    }
   });
 
   it('checks auth on the GET stream and the DELETE too', async () => {

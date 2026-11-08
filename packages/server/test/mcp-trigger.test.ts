@@ -9,8 +9,15 @@ import { Client as SdkClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport as SdkStreamable } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { nodesAiPackage } from '@workflow/nodes-ai';
-import type { AiTool, DataObject, NodePackage, NodeType } from '@workflow/workflow';
+import {
+  type AiTool,
+  type DataObject,
+  type NodePackage,
+  type NodeType,
+  ToolSuspension,
+} from '@workflow/workflow';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { MCP_TOOL_WAITING } from '../src/services/mcp-trigger';
 import {
   createWorkflow,
   executionsOf,
@@ -23,6 +30,9 @@ import {
 } from './helpers';
 
 const TRIGGER = 'MCP Server Trigger';
+
+/** every item the echo tool's sub-node got, in order: what a tool sees as `$json` at a list and at a call */
+const supplied: DataObject[] = [];
 
 /** a tool that answers with its arguments and the trigger's item: what reached a tool */
 const echoTool: NodeType = {
@@ -40,6 +50,7 @@ const echoTool: NodeType = {
   },
   async supplyData(ctx) {
     const item = ctx.getInputData()[0]?.json ?? {};
+    supplied.push(item);
     const tool: AiTool = {
       kind: 'tool',
       name: 'echo',
@@ -50,7 +61,65 @@ const echoTool: NodeType = {
     return { response: tool };
   },
 };
-const echoPackage: NodePackage = { name: 'mcp-trigger-tests', nodes: [echoTool], credentials: [] };
+/** a tool that waits for the test's `open()` before it answers: a long tool run */
+let gate = Promise.resolve();
+let open = () => {};
+const gatedTool: NodeType = {
+  description: {
+    ...echoTool.description,
+    name: 'test.mcpGated',
+    displayName: 'MCP Gated',
+    defaults: { name: 'Gated' },
+  },
+  async supplyData() {
+    const tool: AiTool = {
+      kind: 'tool',
+      name: 'gated',
+      description: 'Answers once the test opens the gate',
+      parameters: { type: 'object', properties: {} },
+      invoke: async () => {
+        await gate;
+        return 'opened';
+      },
+    };
+    return { response: tool };
+  },
+};
+
+/** a tool that stops the run to wait for a person (an approval), counting how often it ran */
+let approvals = 0;
+const approvalTool: NodeType = {
+  description: {
+    ...echoTool.description,
+    name: 'test.mcpApproval',
+    displayName: 'MCP Approval',
+    defaults: { name: 'Approve' },
+  },
+  async supplyData(ctx) {
+    const toolNode = ctx.getNode().name;
+    const tool: AiTool = {
+      kind: 'tool',
+      name: 'approve',
+      description: 'Waits for a person',
+      parameters: { type: 'object', properties: {} },
+      invoke: async () => {
+        approvals++;
+        throw new ToolSuspension({
+          toolNode,
+          waitTill: new Date(Date.now() + 3_600_000),
+          toolName: 'approve',
+          toolCallId: 'c1',
+        });
+      },
+    };
+    return { response: tool };
+  },
+};
+const echoPackage: NodePackage = {
+  name: 'mcp-trigger-tests',
+  nodes: [echoTool, gatedTool, approvalTool],
+  credentials: [],
+};
 
 let server: TestServer & { url: string; port: number };
 
@@ -424,7 +493,14 @@ describe('sessions and transport rules', () => {
     const { url, wf, client } = await setup();
     expect((await post(url, INIT)).status).toBe(200);
     await client.data(client.post(`/rest/workflows/${wf.id}/deactivate`));
-    expect((await post(url, INIT)).status).toBe(404);
+    const gone = await post(url, INIT);
+    expect(gone.status).toBe(404);
+    // made before the hand-off to the MCP service, it still carries CORS: a browser client reads the 404
+    expect(gone.headers.get('access-control-allow-origin')).toBe('*');
+    expect(gone.headers.get('access-control-allow-credentials')).toBeNull();
+    const unknown = await post(`${server.url}/mcp/no-such-workspace/tools`, INIT);
+    expect(unknown.status).toBe(404);
+    expect(unknown.headers.get('access-control-allow-origin')).toBe('*');
   });
 
   it('serves a dynamic path and only that path', async () => {
@@ -473,8 +549,128 @@ describe('test URL', () => {
       const execution = await lastExecution(tenant.id, wf.id);
       expect(execution?.mode).toBe('manual');
       await expect(mcp.client.callTool({ name: 'Calculator', arguments: { input: '1' } })).rejects.toThrow();
+      // the used-up URL answers 404 with CORS
+      const gone = await post(testUrl, INIT);
+      expect(gone.status).toBe(404);
+      expect(gone.headers.get('access-control-allow-origin')).toBe('*');
     } finally {
       await mcp.client.close();
+    }
+  });
+});
+
+describe('tool input, long calls and waits', () => {
+  // one workspace for the block: sign-ups are rate limited
+  let user: Awaited<ReturnType<typeof signup>>;
+  beforeAll(async () => {
+    user = await signup();
+  });
+
+  /** a workflow whose trigger serves one tool node */
+  async function toolWorkflow(type: string, name: string) {
+    const path = `${name.toLowerCase()}-${randomUUID().slice(0, 8)}`;
+    const wf = await createWorkflow(user.client, {
+      name: `MCP ${path}`,
+      nodes: [
+        node(TRIGGER, 'ai.mcpTrigger', { path }, [0, 0], { webhookId: randomUUID() }),
+        node(name, type, {}, [0, 200]),
+      ],
+      connections: { [name]: toolLink() },
+    });
+    await user.client.data(user.client.post(`/rest/workflows/${wf.id}/activate`));
+    return { ...user, wf, url: `${server.url}/mcp/${user.tenant.slug}/${path}` };
+  }
+
+  it('at tools/list a tool sees the base item of a call: body and redacted headers', async () => {
+    const wf = await mcpWorkflow(user.client);
+    const mcp = await legacyClient(`${server.url}/mcp/${user.tenant.slug}/${wf.path}`, {
+      cookie: 'other=cookie-secret-0123456789',
+    });
+    try {
+      supplied.length = 0;
+      await mcp.client.listTools();
+      expect(supplied).toHaveLength(1);
+      const [listed] = supplied;
+      expect(Object.keys(listed).sort()).toEqual(['body', 'headers']);
+      expect(listed.body).toMatchObject({ method: 'tools/list' });
+      expect(listed.headers).toMatchObject({ cookie: '**hidden**', 'content-type': 'application/json' });
+      const answer = JSON.parse(textOf(await mcp.client.callTool({ name: 'echo', arguments: {} })));
+      // the call's item adds the trigger's own fields to the same base
+      expect(Object.keys(answer.item).sort()).toEqual(['body', 'headers', 'mcpMessageId', 'mcpToolCall']);
+      expect(answer.item.headers.cookie).toBe('**hidden**');
+    } finally {
+      await mcp.client.close();
+    }
+  });
+
+  it('legacy SSE: a POST gets 202 at once and a long tool answers on the stream later', async () => {
+    const { url } = await toolWorkflow('test.mcpGated', 'Gated');
+    gate = new Promise((resolve) => {
+      open = resolve;
+    });
+    const abort = new AbortController();
+    try {
+      const res = await fetch(url, { headers: { accept: 'text/event-stream' }, signal: abort.signal });
+      const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+      const decoder = new TextDecoder();
+      let text = '';
+      const until = async (pattern: RegExp) => {
+        for (let match = pattern.exec(text); ; match = pattern.exec(text)) {
+          if (match) return match;
+          const { value, done } = await reader.read();
+          if (done) throw new Error('the stream ended');
+          text += decoder.decode(value, { stream: true });
+        }
+      };
+      const endpoint = (await until(/event: endpoint\ndata: (\S+)/))[1];
+      const call = post(`${server.url}${endpoint}`, rpc('tools/call', { name: 'gated', arguments: {} }, 7));
+      const first = await Promise.race([
+        call,
+        new Promise<'held'>((resolve) => setTimeout(() => resolve('held'), 5_000)),
+      ]);
+      // the tool still waits for the gate, and the POST is already answered
+      expect(first).not.toBe('held');
+      expect((first as Response).status).toBe(202);
+      open();
+      const answer = JSON.parse((await until(/data: (\{[^\n]*"id":7[^\n]*\})\n/))[1]);
+      expect(answer.result.content).toEqual([{ type: 'text', text: 'opened' }]);
+      await reader.cancel().catch(() => {});
+    } finally {
+      open();
+      abort.abort();
+    }
+  });
+
+  it('a tool that waits for a person answers the client once; the resume never runs it again', async () => {
+    const { tenant, wf, url, client } = await toolWorkflow('test.mcpApproval', 'Approve');
+    approvals = 0;
+    const publish = vi.spyOn(server.ctx.bus, 'publish');
+    const answers = () =>
+      publish.mock.calls.filter(([channel]) => String(channel).startsWith('mcp-session:')).map(([, m]) => m);
+    const mcp = await sseClient(url);
+    try {
+      const result = await mcp.callTool({ name: 'approve', arguments: {} });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toBe(MCP_TOOL_WAITING);
+      expect(approvals).toBe(1);
+      const [row] = await executionsOf(server.ctx, tenant.id, wf.id);
+      expect(row.status).toBe('waiting');
+      const sent = answers().length;
+      expect(answers().filter((m) => JSON.stringify(m).includes(MCP_TOOL_WAITING))).toHaveLength(1);
+      // the person answers: the run ends with that answer and the tool does not run a second time
+      const answer = [[{ json: { approved: true } }]];
+      const resumed = await server.ctx.executions.resume(tenant.id, row.id, answer, { wait: true });
+      expect((await resumed?.finished)?.status).toBe('success');
+      expect(approvals).toBe(1);
+      const execution = await client.data(client.get(`/rest/executions/${row.id}`));
+      expect(outputOf(execution.state, TRIGGER)[0].mcpToolResult).toEqual({
+        content: [{ type: 'text', text: '{"approved":true}' }],
+      });
+      // nothing more reached the client
+      expect(answers()).toHaveLength(sent);
+    } finally {
+      publish.mockRestore();
+      await mcp.close();
     }
   });
 });

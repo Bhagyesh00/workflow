@@ -3,7 +3,9 @@
  * (who authenticated); a read with another workflow's or subject's id answers 404 (the service compares them).
  * Queue mode keeps them in Redis with a TTL, so any main can answer; otherwise in memory with a tenant cap.
  * Idle TTL and sweep interval from `config.mcp`. A session with a call in flight is never evicted: the
- * service touches it while the call runs, and the main holding an SSE stream touches it on each keep-alive.
+ * service touches it while the call runs, and the main holding an SSE stream touches it on each keep-alive; both
+ * `hold` it, so the memory store's tenant cap passes it over (and refuses a new session when all are held). A
+ * Redis touch rewrites only a session that still exists, so it never brings a deleted one back.
  *
  * The factory, `startSweep`, `sweep` and `close` never throw (`createContext` and `close()` run them in
  * every server test).
@@ -31,8 +33,12 @@ export interface McpSessionStore {
   create(record: Omit<McpSessionRecord, 'lastSeen'>): Promise<string>;
   /** the session, or undefined when unknown or idle past the TTL */
   get(id: string): Promise<McpSessionRecord | undefined>;
-  /** marks the session used now; false when it is gone */
+  /** marks the session used now; false when it is gone (a session deleted meanwhile stays deleted) */
   touch(id: string): Promise<boolean>;
+  /** marks the session busy in this process (a call in flight, an open SSE stream); one `release` per `hold` */
+  hold(id: string): void;
+  /** ends one `hold` */
+  release(id: string): void;
   /** ends the session; true when it existed */
   delete(id: string): Promise<boolean>;
   /** the legacy SSE streams this tenant holds (the per-tenant cap) */
@@ -52,8 +58,16 @@ export interface McpSessionStoreDeps {
   redis?: Redis;
 }
 
-/** sessions one workspace may hold in a main's memory; the least recently used one goes first */
+/** sessions one workspace may hold in a main's memory; the least recently used one not held goes first */
 export const MCP_TENANT_SESSION_CAP = 1000;
+
+/** `create` when the workspace is at its cap and every one of its sessions is held: nothing may be evicted */
+export class McpSessionLimitError extends Error {
+  constructor() {
+    super('Too many open MCP sessions for this workspace');
+    this.name = 'McpSessionLimitError';
+  }
+}
 
 /** session ids are UUIDs; anything else is never looked up */
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -62,6 +76,8 @@ export const isMcpSessionId = (id: string): boolean => SESSION_ID.test(id);
 
 class MemoryMcpSessionStore implements McpSessionStore {
   private readonly sessions = new Map<string, McpSessionRecord>();
+  /** holds per session id: a held session is never evicted by the cap */
+  private readonly held = new Map<string, number>();
   private timer?: NodeJS.Timeout;
 
   constructor(private readonly deps: McpSessionStoreDeps) {}
@@ -77,8 +93,10 @@ class MemoryMcpSessionStore implements McpSessionStore {
   async create(record: Omit<McpSessionRecord, 'lastSeen'>): Promise<string> {
     const own = [...this.sessions].filter(([, r]) => r.tenantId === record.tenantId);
     if (own.length >= MCP_TENANT_SESSION_CAP) {
-      // Map order is insertion order and touch re-inserts, so the first is the least recently used
-      this.sessions.delete(own[0][0]);
+      // Map order is insertion order and touch re-inserts, so the first not held is the least recently used
+      const evict = own.find(([id]) => !this.held.has(id));
+      if (!evict) throw new McpSessionLimitError();
+      this.sessions.delete(evict[0]);
     }
     const id = randomUUID();
     this.sessions.set(id, { ...record, lastSeen: Date.now() });
@@ -108,6 +126,16 @@ class MemoryMcpSessionStore implements McpSessionStore {
 
   async delete(id: string): Promise<boolean> {
     return this.sessions.delete(id);
+  }
+
+  hold(id: string): void {
+    this.held.set(id, (this.held.get(id) ?? 0) + 1);
+  }
+
+  release(id: string): void {
+    const count = (this.held.get(id) ?? 0) - 1;
+    if (count > 0) this.held.set(id, count);
+    else this.held.delete(id);
   }
 
   async countStreams(tenantId: string): Promise<number> {
@@ -140,8 +168,24 @@ class MemoryMcpSessionStore implements McpSessionStore {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.sessions.clear();
+    this.held.clear();
   }
 }
+
+/**
+ * The touch of a Redis session, in one step: rewrite the record only while its key exists (a session deleted since
+ * the read stays deleted), and for an SSE session put it back in its workspace's stream set. KEYS: session, streams
+ * set. ARGV: record, TTL ms, '1' for SSE, stream score, stream set TTL ms.
+ */
+const TOUCH_SCRIPT = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+if ARGV[3] == '1' then
+  redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
+  redis.call('PEXPIRE', KEYS[2], ARGV[6])
+end
+return 1
+`;
 
 /** queue mode: one key per session with the idle TTL as its expiry, so every main reads the same sessions */
 class RedisMcpSessionStore implements McpSessionStore {
@@ -196,9 +240,26 @@ class RedisMcpSessionStore implements McpSessionStore {
   async touch(id: string): Promise<boolean> {
     const record = await this.read(id);
     if (!record) return false;
-    await this.write(id, { ...record, lastSeen: Date.now() });
-    return true;
+    const next = { ...record, lastSeen: Date.now() };
+    const touched = await this.redis.eval(
+      TOUCH_SCRIPT,
+      2,
+      this.key(id),
+      this.streamsKey(record.tenantId),
+      JSON.stringify(next),
+      this.ttl,
+      next.transport === 'sse' ? '1' : '0',
+      next.lastSeen + this.ttl,
+      id,
+      this.ttl * 2,
+    );
+    return touched === 1;
   }
+
+  // no cap here: Redis expires idle sessions, and a running call or an open stream touches its session
+  hold(): void {}
+
+  release(): void {}
 
   async delete(id: string): Promise<boolean> {
     const record = await this.read(id);

@@ -68,6 +68,7 @@ import {
 import type { Config } from '../config';
 import type { TenantRow } from '../db/schema';
 import { ApiError, errorBody } from '../http/errors';
+import { mcpCorsHeaders } from '../http/mcp-http';
 import type { PinoLogger } from '../logger';
 import type { Repositories } from '../repositories';
 import type { PushService } from './bus';
@@ -246,13 +247,17 @@ const formErrorPage = (statusCode: number, page: { title: string; message: strin
 
 const escapeFixedText = (text: string) => text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-/** a browser opening a form URL gets a page; any other caller keeps the JSON */
+/**
+ * a browser opening a form URL gets a page; any other caller keeps the JSON. An MCP reply carries the MCP CORS
+ * headers, so a browser client reads the 404 made before the hand-off to the MCP service.
+ */
 function formErrorFor(
   kind: WebhookKind,
   headers: WebhookRequest['headers'],
   reply: WebhookReply,
   page: { title: string; message: string },
 ): WebhookReply {
+  if (kind === 'mcp') return { ...reply, headers: { ...mcpCorsHeaders(headers), ...reply.headers } };
   if (kind !== 'form' || !header(headers, 'accept')?.includes('text/html')) return reply;
   return formErrorPage(reply.statusCode, page);
 }

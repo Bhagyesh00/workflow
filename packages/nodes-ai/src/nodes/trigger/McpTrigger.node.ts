@@ -5,11 +5,13 @@
  * auth and the answers that need no run:
  *
  * - `webhook` checks auth first (None, Bearer, Header Auth with a constant-time compare, Workspace sign-in),
- *   401 with `WWW-Authenticate` when refused. Then `initialize` and `server/discover` answer with the server's
- *   identity (name from the node name, version 0.1.0, instructions), `tools/list` with the connected tools (the
- *   server gives the context sub-nodes only for that method), and every other message returns the base item
- *   `{ body, headers, user? }` with the auth headers redacted. `customData.mcpSubject` hands the server the
- *   hash of who authenticated, which binds a session; the server never starts a run with it.
+ *   401 with `WWW-Authenticate` when refused; an unknown method is refused too (fail closed). Then `initialize`
+ *   and `server/discover` answer with the server's identity (name from the node name, version 0.1.0,
+ *   instructions), and every other message returns the base item `{ body, headers, user? }` with the auth
+ *   headers redacted. For `tools/list` the server calls again under `MCP_TOOLS_LIST_HOOK` with sub-nodes that
+ *   see that base item (n8n's tool input), and the node answers with the connected tools.
+ *   `customData.mcpSubject` hands the server the hash of who authenticated, which binds a session; the server
+ *   never starts a run with it.
  * - `execute` runs one `tools/call` inside the execution the server started: it supplies the tools by the
  *   normal sub-node path, calls the named one with the arguments as data (never expressions) and returns the
  *   item with `mcpToolResult` (or `mcpError` for an unknown tool).
@@ -18,15 +20,16 @@ import { createHash } from 'node:crypto';
 import {
   type DataObject,
   type FormUser,
+  type Item,
   isModernMcpRequest,
   isPlainObject,
   isToolSuspension,
-  type Item,
   type JsonRpcRequest,
   type JsonRpcResponse,
   MCP_ERRORS,
   MCP_LATEST_REVISION,
   MCP_LEGACY_REVISIONS,
+  MCP_TOOLS_LIST_HOOK,
   type McpServerInfo,
   mcpCompleteResult,
   mcpDiscoverResult,
@@ -43,7 +46,7 @@ import { getTools } from '../../shared/ai-inputs';
 import { callMcpTool, mcpToolDescriptors, redactMcpHeaders } from '../../shared/mcp-server';
 import { toToolName } from '../../shared/utils';
 import { CHAT_AUTH_TEXTS, headerValue, safeEqual } from './chat-access';
-import { checkWorkspaceSignIn } from './mcp-trigger-signin';
+import { checkWorkspaceSignIn, MCP_SIGNIN_TEXTS } from './mcp-trigger-signin';
 
 /** the version every MCP Server Trigger reports (n8n's) */
 export const MCP_TRIGGER_VERSION = '0.1.0';
@@ -52,6 +55,11 @@ export const MCP_TRIGGER_VERSION = '0.1.0';
 export const MCP_SUBJECT_KEY = 'mcpSubject';
 
 const REALM = 'MCP Server';
+
+/** the methods `authenticate` knows; any other value is refused, never served open */
+const AUTH_MODES = ['none', 'bearerAuth', 'headerAuth', 'n8nOAuth2'];
+
+const UNKNOWN_AUTH = "Couldn't check the MCP client: the authentication method is unknown";
 
 interface McpAuthResult {
   /** set when the caller is refused: send it instead of answering */
@@ -89,16 +97,15 @@ async function credentialOf(ctx: WebhookContext, type: string): Promise<DataObje
   }
 }
 
-/** the trigger's own URL (the OAuth resource): the Host was checked against the MCP base URL before this node ran */
+/** the trigger's request path (the OAuth resource); the host builds the resource on the MCP base URL */
 function resourceUrl(ctx: WebhookContext): string {
-  const request = ctx.getRequestObject();
-  const host = headerValue(ctx, 'host') ?? '';
-  const path = (request.url ?? '').split('?')[0];
-  return `${request.secure ? 'https' : 'http'}://${host}${path}`;
+  return (ctx.getRequestObject().url ?? '').split('?')[0];
 }
 
 async function authenticate(ctx: WebhookContext): Promise<McpAuthResult> {
   const mode = String(ctx.getNodeParameter('authentication', 0, 'none'));
+  // fail closed: only None serves without a check
+  if (!AUTH_MODES.includes(mode)) return refuse(500, UNKNOWN_AUTH);
   if (mode === 'bearerAuth') {
     const token = String((await credentialOf(ctx, 'httpBearerAuth'))?.token ?? '');
     if (!token) return refuse(500, CHAT_AUTH_TEXTS.missing);
@@ -121,6 +128,8 @@ async function authenticate(ctx: WebhookContext): Promise<McpAuthResult> {
     return { subject: sha256(`header:${name}:${expected}`), redact: [name] };
   }
   if (mode === 'n8nOAuth2') {
+    // a host without the sign-in helper refuses the caller (401), never an error page
+    if (!ctx.getMcpAuth?.()) return refuse(401, MCP_SIGNIN_TEXTS.unavailable, 'Bearer');
     const requireExecuteAccess = ctx.getNodeParameter('requireExecuteAccess', 0, true) !== false;
     const signIn = await checkWorkspaceSignIn(ctx, resourceUrl(ctx), requireExecuteAccess);
     if (!signIn.allowed) return { subject: '', redact: [], refusal: { webhookResponse: signIn.response } };
@@ -138,8 +147,15 @@ function serverInfo(ctx: WebhookContext): McpServerInfo {
   };
 }
 
-/** the answer of a request this node serves without a run; undefined for the server's own and the run's */
-async function answer(ctx: WebhookContext, message: JsonRpcRequest): Promise<JsonRpcResponse | undefined> {
+/**
+ * the answer of a request this node serves without a run; undefined for the server's own and the run's. `tools/list`
+ * is answered only under `MCP_TOOLS_LIST_HOOK`, where the server gives the sub-nodes the request's base item.
+ */
+async function answer(
+  ctx: WebhookContext,
+  message: JsonRpcRequest,
+  withTools: boolean,
+): Promise<JsonRpcResponse | undefined> {
   switch (message.method) {
     case 'initialize': {
       // the 2026 revision has no initialize: a client asking for it gets the newest 2025 revision
@@ -150,6 +166,7 @@ async function answer(ctx: WebhookContext, message: JsonRpcRequest): Promise<Jso
     case 'server/discover':
       return mcpResult(message.id, mcpDiscoverResult(serverInfo(ctx)));
     case 'tools/list': {
+      if (!withTools) return undefined;
       const result: DataObject = { tools: mcpToolDescriptors(await getTools(ctx, 0)) as unknown as DataObject[] };
       return mcpResult(message.id, isModernMcpRequest(message) ? mcpCompleteResult(message.method, result) : result);
     }
@@ -284,9 +301,13 @@ export const McpTriggerNode: NodeType = {
     if (auth.refusal) return auth.refusal;
     const customData = { [MCP_SUBJECT_KEY]: auth.subject };
     const request = ctx.getRequestObject();
-    if (ctx.getWebhookName() === 'default') {
+    const hook = ctx.getWebhookName();
+    if (hook === 'default' || hook === MCP_TOOLS_LIST_HOOK) {
       const parsed = parseMcpMessage(request.body);
-      const reply = parsed.kind === 'request' ? await answer(ctx, parsed.message) : undefined;
+      const reply =
+        parsed.kind === 'request'
+          ? await answer(ctx, parsed.message, hook === MCP_TOOLS_LIST_HOOK)
+          : undefined;
       if (reply) {
         return {
           webhookResponse: { statusCode: 200, headers: { 'content-type': 'application/json' }, body: reply },
@@ -294,7 +315,8 @@ export const McpTriggerNode: NodeType = {
         };
       }
     }
-    // the base item of every other message: what the run's tools see as `$json`
+    // the base item of every other message: what the tools see as `$json`, at a call and (through the server's
+    // second call under MCP_TOOLS_LIST_HOOK) at tools/list
     const item: DataObject = {
       body: (request.body ?? {}) as DataObject[keyof DataObject],
       headers: redactMcpHeaders(request.headers, auth.redact),

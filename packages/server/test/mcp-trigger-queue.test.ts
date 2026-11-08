@@ -5,13 +5,13 @@
  * `lastNodeOutput` comes back to the main that answers.
  */
 import { randomUUID } from 'node:crypto';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { Client as SdkClient } from '@modelcontextprotocol/sdk/client/index.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { HttpClient } from '@workflow/core';
 import { nodesAiPackage } from '@workflow/nodes-ai';
 import { nodesBasePackage } from '@workflow/nodes-base';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createContext, type ServerContext } from '../src/context';
 import {
   createWorkflow,
@@ -77,6 +77,17 @@ afterAll(async () => {
   await worker?.close();
 });
 
+/** the executions the worker took from the queue while `fn` ran: a run on a main never reaches it */
+async function onWorker(fn: () => Promise<void>) {
+  const taken = vi.spyOn(worker.executions, 'runQueued');
+  try {
+    await fn();
+    return taken.mock.calls.map(([job]) => job.executionId);
+  } finally {
+    taken.mockRestore();
+  }
+}
+
 /** a fetch that sends what `route` picks to main B, the rest to main A; counts B's requests */
 function routed(route: (init: RequestInit | undefined, index: number) => boolean) {
   const seen = { b: 0, total: 0 };
@@ -105,12 +116,15 @@ describe('MCP Server Trigger in queue mode', () => {
       // the session lives in Redis, so main B sees it
       expect(await mainB.ctx.mcpSessions.get(sessionId)).toMatchObject({ workflowId, transport: 'http' });
       expect((await client.listTools()).tools.map((t) => t.name)).toEqual(['Calculator']);
-      expect(textOf(await client.callTool({ name: 'Calculator', arguments: { input: '6 * 7' } }))).toBe('42');
+      const ran = await onWorker(async () => {
+        const result = await client.callTool({ name: 'Calculator', arguments: { input: '6 * 7' } });
+        expect(textOf(result)).toBe('42');
+      });
       expect(seen.b).toBeGreaterThanOrEqual(2);
-      // neither main ran the execution
-      expect(mainA.ctx.executions.runningCount).toBe(0);
-      expect(mainB.ctx.executions.runningCount).toBe(0);
-      expect((await executionsOf(mainA.ctx, tenantId, workflowId)).length).toBe(before + 1);
+      const runs = await executionsOf(mainA.ctx, tenantId, workflowId);
+      expect(runs.length).toBe(before + 1);
+      // the worker ran the call's execution, and its answer came back to main B
+      expect(ran).toEqual([runs[0].id]);
     } finally {
       await client.close();
     }
@@ -123,11 +137,14 @@ describe('MCP Server Trigger in queue mode', () => {
     await client.connect(new SSEClientTransport(new URL(`${mainA.url}${path}`), { fetch: fetchFn }));
     try {
       expect((await client.listTools()).tools.map((t) => t.name)).toEqual(['Calculator']);
-      expect(textOf(await client.callTool({ name: 'Calculator', arguments: { input: '10 - 3' } }))).toBe('7');
+      const ran = await onWorker(async () => {
+        const result = await client.callTool({ name: 'Calculator', arguments: { input: '10 - 3' } });
+        expect(textOf(result)).toBe('7');
+      });
       expect(seen.b).toBeGreaterThanOrEqual(3);
       expect(await mainA.ctx.mcpSessions.countStreams(tenantId)).toBe(1);
-      expect(mainA.ctx.executions.runningCount).toBe(0);
-      expect(mainB.ctx.executions.runningCount).toBe(0);
+      const [latest] = await executionsOf(mainA.ctx, tenantId, workflowId);
+      expect(ran).toEqual([latest.id]);
     } finally {
       await client.close();
     }

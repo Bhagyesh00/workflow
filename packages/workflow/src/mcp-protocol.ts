@@ -93,6 +93,13 @@ export const MCP_PROTOCOL_VERSION_META = 'io.modelcontextprotocol/protocolVersio
 /** the `_meta` key under which a 2026 result names the server */
 export const MCP_SERVER_INFO_META = 'io.modelcontextprotocol/serverInfo';
 
+/**
+ * The webhook name the server calls the MCP Server Trigger with to answer `tools/list`: the context's sub-nodes
+ * then get the base item of the same request (`{ body, headers, user? }`), the item a tool sees at a call. The node
+ * authenticates under this name like under any other; no route serves it.
+ */
+export const MCP_TOOLS_LIST_HOOK = 'mcpToolsList';
+
 /** 2026 results whose answer a client may cache (they carry `ttlMs` and `cacheScope`) */
 const CACHEABLE_METHODS: readonly string[] = ['tools/list', 'server/discover'];
 
