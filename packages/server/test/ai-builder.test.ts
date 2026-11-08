@@ -229,6 +229,36 @@ describe('POST /rest/ai/build: full flow', () => {
     const settings = await owner.client.data(owner.client.get('/rest/settings'));
     expect(settings.ai.allowSendingParameterValues).toBe(false);
   });
+
+  it('validate_workflow keeps parameter values out of its issues when sending values is off', async () => {
+    const { owner, workflow } = await setup([
+      {
+        toolCalls: [
+          {
+            name: 'add_nodes',
+            arguments: {
+              nodes: [{ type: 'core.set', name: 'Greet', parameters: { mode: 'internal-v-417' } }],
+            },
+          },
+        ],
+      },
+      { toolCalls: [{ name: 'validate_workflow', arguments: {} }] },
+      { text: 'Done.' },
+    ]);
+    await owner.client.data(
+      owner.client.post('/rest/ai/usage-settings', { allowSendingParameterValues: false }),
+    );
+    const { chunks } = await build(owner.client, { workflowId: workflow.id, text: 'Greet' });
+    expect(chunks.filter((c) => c.type === 'error')).toEqual([]);
+    const toolAnswers = (
+      fake!.requests[2] as { messages: Array<{ role: string; content: unknown }> }
+    ).messages
+      .filter((m) => m.role === 'tool')
+      .map((m) => String(m.content));
+    const validation = toolAnswers.find((text) => text.includes('node-invalid-options-value'));
+    expect(validation).toContain('\\"Mode\\" has a value that is not one of its options');
+    expect(validation).not.toContain('internal-v-417');
+  });
 });
 
 describe('seams', () => {
@@ -309,14 +339,17 @@ describe('seams', () => {
     expect(session?.messages[1].questions?.[0].question).toBe('Which channel?');
   });
 
-  it("plan mode's request offers the read tools only: no edit tool, no web fetch", async () => {
+  it("plan mode's request offers the read tools and the submits only: no edit tool, no web fetch", async () => {
     const { owner, workflow } = await setup([{ text: 'Here is my plan' }]);
     const { chunks } = await build(owner.client, { workflowId: workflow.id, text: 'Plan it', mode: 'plan' });
     expect(chunks.filter((c) => c.type === 'error')).toEqual([]);
+    // L3 (plan-S4 L3): planTools adds submit_questions and submit_plan to the read tools
     expect(toolNames(fake!.requests[0]).sort()).toEqual([
       'get_node_details',
       'get_workflow_overview',
       'search_nodes',
+      'submit_plan',
+      'submit_questions',
     ]);
     expect(planTools).toHaveBeenCalledTimes(1);
     expect(webFetchTools).not.toHaveBeenCalled();
