@@ -19,12 +19,19 @@ export interface MaybeCompactInput {
   model: AiChatModel;
   signal: AbortSignal;
   emit: (chunk: BuilderChunk) => void;
+  /**
+   * the turn's own user message, not yet in the session: it ends the `session-messages` chunk, so the
+   * panel, which shows it since the send, keeps it
+   */
+  pending?: BuilderMessage;
 }
 
 /** messages that stay after a compaction (the last exchange); older ones go into the summary */
 export const COMPACT_KEEP_MESSAGES = 2;
 /** characters of one message in the text sent to the compaction model */
 const MESSAGE_CHARS = 4000;
+/** characters of the whole conversation sent to the compaction model (the newest part stays) */
+export const TRANSCRIPT_CHARS = 100000;
 /** the stored summary is cut here */
 const SUMMARY_CHARS = 20000;
 
@@ -49,17 +56,26 @@ export function sessionTokens(session: BuilderSession): number {
 }
 
 function transcript(messages: BuilderMessage[]): string {
-  return messages
-    .map((message) => {
-      const extra = [
-        message.plan ? `[plan: ${JSON.stringify(message.plan)}]` : '',
-        message.questions ? `[questions: ${JSON.stringify(message.questions)}]` : '',
-      ]
-        .filter(Boolean)
-        .join(' ');
-      return `${message.role}: ${`${message.text} ${extra}`.trim().slice(0, MESSAGE_CHARS)}`;
-    })
-    .join('\n\n');
+  const lines: string[] = [];
+  let size = 0;
+  // newest first, so a long chat keeps its latest part within the budget
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i] as BuilderMessage;
+    const extra = [
+      message.plan ? `[plan: ${JSON.stringify(message.plan)}]` : '',
+      message.questions ? `[questions: ${JSON.stringify(message.questions)}]` : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const line = `${message.role}: ${`${message.text} ${extra}`.trim().slice(0, MESSAGE_CHARS)}`;
+    if (size + line.length + 2 > TRANSCRIPT_CHARS) {
+      lines.push(`[${i + 1} earlier messages left out]`);
+      break;
+    }
+    lines.push(line);
+    size += line.length + 2;
+  }
+  return lines.reverse().join('\n\n');
 }
 
 function textOf(content: unknown): string {
@@ -79,7 +95,7 @@ function textOf(content: unknown): string {
  * the turn.
  */
 export async function maybeCompact(input: MaybeCompactInput): Promise<void> {
-  const { session, model, signal, emit } = input;
+  const { session, model, signal, emit, pending } = input;
   if (sessionTokens(session) < BUILDER_COMPACT_TOKENS) return;
   if (session.messages.length <= COMPACT_KEEP_MESSAGES) return;
   const cut = session.messages.length - COMPACT_KEEP_MESSAGES;
@@ -114,7 +130,7 @@ export async function maybeCompact(input: MaybeCompactInput): Promise<void> {
   session.messages = kept;
   session.activeVersionCardId = stays(session.activeVersionCardId);
   session.resumeAfterRestoreMessageId = stays(session.resumeAfterRestoreMessageId);
-  emit({ type: 'session-messages', messages: kept });
+  emit({ type: 'session-messages', messages: pending ? [...kept, pending] : kept });
 }
 
 /** characters per token of the estimate (the usual rough figure for English text and JSON) */

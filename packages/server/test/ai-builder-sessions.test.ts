@@ -6,7 +6,7 @@
 import { nodesAiPackage } from '@workflow/nodes-ai';
 import type { BuilderChunk, BuilderMessage } from '@workflow/workflow';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { estimateTokens, maybeCompact } from '../src/services/ai-builder/compaction';
+import { estimateTokens, maybeCompact, TRANSCRIPT_CHARS } from '../src/services/ai-builder/compaction';
 import { type FakeLlm, type FakeLlmStep, startFakeLlm } from './fakes/fake-llm';
 import {
   createTestServer,
@@ -235,12 +235,13 @@ describe('compaction', () => {
     // long messages are cut in the text the model gets
     expect(compactRequest.length).toBeLessThan(40000);
 
-    // the chunk carries the kept messages
+    // the chunk carries the kept messages and this turn's own user message, so the panel keeps the
+    // message it shows since the send (the old pin expected the kept two only, which dropped it)
     const compacted = chunks.find((c) => c.type === 'session-messages');
-    expect(compacted?.type === 'session-messages' && compacted.messages.map((m) => m.id)).toEqual([
-      'm5',
-      'm6',
-    ]);
+    const chunkMessages = compacted?.type === 'session-messages' ? compacted.messages : [];
+    expect(chunkMessages.map((m) => m.id).slice(0, 2)).toEqual(['m5', 'm6']);
+    expect(chunkMessages.length).toBe(3);
+    expect(chunkMessages[2]).toMatchObject({ role: 'user', text: 'Use #leads' });
 
     // the next call holds the new summary (and not the old one), then answers
     const turnRequest = JSON.stringify(fake?.requests[1]);
@@ -266,6 +267,52 @@ describe('compaction', () => {
     const { chunks } = await build(owner.client, { workflowId: workflow.id, text: 'Go on' });
     expect(fake?.requests.length ?? 0).toBe(1);
     expect(chunks.some((c) => c.type === 'session-messages')).toBe(false);
+  });
+
+  it('sends at most TRANSCRIPT_CHARS of a long chat of medium messages, the newest part', async () => {
+    const many = Array.from({ length: 400 }, (_, i) =>
+      msg(`m${i}`, i % 2 ? 'assistant' : 'user', `message ${i} ${'x'.repeat(1500)}`),
+    );
+    const session = {
+      tenantId: 't',
+      workflowId: 'w',
+      userId: 'u',
+      messages: many,
+      previousSummary: null,
+      activeVersionCardId: null,
+      resumeAfterRestoreMessageId: null,
+      allowedWebDomains: [],
+    };
+    expect(estimateTokens(many.map((m) => m.text).join(''))).toBeGreaterThan(150000);
+    let sent = '';
+    const pending = msg('p1', 'user', 'Use #leads');
+    const emitted: BuilderChunk[] = [];
+    await maybeCompact({
+      session,
+      signal: new AbortController().signal,
+      emit: (chunk) => emitted.push(chunk),
+      pending,
+      model: {
+        provider: 'x',
+        model: 'x',
+        kind: 'chatModel' as const,
+        chat: async (request) => {
+          sent = String(request.messages[1]?.content ?? '');
+          return { message: { role: 'assistant' as const, content: 'Summary.' } };
+        },
+      },
+    });
+    expect(sent.length).toBeLessThan(TRANSCRIPT_CHARS + 1000);
+    expect(sent).toContain('message 397 ');
+    expect(sent).not.toContain('message 0 ');
+    expect(sent).toMatch(/\[\d+ earlier messages left out\]/);
+    expect(session.previousSummary).toBe('Summary.');
+    const chunk = emitted.find((c) => c.type === 'session-messages');
+    expect(chunk?.type === 'session-messages' && chunk.messages.map((m) => m.id)).toEqual([
+      'm398',
+      'm399',
+      'p1',
+    ]);
   });
 
   it('a model that fails or answers nothing leaves the session as it was', async () => {

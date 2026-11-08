@@ -10,7 +10,7 @@ import type { AiChatModel, AiTool, NodeType, WorkflowDefinition } from '@workflo
 import { afterEach, describe, expect, it } from 'vitest';
 import { estimateTokens, maybeCompact } from '../src/services/ai-builder/compaction';
 import { wrapUntrusted } from '../src/services/ai-builder/context';
-import { BuilderDraft } from '../src/services/ai-builder/draft';
+import { BuilderDraft, BuilderDraftError } from '../src/services/ai-builder/draft';
 import { isBuilderModelNode } from '../src/services/ai-builder/model';
 import { applyPlanResume, planTools } from '../src/services/ai-builder/plan';
 import { type AiRuntime, loadAiRuntime } from '../src/services/ai-builder/runtime';
@@ -297,7 +297,9 @@ describe('builder helpers (C0 FULL)', () => {
     expect(AI_ROUTE_RATE_LIMIT.max).toBe(100);
   });
 
-  it('the seams return nothing until their lanes fill them', async () => {
+  // was a C0 pin that the seams return nothing; L3, L4 and L6 filled them, so this proves each seam is
+  // there and does its lane's work on a minimal turn
+  it('the seams exist and each acts on a minimal turn', async () => {
     const definition: WorkflowDefinition = { name: 'Draft', nodes: [], connections: {} };
     const draft = new BuilderDraft(definition, new NodeTypes());
     expect(draft.definition()).toBe(definition);
@@ -321,15 +323,31 @@ describe('builder helpers (C0 FULL)', () => {
       promptNotes: [],
       stopTurn: () => controller.abort(BUILDER_TURN_STOP),
     };
+    // L3: plan mode offers the read tools as given plus the two submits
     const readTools = [{ kind: 'tool', name: 'search_nodes' }] as unknown as AiTool[];
-    expect(planTools(state, readTools)).toBe(readTools);
+    const offered = planTools(state, readTools);
+    expect(offered[0]).toBe(readTools[0]);
+    expect(offered.map((t) => t.name)).toEqual(['search_nodes', 'submit_questions', 'submit_plan']);
+    // an approval with no plan waiting changes nothing
     applyPlanResume(state, { planDecision: 'approve' });
     expect(state.mode).toBe('plan');
+    // L4: build mode gets web_fetch; a refusal becomes a note, and the domain is not allowed
     const deps = { ctx: {}, tenant: {}, emit: () => {} } as never;
-    expect(webFetchTools(state, deps)).toEqual([]);
-    await applyWebFetchResume(state, { webFetch: { url: 'https://example.com', decision: 'approve' } }, deps);
-    await maybeCompact({ session, model: {} as AiChatModel, signal: controller.signal, emit: () => {} });
-    expect(state.promptNotes).toEqual([]);
+    expect(webFetchTools(state, deps).map((t) => t.name)).toEqual(['web_fetch']);
+    await applyWebFetchResume(state, { webFetch: { url: 'https://example.com', decision: 'deny' } }, deps);
+    expect(state.promptNotes).toHaveLength(1);
+    expect(state.promptNotes[0]).toContain('refused to let you read example.com');
+    expect(session.allowedWebDomains).toEqual([]);
+    // L6: a short session is not compacted, so the model (which would throw here) is never called
+    const emitted: unknown[] = [];
+    await maybeCompact({
+      session,
+      model: {} as AiChatModel,
+      signal: controller.signal,
+      emit: (chunk) => emitted.push(chunk),
+    });
+    expect(emitted).toEqual([]);
+    expect(session.previousSummary).toBeNull();
     expect(controller.signal.aborted).toBe(false);
   });
 
@@ -337,5 +355,63 @@ describe('builder helpers (C0 FULL)', () => {
     for (const fn of [searchNodes, nodeDetails, validateDefinition, createBuilderTools, readBuilderTools]) {
       expect(typeof fn).toBe('function');
     }
+  });
+});
+
+describe('BuilderDraft limits (builder tools and MCP update_workflow)', () => {
+  const { nodeTypes } = registriesFromPackages([nodesBasePackage]);
+  const draftWith = (names: string[]) =>
+    new BuilderDraft(
+      {
+        name: 'Draft',
+        nodes: names.map((name, i) => ({
+          id: `n${i}`,
+          name,
+          type: 'core.set',
+          typeVersion: 1,
+          position: [i * 240, 0] as [number, number],
+          parameters: {},
+        })),
+        connections: {},
+      },
+      nodeTypes,
+    );
+  const refusal = (run: () => void) => {
+    try {
+      run();
+    } catch (error) {
+      expect(error).toBeInstanceOf(BuilderDraftError);
+      return (error as Error).message;
+    }
+    throw new Error('expected a BuilderDraftError');
+  };
+
+  it('refuses a huge output or input index before it allocates anything', () => {
+    const draft = draftWith(['A', 'B']);
+    expect(refusal(() => draft.connectNodes([{ from: 'A', to: 'B', outputIndex: 1_000_000_000 }]))).toBe(
+      'Output and input indexes are at most 31',
+    );
+    refusal(() => draft.connectNodes([{ from: 'A', to: 'B', inputIndex: 32 }]));
+    refusal(() => draft.removeConnection({ from: 'A', to: 'B', outputIndex: 3_000_000 }));
+    expect(draft.definition().connections).toEqual({});
+    draft.connectNodes([{ from: 'A', to: 'B', outputIndex: 31 }]);
+    expect(draft.definition().connections.A?.main).toHaveLength(32);
+  });
+
+  it('refuses __proto__, constructor and prototype as node names; a connect never pollutes Object.prototype', () => {
+    const draft = draftWith(['B']);
+    for (const name of ['__proto__', 'constructor', 'prototype']) {
+      expect(refusal(() => draft.addNodes([{ type: 'core.set', name }]))).toBe(
+        `"${name}" can't be used as a node name`,
+      );
+      refusal(() => draft.renameNode('B', name));
+    }
+    expect(draft.definition().nodes.map((n) => n.name)).toEqual(['B']);
+    // a stored workflow that already holds such a name
+    const stored = draftWith(['__proto__', 'B']);
+    refusal(() => stored.connectNodes([{ from: '__proto__', to: 'B' }]));
+    refusal(() => stored.connectNodes([{ from: 'B', to: '__proto__' }]));
+    expect(({} as Record<string, unknown>).main).toBeUndefined();
+    expect(Object.keys(stored.definition().connections)).toEqual([]);
   });
 });

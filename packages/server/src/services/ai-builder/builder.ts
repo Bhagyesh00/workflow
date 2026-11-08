@@ -185,7 +185,13 @@ export class AiBuilderService {
       stopped();
       await applyWebFetchResume(state, request.resumeData, deps);
       stopped();
-      await maybeCompact({ session: state.session, model: model.model, signal: turnSignal, emit });
+      await maybeCompact({
+        session: state.session,
+        model: model.model,
+        signal: turnSignal,
+        emit,
+        pending: userMessage,
+      });
       stopped();
 
       // the seams are done: the mode is final for this turn
