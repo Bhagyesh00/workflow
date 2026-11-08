@@ -489,7 +489,7 @@ describe('BuilderSessionRepository (P5-66)', () => {
 });
 
 describe('repository registration', () => {
-  it('registers builderSessions and mcpOAuth; the OAuth sweep stub removes nothing and does not throw', async () => {
+  it('registers builderSessions and mcpOAuth; the OAuth sweep runs and finds nothing expired before the epoch', async () => {
     expect(repos().builderSessions).toBeInstanceOf(BuilderSessionRepository);
     expect(repos().mcpOAuth).toBeInstanceOf(McpOAuthRepository);
     for (const name of [
@@ -512,7 +512,8 @@ describe('repository registration', () => {
     ] as const) {
       expect(typeof repos().mcpOAuth[name], name).toBe('function');
     }
-    await expect(repos().mcpOAuth.sweepExpired(new Date())).resolves.toEqual({
+    // nothing expires before 1970, so the sweep is safe next to the other files' rows
+    await expect(repos().mcpOAuth.sweepExpired(new Date(0))).resolves.toEqual({
       codes: 0,
       accessTokens: 0,
       refreshTokens: 0,
