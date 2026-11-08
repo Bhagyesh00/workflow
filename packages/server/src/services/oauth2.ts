@@ -256,7 +256,8 @@ export class OAuth2Service {
       code,
       redirect_uri: this.callbackUrl,
     };
-    if (this.credentials.types.isA(row.type, MCP_OAUTH2_TYPE)) {
+    const mcp = this.credentials.types.isA(row.type, MCP_OAUTH2_TYPE);
+    if (mcp) {
       const resource = String(data.resourceUrl ?? '').trim();
       if (resource) body.resource = resource;
     }
@@ -267,7 +268,12 @@ export class OAuth2Service {
       });
     }
     let auth: { username: string; password: string } | undefined;
-    if (data.authentication === 'body' || data.grantType === 'pkce') {
+    // an MCP client registered for client_secret_basic sends Basic here as on every refresh (core
+    // requestOAuth2Token); other PKCE clients keep the form body
+    const basic =
+      data.authentication !== 'body' &&
+      (data.grantType !== 'pkce' || (mcp && data.authentication === 'header' && !!data.clientSecret));
+    if (!basic) {
       body.client_id = String(data.clientId ?? '');
       if (data.clientSecret) body.client_secret = String(data.clientSecret);
     } else {

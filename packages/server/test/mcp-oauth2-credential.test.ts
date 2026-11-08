@@ -56,6 +56,8 @@ interface Mode {
   /** the protected resource metadata answers with a redirect to this origin */
   prmRedirectTo?: string;
   registerSecret: boolean;
+  /** the client authentication the registration answer states for a client with a secret */
+  registerMethod?: 'client_secret_post' | 'client_secret_basic';
   registerError?: { status: number; body: DataObject };
 }
 
@@ -167,12 +169,18 @@ class FakeAuthorizationServer {
         client_id: `client-${this.clients}`,
         client_id_issued_at: Math.floor(Date.now() / 1000),
         ...(this.mode.registerSecret
-          ? { client_secret: REGISTERED_SECRET, token_endpoint_auth_method: 'client_secret_post' }
+          ? {
+              client_secret: REGISTERED_SECRET,
+              token_endpoint_auth_method: this.mode.registerMethod ?? 'client_secret_post',
+            }
           : {}),
       });
     }
     if (path === '/as/token' && req.method === 'POST') {
       const form = Object.fromEntries(new URLSearchParams(body));
+      // a client_secret_basic client names itself in the Basic header, not in the form
+      const basic = /^Basic (.+)$/.exec(req.headers.authorization ?? '');
+      if (basic) form.client_id = Buffer.from(basic[1], 'base64').toString().split(':')[0];
       if (form.grant_type === 'authorization_code') {
         const issued = this.codes.get(form.code ?? '');
         this.codes.delete(form.code ?? '');
@@ -524,6 +532,32 @@ describe('MCP OAuth2: discovery, registration, connect and a retried call', () =
     expect(second.json().error.message).toContain('invalid_client_metadata');
     expect(second.body).not.toContain(REGISTERED_SECRET);
     expect(second.body).not.toContain('refused');
+  });
+
+  it('exchanges the code with Basic when the registration states client_secret_basic', async () => {
+    const { client, tenant } = await signup();
+    fake.mode.registerSecret = true;
+    fake.mode.registerMethod = 'client_secret_basic';
+    const credential = await mcpCredential(client, { resourceUrl: resourceFor('t/basic') });
+    const { url } = await client.data<{ url: string }>(authorize(client, credential.id));
+    expect((await stored(server, tenant.id, credential.id)).authentication).toBe('header');
+    const code = fake.issueCode(url);
+    const state = new URL(url).searchParams.get('state') ?? '';
+    const callback = await server.app.inject({
+      method: 'GET',
+      url: `/rest/oauth2/callback?code=${code}&state=${encodeURIComponent(state)}`,
+    });
+    expect(callback.statusCode).toBe(200);
+    const [exchange] = fake.requests('/as/token');
+    expect(exchange.status).toBe(200);
+    const expected = Buffer.from(`${new URL(url).searchParams.get('client_id')}:${REGISTERED_SECRET}`);
+    expect(exchange.authorization).toBe(`Basic ${expected.toString('base64')}`);
+    const form = Object.fromEntries(new URLSearchParams(exchange.body));
+    expect(form.client_secret).toBeUndefined();
+    expect(form.client_id).toBeUndefined();
+    expect(((await stored(server, tenant.id, credential.id)).oauthTokenData as DataObject).access_token).toBe(
+      STALE_TOKEN,
+    );
   });
 
   it('uses the metadata document URL as client id with an https base URL and a server that states CIMD support', async () => {
