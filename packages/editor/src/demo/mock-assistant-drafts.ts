@@ -145,6 +145,9 @@ export function registerAssistantDraftRoutes(backend: MockBackend): void {
     const [threadId, draftId] = params;
     const draft = ownDraft(backend, threadId, draftId);
     if (draft.status !== 'open') throw new HttpError(409, 'conflict', NOT_OPEN);
+    if (typeof body.updatedAt === 'string' && body.updatedAt !== draft.updatedAt) {
+      throw new HttpError(409, 'conflict', 'The draft changed. Review it again');
+    }
     const given = typeof body.name === 'string' ? body.name.trim().slice(0, 128) : '';
     const wf = save(backend, draft, given || draft.name);
     draft.status = 'accepted';
