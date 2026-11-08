@@ -38,7 +38,8 @@ export const ExecutionDataNode: NodeType = {
         type: 'fixedCollection',
         default: { values: [{ key: '', value: '' }] },
         placeholder: 'Add item',
-        description: 'Keys and values saved on the execution. Up to 10 keys; keys are cut to 50 characters and values to 255.',
+        description:
+          'Keys and values saved on the execution. Up to 10 keys; keys are cut to 50 characters and values to 255.',
         typeOptions: { multipleValues: true },
         displayOptions: { show: { operation: ['save'] } },
         options: [
@@ -60,7 +61,10 @@ export const ExecutionDataNode: NodeType = {
     const skipped = new Set<string>();
     const cut = new Set<string>();
     for (let i = 0; i < items.length; i++) {
-      const rows = ctx.getNodeParameter('dataToSave.values', i, []) as Array<{ key?: unknown; value?: unknown }>;
+      const rows = ctx.getNodeParameter('dataToSave.values', i, []) as Array<{
+        key?: unknown;
+        value?: unknown;
+      }>;
       for (const row of Array.isArray(rows) ? rows : []) {
         const key = String(row?.key ?? '').trim();
         if (!key) continue;
@@ -71,7 +75,8 @@ export const ExecutionDataNode: NodeType = {
           skipped.add(key.slice(0, MAX_KEY_LENGTH));
           continue;
         }
-        if (key.length > MAX_KEY_LENGTH || value.length > MAX_VALUE_LENGTH) cut.add(key.slice(0, MAX_KEY_LENGTH));
+        if (key.length > MAX_KEY_LENGTH || value.length > MAX_VALUE_LENGTH)
+          cut.add(key.slice(0, MAX_KEY_LENGTH));
       }
     }
     ctx.addExecutionHints(

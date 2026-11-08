@@ -143,6 +143,13 @@
   display: none;
 }
 
+.chat-window {
+  display: flex;
+  flex-direction: column;
+  background: var(--chat--body--background);
+  min-height: 0;
+}
+
 /* window mode: a floating panel and its toggle button */
 .chat-layout-window {
   position: fixed;
@@ -198,13 +205,6 @@
 .chat-layout-fullscreen .chat-window {
   width: 100%;
   height: 100%;
-}
-
-.chat-window {
-  display: flex;
-  flex-direction: column;
-  background: var(--chat--body--background);
-  min-height: 0;
 }
 
 /* header */

@@ -86,7 +86,12 @@ async function evalWorkflow(owner: Owner, rowCount = 3) {
     node(name, EVALUATION_NODE_TYPE, parameters, [400, 0]);
   return createWorkflow(owner.client, {
     nodes: [
-      node('Dataset', EVALUATION_TRIGGER_TYPE, { source: 'dataTable', dataTableId: locator(table.id) }, [0, 0]),
+      node(
+        'Dataset',
+        EVALUATION_TRIGGER_TYPE,
+        { source: 'dataTable', dataTableId: locator(table.id) },
+        [0, 0],
+      ),
       evaluation('Check', { operation: 'checkIfEvaluating' }),
       evaluation('Inputs', {
         operation: 'setInputs',

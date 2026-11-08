@@ -39,7 +39,8 @@ describe('Executions page highlighted data filter', () => {
     backend().handle = (async (req: Parameters<typeof original>[0]) => {
       if (req.method === 'GET' && req.path === '/executions') {
         const query: Record<string, string> = {};
-        for (const [k, v] of Object.entries(req.query ?? {})) if (v !== undefined && v !== null) query[k] = String(v);
+        for (const [k, v] of Object.entries(req.query ?? {}))
+          if (v !== undefined && v !== null) query[k] = String(v);
         requests.push(query);
       }
       return original(req);
