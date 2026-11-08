@@ -12,6 +12,9 @@ import { truncate } from './utils';
 
 type Request = <T>(options: HttpRequestOptions) => Promise<T | HttpFullResponse<T>>;
 
+/** the most one event may hold before its blank line (characters): a server must not grow our memory */
+export const MAX_SSE_EVENT_CHARS = 10 * 1024 * 1024;
+
 export interface SseTransportOptions {
   request: Request;
   /** the stream URL (the configured endpoint) */
@@ -128,9 +131,14 @@ export function createSseTransport(options: SseTransportOptions): SseTransport {
           );
           return;
         }
-        iterator = body[Symbol.asyncIterator]();
+        const events = body[Symbol.asyncIterator]();
+        iterator = events;
         if (response.statusCode >= 400) {
-          void iterator.return?.();
+          // `return()` on an unstarted body skips the `finally` that cancels it: one `next()` starts it first
+          void events
+            .next()
+            .then(() => events.return?.())
+            .catch(() => undefined);
           fail(
             new McpError(
               `MCP server answered the event stream with HTTP ${response.statusCode}`,
@@ -150,9 +158,13 @@ export function createSseTransport(options: SseTransportOptions): SseTransport {
             buffer += decoder.decode(value, { stream: true });
             // whole events only: they end with a blank line
             const cut = Math.max(buffer.lastIndexOf('\n\n'), buffer.lastIndexOf('\r\n\r\n'));
-            if (cut < 0) continue;
-            const complete = buffer.slice(0, cut + 2);
-            buffer = buffer.slice(cut + 2);
+            const complete = cut < 0 ? '' : buffer.slice(0, cut + 2);
+            if (cut >= 0) buffer = buffer.slice(cut + 2);
+            if (buffer.length > MAX_SSE_EVENT_CHARS) {
+              throw new McpError(
+                "Couldn't read the MCP event stream: one event is over 10 MB, so the connection was closed",
+              );
+            }
             for (const event of parseSse(complete)) {
               if (event.event === 'endpoint' && !gotEndpoint) {
                 const url = resolveSseEndpoint(event.data, endpoint);
@@ -176,6 +188,8 @@ export function createSseTransport(options: SseTransportOptions): SseTransport {
           const e = error instanceof Error ? error : new Error(String(error));
           if (!gotEndpoint) fail(e);
           failAll(e);
+          // the body was started, so this runs its `finally`: the read is cancelled and the connection freed
+          void events.return?.().catch(() => undefined);
         }
       })();
     });

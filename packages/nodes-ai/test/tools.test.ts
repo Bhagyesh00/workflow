@@ -601,7 +601,8 @@ describe('MCP Client tool', () => {
   it('is blocked by the SSRF policy without an allow-list entry', async () => {
     const { r } = await agentWith([mcpNode()], ['x'], { services: services({ http: new HttpClient() }) });
     expect(r.status).toBe('error');
-    expect(r.error?.message).toMatch(/Could not connect to the MCP server: .*blocked/);
+    expect(r.error?.message).toBe('Could not connect to your MCP server');
+    expect(r.error?.description).toMatch(/blocked/);
     expect(log).toHaveLength(0);
   });
 });

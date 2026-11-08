@@ -3,17 +3,17 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { HttpClient } from '@workflow/core';
 import type { DataObject, NodeType } from '@workflow/workflow';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpClientToolNode } from '../src/nodes/tools/McpClientTool.node';
 import { MCP_PROTOCOL_VERSION } from '../src/shared/mcp-client';
 import {
   createMcpConnection,
   isMcpAuthFailure,
   type McpConnectionInput,
-  mcpConnectErrorMessage,
+  mcpConnectFailure,
 } from '../src/shared/mcp-connect';
 import { MCP_CLIENT_PROPERTIES } from '../src/shared/mcp-description';
-import { resolveSseEndpoint } from '../src/shared/mcp-sse';
+import { MAX_SSE_EVENT_CHARS, resolveSseEndpoint } from '../src/shared/mcp-sse';
 import { sharedResourceCount } from '../src/shared/shared-resource';
 
 interface Logged {
@@ -42,6 +42,8 @@ describe('MCP client transports (P5-17)', () => {
   let answerVersion: string | undefined;
   let endpointEvent: string | undefined;
   let status: number | undefined;
+  /** set when the server sees the oversized event stream closed */
+  let hugeClosed = false;
   const streams: ServerResponse[] = [];
   const sockets = new Set<Socket>();
 
@@ -98,6 +100,19 @@ describe('MCP client transports (P5-17)', () => {
       }
       if (status) {
         res.writeHead(status).end();
+        return;
+      }
+      if (url.pathname === '/huge' && req.method === 'GET') {
+        // one event that never ends: 11 chunks of 1 MB with no blank line
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.on('close', () => {
+          hugeClosed = true;
+        });
+        res.write('event: message\ndata: ');
+        const chunk = 'x'.repeat(1024 * 1024);
+        for (let i = 0; i < 11 && !res.destroyed; i++) {
+          if (!res.write(chunk)) await new Promise((resolve) => res.once('drain', resolve));
+        }
         return;
       }
       if (url.pathname === '/sse' && req.method === 'GET') {
@@ -274,23 +289,48 @@ describe('MCP client transports (P5-17)', () => {
     expect(posts.every((l) => l.headers.authorization === 'Bearer tok-1')).toBe(true);
   });
 
-  it('gives the connection text and the authentication text', async () => {
+  it("gives n8n's connection, authentication and URL texts, with the reason as the description", async () => {
     status = 401;
     const bad = await createMcpConnection(ctxWith(), input()).catch((e) => e);
     expect(isMcpAuthFailure(bad)).toBe(true);
-    expect(mcpConnectErrorMessage(bad)).toBe(
-      'Authentication failed. Check the credentials for the MCP server.',
-    );
+    expect(mcpConnectFailure(bad)).toEqual({
+      message: 'Could not connect to your MCP server. Authentication failed.',
+      description: expect.stringMatching(/401/),
+    });
     status = undefined;
-    const failure = new Error('connect ECONNREFUSED');
-    expect(mcpConnectErrorMessage(failure)).toMatch(/^Could not connect to the MCP server: /);
+    expect(mcpConnectFailure(new Error('connect ECONNREFUSED'))).toEqual({
+      message: 'Could not connect to your MCP server',
+      description: 'connect ECONNREFUSED',
+    });
+    // a message that names the status counts, as in n8n
+    expect(isMcpAuthFailure(new Error('Request failed with status code 403'))).toBe(true);
+    expect(isMcpAuthFailure(new Error('connect ECONNREFUSED 127.0.0.1:4013'))).toBe(false);
+    const url = await createMcpConnection(ctxWith(), input({ endpointUrl: 'ftp://example.com/mcp' })).catch(
+      (e) => e,
+    );
+    expect(mcpConnectFailure(url).message).toBe(
+      'Could not connect to your MCP server. The provided URL is invalid.',
+    );
     // an event stream the server refuses is the same failure
     status = 403;
     const sse = await createMcpConnection(
       ctxWith(),
       input({ endpointUrl: `${endpoint}/sse`, serverTransport: 'sse' }),
     ).catch((x) => x);
-    expect(mcpConnectErrorMessage(sse)).toMatch(/^Authentication failed/);
+    expect(mcpConnectFailure(sse).message).toBe(
+      'Could not connect to your MCP server. Authentication failed.',
+    );
+  });
+
+  it('closes an SSE connection whose event grows past the size cap', async () => {
+    expect(MAX_SSE_EVENT_CHARS).toBe(10 * 1024 * 1024);
+    hugeClosed = false;
+    await expect(
+      createMcpConnection(ctxWith(), input({ endpointUrl: `${endpoint}/huge`, serverTransport: 'sse' })),
+    ).rejects.toThrow(
+      "Couldn't read the MCP event stream: one event is over 10 MB, so the connection was closed",
+    );
+    await vi.waitFor(() => expect(hugeClosed).toBe(true));
   });
 
   it('offers the two transports, SSE marked deprecated, and the five authentications', () => {
@@ -339,7 +379,30 @@ describe('MCP client transports (P5-17)', () => {
     expect(await echo.invoke({ text: 'y' })).toBe('echo y\n[image image/png]');
     const boom = response.find((t: { name: string }) => t.name === 'boom');
     expect((await boom.invokeRaw({})).isError).toBe(true);
+    await expect(boom.invoke({})).rejects.toThrow('it broke');
     await closeFunction();
+    expect(sharedResourceCount()).toBe(0);
+  });
+
+  it("stops with n8n's text when no tool is left to offer, and closes the session", async () => {
+    const params: Record<string, unknown> = {
+      endpointUrl: `${endpoint}/mcp`,
+      serverTransport: 'httpStreamable',
+      authentication: 'none',
+      include: 'selected',
+      includeTools: ['missing'],
+      options: {},
+    };
+    const ctx = {
+      ...ctxWith(),
+      getNodeParameter: (name: string, _i: number, fallback?: unknown) => params[name] ?? fallback,
+      getNode: () => ({ name: 'MCP' }),
+      getTenantId: () => 't1',
+      getExecutionId: () => 'e-none',
+      logSubNodeRun: () => {},
+    };
+    const supply = (McpClientToolNode as NodeType).supplyData as (c: unknown, i: number) => Promise<unknown>;
+    await expect(supply(ctx, 0)).rejects.toThrow('MCP Server returned no tools');
     expect(sharedResourceCount()).toBe(0);
   });
 });

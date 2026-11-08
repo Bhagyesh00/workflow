@@ -11,7 +11,7 @@ import {
   type NodeType,
 } from '@workflow/workflow';
 import { type McpClient, type McpTool, type McpToolResult, mcpResultText } from '../../shared/mcp-client';
-import { createMcpConnection, mcpConnectErrorMessage, resolveMcpAuth } from '../../shared/mcp-connect';
+import { createMcpConnection, mcpConnectFailure, resolveMcpAuth } from '../../shared/mcp-connect';
 import { MCP_CLIENT_CREDENTIALS, MCP_CLIENT_PROPERTIES } from '../../shared/mcp-description';
 import { acquireShared, type Shared, sharedKey } from '../../shared/shared-resource';
 import { createTool } from '../../shared/tools';
@@ -147,13 +147,18 @@ export const McpClientToolNode: NodeType = {
         ({ client }) => client.close(),
       );
     } catch (error) {
-      throw new NodeOperationError(ctx.getNode(), mcpConnectErrorMessage(error), {
-        itemIndex,
-        cause: error,
-      });
+      const { message, description } = mcpConnectFailure(error);
+      throw new NodeOperationError(ctx.getNode(), message, { itemIndex, description, cause: error });
     }
     const { client } = shared.value;
     const serverTools = selectTools(shared.value.tools, include, selected);
+    if (serverTools.length === 0) {
+      await shared.release();
+      throw new NodeOperationError(ctx.getNode(), 'MCP Server returned no tools', {
+        itemIndex,
+        description: 'The MCP server is connected, but it offers no tools to use here.',
+      });
+    }
     const tools = serverTools.map((tool) => {
       const parameters: JsonSchema = { type: 'object', properties: {}, ...(tool.inputSchema ?? {}) };
       const base = createTool(
@@ -162,7 +167,7 @@ export const McpClientToolNode: NodeType = {
         async (args) => {
           const result = await client.callTool(tool.name, args);
           const text = mcpResultText(result);
-          if (result.isError) throw new Error(text || `The MCP tool "${tool.name}" reported an error`);
+          if (result.isError) throw new Error(text || `Failed to execute tool "${tool.name}"`);
           return text;
         },
       );

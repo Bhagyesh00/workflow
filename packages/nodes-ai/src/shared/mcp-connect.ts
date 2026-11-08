@@ -37,27 +37,45 @@ export interface McpAuth {
   credentialType?: string;
 }
 
-/** `Authentication failed` for a 401 or 403 of the server; the connection text for everything else */
-export const MCP_AUTH_FAILED = 'Authentication failed. Check the credentials for the MCP server.';
-export const MCP_CONNECT_FAILED = 'Could not connect to the MCP server';
+/** n8n's texts when connecting fails: the URL, a 401 or 403 of the server, everything else */
+export const MCP_CONNECT_FAILED = 'Could not connect to your MCP server';
+export const MCP_AUTH_FAILED = `${MCP_CONNECT_FAILED}. Authentication failed.`;
+export const MCP_INVALID_URL = `${MCP_CONNECT_FAILED}. The provided URL is invalid.`;
 
-export function isMcpAuthFailure(error: unknown): boolean {
-  const e = error as { httpStatus?: number; httpCode?: string | number; statusCode?: number } | undefined;
-  const status = e?.httpStatus ?? e?.statusCode ?? Number(e?.httpCode);
-  return status === 401 || status === 403;
+/** the endpoint is not an http(s) URL */
+export class McpEndpointUrlError extends Error {
+  constructor() {
+    super('The MCP endpoint must be an http(s) URL');
+    this.name = 'McpEndpointUrlError';
+  }
 }
 
-/** the text the node shows when connecting fails (no secret: `errorMessage` redacts) */
-export function mcpConnectErrorMessage(error: unknown): string {
-  if (isMcpAuthFailure(error)) return MCP_AUTH_FAILED;
-  return `${MCP_CONNECT_FAILED}: ${redactSecrets(errorMessage(error))}`;
+/** a 401 or 403: the status of the error, or a message that names it (as n8n tells them apart) */
+export function isMcpAuthFailure(error: unknown): boolean {
+  const e = error as
+    | { httpStatus?: number; httpCode?: string | number; statusCode?: number; message?: unknown }
+    | undefined;
+  const status = e?.httpStatus ?? e?.statusCode ?? Number(e?.httpCode);
+  if (status === 401 || status === 403) return true;
+  return typeof e?.message === 'string' && /\b(401|403)\b/.test(e.message);
+}
+
+/**
+ * What the node shows when connecting fails: n8n's message, and the reason as the description (no secret:
+ * `errorMessage` redacts).
+ */
+export function mcpConnectFailure(error: unknown): { message: string; description: string } {
+  const description = redactSecrets(errorMessage(error));
+  if (error instanceof McpEndpointUrlError) return { message: MCP_INVALID_URL, description };
+  if (isMcpAuthFailure(error)) return { message: MCP_AUTH_FAILED, description };
+  return { message: MCP_CONNECT_FAILED, description };
 }
 
 function endpointHost(endpoint: string): string {
   try {
     return new URL(endpoint).hostname;
   } catch {
-    throw new Error('The MCP endpoint must be an http(s) URL');
+    throw new McpEndpointUrlError();
   }
 }
 
@@ -124,7 +142,7 @@ export async function createMcpConnection(
   input: McpConnectionInput,
 ): Promise<McpClient> {
   const endpoint = input.endpointUrl.trim();
-  if (!/^https?:\/\//i.test(endpoint)) throw new Error('The MCP endpoint must be an http(s) URL');
+  if (!/^https?:\/\//i.test(endpoint)) throw new McpEndpointUrlError();
   const itemIndex = input.itemIndex ?? 0;
   const auth = await resolveMcpAuth(ctx, input.authentication, endpoint, itemIndex);
   const client = openMcpClient(ctx, endpoint, input.serverTransport, auth, input.timeoutMs, itemIndex);
