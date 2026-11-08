@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { HttpClient } from '@workflow/core';
-import type { DataObject, HttpRequestOptions } from '@workflow/workflow';
+import type { DataObject, HttpRequestOptions, NodeType } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   assistantModelCatalog,
@@ -360,6 +360,51 @@ describe('Assistant node and model tools (P5-69)', () => {
     expect(result).not.toContain('sk-options-key');
   });
 
+  it("get_node_parameter_options keeps a node's error text (outside text) inside one wrapper", async () => {
+    // a node that builds its error from the outside service's answer, as many do
+    const registry = h.ctx.registries.nodeTypes as unknown as { register(node: NodeType): void };
+    if (!h.ctx.registries.nodeTypes.get('test.optionsError')) {
+      registry.register({
+        description: {
+          name: 'test.optionsError',
+          displayName: 'Options error',
+          description: '',
+          group: ['transform'],
+          version: 1,
+          defaults: { name: 'Options error' },
+          inputs: ['main'],
+          outputs: ['main'],
+          properties: [
+            {
+              displayName: 'Channel',
+              name: 'channel',
+              type: 'options',
+              default: '',
+              typeOptions: { loadOptionsMethod: 'listChannels' },
+            },
+          ],
+        },
+        methods: {
+          loadOptions: {
+            async listChannels() {
+              throw new Error(`The service answered: ${INJECTION}`);
+            },
+          },
+        },
+        async execute(ctx) {
+          return [ctx.getInputData()];
+        },
+      } as NodeType);
+    }
+    const { result } = await turn(h, h.editor, 'get_node_parameter_options', {
+      nodeType: 'test.optionsError',
+      version: 1,
+      parameterPath: 'channel',
+    });
+    expect(result?.startsWith('Error: ')).toBe(true);
+    expectOneWrapper(result?.slice('Error: '.length), 'node-options');
+  });
+
   it("get_node_parameter_options refuses another workspace's credential before any request", async () => {
     const before = optionsRequests.length;
     const byId = await turn(h, h.editor, 'get_node_parameter_options', {
@@ -368,7 +413,9 @@ describe('Assistant node and model tools (P5-69)', () => {
       parameterPath: 'model',
       credentialId: h.other.credentialId,
     });
-    expect(byId.result).toBe('Error: The credential is not in this workspace, so it was refused');
+    // a handler's error of an untrusted tool comes back wrapped like its result (tool-adapter's shapeToolError)
+    expect(byId.result).toMatch(/^Error: /);
+    expect(byId.result).toContain('The credential is not in this workspace, so it was refused');
     const byMap = await turn(h, h.editor, 'get_node_parameter_options', {
       nodeType: 'ai.lmChatOpenAi',
       version: 1,
@@ -376,9 +423,8 @@ describe('Assistant node and model tools (P5-69)', () => {
       methodType: 'loadOptions',
       credentials: { openAiApi: { id: h.other.credentialId, name: 'x' } },
     });
-    expect(byMap.result).toBe(
-      'Error: A credential this node uses is not in this workspace, so it was refused',
-    );
+    expect(byMap.result).toMatch(/^Error: /);
+    expect(byMap.result).toContain('A credential this node uses is not in this workspace, so it was refused');
     expect(optionsRequests.length).toBe(before);
     const sent = JSON.stringify(h.fake.requests);
     expect(sent).not.toContain(CANARY.credential);

@@ -5,11 +5,13 @@
  *   static descriptions, so no untrusted wrapper. A node type is only ever looked up with `nodeTypes.get`.
  * - `get_node_parameter_options` (editor, as `POST /node-types/options`): `loadNodeOptions` for one
  *   parameter or method; a credential must be this workspace's; the list comes from an outside API, so the
- *   result is wrapped (`node-options`).
+ *   result is wrapped (`node-options`), and so is the node's own error (the adapter's `shapeToolError`).
  * - `execute_node` (editor, `executeNode`): always a card unless this thread holds the grant
  *   `nodes:execute:<type>:<resource>:<operation>` (a node with neither is scoped by the first of `mode`,
  *   `url`, `query`, `command`, `action` it declares, else by its type alone; no grant is offered past 200
- *   characters, so one URL never stands for all). Before the card: the type must exist and run alone (no
+ *   characters, so one URL never stands for all, nor when a value the key uses is an expression, which the
+ *   input items decide at run time). The card shows every parameter (redacted, up to 6000 characters, the
+ *   rest counted) and the input items as a preview. Before the card: the type must exist and run alone (no
  *   trigger, webhook-only or sub-node), and every credential must be this workspace's
  *   (`assertCredentialsInTenant`). On approval a one-node definition runs through `runAndCollect` (mode
  *   manual, no workflow id, at most 60 s); a node that starts waiting is stopped and reported as an error;
@@ -20,6 +22,7 @@ import {
   type AssistantApprovalDetails,
   type DataObject,
   type Item,
+  isExpression,
   type NodeProperty,
   type NodeType,
   redactSecrets,
@@ -33,6 +36,7 @@ import { nodeDetails, searchNodes } from '../../ai-builder/tools';
 import { assertCredentialsInTenant } from '../../mcp/tools/builder/credential-check';
 import { McpToolError } from '../../mcp/workflow-gate';
 import { loadNodeOptions } from '../../node-options';
+import { approvalPreview } from '../approvals';
 import { previewOutput, runAndCollect } from '../run-helper';
 import type { AssistantRunScope, AssistantToolDefinition } from '../types';
 
@@ -44,6 +48,10 @@ export const EXECUTE_NODE_GRANT_MAX = 200;
 export const EXECUTE_NODE_GRANT_FALLBACK = ['mode', 'url', 'query', 'command', 'action'] as const;
 const MAX_INPUT_ITEMS = 50;
 const FACT_CHARS = 200;
+/** characters of one parameter fact (the gate cuts a fact at 500) */
+const PARAMETER_PART_CHARS = 480;
+/** characters of parameters one card shows; the rest is counted in a `Parameters cut` fact */
+export const EXECUTE_NODE_PARAMETER_CHARS = 6000;
 
 const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
@@ -338,16 +346,26 @@ const executeNodeInput = z.object({
 });
 type ExecuteNodeInput = z.infer<typeof executeNodeInput>;
 
-/** a parameter's value as given, else the default of its first declaration shown for `resource` */
+/** a scoping value only known at run time: an expression, or a value that is not plain text (a resource locator) */
+const UNSCOPED = 'unscoped';
+
+/**
+ * A parameter's value as given, else the default of its first declaration shown for `resource`.
+ * `unscoped` when the value is an expression or given as anything but text: the input items decide it at
+ * run time, so a grant keyed by its text would cover every value.
+ */
 function resolveValue(
   properties: NodeProperty[],
   parameters: Record<string, unknown>,
   name: string,
   resource?: string,
-): { value: string; label: string } | undefined {
+): { value: string; label: string } | typeof UNSCOPED | undefined {
   const declared = properties.filter((p) => p.name === name && shownFor(p, 'resource', resource));
   if (!declared.length) return undefined;
-  const value = parameters[name] ?? declared[0]?.default;
+  const given = parameters[name];
+  if (given !== undefined && given !== null && typeof given !== 'string') return UNSCOPED;
+  const value = given ?? declared[0]?.default;
+  if (isExpression(value)) return UNSCOPED;
   if (typeof value !== 'string' || value.length === 0) return undefined;
   const option = declared
     .flatMap((p) => p.options ?? [])
@@ -357,7 +375,8 @@ function resolveValue(
 
 /**
  * The thread grant an approval of this call covers, and the operation's label for the card. Values are
- * URI-encoded, so a `:` in one cannot pose as another part. Null when the key passes 200 characters.
+ * URI-encoded, so a `:` in one cannot pose as another part. Null when the key passes 200 characters, and
+ * when a value the key uses is an expression (or not plain text): the card then offers approve once only.
  */
 export function executeNodeScope(
   nodeType: NodeType,
@@ -365,8 +384,11 @@ export function executeNodeScope(
 ): { grantKey: string | null; label: string | null } {
   const type = nodeType.description.name;
   const properties = nodeType.description.properties;
-  const resource = resolveValue(properties, parameters, 'resource');
-  const operation = resolveValue(properties, parameters, 'operation', resource?.value);
+  const resourceFound = resolveValue(properties, parameters, 'resource');
+  const resource = resourceFound === UNSCOPED ? undefined : resourceFound;
+  const operationFound = resolveValue(properties, parameters, 'operation', resource?.value);
+  const operation = operationFound === UNSCOPED ? undefined : operationFound;
+  let unscoped = resourceFound === UNSCOPED || operationFound === UNSCOPED;
   const declaresSplit = properties.some((p) => p.name === 'resource' || p.name === 'operation');
   let key = `nodes:execute:${type}`;
   let label: string | null = null;
@@ -377,12 +399,16 @@ export function executeNodeScope(
     for (const name of EXECUTE_NODE_GRANT_FALLBACK) {
       const found = resolveValue(properties, parameters, name);
       if (!found) continue;
+      if (found === UNSCOPED) {
+        unscoped = true;
+        break;
+      }
       key += `:${encodeURIComponent(found.value)}`;
       label = found.label;
       break;
     }
   }
-  return { grantKey: key.length > EXECUTE_NODE_GRANT_MAX ? null : key, label };
+  return { grantKey: unscoped || key.length > EXECUTE_NODE_GRANT_MAX ? null : key, label };
 }
 
 interface PreparedNode {
@@ -442,17 +468,47 @@ function nodeFacts(prepared: PreparedNode, input: ExecuteNodeInput, label: strin
   ];
   if (label) facts.push({ label: 'Operation', value: cut(label, FACT_CHARS) });
   for (const c of prepared.credentials) facts.push({ label: 'Credential', value: cut(c.name, FACT_CHARS) });
-  facts.push({ label: 'Input items', value: String(input.input?.length || 1) });
-  let parameters = '';
-  try {
-    parameters = JSON.stringify(input.config.parameters) ?? '';
-  } catch {
-    parameters = '';
-  }
-  if (parameters && parameters !== '{}') {
-    facts.push({ label: 'Parameters', value: cut(redactSecrets(parameters), FACT_CHARS * 2) });
-  }
+  facts.push(...parameterFacts(input.config.parameters));
+  facts.push({
+    label: 'Input items',
+    value: input.input?.length ? String(input.input.length) : '1 (empty)',
+  });
   facts.push({ label: 'Note', value: 'The node really runs: what it sends or changes happens' });
+  return facts;
+}
+
+/**
+ * Every parameter as its own fact (text as it is, the rest as JSON), redacted whole before it is split
+ * into parts the gate keeps, up to `EXECUTE_NODE_PARAMETER_CHARS`; what is left out is counted.
+ */
+export function parameterFacts(parameters: Record<string, unknown>): AssistantApprovalDetails['facts'] {
+  const facts: AssistantApprovalDetails['facts'] = [];
+  let left = EXECUTE_NODE_PARAMETER_CHARS;
+  let hidden = 0;
+  for (const [name, value] of Object.entries(parameters)) {
+    let text: string;
+    try {
+      text = typeof value === 'string' ? value : (JSON.stringify(value) ?? String(value));
+    } catch {
+      text = String(value);
+    }
+    text = redactSecrets(text);
+    const shown = text.slice(0, Math.max(0, left));
+    hidden += text.length - shown.length;
+    left -= shown.length;
+    if (!shown && text) continue;
+    const label = `Parameter ${cut(redactSecrets(name), 60)}`;
+    const parts = Math.max(1, Math.ceil(shown.length / PARAMETER_PART_CHARS));
+    for (let i = 0; i < parts; i++) {
+      facts.push({
+        label: parts > 1 ? `${label} (${i + 1} of ${parts})` : label,
+        value: shown.slice(i * PARAMETER_PART_CHARS, (i + 1) * PARAMETER_PART_CHARS),
+      });
+    }
+  }
+  if (hidden > 0) {
+    facts.push({ label: 'Parameters cut', value: `${hidden} more characters are not shown on this card` });
+  }
   return facts;
 }
 
@@ -475,7 +531,11 @@ const executeNodeTool: AssistantToolDefinition<ExecuteNodeInput> = {
       inputType: 'approval',
       title: 'Run a node',
       resourceName: `${prepared.nodeType.description.displayName} node`,
-      details: { facts: nodeFacts(prepared, input, label) },
+      details: {
+        facts: nodeFacts(prepared, input, label),
+        // the items every `$json` expression reads, so the person sees the real URL, body or id
+        ...(input.input?.length ? { preview: approvalPreview(input.input.map((item) => item.json)) } : {}),
+      },
       grantKey,
     };
   },

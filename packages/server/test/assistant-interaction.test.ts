@@ -256,7 +256,10 @@ describe('Assistant interaction tools (P5-69)', () => {
 
       const unknown = await turn(h, h.editor, 'setup_credentials', { credentialType: 'noSuchApi' });
       expect(unknown.status.pending).toEqual([]);
-      expect(unknown.result).toBe('Error: There is no credential type "noSuchApi"');
+      // an untrusted tool's error comes back wrapped like its result (tool-adapter's shapeToolError)
+      expect(unknown.result).toMatch(
+        /^Error: (?:<untrusted_data source="[^"]+">\n)?There is no credential type "noSuchApi"/,
+      );
     });
   });
 });
