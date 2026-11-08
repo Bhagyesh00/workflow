@@ -3,12 +3,34 @@
  * `DomainApprovalCard` (L10).
  */
 import type { AssistantConfirmation } from '@workflow/workflow';
+import { ApprovalCard } from './ApprovalCard';
+import { CredentialSetupCard } from './CredentialSetupCard';
+import { DomainApprovalCard } from './DomainApprovalCard';
+import { QuestionsCard } from './QuestionsCard';
 
 export interface ConfirmationCardProps {
   confirmation: AssistantConfirmation;
 }
 
-export function ConfirmationCard(_props: ConfirmationCardProps) {
-  // L2 renders it
-  return null;
+function CardBody({ confirmation }: ConfirmationCardProps) {
+  switch (confirmation.inputType) {
+    case 'approval':
+      return <ApprovalCard confirmation={confirmation} />;
+    case 'questions':
+      return <QuestionsCard confirmation={confirmation} />;
+    case 'domain':
+      return <DomainApprovalCard confirmation={confirmation} />;
+    case 'credential':
+      return <CredentialSetupCard confirmation={confirmation} />;
+    default:
+      return null;
+  }
+}
+
+export function ConfirmationCard({ confirmation }: ConfirmationCardProps) {
+  return (
+    <div data-request-id={confirmation.requestId} data-input-type={confirmation.inputType}>
+      <CardBody confirmation={confirmation} />
+    </div>
+  );
 }

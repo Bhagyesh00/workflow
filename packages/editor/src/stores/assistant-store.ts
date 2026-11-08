@@ -9,16 +9,23 @@
  */
 import type {
   AssistantArtifact,
+  AssistantAttachmentRef,
   AssistantConfirmation,
   AssistantEvent,
   AssistantMessageDTO,
   AssistantSendMessage,
+  AssistantStatusDTO,
   AssistantTask,
   AssistantThreadDTO,
   DataObject,
 } from '@workflow/workflow';
 import { create } from 'zustand';
-import type { AssistantDraftView } from '../api/types';
+import { streamAssistantEvents } from '../api/assistant-stream';
+import { errorMessage } from '../api/client';
+import { assistantApi } from '../api/endpoints';
+import type { AssistantDraftView, AssistantThreadPage } from '../api/types';
+import { reduceAssistantEvent } from '../features/assistant/event-reducer';
+import { newId } from '../lib/ids';
 
 /** where the open thread is: nothing open, loading it, a turn running, or a turn waiting for a card */
 export type AssistantPhase = 'idle' | 'loading' | 'running' | 'suspended';
@@ -107,7 +114,122 @@ export function initialAssistantState(): AssistantStoreData {
   };
 }
 
-export const useAssistantStore = create<AssistantState>()((set) => ({
+/** the open thread's part of the state, empty */
+function emptyThread(): AssistantThreadState {
+  const { messages, streamingText, toolRuns, pending, tasks, artifacts, status, cursor, error } =
+    initialAssistantState();
+  return { messages, streamingText, toolRuns, pending, tasks, artifacts, status, cursor, error };
+}
+
+/** the running stream of the open thread; one at a time */
+let stream: AbortController | null = null;
+/** bumped by every open, reload, close and reset, so a late answer of an older load changes nothing */
+let generation = 0;
+
+function endStream(): void {
+  stream?.abort();
+  stream = null;
+}
+
+function phaseOf(status: AssistantStatusDTO): AssistantPhase {
+  if (status.hasActiveRun) return 'running';
+  if (status.isSuspended || status.pending.length > 0) return 'suspended';
+  return 'idle';
+}
+
+/** the attachments of a sent message as the thread shows them (names and sizes, never the bytes) */
+function attachmentRefs(body: AssistantSendMessage): AssistantAttachmentRef[] | undefined {
+  if (!body.attachments?.length) return undefined;
+  return body.attachments.map((file) => ({
+    fileName: file.fileName,
+    mimeType: file.mimeType,
+    size: Math.floor((file.data.length * 3) / 4),
+  }));
+}
+
+/** the thread list answer: the editor's page shape, or a bare list */
+function threadsOf(
+  page: AssistantThreadPage | AssistantThreadDTO[] | null | undefined,
+): AssistantThreadDTO[] {
+  if (Array.isArray(page)) return page;
+  return Array.isArray(page?.data) ? page.data : [];
+}
+
+/** opens the stream of `threadId` after `afterId`; events of an older generation are dropped */
+function startStream(threadId: string, afterId: number, token: number): void {
+  endStream();
+  const controller = new AbortController();
+  stream = controller;
+  const live = () => !controller.signal.aborted && token === generation;
+  streamAssistantEvents(
+    threadId,
+    afterId,
+    (event) => {
+      if (live()) useAssistantStore.getState().applyEvent(event);
+    },
+    controller.signal,
+  ).catch((error: unknown) => {
+    if (live()) useAssistantStore.setState({ error: errorMessage(error) });
+  });
+}
+
+/** messages, then status, then the stream from `nextEventId - 1` (n8n's open order) */
+async function loadThread(threadId: string, token: number): Promise<void> {
+  try {
+    const page = await assistantApi.messages(threadId);
+    if (token !== generation) return;
+    const status = await assistantApi.status(threadId);
+    if (token !== generation) return;
+    const cursor = Math.max(0, (Number(page.nextEventId) || 1) - 1);
+    useAssistantStore.setState({
+      messages: page.messages ?? [],
+      pending: status.pending ?? [],
+      status: phaseOf({ ...status, pending: status.pending ?? [] }),
+      streamingText: '',
+      cursor,
+      error: null,
+    });
+    startStream(threadId, cursor, token);
+  } catch (error) {
+    if (token !== generation) return;
+    useAssistantStore.setState({ status: 'idle', error: errorMessage(error) });
+  }
+}
+
+/** Loads the caller's threads (newest first) into the store. */
+export async function refreshAssistantThreads(): Promise<AssistantThreadDTO[]> {
+  const threads = threadsOf(await assistantApi.threads({ limit: 100 }));
+  useAssistantStore.getState().setThreads(threads);
+  return threads;
+}
+
+/** Creates an empty thread and lists it first. */
+export async function createAssistantThread(): Promise<AssistantThreadDTO> {
+  const thread = await assistantApi.createThread({});
+  useAssistantStore.setState((state) => ({
+    threads: [thread, ...state.threads.filter((t) => t.id !== thread.id)],
+  }));
+  return thread;
+}
+
+/** Renames a thread; the list shows the server's title. */
+export async function renameAssistantThread(threadId: string, title: string): Promise<void> {
+  const thread = await assistantApi.renameThread(threadId, title);
+  useAssistantStore.setState((state) => ({
+    threads: state.threads.map((t) => (t.id === threadId ? { ...t, ...thread } : t)),
+  }));
+}
+
+/** Deletes a thread (the server ends its run first); the open thread closes when it is the one deleted. */
+export async function deleteAssistantThread(threadId: string): Promise<void> {
+  await assistantApi.deleteThread(threadId);
+  useAssistantStore.setState((state) => ({ threads: state.threads.filter((t) => t.id !== threadId) }));
+  if (useAssistantStore.getState().activeThreadId === threadId) {
+    await useAssistantStore.getState().openThread(null);
+  }
+}
+
+export const useAssistantStore = create<AssistantState>()((set, get) => ({
   ...initialAssistantState(),
 
   setThreads: (threads) => set({ threads }),
@@ -123,21 +245,101 @@ export const useAssistantStore = create<AssistantState>()((set) => ({
   setStatus: (status) => set({ status }),
   setCursor: (cursor) => set({ cursor }),
   setError: (error) => set({ error }),
-  reset: () => set(initialAssistantState()),
+  reset: () => {
+    endStream();
+    generation += 1;
+    set(initialAssistantState());
+  },
 
-  openThread: async (_threadId) => {
-    throw new Error('not implemented (L2)');
+  openThread: async (threadId) => {
+    endStream();
+    generation += 1;
+    const token = generation;
+    if (!threadId) {
+      set({ ...emptyThread(), activeThreadId: null, drafts: {} });
+      return;
+    }
+    set({ ...emptyThread(), activeThreadId: threadId, drafts: {}, status: 'loading' });
+    await loadThread(threadId, token);
   },
-  send: async (_body) => {
-    throw new Error('not implemented (L2)');
+
+  send: async (body) => {
+    let threadId = get().activeThreadId;
+    if (!threadId) {
+      // the first message of a new chat: the thread is made, opened and streamed before the turn starts
+      const thread = await createAssistantThread();
+      threadId = thread.id;
+      endStream();
+      generation += 1;
+      set({ ...emptyThread(), activeThreadId: threadId, drafts: {} });
+      startStream(threadId, 0, generation);
+    }
+    const local: AssistantMessageDTO = {
+      id: `local-${newId()}`,
+      runId: null,
+      role: 'user',
+      content: body.message,
+      attachments: attachmentRefs(body),
+      summarized: false,
+      createdAt: new Date().toISOString(),
+    };
+    const before = get().status;
+    const sentOn = threadId;
+    set((state) => ({
+      messages: [...state.messages, local],
+      status: 'running',
+      error: null,
+      threads: [
+        ...state.threads.filter((t) => t.id === sentOn),
+        ...state.threads.filter((t) => t.id !== sentOn),
+      ],
+    }));
+    try {
+      await assistantApi.chat(sentOn, body);
+    } catch (error) {
+      if (get().activeThreadId === sentOn) {
+        set((state) => ({
+          messages: state.messages.filter((message) => message.id !== local.id),
+          status: state.status === 'running' ? (before === 'loading' ? 'idle' : before) : state.status,
+        }));
+      }
+      // the caller (the composer) shows why and gives the text back
+      throw error;
+    }
   },
+
   stop: async () => {
-    throw new Error('not implemented (L2)');
+    const threadId = get().activeThreadId;
+    if (!threadId) return;
+    try {
+      await assistantApi.cancel(threadId);
+      // the stream's `run-finish` says `cancelled`; the composer is free again at once
+      if (get().activeThreadId === threadId && get().status === 'running') {
+        set({ status: 'idle', streamingText: '' });
+      }
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
   },
-  applyEvent: (_event) => {
-    throw new Error('not implemented (L2)');
-  },
+
+  applyEvent: (event) =>
+    set((state) => {
+      // a replay the state already holds
+      if (typeof event.id === 'number' && event.id <= state.cursor) return state;
+      const next = reduceAssistantEvent(state, event);
+      if (event.type !== 'thread-title-updated') return next === state ? state : next;
+      const title = event.payload.title;
+      return {
+        ...next,
+        threads: state.threads.map((t) => (t.id === state.activeThreadId ? { ...t, title } : t)),
+      };
+    }),
+
   reload: async () => {
-    throw new Error('not implemented (L2)');
+    const threadId = get().activeThreadId;
+    if (!threadId) return;
+    endStream();
+    generation += 1;
+    await loadThread(threadId, generation);
   },
 }));
