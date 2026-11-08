@@ -155,7 +155,7 @@ describe('Assistant interaction tools (P5-69)', () => {
         ],
       });
       expect(status.pending).toEqual([]);
-      expect(result).toMatch(/^Error: .*own id/);
+      expect(result).toMatch(/^Error: [\s\S]*own id/);
     });
 
     it('refuses a single question without options', async () => {
@@ -229,7 +229,7 @@ describe('Assistant interaction tools (P5-69)', () => {
         kind: 'credential',
         credentialId: h.other.credentialId,
       });
-      expect(other).toMatch(/^Error: .*not a "openAiApi" credential of this workspace/);
+      expect(other).toMatch(/^Error: [\s\S]*not a "openAiApi" credential of this workspace/);
       expect(other).not.toContain(CANARY.credential);
 
       const second = await turn(h, h.editor, 'setup_credentials', { credentialType: 'slackApi' });
@@ -237,7 +237,7 @@ describe('Assistant interaction tools (P5-69)', () => {
         kind: 'credential',
         credentialId: h.modelCredentialId,
       });
-      expect(wrongType).toMatch(/^Error: .*not a "slackApi" credential/);
+      expect(wrongType).toMatch(/^Error: [\s\S]*not a "slackApi" credential/);
       h.expectNoCanary();
     });
 
