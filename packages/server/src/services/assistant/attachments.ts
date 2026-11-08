@@ -41,11 +41,24 @@ function baseType(mimeType: string): string {
   return (mimeType.split(';')[0] ?? '').trim().toLowerCase();
 }
 
-/** the file name without a folder part or control characters, cut to a sane length */
+/** a control character (U+0000 to U+001F, U+007F) */
+const isControl = (char: string) => {
+  const code = char.charCodeAt(0);
+  return code <= 0x1f || code === 0x7f;
+};
+
+/** the file name without a folder part or control characters, cut to a sane length with its extension kept */
 function cleanName(fileName: string): string {
-  // eslint-disable-next-line no-control-regex
-  const base = (fileName.split(/[\\/]/).pop() ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
-  return base.slice(0, FILE_NAME_CHARS);
+  const last = fileName.split(/[\\/]/).pop() ?? '';
+  const base = Array.from(last, (char) => (isControl(char) ? '' : char))
+    .join('')
+    .trim();
+  if (base.length <= FILE_NAME_CHARS) return base;
+  const dot = base.lastIndexOf('.');
+  const extension = dot < 0 ? '' : base.slice(dot);
+  return extension.length < FILE_NAME_CHARS
+    ? base.slice(0, FILE_NAME_CHARS - extension.length) + extension
+    : base.slice(0, FILE_NAME_CHARS);
 }
 
 function extensionOf(fileName: string): string {

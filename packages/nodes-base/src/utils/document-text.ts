@@ -85,7 +85,7 @@ async function readText(
     case 'docx':
       return readDocxText(bytes, options);
     case 'html':
-      return { text: htmlToText(decodeUtf8(bytes)), truncated: false };
+      return readHtml(bytes);
     case 'text':
     case 'markdown':
       return { text: decodeUtf8(bytes), truncated: false };
@@ -227,14 +227,108 @@ function decodeEntities(text: string): string {
   });
 }
 
-/** the visible text of an HTML page: scripts, styles and comments dropped, block tags become line breaks */
+/** characters of HTML read at most (an attachment at n8n's 7.5 MB limit fits); a longer page is cut */
+export const MAX_HTML_CHARS = 8 * 1024 * 1024;
+/** elements whose content is never shown */
+const HIDDEN_ELEMENTS = new Set(['script', 'style', 'noscript', 'template']);
+/** closing tags that end a line (`<br>` too) */
+const LINE_END_TAGS = new Set([
+  'p',
+  'div',
+  'li',
+  'tr',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'table',
+  'section',
+  'article',
+  'pre',
+  'ul',
+  'ol',
+]);
+/** characters of a tag name looked at; a longer name is no tag this reader knows */
+const TAG_NAME_CHARS = 16;
+
+function readHtml(bytes: Uint8Array): DocumentText {
+  const html = decodeUtf8(bytes);
+  const truncated = html.length > MAX_HTML_CHARS;
+  return { text: htmlToText(truncated ? html.slice(0, MAX_HTML_CHARS) : html), truncated };
+}
+
+/** a letter, a digit or `-` */
+function isNameChar(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 45
+  );
+}
+
+/** the tag name that starts at `from`, lower case */
+function tagNameAt(html: string, from: number): string {
+  let end = from;
+  while (end < html.length && end - from < TAG_NAME_CHARS && isNameChar(html.charCodeAt(end))) end += 1;
+  return html.slice(from, end).toLowerCase();
+}
+
+/** the index after the `</name ...>` that closes a hidden element, searched from `from`; -1 when there is none */
+function hiddenElementEnd(html: string, name: string, from: number): number {
+  let at = from;
+  for (;;) {
+    const close = html.indexOf('</', at);
+    if (close < 0) return -1;
+    const nameEnd = close + 2 + name.length;
+    if (html.slice(close + 2, nameEnd).toLowerCase() === name && !isNameChar(html.charCodeAt(nameEnd))) {
+      const end = html.indexOf('>', nameEnd);
+      return end < 0 ? -1 : end + 1;
+    }
+    at = close + 2;
+  }
+}
+
+/**
+ * The visible text of an HTML page: scripts, styles and comments dropped, block tags become line breaks.
+ * One pass with `indexOf` that only moves forward, so hostile input costs linear time (no regex runs on
+ * the markup): an unclosed comment or hidden element hides the rest of the page, as in a browser, and a
+ * `<` with no `>` after it is text.
+ */
 function htmlToText(html: string): string {
-  const stripped = html
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, ' ')
-    .replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6]|\/table|\/section|\/article|\/pre|\/ul|\/ol)\b[^>]*>/gi, '\n')
-    .replace(/<[^>]*>/g, ' ');
-  return decodeEntities(stripped)
+  const parts: string[] = [];
+  let at = 0;
+  while (at < html.length) {
+    const open = html.indexOf('<', at);
+    if (open < 0) {
+      parts.push(html.slice(at));
+      break;
+    }
+    parts.push(html.slice(at, open));
+    if (html.startsWith('<!--', open)) {
+      const close = html.indexOf('-->', open + 4);
+      if (close < 0) break;
+      parts.push(' ');
+      at = close + 3;
+      continue;
+    }
+    const end = html.indexOf('>', open + 1);
+    if (end < 0) {
+      parts.push(html.slice(open));
+      break;
+    }
+    const closing = html.charCodeAt(open + 1) === 47;
+    const name = tagNameAt(html, open + (closing ? 2 : 1));
+    if (!closing && HIDDEN_ELEMENTS.has(name)) {
+      const after = hiddenElementEnd(html, name, end + 1);
+      if (after < 0) break;
+      parts.push(' ');
+      at = after;
+      continue;
+    }
+    parts.push((closing && LINE_END_TAGS.has(name)) || (!closing && name === 'br') ? '\n' : ' ');
+    at = end + 1;
+  }
+  return decodeEntities(parts.join(''))
     .split('\n')
     .map((line) => line.replace(/[ \t ]+/g, ' ').trim())
     .join('\n')

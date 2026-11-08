@@ -19,6 +19,19 @@ export interface AttachmentPickerProps {
 
 const ACCEPT = Object.values(ASSISTANT_ATTACHMENT_TYPES).flat().join(',');
 
+/** a stable key per picked file (a file picked twice is two `File` objects, so two keys) */
+const fileKeys = new WeakMap<File, string>();
+let nextFileKey = 0;
+function fileKey(file: File): string {
+  let key = fileKeys.get(file);
+  if (!key) {
+    nextFileKey += 1;
+    key = `file-${nextFileKey}`;
+    fileKeys.set(file, key);
+  }
+  return key;
+}
+
 function sizeText(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10} KB`;
@@ -56,7 +69,7 @@ export function AttachmentPicker({ files, onChange }: AttachmentPickerProps) {
             const bad = !attachmentMimeType(file) || file.size > ATTACHMENT_FILE_BYTES;
             return (
               <li
-                key={`${file.name}-${index}`}
+                key={fileKey(file)}
                 className={`flex max-w-56 items-center gap-1 rounded-full border px-2 py-0.5 text-xs ${
                   bad ? 'border-err text-err' : 'border-line bg-surface-2 text-ink-2'
                 }`}

@@ -45,6 +45,7 @@ function decodeUtf8(bytes: Uint8Array): string {
   return new TextDecoder('utf-8').decode(bytes).replace(/^﻿/, '');
 }
 
+/** the turn's files by index (third-party names: the error holding it is wrapped by `shapeToolError`) */
 function describeFiles(run: AssistantRunScope): string {
   return run.attachments
     .map((file, index) => `${index}: ${file.fileName} (${file.mimeType}, ${file.size} bytes)`)
@@ -142,12 +143,14 @@ async function parseFile(ctx: ServerContext, run: AssistantRunScope, input: Pars
         : `There is no file ${input.attachmentIndex} in this message. The files are ${describeFiles(run)}`,
     );
   }
+  // the other errors name a file by index and type only, never by its name
+  const index = input.attachmentIndex;
   if (isImageAttachment(file)) {
-    throw new Error(`"${file.fileName}" is an image: it was sent to you with the message, so look at it directly`);
+    throw new Error(`File ${index} is an image: it was sent to you with the message, so look at it directly`);
   }
   const type = (file.mimeType.split(';')[0] ?? '').trim().toLowerCase();
   const format = input.format ?? TYPE_FORMATS[type];
-  if (!format) throw new Error(`"${file.fileName}" cannot be read as text`);
+  if (!format) throw new Error(`File ${index} (${type}) cannot be read as text`);
 
   const bytes = await ctx.executions.binaryStore(run.tenant.id).getBuffer(file.binary);
   const startRow = input.startRow ?? 0;
@@ -167,7 +170,7 @@ async function parseFile(ctx: ServerContext, run: AssistantRunScope, input: Pars
     try {
       value = JSON.parse(decodeUtf8(bytes));
     } catch {
-      throw new Error(`"${file.fileName}" is not valid JSON`);
+      throw new Error(`File ${index} is not valid JSON`);
     }
     if (Array.isArray(value)) {
       return { ...head, ...pageRows(value as unknown[], startRow, maxRows) };

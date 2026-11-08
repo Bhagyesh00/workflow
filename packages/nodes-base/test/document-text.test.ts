@@ -1,9 +1,9 @@
 /** P5-74 (L11): `documentText` reads PDF, XLSX, DOCX, HTML, text and markdown within the instance limits. */
-import * as XLSX from 'xlsx';
 import { describe, expect, it } from 'vitest';
-import { zipFiles } from '../src/utils/archive';
-import { DocumentTextError, documentText } from '../src/utils/document-text';
+import * as XLSX from 'xlsx';
 import { spreadsheetRows } from '../src/nodes/core/extract/spreadsheet';
+import { zipFiles } from '../src/utils/archive';
+import { DocumentTextError, documentText, MAX_HTML_CHARS } from '../src/utils/document-text';
 
 const LIMITS = { maxDecompressedBytes: 1024 * 1024, maxArchiveEntries: 50, maxSpreadsheetCells: 10_000 };
 const options = { limits: LIMITS };
@@ -158,6 +158,44 @@ describe('documentText (P5-74)', () => {
     const out = await documentText(enc(html), 'html', options);
     expect(out.text).toBe('Title\nOne & two\na\nb');
     expect(out.text).not.toContain('alert');
+  });
+
+  it('reads HTML tags in any case, entities, and a stray "<" as text', async () => {
+    const html =
+      '<P>a &lt; b</P><SCRIPT type="x">hidden()</SCRIPT ><br/>after<Template><b>gone</b></template>end<BR>2 < 3';
+    const out = await documentText(enc(html), 'html', options);
+    expect(out.text).toBe('a < b\n\nafter end\n2 < 3');
+  });
+
+  it('hides the rest of a page after an unclosed comment or script, as a browser does', async () => {
+    const textOf = async (html: string) => (await documentText(enc(html), 'html', options)).text;
+    expect(await textOf('<p>shown</p><!-- open <p>hidden</p>')).toBe('shown');
+    expect(await textOf('<p>shown</p><script>hidden()</p>')).toBe('shown');
+  });
+
+  it('strips about 1 MB of hostile HTML in linear time (no backtracking)', async () => {
+    const size = 1024 * 1024;
+    const hostile = [
+      '<!--'.repeat(size / 4),
+      '<'.repeat(size),
+      '<script '.repeat(size / 8),
+      `<script>${'</'.repeat(size / 2)}`,
+      `<style>${'</styl'.repeat(size / 6)}</style>x`,
+      '<a>'.repeat(size / 3),
+      '<a '.repeat(size / 3),
+      '&#x'.repeat(size / 3),
+    ];
+    for (const html of hostile) {
+      const started = performance.now();
+      await documentText(enc(html), 'html', options);
+      expect(performance.now() - started).toBeLessThan(500);
+    }
+  });
+
+  it('cuts a page past MAX_HTML_CHARS and says so', async () => {
+    const out = await documentText(enc(`${'a'.repeat(MAX_HTML_CHARS)}<p>past the cut</p>`), 'html', options);
+    expect(out.truncated).toBe(true);
+    expect(out.text).not.toContain('past the cut');
   });
 
   it('keeps text and markdown as they are (BOM dropped) and cuts at maxChars', async () => {
