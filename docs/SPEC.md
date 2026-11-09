@@ -144,20 +144,20 @@
 
 ### 1.9 Credentials and secrets
 
-| Capability                                                                                                         | M     | Status                                             |
-| ------------------------------------------------------------------------------------------------------------------ | ----- | -------------------------------------------------- |
-| Typed credential schemas, AES-256-GCM per-tenant encryption bound to tenant+credential, key rotation               | M1    | ✅                                                 |
-| Redacted API output, merge-on-update                                                                               | M1    | ✅ helpers · 🔨 server                             |
-| Credential test                                                                                                    | M1    | 🔨                                                 |
-| Credential tests for every credential type                                                                         | M2    | ✅                                                 |
-| Postgres and MySQL SSL and SSH tunnel                                                                              | M2    | ✅                                                 |
-| Generic auth: Basic, Header, Query, Bearer, Custom JSON, OAuth2 (auth code, client credentials, PKCE) with refresh | M1    | ✅ OAuth2 refresh · 🔨 types and flow              |
-| Reuse any integration credential in HTTP Request                                                                   | M1    | 🔨                                                 |
-| Allowed domains per credential                                                                                     | M2    | ✅                                                 |
-| OAuth1, Digest auth                                                                                                | M2    | ✅                                                 |
-| External secret vaults (AWS, GCP, Azure, Vault, 1Password), `$secrets`                                             | M2    | ✅                                                 |
-| End-user credentials / per-customer credential slots (see NF-05)                                                   | M1/M2 | 📋                                                 |
-| Credential sharing between users/projects                                                                          | M2    | 📋 (tenants share by default; projects come in M2) |
+| Capability                                                                                                         | M     | Status                                |
+| ------------------------------------------------------------------------------------------------------------------ | ----- | ------------------------------------- |
+| Typed credential schemas, AES-256-GCM per-tenant encryption bound to tenant+credential, key rotation               | M1    | ✅                                    |
+| Redacted API output, merge-on-update                                                                               | M1    | ✅ helpers · 🔨 server                |
+| Credential test                                                                                                    | M1    | 🔨                                    |
+| Credential tests for every credential type                                                                         | M2    | ✅                                    |
+| Postgres and MySQL SSL and SSH tunnel                                                                              | M2    | ✅                                    |
+| Generic auth: Basic, Header, Query, Bearer, Custom JSON, OAuth2 (auth code, client credentials, PKCE) with refresh | M1    | ✅ OAuth2 refresh · 🔨 types and flow |
+| Reuse any integration credential in HTTP Request                                                                   | M1    | 🔨                                    |
+| Allowed domains per credential                                                                                     | M2    | ✅                                    |
+| OAuth1, Digest auth                                                                                                | M2    | ✅                                    |
+| External secret vaults (AWS, GCP, Azure, Vault, 1Password), `$secrets`                                             | M2    | ✅                                    |
+| End-user credentials / per-customer credential slots (see NF-05)                                                   | M1/M2 | 📋                                    |
+| Credential sharing between users/projects                                                                          | M2    | ✅                                    |
 
 ### 1.10 Integrations
 
@@ -229,15 +229,15 @@
 
 ### 1.13 Users, access and authentication
 
-| Capability                                                                          | M   | Status |
-| ----------------------------------------------------------------------------------- | --- | ------ |
-| Tenants (workspaces), owner/admin/editor/viewer roles, invitations, tenant switcher | M1  | 🔨     |
-| Email + password (argon2id), sessions, CSRF origin checks, login rate limits        | M1  | 🔨     |
-| API keys for the public API                                                         | M1  | 🔨     |
-| Audit log (append-only, every tier)                                                 | M1  | 🔨     |
-| Password reset, TOTP 2FA (enforceable)                                              | M2  | 📋     |
-| Projects inside a tenant with project roles, custom roles                           | M2  | 📋     |
-| SSO: SAML, OIDC; SCIM; role provisioning from IdP claims                            | M2  | 📋     |
+| Capability                                                                                 | M   | Status |
+| ------------------------------------------------------------------------------------------ | --- | ------ |
+| Tenants (workspaces), owner, admin, member and project roles, invitations, tenant switcher | M1  | 🔨     |
+| Email + password (argon2id), sessions, CSRF origin checks, login rate limits               | M1  | 🔨     |
+| API keys for the public API                                                                | M1  | 🔨     |
+| Audit log (append-only, every tier)                                                        | M1  | 🔨     |
+| Password reset, TOTP 2FA (enforceable)                                                     | M2  | 📋     |
+| Projects inside a tenant with project roles, custom roles                                  | M2  | ✅     |
+| SSO: SAML, OIDC; SCIM; role provisioning from IdP claims                                   | M2  | 📋     |
 
 ### 1.14 Lifecycle and governance
 
