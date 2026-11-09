@@ -4,6 +4,9 @@ INSERT INTO "projects" ("tenant_id", "name", "type") SELECT "id", left("name", 2
 INSERT INTO "projects" ("tenant_id", "name", "type", "owner_user_id", "creator_id")
 SELECT m."tenant_id", left(u."name", 255), 'personal', m."user_id", m."user_id"
 FROM "memberships" m JOIN "users" u ON u."id" = m."user_id";--> statement-breakpoint
+INSERT INTO "project_relations" ("tenant_id", "project_id", "user_id", "role")
+SELECT "tenant_id", "id", "owner_user_id", 'project:personalOwner' FROM "projects" WHERE "type" = 'personal'
+ON CONFLICT ("project_id", "user_id") DO NOTHING;--> statement-breakpoint
 ALTER TABLE "workflows" ADD COLUMN "project_id" uuid;--> statement-breakpoint
 ALTER TABLE "credentials" ADD COLUMN "project_id" uuid;--> statement-breakpoint
 ALTER TABLE "folders" ADD COLUMN "project_id" uuid;--> statement-breakpoint

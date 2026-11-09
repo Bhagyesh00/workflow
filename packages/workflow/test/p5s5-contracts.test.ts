@@ -266,7 +266,7 @@ describe('Assistant DTOs', () => {
   it('holds no secret or binary field in the MCP connection and message DTOs', () => {
     const source = readSource('assistant.ts');
     const block = (name: string) =>
-      source.slice(source.indexOf(`export interface ${name}`)).split('\n}\n')[0];
+      source.slice(source.indexOf(`export interface ${name}`)).split(/\r?\n\}\r?\n/)[0];
     expect(block('AssistantMcpConnectionDTO')).not.toMatch(/\b(secret|token|password|data)\??:/);
     expect(block('AssistantMessageDTO')).not.toMatch(/\bbinary\??:/);
   });

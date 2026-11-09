@@ -330,7 +330,7 @@ describe('0021 to 0024 on rows of the old shape', () => {
     }
   });
 
-  it('turns editor and viewer into member with the same role in the team project; the owner stays', async () => {
+  it('turns editor and viewer into member with the same role in the team project, owners of personal projects get project:personalOwner', async () => {
     for (const w of [a, b]) {
       const team = await teamProject(w.tenantId);
       const members = (
@@ -346,14 +346,28 @@ describe('0021 to 0024 on rows of the old shape', () => {
       });
       const relations = (
         await pool.query<{ project_id: string; user_id: string; role: string }>(
-          'select project_id, user_id, role from project_relations where tenant_id = $1 order by role',
+          'select project_id, user_id, role from project_relations where tenant_id = $1',
           [w.tenantId],
         )
       ).rows;
-      expect(relations).toEqual([
-        { project_id: team, user_id: w.editor, role: 'project:editor' },
-        { project_id: team, user_id: w.viewer, role: 'project:viewer' },
-      ]);
+      const byKey = (r: { user_id: string; role: string }) => `${r.role} ${r.user_id}`;
+      const sorted = <T extends { user_id: string; role: string }>(rows: T[]): T[] =>
+        [...rows].sort((x, y) => byKey(x).localeCompare(byKey(y)));
+      // 0022 gives every personal project its owner's relation; 0024 adds the old roles on the team project
+      const owned = async (userId: string) => ({
+        project_id: await personalProject(w.tenantId, userId),
+        user_id: userId,
+        role: 'project:personalOwner',
+      });
+      expect(sorted(relations)).toEqual(
+        sorted([
+          { project_id: team, user_id: w.editor, role: 'project:editor' },
+          { project_id: team, user_id: w.viewer, role: 'project:viewer' },
+          await owned(w.owner),
+          await owned(w.editor),
+          await owned(w.viewer),
+        ]),
+      );
     }
   });
 
