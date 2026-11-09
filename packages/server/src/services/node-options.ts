@@ -1,8 +1,14 @@
 /**
  * Node parameter options (`POST /rest/node-types/options`): a node type's `loadOptions`, `listSearch`
  * or `resourceMapping` method run for one tenant. Moved out of routes/settings.ts (P5 S5, C0e) with no
- * change, so the route and the Assistant's `get_node_parameter_options` (L6) share one path. The
- * caller checks the role (editor, as the route); this function parses the body itself.
+ * change, so the route and the Assistant's `get_node_parameter_options` (L6) share one path.
+ *
+ * P6-27: the access check and the project binding live here, so no caller can skip them. The body names
+ * `workflowId` (the caller needs `workflow:update` on it; its project is the run's project) or, for a
+ * workflow not saved yet, `projectId` (`workflow:create` in it); with neither, the project a create goes to
+ * by default (`workflow:create` there). The method's services (credentials, data
+ * tables, variables) are bound to that project, and the workflow pickers list through the caller's access
+ * filter. This function parses the body itself.
  */
 import { createBaseContext } from '@workflow/core';
 import {
@@ -19,6 +25,7 @@ import { ApiError, parse } from '../http/errors';
 import { decodeCursor, encodeCursor } from '../http/pagination';
 import { nodeSchema } from '../http/schemas';
 import { isUuid } from '../repositories/util';
+import { MISSING_SCOPE_MESSAGE } from './access';
 
 export const nodeOptionsSchema = z.object({
   nodeType: z.string().min(1),
@@ -27,8 +34,10 @@ export const nodeOptionsSchema = z.object({
   node: nodeSchema,
   filter: z.string().max(1000).optional(),
   paginationToken: z.string().max(2000).optional(),
-  /** the workflow open in the editor (left out of workflow pickers) */
+  /** the workflow open in the editor (left out of workflow pickers); its project is the project of the run */
   workflowId: z.string().uuid().optional(),
+  /** for a workflow not saved yet: the project it will be created in */
+  projectId: z.string().uuid().optional(),
 });
 
 export type NodeOptionsBody = z.infer<typeof nodeOptionsSchema>;
@@ -49,9 +58,41 @@ function decodeWorkflowCursor(token: string | undefined) {
   return cursor;
 }
 
+/** what the caller named, read before the body is parsed so a caller without the scope is 403 first */
+const optionsTarget = z.object({ workflowId: z.string().optional(), projectId: z.string().optional() });
+
+/**
+ * The project the method runs in, after the scope check: `workflow:update` on `workflowId`, else
+ * `workflow:create` in `projectId`. A caller who named neither gets the project a create goes to without one
+ * (`targetProject`) and needs `workflow:create` there. Another workspace's id, a missing or malformed id is 404.
+ */
+async function projectOfOptions(ctx: ServerContext, auth: AuthContext, rawBody: unknown): Promise<string> {
+  const { access, repos } = ctx;
+  const named = optionsTarget.safeParse(rawBody);
+  const { workflowId, projectId } = named.success ? named.data : {};
+  if (workflowId !== undefined) {
+    const held = await access.scopesForAuth(auth, { workflowId });
+    if (!held.has('workflow:update')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+    const row = await repos.workflows.get(auth.tenant.id, workflowId);
+    if (!row) throw ApiError.notFound('Workflow not found');
+    return row.projectId;
+  }
+  if (projectId !== undefined) {
+    const held = await access.scopesForAuth(auth, { projectId });
+    if (!held.has('workflow:create')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+    return projectId;
+  }
+  // neither named: the project a create would go to without one (`targetProject`), with the create scope there
+  const fallback = await access.targetProject(auth);
+  const held = await access.scopesForAuth(auth, { projectId: fallback });
+  if (!held.has('workflow:create')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+  return fallback;
+}
+
 /**
  * Runs the method `body` names and returns its result (the route answers `{ data: result }`).
- * `body` is parsed with `nodeOptionsSchema` (400 on a bad body); an unknown node type or method is a
+ * The caller's scope is checked first (see the top of this file), then `body` is parsed with
+ * `nodeOptionsSchema` (400 on a bad body); an unknown node type or method is a
  * 400, and an error thrown by the method is a 400 `options_error` with its message.
  */
 export async function loadNodeOptions(
@@ -60,6 +101,7 @@ export async function loadNodeOptions(
   rawBody: unknown,
 ): Promise<unknown> {
   const { repos, registries } = ctx;
+  const projectId = await projectOfOptions(ctx, auth, rawBody);
   const body = parse(nodeOptionsSchema, rawBody);
   const type = registries.nodeTypes.get(body.nodeType);
   if (!type) throw ApiError.badRequest(`Unknown node type "${body.nodeType}"`);
@@ -76,8 +118,7 @@ export async function loadNodeOptions(
   const services = await ctx.executions.buildServices({
     tenant: auth.tenant,
     executionId: '',
-    // P6 S1: the workspace's default project until L7 resolves the caller's (body.workflowId's row or targetProject)
-    projectId: await repos.projects.defaultProjectFor(auth.tenant.id),
+    projectId,
     mode: 'manual',
   });
   const base = createBaseContext({
@@ -100,6 +141,7 @@ export async function loadNodeOptions(
     listWorkflows: async ({ filter, paginationToken, excludeId }) => {
       // one row more than a page tells whether another page follows; one more again covers the excluded row
       const rows = await repos.workflows.list(auth.tenant.id, {
+        filter: await ctx.access.listFilter(auth, 'workflow:list'),
         search: filter,
         limit: WORKFLOW_PAGE_SIZE + (excludeId ? 1 : 0),
         cursor: decodeWorkflowCursor(paginationToken),
@@ -116,6 +158,15 @@ export async function loadNodeOptions(
     readWorkflow: async (id) => {
       const row = await repos.workflows.get(auth.tenant.id, id);
       if (!row) return undefined;
+      // a workflow the caller cannot read looks like a missing one
+      const readable = await ctx.access.listFilter(auth, 'workflow:read');
+      if (
+        !readable.all &&
+        !readable.projectIds.includes(row.projectId) &&
+        !readable.workflowIds.includes(row.id)
+      ) {
+        return undefined;
+      }
       return {
         id: row.id,
         name: row.name,

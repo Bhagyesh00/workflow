@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { CHAT_TOKEN_KINDS, type FormAuthHelper, type FormUser } from '@workflow/workflow';
 import type { ServiceDeps } from '../context';
 import { ApiError } from '../http/errors';
-import { hasRole, sha256 } from './auth';
+import { sha256 } from './auth';
 
 const CODE_TTL_MS = 60_000;
 /** n8n's FORM_USER_AUTH_TOKEN_TTL_SECONDS */
@@ -71,13 +71,17 @@ export class FormAuthService implements FormAuthHelper {
     return { id: user.id, email: user.email, firstName, lastName: rest.join(' ') };
   }
 
-  /** editor or above in the workflow's tenant */
+  /**
+   * `workflow:execute` for this user on the workflow, in the workspace the workflow belongs to (P6-27: their
+   * scopes there, through their projects; a workspace they are not in, or a workflow they hold no scope on, is false)
+   */
   async canExecute(userId: string, workflowId: string): Promise<boolean> {
     const { repos } = this.deps;
+    const { access } = this.deps.context();
     const memberships = await repos.memberships.listForUser(userId);
-    for (const { id: tenantId, role } of memberships) {
-      if (!hasRole(role, 'editor')) continue;
-      if (await repos.workflows.get(tenantId, workflowId)) return true;
+    for (const { id: tenantId } of memberships) {
+      if (!(await repos.workflows.get(tenantId, workflowId))) continue;
+      if ((await access.scopesFor(tenantId, userId, { workflowId })).has('workflow:execute')) return true;
     }
     return false;
   }

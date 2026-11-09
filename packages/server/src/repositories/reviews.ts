@@ -19,6 +19,7 @@ import {
   workflowVersions,
 } from '../db/schema';
 import type { Cursor } from '../http/pagination';
+import { inUuids } from './shares';
 import { isUuid, now } from './util';
 
 export interface ReviewUserRef {
@@ -41,8 +42,25 @@ export interface ReviewActivityRecord {
   comment?: { id: number; body: string };
 }
 
-/** who may see a request in a list: everyone (admins) or its authors and assigned reviewers */
-export type ReviewScope = { kind: 'all' } | { kind: 'participant'; userId: string };
+/**
+ * The workflows whose review requests a caller administers (P6-27): every workflow (`all`), or those in
+ * `projectIds` and the ones in `workflowIds` (shared into the caller's projects). From
+ * `AccessService.listFilter`; a request with no workflow is never in a reach.
+ */
+export interface ReviewReach {
+  all: boolean;
+  projectIds: string[];
+  workflowIds: string[];
+}
+
+/**
+ * who may see a request in a list: everyone (`all`), its authors and assigned reviewers
+ * (`participant`), or those plus the requests of the workflows in a reach (`reach`)
+ */
+export type ReviewScope =
+  | { kind: 'all' }
+  | { kind: 'participant'; userId: string }
+  | { kind: 'reach'; userId: string; reach: ReviewReach };
 
 export interface ReviewListFilter {
   workflowId?: string;
@@ -50,8 +68,9 @@ export interface ReviewListFilter {
   /** inbox tabs: requests the user reviews, or authored */
   reviewerId?: string;
   authorId?: string;
-  /** with reviewerId and admin access: also open requests the user did not author */
+  /** with reviewerId and `reach`: also the requests in the reach that the user did not author */
   orNotAuthoredBy?: string;
+  reach?: ReviewReach;
   scope: ReviewScope;
   limit: number;
   /** keyset on (updated_at desc, id desc) */
@@ -307,15 +326,12 @@ export class ReviewRepository {
     return { reviewer: Boolean(reviewer), author: Boolean(author) };
   }
 
-  /** tenant members with one of the roles, without the given user */
-  async membersWithRole(tenantId: string, roles: string[], exceptUserId?: string): Promise<ReviewUserRef[]> {
-    const conditions: SQL[] = [
-      eq(memberships.tenantId, tenantId),
-      inArray(memberships.role, roles as never[]),
-    ];
+  /** tenant members with their workspace role, without the given user */
+  async members(tenantId: string, exceptUserId?: string): Promise<Array<ReviewUserRef & { role: string }>> {
+    const conditions: SQL[] = [eq(memberships.tenantId, tenantId)];
     if (exceptUserId) conditions.push(sql`${users.id} <> ${exceptUserId}::uuid`);
     return this.db
-      .select({ id: users.id, name: users.name, email: users.email })
+      .select({ id: users.id, name: users.name, email: users.email, role: memberships.role })
       .from(memberships)
       .innerJoin(users, eq(users.id, memberships.userId))
       .where(and(...conditions))
@@ -397,16 +413,41 @@ export class ReviewRepository {
       const { userId } = filter.scope;
       conditions.push(or(this.isReviewer(tenantId, userId), this.isAuthor(tenantId, userId)) as SQL);
     }
+    if (filter.scope.kind === 'reach') {
+      const { userId, reach } = filter.scope;
+      const inReach = this.inReach(tenantId, reach);
+      const participant = [this.isReviewer(tenantId, userId), this.isAuthor(tenantId, userId)];
+      conditions.push(or(...participant, ...(inReach ? [inReach] : [])) as SQL);
+    }
     if (filter.reviewerId) {
       const reviewer = this.isReviewer(tenantId, filter.reviewerId);
+      const inReach = filter.reach ? this.inReach(tenantId, filter.reach) : undefined;
       conditions.push(
-        filter.orNotAuthoredBy
-          ? (or(reviewer, sql`not ${this.isAuthor(tenantId, filter.orNotAuthoredBy)}`) as SQL)
+        filter.orNotAuthoredBy && inReach
+          ? (or(reviewer, and(sql`not ${this.isAuthor(tenantId, filter.orNotAuthoredBy)}`, inReach)) as SQL)
           : reviewer,
       );
     }
     if (filter.authorId) conditions.push(this.isAuthor(tenantId, filter.authorId));
     return conditions;
+  }
+
+  /** the request's workflow is in the reach; undefined when the reach holds nothing */
+  private inReach(tenantId: string, reach: ReviewReach): SQL | undefined {
+    if (reach.all) return sql`true`;
+    const projectIds = reach.projectIds.filter(isUuid);
+    const workflowIds = reach.workflowIds.filter(isUuid);
+    const alternatives: SQL[] = [];
+    if (projectIds.length) {
+      alternatives.push(
+        sql`${workflowReviewRequests.workflowId} in (
+          select w.id from ${workflows} w
+          where w.tenant_id = ${tenantId}::uuid and ${inUuids(sql`w.project_id`, projectIds)}
+        )`,
+      );
+    }
+    if (workflowIds.length) alternatives.push(inUuids(workflowReviewRequests.workflowId, workflowIds));
+    return alternatives.length ? (or(...alternatives) as SQL) : undefined;
   }
 
   private isReviewer(tenantId: string, userId: string): SQL {

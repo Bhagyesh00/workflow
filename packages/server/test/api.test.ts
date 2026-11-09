@@ -300,11 +300,15 @@ describe('system endpoints', () => {
 
   it('runs loadOptions methods for the node details view', async () => {
     const { client } = await signup(server.app);
+    const open = await client.data<{ id: string }>(
+      client.post('/rest/workflows', { name: 'Open', nodes: [], connections: {} }),
+    );
     const res = await client.post('/rest/node-types/options', {
       nodeType: 'core.set',
       method: 'nope',
       kind: 'loadOptions',
       node: node('Set', 'core.set'),
+      workflowId: open.id,
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.message).toMatch(/has no loadOptions method/);

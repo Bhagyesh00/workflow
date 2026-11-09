@@ -18,15 +18,21 @@
  *
  * The hooks below are called by the publish, archive and delete paths.
  */
+import type { Scope } from '@workflow/workflow';
 import { z } from 'zod';
 import type { ServiceDeps } from '../context';
 import type { Role, WorkflowReviewRequestRow } from '../db/schema';
+import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { decodeCursor, encodeCursor, page } from '../http/pagination';
 import type { TenantSettings } from '../plans';
 import { createRepositories, isUniqueViolation, isUuid } from '../repositories';
-import type { ReviewActivityRecord, ReviewListFilter, ReviewUserRef } from '../repositories/reviews';
-import { hasRole } from './auth';
+import type {
+  ReviewActivityRecord,
+  ReviewListFilter,
+  ReviewReach,
+  ReviewUserRef,
+} from '../repositories/reviews';
 import { assertNotArchived } from './workflow-rules';
 import type { Actor } from './workflows';
 
@@ -123,6 +129,8 @@ export type InboxQuery = z.output<typeof inboxQuerySchema>;
 export interface ReviewCaller {
   userId: string;
   role: Role;
+  /** the request's auth (the access filter of lists reads it) */
+  auth: AuthContext;
   ip?: string;
 }
 
@@ -161,11 +169,25 @@ export interface ReviewDecisionResult {
   autoPublish?: { status: 'published' | 'failed'; message?: string };
 }
 
-const isAdmin = (role: Role) => hasRole(role, 'admin');
-const canPublish = (role: Role | undefined) => role !== undefined && hasRole(role, 'editor');
-/** an admin (also on a review they authored), or an assigned reviewer who can publish and is not an author */
-const mayDecide = (role: Role, participant: { reviewer: boolean; author: boolean }) =>
-  isAdmin(role) || (participant.reviewer && !participant.author && canPublish(role));
+type ScopeSet = ReadonlySet<Scope>;
+
+/**
+ * P6-27: what a review needs from the caller's scopes ON THE REQUEST'S WORKFLOW (`scopesFor` of that
+ * user; a request with no workflow, or one whose workflow is gone, only has the workspace scopes).
+ * - `workflow:publish` is "can publish": reviewers, requesters and whoever moves a request need it.
+ * - `workflow:move` is "administers the workflow" (workspace owners and admins, project admins, the
+ *   owner of a personal project): they read and decide every request of it, as an admin did before.
+ */
+const PUBLISH_SCOPE: Scope = 'workflow:publish';
+const ADMIN_SCOPE: Scope = 'workflow:move';
+
+const isAdmin = (scopes: ScopeSet) => scopes.has(ADMIN_SCOPE);
+const canPublish = (scopes: ScopeSet) => scopes.has(PUBLISH_SCOPE);
+/** an administrator (also on a review they authored), or an assigned reviewer who can publish and is not an author */
+const mayDecide = (scopes: ScopeSet, participant: { reviewer: boolean; author: boolean }) =>
+  isAdmin(scopes) || (participant.reviewer && !participant.author && canPublish(scopes));
+
+const NO_SCOPES: ScopeSet = new Set<Scope>();
 
 export class WorkflowReviewService {
   constructor(readonly deps: ServiceDeps) {}
@@ -215,18 +237,22 @@ export class WorkflowReviewService {
     return this.listPage(tenantId, query.limit, query.cursor, {
       workflowId: query.workflowId,
       state: query.state,
-      scope: isAdmin(caller.role) ? { kind: 'all' } : { kind: 'participant', userId: caller.userId },
+      scope: await this.listScope(caller),
     });
   }
 
   async inbox(tenantId: string, caller: ReviewCaller, query: InboxQuery) {
-    return this.listPage(tenantId, query.limit, query.cursor, this.inboxFilter(caller, query.tab));
+    return this.listPage(tenantId, query.limit, query.cursor, await this.inboxFilter(caller, query.tab));
   }
 
   async inboxSummary(tenantId: string, caller: ReviewCaller): Promise<{ toReview: number; mine: number }> {
+    const [toReviewFilter, mineFilter] = await Promise.all([
+      this.inboxFilter(caller, 'to_review'),
+      this.inboxFilter(caller, 'mine'),
+    ]);
     const [toReview, mine] = await Promise.all([
-      this.repos.reviews.count(tenantId, this.inboxFilter(caller, 'to_review')),
-      this.repos.reviews.count(tenantId, this.inboxFilter(caller, 'mine')),
+      this.repos.reviews.count(tenantId, toReviewFilter),
+      this.repos.reviews.count(tenantId, mineFilter),
     ]);
     return { toReview, mine };
   }
@@ -247,21 +273,39 @@ export class WorkflowReviewService {
     return { data: await this.activityDtos(data), nextCursor };
   }
 
-  /** tenant members who can publish (editor and up), without the caller */
+  /**
+   * tenant members who can publish the workflow (`workflow:publish` on it; without a workflow, in the
+   * workspace), without the caller
+   */
   async eligibleReviewers(
     tenantId: string,
     caller: ReviewCaller,
     workflowId?: string,
   ): Promise<ReviewUserRef[]> {
     if (workflowId !== undefined) await this.deps.context().workflows.get(tenantId, workflowId);
-    return this.repos.reviews.membersWithRole(tenantId, ['editor', 'admin', 'owner'], caller.userId);
+    const members = await this.repos.reviews.members(tenantId, caller.userId);
+    const eligible: ReviewUserRef[] = [];
+    for (let start = 0; start < members.length; start += 10) {
+      const chunk = members.slice(start, start + 10);
+      const held = await Promise.all(
+        chunk.map((member) => this.scopesOf(tenantId, member.id, workflowId ?? null, member.role as Role)),
+      );
+      chunk.forEach(({ role: _role, ...ref }, index) => {
+        if (canPublish(held[index])) eligible.push(ref);
+      });
+    }
+    return eligible;
   }
 
   // -------------------------------------------------------------------------------------------
   // writes
 
   async create(tenantId: string, input: ReviewCreateInput, caller: ReviewCaller): Promise<WorkflowReviewDTO> {
-    if (!canPublish(caller.role)) throw ApiError.forbidden();
+    // the workflow first: another workspace's id is 404, a caller who cannot publish it is 403
+    const callerScopes = await this.deps.context().access.scopesFor(tenantId, caller.userId, {
+      workflowId: input.workflowId,
+    });
+    if (!canPublish(callerScopes)) throw ApiError.forbidden();
     if (!(await this.enabled(tenantId))) {
       throw ApiError.badRequest('Workflow reviews are turned off for this workspace');
     }
@@ -271,8 +315,7 @@ export class WorkflowReviewService {
       throw ApiError.badRequest('You cannot assign yourself as a reviewer');
     }
     for (const userId of input.reviewerUserIds) {
-      const membership = await this.repos.memberships.get(tenantId, userId);
-      if (!canPublish(membership?.role)) {
+      if (!canPublish(await this.scopesOf(tenantId, userId, workflow.id))) {
         throw ApiError.badRequest('Reviewers must be able to publish this workflow');
       }
     }
@@ -322,12 +365,12 @@ export class WorkflowReviewService {
     caller: ReviewCaller,
   ): Promise<WorkflowReviewDTO> {
     // any member who can publish the workflow may move it (n8n); they become an author below
-    if (!canPublish(caller.role)) {
+    const current = await this.repos.reviews.get(tenantId, id);
+    if (!current) throw ApiError.notFound('Review request');
+    if (!canPublish(await this.scopesOf(tenantId, caller.userId, current.workflowId, caller.role))) {
       await this.readable(tenantId, id, caller); // 404 for a non-participant
       throw ApiError.forbidden('Only members who can publish this workflow can update the request');
     }
-    const current = await this.repos.reviews.get(tenantId, id);
-    if (!current) throw ApiError.notFound('Review request');
     if (current.state !== 'open' || !current.workflowId) throw this.closed();
     const workflow = await this.deps.context().workflows.get(tenantId, current.workflowId);
     const versionId = input.versionId ?? workflow.versionId;
@@ -364,8 +407,8 @@ export class WorkflowReviewService {
     input: ReviewDecisionInput,
     caller: ReviewCaller,
   ): Promise<ReviewDecisionResult> {
-    const { row: current, participant } = await this.readable(tenantId, id, caller);
-    if (!mayDecide(caller.role, participant)) {
+    const { row: current, participant, scopes } = await this.readable(tenantId, id, caller);
+    if (!mayDecide(scopes, participant)) {
       throw ApiError.forbidden(
         participant.author
           ? 'Authors cannot decide on their own review request'
@@ -424,8 +467,8 @@ export class WorkflowReviewService {
     body: string,
     caller: ReviewCaller,
   ): Promise<ReviewActivityDTO> {
-    const { row: current, participant } = await this.readable(tenantId, id, caller);
-    if (!participant.author && !mayDecide(caller.role, participant)) {
+    const { row: current, participant, scopes } = await this.readable(tenantId, id, caller);
+    if (!participant.author && !mayDecide(scopes, participant)) {
       throw ApiError.forbidden('You cannot comment on this review request');
     }
     if (current.state !== 'open') throw this.closed();
@@ -460,9 +503,45 @@ export class WorkflowReviewService {
     if (!row) throw ApiError.notFound('Review request');
     const participant = await this.repos.reviews.isParticipant(tenantId, row.id, caller.userId);
     // a non-participant learns nothing about the request, not even that it exists
-    if (!participant.author && !participant.reviewer && !isAdmin(caller.role))
+    const scopes = await this.scopesOf(tenantId, caller.userId, row.workflowId, caller.role);
+    if (!participant.author && !participant.reviewer && !isAdmin(scopes))
       throw ApiError.notFound('Review request');
-    return { row, participant };
+    return { row, participant, scopes };
+  }
+
+  /**
+   * `userId`'s scopes on the workflow (`AccessService.scopesFor`); with no workflow, or one that is
+   * gone, the workspace scopes of their role. No membership: none.
+   */
+  private async scopesOf(
+    tenantId: string,
+    userId: string,
+    workflowId: string | null,
+    role?: Role,
+  ): Promise<ScopeSet> {
+    const { access } = this.deps.context();
+    if (workflowId) {
+      try {
+        return await access.scopesFor(tenantId, userId, { workflowId });
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.statusCode !== 404) throw error;
+      }
+    }
+    const memberRole = role ?? (await this.repos.memberships.get(tenantId, userId))?.role;
+    return memberRole === undefined ? NO_SCOPES : access.globalScopes(tenantId, memberRole);
+  }
+
+  /** the workflows whose requests the caller administers (`workflow:move`) */
+  private async reachOf(caller: ReviewCaller): Promise<ReviewReach> {
+    const filter = await this.deps.context().access.listFilter(caller.auth, ADMIN_SCOPE);
+    return filter.all
+      ? { all: true, projectIds: [], workflowIds: [] }
+      : { all: false, projectIds: filter.projectIds, workflowIds: filter.workflowIds };
+  }
+
+  private async listScope(caller: ReviewCaller): Promise<ReviewListFilter['scope']> {
+    const reach = await this.reachOf(caller);
+    return reach.all ? { kind: 'all' } : { kind: 'reach', userId: caller.userId, reach };
   }
 
   /** the requester as a publisher: a member who can publish (editor and up) */
@@ -474,7 +553,7 @@ export class WorkflowReviewService {
     if (!row.createdBy || !membership) {
       return { ok: false, message: 'The review requester is no longer available' };
     }
-    if (!canPublish(membership.role)) {
+    if (!canPublish(await this.scopesOf(tenantId, row.createdBy, row.workflowId, membership.role))) {
       return { ok: false, message: 'The review requester no longer has permission to publish this workflow' };
     }
     return { ok: true, userId: row.createdBy };
@@ -529,13 +608,19 @@ export class WorkflowReviewService {
     if (row) this.emit(tenantId);
   }
 
-  private inboxFilter(caller: ReviewCaller, tab: 'to_review' | 'mine'): Omit<ReviewListFilter, 'limit'> {
+  private async inboxFilter(
+    caller: ReviewCaller,
+    tab: 'to_review' | 'mine',
+  ): Promise<Omit<ReviewListFilter, 'limit'>> {
     const base = { state: 'open' as const, scope: { kind: 'all' as const } };
     if (tab === 'mine') return { ...base, authorId: caller.userId };
-    // admins review everything they did not author
-    return isAdmin(caller.role)
-      ? { ...base, reviewerId: caller.userId, orNotAuthoredBy: caller.userId }
-      : { ...base, reviewerId: caller.userId };
+    // administrators of a workflow review everything of it they did not author
+    return {
+      ...base,
+      reviewerId: caller.userId,
+      orNotAuthoredBy: caller.userId,
+      reach: await this.reachOf(caller),
+    };
   }
 
   private async listPage(

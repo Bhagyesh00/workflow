@@ -5,12 +5,11 @@ import type { CredentialTypeDescription } from '@workflow/workflow';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import { clearSessionCookie, requireAuth, requireRole } from '../http/auth';
+import { clearSessionCookie, requireAuth, requireOwner, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { currentPeriod, effectiveLimits, PLANS, type TenantSettings } from '../plans';
 import { CREDENTIAL_MISMATCH, credentialFitsModel, isBuilderModelNode } from '../services/ai-builder/model';
 import { assistantFeature } from '../services/assistant/settings';
-import { hasRole } from '../services/auth';
 import { loadNodeOptions } from '../services/node-options';
 
 const settingsPatch = z.object({
@@ -78,6 +77,10 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
     const limits = auth
       ? effectiveLimits(auth.tenant.plan, tenantSettings)
       : (PLANS[config.defaultPlan] ?? PLANS.unlimited);
+    // P6-27: the AI block is read by the scope that writes it
+    const manageSecurity = auth
+      ? (await ctx.access.scopesForAuth(auth)).has('securitySettings:manage')
+      : false;
     const usage = auth ? await repos.usage.get(auth.tenant.id, currentPeriod()) : undefined;
     return {
       data: {
@@ -114,13 +117,13 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         /** P5-11: read only, the editor caps the "run in parallel" slider with it; PATCH never takes it */
         evaluationConcurrencyLimit: config.evaluationConcurrencyLimit,
         /** P5-09: the builder's model setup, admins only (it names a credential) */
-        ...(auth && hasRole(auth.role, 'admin') && tenantSettings.ai ? { ai: tenantSettings.ai } : {}),
+        ...(manageSecurity && tenantSettings.ai ? { ai: tenantSettings.ai } : {}),
       },
     };
   });
 
   app.patch('/settings', async (request) => {
-    const auth = requireRole(request, 'admin');
+    const auth = await requireScope(request, 'securitySettings:manage');
     const body = parse(settingsPatch, request.body);
     const current = (auth.tenant.settings ?? {}) as TenantSettings;
     if (body.ai) {
@@ -179,7 +182,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
 
   // owners can delete the whole workspace (all its data, cascading); the slug must be confirmed
   app.delete('/tenant', async (request, reply) => {
-    const auth = requireRole(request, 'owner');
+    const auth = requireOwner(request);
     const { confirm } = parse(z.object({ confirm: z.string() }), request.body ?? {});
     if (confirm !== auth.tenant.slug) {
       throw ApiError.badRequest('Confirm the deletion with the workspace slug in "confirm"');
@@ -220,7 +223,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
   });
 
   app.post('/node-types/options', async (request) => {
-    const auth = requireRole(request, 'editor');
+    // the scope check lives in loadNodeOptions (the Assistant tool reaches it too)
+    const auth = requireAuth(request);
     return { data: await loadNodeOptions(ctx, auth, request.body) };
   });
 }

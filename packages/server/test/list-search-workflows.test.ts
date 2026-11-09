@@ -16,8 +16,15 @@ beforeEach(async () => {
 
 type Page = { results: Array<{ name: string; value: string; url?: string }>; paginationToken?: string };
 
+type Client = Awaited<ReturnType<typeof signup>>['client'];
+
+/** the workflow open in the editor: the options call names it (P6-27), and the pickers leave it out */
+async function openWorkflow(client: Client): Promise<string> {
+  return (await createWorkflow(client, { name: 'Open in the editor', nodes: trigger() })).id;
+}
+
 async function search(
-  client: Awaited<ReturnType<typeof signup>>['client'],
+  client: Client,
   extra: { filter?: string; paginationToken?: string; workflowId?: string } = {},
 ): Promise<Page> {
   return client.data<Page>(
@@ -27,6 +34,7 @@ async function search(
       kind: 'listSearch',
       node: node('Execute Workflow', 'core.executeWorkflow', { source: 'database' }),
       ...extra,
+      workflowId: extra.workflowId ?? (await openWorkflow(client)),
     }),
   );
 }
@@ -124,6 +132,7 @@ describe('Execute Workflow listSearch searchWorkflows', () => {
       method: 'searchWorkflows',
       kind: 'listSearch',
       node: node('Execute Workflow', 'core.executeWorkflow'),
+      workflowId: await openWorkflow(client),
       paginationToken: 'not-a-token',
     });
     expect(res.statusCode).toBe(400);
@@ -139,6 +148,7 @@ describe('Execute Workflow listSearch searchWorkflows', () => {
       method: 'searchWorkflows',
       kind: 'listSearch',
       node: node('Execute Workflow', 'core.executeWorkflow'),
+      workflowId: await openWorkflow(client),
       paginationToken: Buffer.from(JSON.stringify(parts)).toString('base64url'),
     });
     expect(res.statusCode).toBe(400);

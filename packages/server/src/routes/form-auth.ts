@@ -5,7 +5,7 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireRole } from '../http/auth';
+import { requireAuth } from '../http/auth';
 import { parse } from '../http/errors';
 import type { FormAuthService } from '../services/form-auth';
 
@@ -32,7 +32,7 @@ export function registerFormAuthRoutes(app: FastifyInstance, deps: { formAuth: F
   const { formAuth } = deps;
 
   app.post('/form-auth/code', async (request) => {
-    const auth = requireRole(request, 'viewer');
+    const auth = requireAuth(request);
     const { returnTo } = parse(codeBody, request.body);
     return { data: { code: await formAuth.issueCode(auth.user.id, returnTo) } };
   });

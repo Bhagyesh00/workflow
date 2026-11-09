@@ -35,6 +35,12 @@ beforeEach(async () => {
 
 const locator = (mode: 'id' | 'name', value: string) => ({ __rl: true, mode, value });
 
+/** the workflow open in the editor: the options call names it (P6-27) */
+async function openWorkflow(owner: Owner): Promise<string> {
+  return (await createWorkflow(owner.client, { name: 'Open', nodes: [node('Start', 'core.manualTrigger')] }))
+    .id;
+}
+
 async function makeTable(owner: Owner, name = 'Orders') {
   return owner.client.data<{ id: string; name: string }>(
     owner.client.post('/rest/data-tables', {
@@ -260,6 +266,7 @@ describe('Data Table node on the server', () => {
           parameters: {},
         },
         filter: 'ord',
+        workflowId: await openWorkflow(owner),
       }),
     );
     expect(search.results).toEqual([{ name: 'Orders', value: table.id, url: `/data-tables/${table.id}` }]);
@@ -277,6 +284,7 @@ describe('Data Table node on the server', () => {
           position: [0, 0],
           parameters: { dataTableId: locator('id', table.id) },
         },
+        workflowId: await openWorkflow(owner),
       }),
     );
     expect(columns.map((c) => c.value)).toEqual(['title', 'qty', 'id', 'createdAt', 'updatedAt']);
