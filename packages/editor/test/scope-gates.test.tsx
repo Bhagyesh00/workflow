@@ -274,7 +274,8 @@ describe('execution gates', () => {
     return demo.executions[0].id;
   }
 
-  it('Delete follows execution:delete and the vote buttons follow workflow:execute', async () => {
+  // rating a run needs only `execution:read` on it (the server's PATCH /executions/:id rule, as n8n)
+  it('Delete follows execution:delete; a project viewer still rates the run', async () => {
     const { demo, teamId } = asMember('project:viewer');
     demo.setDemoRole('owner');
     const id = await run(demo, teamId);
@@ -282,7 +283,9 @@ describe('execution gates', () => {
     renderApp(`/executions/${id}`);
     const panel = await screen.findByRole('region', { name: 'Execution annotation' }, LONG);
     expect(screen.queryByRole('button', { name: 'Delete execution' })).toBeNull();
-    expect((within(panel).getByRole('button', { name: 'Bad run' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(panel).getByRole('button', { name: 'Bad run' }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
   });
 
   it('a project editor deletes and rates', async () => {
@@ -300,13 +303,14 @@ describe('execution gates', () => {
 });
 
 describe('settings gates read the workspace role scopes', () => {
-  it('MCP settings: a member has no switch and no tables; the owner has both', async () => {
+  // the workflows table follows `workflow:update` in any project: a member holds it in their personal project
+  it('MCP settings: a member has no switch and no clients table; the owner has both', async () => {
     const demo = signedIn();
     demo.setDemoRole('member');
     const { unmount } = renderApp('/settings/mcp');
     expect((await screen.findByTestId('mcp-status', {}, LONG)).textContent).toBe('Off');
     expect(screen.queryByRole('switch')).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Workflows' })).toBeNull();
+    expect(await screen.findByRole('heading', { name: 'Workflows' })).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Connected clients' })).toBeNull();
     unmount();
     demo.setDemoRole('owner');
