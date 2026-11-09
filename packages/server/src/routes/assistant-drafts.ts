@@ -10,7 +10,7 @@ import { z } from 'zod';
 import type { ServerContext } from '../context';
 import { clientIp } from '../http/auth';
 import { parse } from '../http/errors';
-import { assistantRouteOptions, requireAssistant } from './assistant';
+import { assistantRouteOptions, requireAssistant, requireAssistantWriter } from './assistant';
 
 const draftParams = z.object({
   threadId: z.string().min(1).max(64),
@@ -31,7 +31,7 @@ export function registerAssistantDraftRoutes(rest: FastifyInstance, ctx: ServerC
     '/assistant/threads/:threadId/drafts/:draftId',
     assistantRouteOptions('draft', 'read'),
     async (request) => {
-      const { auth } = requireAssistant(request, ctx, 'viewer');
+      const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
       const { threadId, draftId } = parse(draftParams, request.params);
       return { data: await ctx.assistantDrafts.get(auth, threadId, draftId) };
     },
@@ -41,7 +41,7 @@ export function registerAssistantDraftRoutes(rest: FastifyInstance, ctx: ServerC
     '/assistant/threads/:threadId/drafts/:draftId/accept',
     assistantRouteOptions('draft-accept', 'write'),
     async (request) => {
-      const { auth } = requireAssistant(request, ctx, 'editor');
+      const { auth } = await requireAssistantWriter(request, ctx);
       const { threadId, draftId } = parse(draftParams, request.params);
       const body = parse(acceptSchema, request.body ?? {});
       const actor = { userId: auth.user.id, ip: clientIp(request) };
@@ -53,7 +53,7 @@ export function registerAssistantDraftRoutes(rest: FastifyInstance, ctx: ServerC
     '/assistant/threads/:threadId/drafts/:draftId/discard',
     assistantRouteOptions('draft-discard', 'write'),
     async (request) => {
-      const { auth } = requireAssistant(request, ctx, 'editor');
+      const { auth } = await requireAssistantWriter(request, ctx);
       const { threadId, draftId } = parse(draftParams, request.params);
       await ctx.assistantDrafts.discard(auth, threadId, draftId);
       return { data: { ok: true as const } };

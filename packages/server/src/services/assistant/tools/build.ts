@@ -44,7 +44,13 @@ import { draftStatus } from '../drafts';
 import { loadAssistantModel } from '../model';
 import { guardModel } from '../model-guard';
 import { RUN_PREVIEW, type RunOutcome, runAndCollect, triggerPinData } from '../run-helper';
-import type { AssistantRunScope, AssistantToolDefinition } from '../types';
+import {
+  type AssistantRunScope,
+  type AssistantToolDefinition,
+  assertScope,
+  projectIdInput,
+  writeProject,
+} from '../types';
 import { planVerify } from '../verify-plan';
 
 /** what a tool refused by the admin answers (approvals.ts uses the same words) */
@@ -106,6 +112,8 @@ interface BuildStart {
   baseVersionId: string | null;
   definition: WorkflowDefinition;
   createdAt: string;
+  /** the project the draft is saved in when it is accepted (a new workflow); null for a saved workflow's own */
+  projectId: string | null;
 }
 
 /** where a build starts: an open draft of this thread, the workspace's saved workflow, or nothing */
@@ -118,7 +126,20 @@ async function buildStart(
     const stored = await threadDraft(ctx, run, input.draftId);
     if (!stored) throw new Error(BUILD_TEXTS.noDraft(input.draftId));
     if (draftStatus(stored) !== 'open') throw new Error(BUILD_TEXTS.draftClosed);
+    // the scope on what the draft changes, read now: a project lost since the draft was made stops the build
+    let projectId: string | null = null;
+    if (stored.workflowId) {
+      await assertScope(ctx, run, 'workflow:update', { workflowId: stored.workflowId });
+    } else {
+      projectId = await writeProject(
+        ctx,
+        run,
+        'workflow:create',
+        typeof stored.projectId === 'string' ? stored.projectId : undefined,
+      );
+    }
     return {
+      projectId,
       draftId: stored.id,
       name: stored.name,
       workflowId: stored.workflowId ?? null,
@@ -129,8 +150,10 @@ async function buildStart(
   }
   const createdAt = new Date().toISOString();
   if (input.workflowId) {
+    // a saved workflow is changed through a draft only by someone who may change it
     const row = await ctx.repos.workflows.get(run.tenant.id, input.workflowId);
     if (!row) throw new Error(BUILD_TEXTS.notFound);
+    await assertScope(ctx, run, 'workflow:update', { workflowId: row.id });
     const definition = cloneDefinition(toDefinition(row));
     // static data is the server's: a draft never carries it
     delete definition.staticData;
@@ -141,10 +164,14 @@ async function buildStart(
       baseVersionId: row.versionId,
       definition,
       createdAt,
+      projectId: null,
     };
   }
+  // a new workflow: the named project, else the caller's default, with `workflow:create` there
+  const projectId = await writeProject(ctx, run, 'workflow:create', input.projectId);
   const name = nameFromRequest(input.request);
   return {
+    projectId,
     draftId: randomUUID(),
     name,
     workflowId: null,
@@ -221,6 +248,7 @@ const buildInput = z.object({
     .optional()
     .describe('A saved workflow to change; leave out to build a new one'),
   draftId: z.string().min(1).max(64).optional().describe('An open draft of this chat to keep working on'),
+  projectId: projectIdInput.describe('For a new workflow: the project it is saved in; yours when left out'),
 });
 
 type BuildInput = z.output<typeof buildInput>;
@@ -242,7 +270,8 @@ export const buildWorkflowTool: AssistantToolDefinition<BuildInput> = {
   description:
     'Build a new workflow, or change a saved one, as a draft. Describe the whole request in plain words. Nothing is saved: the person sees the draft in the chat and accepts or discards it. Pass draftId to keep working on a draft of this chat, or workflowId to change a saved workflow. Call verify_workflow on the draft to test it safely.',
   input: buildInput,
-  minRole: 'editor',
+  access: 'workflow:create',
+  target: (input) => (input.projectId && !input.workflowId ? { projectId: input.projectId } : null),
   untrusted: 'workflow-draft',
   artifact(_input, result) {
     const built = result as BuildWorkflowResult | undefined;
@@ -307,6 +336,7 @@ export const buildWorkflowTool: AssistantToolDefinition<BuildInput> = {
       name: start.name,
       workflowId: start.workflowId,
       baseVersionId: start.baseVersionId,
+      ...(start.projectId ? { projectId: start.projectId } : {}),
       definition,
       createdAt: start.createdAt,
       updatedAt: now,
@@ -489,13 +519,30 @@ export const verifyWorkflowTool: AssistantToolDefinition<VerifyInput> = {
   description:
     'Test a draft safely before the person accepts it. Data-only nodes (Set, If, Switch, Filter, Merge, Sort and similar) run for real; every other node, every trigger and every node with a credential is simulated with its fixture or one empty item, so nothing is sent outside. Give inputData for the trigger and fixtures for simulated nodes. A run that waits counts as a failure.',
   input: verifyInput,
-  minRole: 'editor',
+  access: 'workflow:create',
   untrusted: 'execution-output',
   async handler(ctx, run, input): Promise<VerifyWorkflowResult> {
     if (run.settings.permissions.runWorkflow === 'blocked') throw new Error(BUILD_BLOCKED);
     const stored = await threadDraft(ctx, run, input.draftId);
     if (!stored) throw new Error(BUILD_TEXTS.noDraft(input.draftId));
     if (draftStatus(stored) === 'discarded') throw new Error(VERIFY_TEXTS.discarded);
+
+    // the project the draft runs in: a saved workflow's own (the caller must be able to run it), else the
+    // project it was built for (the caller must be able to build there), read now
+    let projectId: string;
+    if (stored.workflowId) {
+      await assertScope(ctx, run, 'workflow:execute', { workflowId: stored.workflowId });
+      projectId =
+        (await ctx.repos.workflows.get(run.tenant.id, stored.workflowId))?.projectId ??
+        (await writeProject(ctx, run, 'workflow:create'));
+    } else {
+      projectId = await writeProject(
+        ctx,
+        run,
+        'workflow:create',
+        typeof stored.projectId === 'string' ? stored.projectId : undefined,
+      );
+    }
 
     const definition = cloneDefinition(stored.definition);
     // the run's pins are ours alone; the draft's own pins and static data are not used
@@ -539,9 +586,8 @@ export const verifyWorkflowTool: AssistantToolDefinition<VerifyInput> = {
       {
         workflow: definition,
         ...(stored.workflowId ? { workflowId: stored.workflowId } : {}),
-        // P6 S1: a saved draft runs in its row's project (read at run time); an unsaved one in the
-        // workspace's default project until L16 runs it in the caller's
-        projectId: await ctx.repos.projects.defaultProjectFor(run.tenant.id),
+        // a saved draft runs in its row's project, an unsaved one in the project it was built for
+        projectId,
         ...(start ? { startNode: start.name } : {}),
         ...(triggerItems ? { triggerItems } : {}),
         pinData,

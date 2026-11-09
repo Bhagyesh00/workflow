@@ -10,28 +10,34 @@ import {
   ASSISTANT_PERMISSION_MODES,
   type AssistantMcpConnectionDTO,
   type AssistantPermissionMode,
+  type Scope,
 } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import type { Role } from '../db/schema';
-import { type AuthContext, clientIp, requireAuth } from '../http/auth';
+import { type AuthContext, clientIp, requireAuth, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import type { TenantSettings } from '../plans';
 import type { AssistantMcpConnectionInput, AssistantMcpConnectionRow } from '../repositories/assistant-mcp';
 import { isUniqueViolation } from '../repositories/util';
 import { MCP_CREDENTIAL_TYPES, validateMcpUrl } from '../services/assistant/mcp';
 import { effectiveAssistantSettings } from '../services/assistant/settings';
-import { hasRole } from '../services/auth';
+import { assertCredentialsUsable } from '../services/credential-usable';
 import { assistantRouteOptions } from './assistant';
 
-/** 401 signed out, 404 while MCP access is off for the workspace, then `minimum` role (403) */
-export function requireAssistantMcp(request: FastifyRequest, ctx: ServerContext, minimum: Role): AuthContext {
-  const auth = requireAuth(request);
-  const settings = effectiveAssistantSettings(ctx.config, auth.tenant.settings as TenantSettings);
+/**
+ * 401 signed out, 404 while MCP access is off for the workspace, then the scope (403). The connections are
+ * workspace settings, no project's: listing needs `instanceAi:message`, a write `instanceAi:manage`.
+ */
+export async function requireAssistantMcp(
+  request: FastifyRequest,
+  ctx: ServerContext,
+  scope: Scope,
+): Promise<AuthContext> {
+  const signedIn = requireAuth(request);
+  const settings = effectiveAssistantSettings(ctx.config, signedIn.tenant.settings as TenantSettings);
   if (!settings.mcpAccessEnabled) throw ApiError.notFound();
-  if (!hasRole(auth.role, minimum)) throw ApiError.forbidden();
-  return auth;
+  return requireScope(request, scope);
 }
 
 /** the editor's shape of a connection: the credential id, never a secret */
@@ -81,7 +87,7 @@ const patchSchema = createSchema.partial().strict();
 /** the address, the sign-in method and its credential, checked together against the workspace */
 async function checkConnection(
   ctx: ServerContext,
-  tenantId: string,
+  auth: AuthContext,
   next: {
     url: string;
     authentication: AssistantMcpConnectionRow['authentication'];
@@ -97,11 +103,28 @@ async function checkConnection(
   }
   if (!next.credentialId) throw ApiError.badRequest('Choose a credential for this sign-in method');
   // the foreign key alone does not say the credential is this workspace's
+  const tenantId = auth.tenant.id;
   const credential = await ctx.repos.credentials.get(tenantId, next.credentialId);
   if (!credential) throw ApiError.badRequest('The credential was not found in this workspace');
   if (credential.type !== wanted) {
     throw ApiError.badRequest(`This sign-in method needs a ${wanted} credential`);
   }
+  // the admin who saves it must be able to use it; every member's turn then uses it (workspace-wide)
+  await assertCredentialsUsable(ctx, tenantId, await ctx.access.targetProject(auth), {
+    name: 'Assistant MCP connection',
+    nodes: [
+      {
+        id: 'assistant-mcp-connection',
+        name: 'MCP connection',
+        type: 'assistant.mcpConnection',
+        typeVersion: 1,
+        position: [0, 0],
+        parameters: {},
+        credentials: { [wanted]: { id: next.credentialId, name: credential.name } },
+      },
+    ],
+    connections: {},
+  });
 }
 
 async function audit(
@@ -124,13 +147,13 @@ async function audit(
 
 export function registerAssistantMcpRoutes(rest: FastifyInstance, ctx: ServerContext): void {
   rest.get('/assistant/mcp-connections', assistantRouteOptions('mcp-list', 'read'), async (request) => {
-    const auth = requireAssistantMcp(request, ctx, 'viewer');
+    const auth = await requireAssistantMcp(request, ctx, 'instanceAi:message');
     const rows = await ctx.repos.assistantMcp.list(auth.tenant.id);
     return { data: rows.map(mcpConnectionDto) };
   });
 
   rest.post('/assistant/mcp-connections', assistantRouteOptions('mcp-create', 'write'), async (request) => {
-    const auth = requireAssistantMcp(request, ctx, 'admin');
+    const auth = await requireAssistantMcp(request, ctx, 'instanceAi:manage');
     const body = parse(createSchema, request.body);
     const input = {
       name: body.name,
@@ -141,7 +164,7 @@ export function registerAssistantMcpRoutes(rest: FastifyInstance, ctx: ServerCon
       enabled: body.enabled ?? true,
       toolPermissions: body.toolPermissions ?? {},
     } satisfies AssistantMcpConnectionInput;
-    await checkConnection(ctx, auth.tenant.id, input);
+    await checkConnection(ctx, auth, input);
     try {
       const row = await ctx.repos.assistantMcp.create(auth.tenant.id, input, auth.user.id);
       await audit(ctx, request, auth, 'assistant.mcp_connection_created', row.id, row.name);
@@ -157,7 +180,7 @@ export function registerAssistantMcpRoutes(rest: FastifyInstance, ctx: ServerCon
     '/assistant/mcp-connections/:id',
     assistantRouteOptions('mcp-update', 'write'),
     async (request) => {
-      const auth = requireAssistantMcp(request, ctx, 'admin');
+      const auth = await requireAssistantMcp(request, ctx, 'instanceAi:manage');
       const { id } = request.params as { id: string };
       const body = parse(patchSchema, request.body ?? {});
       const current = await ctx.repos.assistantMcp.get(auth.tenant.id, id);
@@ -170,7 +193,7 @@ export function registerAssistantMcpRoutes(rest: FastifyInstance, ctx: ServerCon
       if (credentialId !== current.credentialId || body.credentialId !== undefined) {
         patch.credentialId = credentialId;
       }
-      await checkConnection(ctx, auth.tenant.id, {
+      await checkConnection(ctx, auth, {
         url: body.url ?? current.url,
         authentication,
         credentialId,
@@ -193,7 +216,7 @@ export function registerAssistantMcpRoutes(rest: FastifyInstance, ctx: ServerCon
     '/assistant/mcp-connections/:id',
     assistantRouteOptions('mcp-delete', 'write'),
     async (request) => {
-      const auth = requireAssistantMcp(request, ctx, 'admin');
+      const auth = await requireAssistantMcp(request, ctx, 'instanceAi:manage');
       const { id } = request.params as { id: string };
       const current = await ctx.repos.assistantMcp.get(auth.tenant.id, id);
       if (!current || !(await ctx.repos.assistantMcp.delete(auth.tenant.id, id))) {

@@ -106,7 +106,7 @@ describe('execute_node (P5-69)', () => {
   });
 
   it('is offered from editor up', async () => {
-    await h.expectToolRoles({ execute_node: 'editor' });
+    await h.expectToolRoles({ execute_node: 'workflow:execute' });
   });
 
   it('waits for its card, then runs a real Set node once as a manual run with no workflow id', async () => {

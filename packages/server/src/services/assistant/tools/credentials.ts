@@ -3,7 +3,9 @@
  * answers id, name and type only (names are written by people, so that text is untrusted), the type
  * search is static, and `test_credential` runs the credential's own test on the server and answers the
  * status and a message scrubbed of every stored and resolved value (the same calls as
- * POST /rest/credentials/test). `delete_credential` is editor, needs a card every time (null
+ * POST /rest/credentials/test: `credential:read` on the credential, its data resolved under its own project).
+ * The list holds only the credentials the caller may list (owned by or shared with their projects, or
+ * global). `delete_credential` needs `credential:delete` on the credential, needs a card every time (null
  * `grantKey`) and leaves the audit row the REST route leaves.
  */
 import type { DataObject } from '@workflow/workflow';
@@ -13,22 +15,45 @@ import { toWorkflowLogger } from '../../../logger';
 import { credentialSummary, deleteCredential } from '../../../routes/credentials';
 import { testCredential } from '../../credential-test';
 import { credentialReadErrorText, resolvedValues, scrubValues } from '../../secrets/resolver';
-import type { AssistantToolDefinition } from '../types';
+import {
+  type AssistantToolDefinition,
+  authOf,
+  listNarrowing,
+  listScopeInput,
+  projectIdInput,
+} from '../types';
 
 const fact = (label: string, value: unknown) => ({ label, value: String(value) });
 
 const listInput = z.object({
   type: z.string().max(128).optional().describe('Only credentials of this type'),
+  projectId: projectIdInput,
+  scope: listScopeInput,
 });
 
 const listCredentials: AssistantToolDefinition<z.output<typeof listInput>> = {
   name: 'list_credentials',
   description: 'List the credentials of the workspace (id, name and type only; never their data).',
   input: listInput,
-  minRole: 'viewer',
+  access: 'credential:list',
+  target: (input) => (input.projectId ? { projectId: input.projectId } : null),
   untrusted: 'credentials',
   async handler(ctx, run, input) {
-    const rows = await ctx.repos.credentials.list(run.tenant.id, input.type);
+    const auth = authOf(run);
+    const narrow = await listNarrowing(ctx, run, input);
+    if (narrow.none) return { data: [] };
+    let projectId = narrow.projectId;
+    if (narrow.onlySharedWithMe && !projectId) {
+      // what others shared into the caller's personal project (as GET /credentials?onlySharedWithMe)
+      projectId = (await ctx.repos.projects.getPersonal(run.tenant.id, run.user.id))?.id;
+      if (!projectId) return { data: [] };
+    }
+    const rows = await ctx.repos.credentials.list(run.tenant.id, {
+      type: input.type,
+      filter: await ctx.access.listFilter(auth, 'credential:list'),
+      projectId,
+      onlySharedWithMe: narrow.onlySharedWithMe,
+    });
     return {
       data: rows.map((row) => {
         const summary = credentialSummary(row);
@@ -47,7 +72,7 @@ const searchCredentialTypes: AssistantToolDefinition<z.output<typeof searchTypes
   name: 'search_credential_types',
   description: 'Find credential types a node can use, by part of the type name or display name.',
   input: searchTypesInput,
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   async handler(ctx, _run, input) {
     const needle = input.query.toLowerCase();
     const matches = ctx.registries.credentialTypes
@@ -70,7 +95,8 @@ const testCredentialTool: AssistantToolDefinition<z.output<typeof idInput>> = {
   description:
     "Run a stored credential's own test (a request to the service it belongs to). Answers OK or Error with a message; never its data.",
   input: idInput,
-  minRole: 'editor',
+  access: 'credential:read',
+  target: (input) => ({ credentialId: input.credentialId }),
   untrusted: 'credential-test',
   async handler(ctx, run, input) {
     const tenantId = run.tenant.id;
@@ -99,7 +125,8 @@ const deleteCredentialTool: AssistantToolDefinition<z.output<typeof idInput>> = 
   description:
     'Delete a credential. Workflows that use it stop working until another is chosen. This cannot be undone, so a person approves it every time.',
   input: idInput,
-  minRole: 'editor',
+  access: 'credential:delete',
+  target: (input) => ({ credentialId: input.credentialId }),
   permission: 'deleteCredential',
   grantKey: () => null,
   async approval(ctx, caller, input) {

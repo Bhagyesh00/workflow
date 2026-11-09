@@ -74,7 +74,11 @@ describe('Assistant interaction tools (P5-69)', () => {
   });
 
   it('offers each tool from its minimum role', async () => {
-    await h.expectToolRoles({ ask_user: 'viewer', update_tasks: 'viewer', setup_credentials: 'editor' });
+    await h.expectToolRoles({
+      ask_user: 'instanceAi:message',
+      update_tasks: 'instanceAi:message',
+      setup_credentials: 'credential:create',
+    });
   });
 
   describe('ask_user', () => {

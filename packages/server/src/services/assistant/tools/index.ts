@@ -1,15 +1,20 @@
 /**
- * The Assistant's tool list (P5-69, FULL from C0, C0-final). `assistantTools` joins every tool file's
- * array and the service's `extraTools` (the test seam), then drops the tools above the caller's role and
+ * The Assistant's tool list (P5-69, FULL from C0, C0-final; P6-37 by scope). `assistantTools` joins every tool file's
+ * array and the service's `extraTools` (the test seam), then drops the tools whose scope the caller lacks and
  * those whose permission is `blocked`. The run's `available` check is L1's `toAiTools`, since this
  * function has no run. MCP tools come from `openMcpTools` per turn; an approved MCP call after a stop
  * finds its tool again through `resolveDynamicTool`.
  */
 import type { ServerContext } from '../../../context';
-import type { Role } from '../../../db/schema';
-import { hasRole } from '../../auth';
 import { resolveMcpTool } from '../mcp';
-import type { AssistantRunScope, AssistantToolDefinition, EffectiveAssistantSettings } from '../types';
+import {
+  type AssistantCaller,
+  type AssistantRunScope,
+  type AssistantToolDefinition,
+  type EffectiveAssistantSettings,
+  homeScopes,
+  toolAccess,
+} from '../types';
 import { attachmentsTools } from './attachments';
 import { buildTools } from './build';
 import { credentialsTools } from './credentials';
@@ -40,19 +45,22 @@ export function builtInAssistantTools(): AssistantToolDefinition[] {
 }
 
 /**
- * The tools `role` may be offered under `settings`: built-in ones, then `extraTools`; a tool above the
- * role or with a `blocked` permission is dropped, and a second tool with a name already taken is dropped
- * (providers refuse a request with a tool name twice).
+ * The tools the caller may be offered under `settings`: built-in ones, then `extraTools`; a tool whose
+ * scope the caller lacks (globally and where its writes land, read now) or with a `blocked` permission is
+ * dropped, and a second tool with a name already taken is dropped (providers refuse a request with a tool
+ * name twice). A call with a target checks that target again (`toolDenial`).
  */
-export function assistantTools(
-  role: Role,
+export async function assistantTools(
+  ctx: ServerContext,
+  caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>,
   settings: EffectiveAssistantSettings,
   extraTools: AssistantToolDefinition[] = [],
-): AssistantToolDefinition[] {
+): Promise<AssistantToolDefinition[]> {
+  const held = await homeScopes(ctx, caller);
   const seen = new Set<string>();
   const out: AssistantToolDefinition[] = [];
   for (const def of [...builtInAssistantTools(), ...extraTools]) {
-    if (!hasRole(role, def.minRole)) continue;
+    if (!held.has(toolAccess(def))) continue;
     if (def.permission !== undefined && settings.permissions[def.permission] === 'blocked') continue;
     if (seen.has(def.name)) continue;
     seen.add(def.name);

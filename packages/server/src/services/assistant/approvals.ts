@@ -37,18 +37,19 @@ import type { ServiceDeps } from '../../context';
 import type { AuthContext } from '../../http/auth';
 import { ApiError } from '../../http/errors';
 import type { AssistantConfirmationRow } from '../../repositories/assistant-confirmations';
-import { hasRole } from '../auth';
 import type { Actor } from '../workflows';
 import { redactDeep } from './events';
 import { ASSISTANT_STALE_RUN_MS } from './sweep';
 import { ASSISTANT_TOOL_NO_ACCESS, shapeToolError, shapeToolResult } from './tool-adapter';
 import { assistantTools, builtInAssistantTools, resolveDynamicTool } from './tools';
-import type {
-  ApprovalCopy,
-  AssistantRunScope,
-  AssistantSuspend,
-  AssistantToolDefinition,
-  GateResult,
+import {
+  type ApprovalCopy,
+  type AssistantRunScope,
+  type AssistantSuspend,
+  type AssistantToolDefinition,
+  type GateResult,
+  homeScopes,
+  toolDenial,
 } from './types';
 
 /** the texts the model reads in place of a gated call's result */
@@ -400,9 +401,11 @@ export class AssistantApprovals {
     const membership = await ctx.repos.memberships.get(tenantId, run.user.id);
     if (!membership) return this.refuseApproved(run, current, ASSISTANT_TOOL_NO_ACCESS);
 
+    // the membership and scopes as they are now (a lost project or a narrowed role refuses the call)
+    const caller = { tenant, user: run.user, role: membership.role };
     let dynamic: { tool: AssistantToolDefinition; close(): Promise<void> } | undefined;
     try {
-      let def = assistantTools(membership.role, settings, this.extraTools).find(
+      let def = (await assistantTools(ctx, caller, settings, this.extraTools)).find(
         (candidate) => candidate.name === current.toolName,
       );
       if (!def) {
@@ -416,17 +419,14 @@ export class AssistantApprovals {
         );
         const text = !known
           ? ASSISTANT_APPROVED_TOOL_GONE
-          : !hasRole(membership.role, known.minRole)
+          : (await toolDenial(ctx, caller, known))
             ? ASSISTANT_TOOL_NO_ACCESS
             : known.permission !== undefined && settings.permissions[known.permission] === 'blocked'
               ? ASSISTANT_APPROVAL_TEXTS.blocked
               : ASSISTANT_APPROVED_TOOL_GONE;
         return await this.refuseApproved(run, current, text);
       }
-      // the role and the permission now, not the ones the card was written under
-      if (!hasRole(membership.role, def.minRole)) {
-        return await this.refuseApproved(run, current, ASSISTANT_TOOL_NO_ACCESS);
-      }
+      // the permission now, not the one the card was written under
       if (def.permission !== undefined && settings.permissions[def.permission] === 'blocked') {
         return await this.refuseApproved(run, current, ASSISTANT_APPROVAL_TEXTS.blocked);
       }
@@ -434,10 +434,15 @@ export class AssistantApprovals {
       if (!parsed.success) {
         return await this.refuseApproved(run, current, `Invalid arguments for "${def.name}"`);
       }
+      // the scope now, on the target the stored args name: a project lost since the card was written
+      // refuses the call before the handler runs
+      const denied = await toolDenial(ctx, caller, def, parsed.data);
+      if (denied) return await this.refuseApproved(run, current, denied);
       const scope: AssistantRunScope = {
         ...run,
         tenant,
         role: membership.role,
+        scopes: await homeScopes(ctx, caller),
         settings,
         sendValues: settings.sendValues,
       };

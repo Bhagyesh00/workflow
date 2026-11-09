@@ -2,8 +2,9 @@
  * The workspace's MCP servers as Assistant tools (P5-72, lane L9). Per enabled connection a one-parent
  * definition (`ai.agent`, `ai.mcpClientTool`) is opened through `openSubNodes`, its `ai_tool` read,
  * descriptions and schemas sanitized (mcp-sanitize.ts), names made `mcp_<connection>_<tool>`,
- * `permission` `mcpRead` only for a `readOnlyHint` tool, else `mcpWrite`, `minRole` editor. None when
- * `mcpAccessEnabled` is off or the caller is below editor. One server that cannot be reached gives a
+ * `permission` `mcpRead` only for a `readOnlyHint` tool, else `mcpWrite`, scope `workflow:update`. None when
+ * `mcpAccessEnabled` is off or the caller lacks that scope. The connections are workspace settings (an admin
+ * set them, the credential checked usable then), so a member's project is not asked about them. One server that cannot be reached gives a
  * status note and the others still work.
  *
  * Everything a server sends is untrusted: results are cleaned here and wrapped by `shapeToolResult`
@@ -25,7 +26,6 @@ import { z } from 'zod';
 import type { ServerContext } from '../../context';
 import type { AssistantMcpConnectionRow } from '../../repositories/assistant-mcp';
 import { openSubNodes } from '../ai-builder/model';
-import { hasRole } from '../auth';
 import {
   MCP_LIMITS,
   mcpToolName,
@@ -37,11 +37,14 @@ import {
   stripInvisible,
 } from './mcp-sanitize';
 import { builtInAssistantTools } from './tools';
-import type {
-  ApprovalCopy,
-  AssistantRunScope,
-  AssistantToolDefinition,
-  EffectiveAssistantSettings,
+import {
+  type ApprovalCopy,
+  type AssistantCaller,
+  type AssistantRunScope,
+  type AssistantToolDefinition,
+  authOf,
+  type EffectiveAssistantSettings,
+  homeScopes,
 } from './types';
 
 const AGENT_TYPE = 'ai.agent';
@@ -282,18 +285,20 @@ async function connectionDefinition(
  */
 async function openConnection(
   ctx: ServerContext,
-  tenant: AssistantRunScope['tenant'],
+  caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>,
   signal: AbortSignal,
   row: AssistantMcpConnectionRow,
   access: Access,
   taken: Set<string>,
   dropBlocked: boolean,
 ): Promise<OpenedServer> {
+  const { tenant } = caller;
   const definition = await connectionDefinition(ctx, tenant.id, row);
-  // P6 S1: the connection's credential is the one allowed (read from the row, never from node data);
-  // the workspace's default project until L16 runs the Assistant in the caller's project
+  // P6 S1: the connection's credential is the one allowed (read from the row, never from node data); an
+  // admin set it for the workspace (checked usable when saved), so no project of the caller is asked for it.
+  // The sub-nodes open in the caller's own project, where its writes land.
   const sub = await openSubNodes(ctx, tenant, definition, PARENT_NAME, signal, {
-    projectId: await ctx.repos.projects.defaultProjectFor(tenant.id),
+    projectId: await ctx.access.targetProject(authOf(caller)),
     allowCredentials: row.credentialId ? [row.credentialId] : [],
   });
   const notes: string[] = [];
@@ -366,8 +371,8 @@ function toDefinition(
     name,
     description: cut(`[MCP server "${nameToken(row.name)}"] ${description}`, MCP_LIMITS.toolDescriptionChars),
     input: input as unknown as z.ZodType<DataObject>,
-    // a server that lies with `readOnlyHint` cannot hand a viewer a write: editor, always
-    minRole: 'editor',
+    // a server that lies with `readOnlyHint` cannot hand a reader a write: the scope to build, always
+    access: MCP_TOOL_ACCESS,
     permission,
     untrusted: `mcp:${row.name}`,
     grantKey: () => mcpGrantKey(row.id, toolName),
@@ -399,9 +404,16 @@ function toDefinition(
   };
 }
 
-/** access for a turn: MCP access on and the caller at least an editor */
-function mayUse(settings: EffectiveAssistantSettings, role: AssistantRunScope['role']): boolean {
-  return settings.mcpAccessEnabled && hasRole(role, 'editor');
+/** the scope an MCP tool needs (the one that was `editor`): to change workflows where the caller's work lands */
+const MCP_TOOL_ACCESS = 'workflow:update' as const;
+
+/** access for a turn: MCP access on and the caller holding `MCP_TOOL_ACCESS` now */
+async function mayUse(
+  ctx: ServerContext,
+  settings: EffectiveAssistantSettings,
+  caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>,
+): Promise<boolean> {
+  return settings.mcpAccessEnabled && (await homeScopes(ctx, caller)).has(MCP_TOOL_ACCESS);
 }
 
 /** the MCP tools of this turn and the `close()` the turn runs in its `finally` */
@@ -410,7 +422,7 @@ export async function openMcpTools(
   run: AssistantRunScope,
 ): Promise<{ tools: AssistantToolDefinition[]; close(): Promise<void> }> {
   const none = { tools: [] as AssistantToolDefinition[], close: async () => {} };
-  if (!mayUse(run.settings, run.role)) return none;
+  if (!(await mayUse(ctx, run.settings, run))) return none;
   const rows = (await ctx.repos.assistantMcp.list(run.tenant.id)).filter((row) => row.enabled);
   if (rows.length === 0) return none;
 
@@ -423,7 +435,7 @@ export async function openMcpTools(
         // names are claimed in order below, so each server starts from its own copy
         return {
           row,
-          opened: await openConnection(ctx, run.tenant, run.signal, row, access, new Set(), true),
+          opened: await openConnection(ctx, run, run.signal, row, access, new Set(), true),
         };
       } catch (error) {
         return { row, error };
@@ -490,7 +502,8 @@ export async function resolveMcpTool(
   const membership = await ctx.repos.memberships.get(tenant.id, run.user.id);
   if (!membership) return undefined;
   const settings = await ctx.assistantSettings.read(tenant);
-  if (!mayUse(settings, membership.role)) return undefined;
+  const caller = { tenant, user: run.user, role: membership.role };
+  if (!(await mayUse(ctx, settings, caller))) return undefined;
 
   const rows = (await ctx.repos.assistantMcp.list(tenant.id)).filter((row) => row.enabled);
   const pinned = grantConnectionId(grantKey);
@@ -504,7 +517,7 @@ export async function resolveMcpTool(
   for (const row of candidates) {
     let opened: OpenedServer;
     try {
-      opened = await openConnection(ctx, tenant, run.signal, row, { settings }, new Set(), false);
+      opened = await openConnection(ctx, caller, run.signal, row, { settings }, new Set(), false);
     } catch {
       continue;
     }

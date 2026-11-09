@@ -1,10 +1,10 @@
 /**
  * Assistant tools: executions (P5-69, lane L4; n8n IA/docs/tools.md, `workflow_builder_executions` as
  * separate tools). Reads (`list_executions`, `get_execution`, `debug_execution`, `get_node_output`,
- * `get_resolved_node_parameters`) are viewer tools, as GET /executions; what they return is untrusted
+ * `get_resolved_node_parameters`) need `execution:read` (or `execution:list`) on the run, as GET /executions; what they return is untrusted
  * run data, strings through `redactSecrets` and cut, binary data as name, type and size only, and no item
- * values when `sendValues` is false. Writes (`run_workflow`, `run_node`, `stop_execution`) are editor
- * tools behind a `runWorkflow` card, as POST /workflows/:id/run and /executions/:id/stop.
+ * values when `sendValues` is false. Writes (`run_workflow`, `run_node`, `stop_execution`) need
+ * `workflow:execute` on the workflow (or the run's workflow), behind a `runWorkflow` card, as POST /workflows/:id/run and /executions/:id/stop.
  *
  * `run_workflow` always shows a card (no thread grant), runs through `runAndCollect` with the trigger's
  * items from `triggerPinData` (data, never evaluated), waits 5 minutes by default and 10 at most, stops
@@ -29,11 +29,23 @@ import { z } from 'zod';
 import type { ServerContext } from '../../../context';
 import type { ExecutionRow, WorkflowRow } from '../../../db/schema';
 import { ApiError, parse } from '../../../http/errors';
+import type { AccessFilter } from '../../access';
 import { executionListQuery, executionSummary, listExecutions } from '../../../routes/executions';
 import { toDefinition } from '../../workflow-model';
 import { chooseManualStartNode, type WorkflowService } from '../../workflows';
 import { previewOutput, RUN_PREVIEW, runAndCollect, triggerPinData } from '../run-helper';
-import type { ApprovalCopy, AssistantCaller, AssistantRunScope, AssistantToolDefinition } from '../types';
+import {
+  type ApprovalCopy,
+  type AssistantCaller,
+  type AssistantRunScope,
+  type AssistantToolDefinition,
+  assertScope,
+  authOf,
+  type ListNarrowing,
+  listNarrowing,
+  listScopeInput,
+  projectIdInput,
+} from '../types';
 import { resolveNodeParameters, safeValue } from './resolve-parameters';
 
 const STATUSES = ['new', 'running', 'success', 'error', 'canceled', 'waiting', 'crashed'] as const;
@@ -171,12 +183,35 @@ function isSubNodeIn(definition: WorkflowDefinition | null, name: string): boole
   return Object.keys(byType ?? {}).some((type) => type !== 'main');
 }
 
+/** the run a call names (read: `execution:read`; the adapter checks it on its project) */
+const onExecution = (input: { executionId: string }) => ({ executionId: input.executionId });
+/** the workflow a call names */
+const onWorkflow = (input: { workflowId: string }) => ({ workflowId: input.workflowId });
+
+/** narrows the caller's access filter to a project or to what is shared with them; never widens it */
+function narrowFilter(filter: AccessFilter, narrow: ListNarrowing): AccessFilter {
+  if (narrow.none) return { all: false, projectIds: [], workflowIds: [], credentialIds: [] };
+  if (narrow.onlySharedWithMe && !narrow.projectId) {
+    return { all: false, projectIds: [], workflowIds: filter.all ? [] : filter.workflowIds, credentialIds: [] };
+  }
+  if (!narrow.projectId) return filter;
+  if (filter.all) return { all: false, projectIds: [narrow.projectId], workflowIds: [], credentialIds: [] };
+  return {
+    all: false,
+    projectIds: filter.projectIds.filter((id) => id === narrow.projectId),
+    workflowIds: [],
+    credentialIds: [],
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
 // reads
 
 const listExecutionsTool: AssistantToolDefinition<{
   workflowId?: string;
   status?: Array<(typeof STATUSES)[number]>;
+  projectId?: string;
+  scope: 'all' | 'personal' | 'shared';
   limit: number;
   cursor?: string;
 }> = {
@@ -185,10 +220,13 @@ const listExecutionsTool: AssistantToolDefinition<{
   input: z.object({
     workflowId: workflowId.optional(),
     status: z.array(z.enum(STATUSES)).max(STATUSES.length).optional(),
+    projectId: projectIdInput,
+    scope: listScopeInput,
     limit: z.number().int().min(1).max(100).default(20),
     cursor: z.string().max(512).optional().describe('The nextCursor of an earlier page'),
   }),
-  minRole: 'viewer',
+  access: 'execution:list',
+  target: (input) => (input.projectId ? { projectId: input.projectId } : null),
   untrusted: 'execution-list',
   async handler(ctx, run, input) {
     if (input.workflowId) await ctx.workflows.get(run.tenant.id, input.workflowId);
@@ -198,7 +236,10 @@ const listExecutionsTool: AssistantToolDefinition<{
       limit: input.limit,
       cursor: input.cursor,
     });
-    const page = await listExecutions(ctx, run.tenant.id, query);
+    // only the runs of workflows the caller may list; `projectId` and `scope` only narrow that
+    const narrow = await listNarrowing(ctx, run, input);
+    const filter = narrowFilter(await ctx.access.listFilter(authOf(run), 'execution:list'), narrow);
+    const page = await listExecutions(ctx, run.tenant.id, query, { filter });
     return {
       executions: page.data.map((e) => ({
         id: e.id,
@@ -222,7 +263,8 @@ const getExecutionTool: AssistantToolDefinition<{ executionId: string }> = {
   description:
     "An execution's status, timing, error and what each node did (status, runs, item counts). It does not wait for a running execution.",
   input: z.object({ executionId }),
-  minRole: 'viewer',
+  access: 'execution:read',
+  target: onExecution,
   untrusted: 'execution-output',
   async handler(ctx, run, input) {
     const { row, runData, state } = await loadExecution(ctx, run, input.executionId);
@@ -249,7 +291,8 @@ const debugExecution: AssistantToolDefinition<{ executionId: string }> = {
   description:
     'Why an execution failed: the failed node, its error, and the trace of the nodes that ran before it. Use get_resolved_node_parameters and get_node_output for more.',
   input: z.object({ executionId }),
-  minRole: 'viewer',
+  access: 'execution:read',
+  target: onExecution,
   untrusted: 'execution-output',
   async handler(ctx, run, input) {
     const { row, runData, state, definition } = await loadExecution(ctx, run, input.executionId);
@@ -323,7 +366,8 @@ const getNodeOutput: AssistantToolDefinition<{
     startIndex: z.number().int().min(0).default(0),
     maxItems: z.number().int().min(1).max(50).default(10),
   }),
-  minRole: 'viewer',
+  access: 'execution:read',
+  target: onExecution,
   untrusted: 'execution-output',
   async handler(ctx, run, input) {
     const { row, runData, definition } = await loadExecution(ctx, run, input.executionId);
@@ -367,7 +411,8 @@ const getResolvedNodeParameters: AssistantToolDefinition<{
     itemIndex: z.number().int().min(0).default(0),
     runIndex: z.number().int().min(0).optional(),
   }),
-  minRole: 'viewer',
+  access: 'execution:read',
+  target: onExecution,
   untrusted: 'resolved-parameters',
   async handler(ctx, run, input) {
     const { row, runData, definition } = await loadExecution(ctx, run, input.executionId);
@@ -460,7 +505,8 @@ const runWorkflowTool: AssistantToolDefinition<RunWorkflowInput> = {
     timeout,
     approvalSummary,
   }),
-  minRole: 'editor',
+  access: 'workflow:execute',
+  target: onWorkflow,
   permission: 'runWorkflow',
   // n8n: a run always waits for the person; no "always allow this session"
   grantKey: () => null,
@@ -674,13 +720,18 @@ const runNodeTool: AssistantToolDefinition<RunNodeInput> = {
     timeout,
     approvalSummary,
   }),
-  minRole: 'editor',
+  access: 'workflow:execute',
+  target: onWorkflow,
   permission: 'runWorkflow',
   grantKey: runNodeGrantKey,
   async approval(ctx, caller, input): Promise<ApprovalCopy> {
     const { row, definition, workflow } = await runnableWorkflow(ctx, caller, input.workflowId);
     if (!workflow.nodes[input.nodeName]) throw new Error(`Node '${input.nodeName}' is not in the workflow`);
-    if (input.reuseExecutionId) await executionRow(ctx, caller, input.reuseExecutionId);
+    if (input.reuseExecutionId) {
+      // an earlier run is read to replay: the caller must be able to read it
+      await assertScope(ctx, caller, 'execution:read', { executionId: input.reuseExecutionId });
+      await executionRow(ctx, caller, input.reuseExecutionId);
+    }
     const mode = runNodeMode(input);
     const given =
       mode === 'mocked' ? inputRows(input.mockInput) : mode === 'tool' ? [input.toolArguments ?? {}] : [];
@@ -729,6 +780,7 @@ const runNodeTool: AssistantToolDefinition<RunNodeInput> = {
       if (!isTool) throw new Error('toolArguments is only for a tool sub-node');
       body.agentRequest = { query: input.toolArguments ?? {}, toolName: target.name };
     } else if (mode === 'reused-execution') {
+      await assertScope(ctx, run, 'execution:read', { executionId: input.reuseExecutionId as string });
       const earlier = await loadExecution(ctx, run, input.reuseExecutionId as string);
       if (earlier.row.workflowId !== row.id) throw new Error('That execution belongs to another workflow');
       if (!Object.keys(earlier.runData).length) throw new Error('That execution kept no run data to replay');
@@ -804,7 +856,8 @@ const stopExecution: AssistantToolDefinition<{ executionId: string; approvalSumm
   name: 'stop_execution',
   description: "Stop a running or waiting execution. Needs the person's approval.",
   input: z.object({ executionId, approvalSummary }),
-  minRole: 'editor',
+  access: 'workflow:execute',
+  target: onExecution,
   permission: 'runWorkflow',
   grantKey: (input) => `stop_execution:${input.executionId}`,
   async approval(ctx, caller, input): Promise<ApprovalCopy> {

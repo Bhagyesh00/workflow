@@ -129,7 +129,7 @@ describe('createAssistantHarness', () => {
     );
     expect(feature.features.assistant).toEqual({ enabled: true, modelSet: true });
     expect(ctx.assistant.extraTools).toEqual([echo]);
-    await harness.expectToolRoles({ harness_echo: 'editor' });
+    await harness.expectToolRoles({ harness_echo: 'workflow:update' });
 
     await harness.setSettings({ enabled: false });
     expect((await harness.viewer.client.get('/rest/assistant/threads')).statusCode).toBe(404);

@@ -12,7 +12,7 @@
  */
 import type { HttpClient } from '@workflow/core';
 import { z } from 'zod';
-import type { AssistantToolDefinition } from '../types';
+import { type AssistantToolDefinition, authOf } from '../types';
 
 export const MODELS_DEV_URL = 'https://models.dev/api.json';
 export const MODEL_CATALOG_LIMITS = {
@@ -316,11 +316,46 @@ const searchModelsTool: AssistantToolDefinition<z.infer<typeof searchModelsInput
   description:
     'Look up recent chat models of one provider in the public models.dev catalog when no credential of that provider exists to list them. Not a check of what a credential can use.',
   input: searchModelsInput,
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   untrusted: 'models-dev',
   async handler(ctx, run, input) {
     return assistantModelCatalog.search(ctx.http, input, run.signal);
   },
 };
 
-export const modelsTools: AssistantToolDefinition[] = [searchModelsTool];
+const listProjectsInput = z.object({
+  query: z.string().trim().max(100).optional().describe('Part of the project name; exact matches come first'),
+});
+
+/** the projects the caller sees, each with the caller's role: what `projectId` of the other tools takes */
+const listProjectsTool: AssistantToolDefinition<z.infer<typeof listProjectsInput>> = {
+  name: 'list_projects',
+  description:
+    'List the projects you can reach (your personal project and the team projects you belong to), each with your role in it. Other tools take a project id to look only at one project or to put new work in it.',
+  input: listProjectsInput,
+  access: 'project:list',
+  untrusted: 'projects',
+  async handler(ctx, run, input) {
+    const listed = await ctx.projects.list(authOf(run));
+    const rows = Array.isArray(listed) ? listed : listed.data;
+    const needle = input.query?.toLowerCase();
+    const matching = needle ? rows.filter((row) => row.name.toLowerCase().includes(needle)) : rows;
+    // exact name matches first, then the order the service gives (personal project first)
+    const ordered = needle
+      ? [...matching].sort(
+          (a, b) => Number(b.name.toLowerCase() === needle) - Number(a.name.toLowerCase() === needle),
+        )
+      : matching;
+    return {
+      projects: ordered.slice(0, 100).map((row) => ({
+        id: row.id,
+        name: row.name,
+        type: row.type,
+        ...(row.role ? { role: row.role } : {}),
+        canCreateWorkflows: row.scopes.includes('workflow:create'),
+      })),
+    };
+  },
+};
+
+export const modelsTools: AssistantToolDefinition[] = [searchModelsTool, listProjectsTool];

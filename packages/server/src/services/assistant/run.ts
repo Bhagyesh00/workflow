@@ -57,6 +57,7 @@ import {
   type AssistantRunScope,
   type AssistantToolDefinition,
   AssistantTurnStop,
+  homeScopes,
   type StoredAttachment,
 } from './types';
 
@@ -153,6 +154,7 @@ export async function createRunScope(
     tenant,
     user,
     role: membership.role,
+    scopes: await homeScopes(ctx, { tenant, user, role: membership.role }),
     actor: input.actor,
     threadId: input.threadId,
     runId: input.runId,
@@ -452,7 +454,7 @@ export async function executeTurn(run: AssistantRun, turn: AssistantTurn): Promi
 
     const opened = await openMcpTools(ctx, scope);
     mcp = opened;
-    const defs = [...assistantTools(scope.role, scope.settings, turn.extraTools), ...opened.tools];
+    const defs = [...(await assistantTools(ctx, scope, scope.settings, turn.extraTools)), ...opened.tools];
     // a card written in this turn stops it at the next model call, even when it was answered meanwhile
     let cardWritten = false;
     const gate: ToolGate = {
@@ -467,7 +469,7 @@ export async function executeTurn(run: AssistantRun, turn: AssistantTurn): Promi
     const timezone = ((scope.tenant.settings ?? {}) as TenantSettings).timezone;
     const systemText = async () =>
       assistantSystemPrompt({
-        role: scope.role,
+        scopes: scope.scopes ?? new Set(),
         observations: await repo.getObservations(tenantId, threadId),
         toolNames,
         timezone,

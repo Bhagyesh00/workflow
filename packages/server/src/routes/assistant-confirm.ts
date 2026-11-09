@@ -40,7 +40,7 @@ const answerSchema = z.discriminatedUnion('kind', [
 
 export function registerAssistantConfirmRoutes(rest: FastifyInstance, ctx: ServerContext): void {
   rest.post('/assistant/confirm/:requestId', assistantRouteOptions('confirm', 'write'), async (request) => {
-    const { auth } = requireAssistant(request, ctx, 'viewer');
+    const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
     const { requestId } = parse(confirmParams, request.params);
     const answer = parse(answerSchema, request.body ?? {}) as AssistantConfirmAnswer;
     const actor = { userId: auth.user.id, ip: clientIp(request) };

@@ -21,16 +21,19 @@ import {
 import { z } from 'zod';
 import type { ServerContext } from '../../context';
 import { wrapUntrusted } from '../ai-builder/context';
-import { hasRole } from '../auth';
 import type { AssistantApprovals } from './approvals';
 import { redactDeep } from './events';
-import type { AssistantRunScope, AssistantToolDefinition } from './types';
+import {
+  ASSISTANT_TOOL_NO_ACCESS,
+  type AssistantRunScope,
+  type AssistantToolDefinition,
+  toolDenial,
+} from './types';
+
+export { ASSISTANT_TOOL_NO_ACCESS };
 
 /** the part of the approvals a call uses (the run wraps it to see a card it wrote) */
 export type ToolGate = Pick<AssistantApprovals, 'gate'>;
-
-/** what the model reads when the caller lost the role a tool needs during the turn */
-export const ASSISTANT_TOOL_NO_ACCESS = 'You no longer have access to this tool';
 
 /** the tool's arguments as JSON Schema (an object schema, as providers require) */
 export function toolParameters(def: AssistantToolDefinition): JsonSchema {
@@ -109,24 +112,30 @@ async function invokeTool(
     throw new ToolCallError(text);
   };
 
-  // the role now, not the one the turn started with
+  // the membership and the scopes now, not the ones the turn started with
   const membership = await ctx.repos.memberships.get(run.tenant.id, run.user.id);
-  if (!membership || !hasRole(membership.role, def.minRole)) return fail(ASSISTANT_TOOL_NO_ACCESS);
+  if (!membership) return fail(ASSISTANT_TOOL_NO_ACCESS);
+  const caller = { tenant: run.tenant, user: run.user, role: membership.role };
+  // the handler and the card read the role as it is now too, not the one the turn started with
+  const live: AssistantRunScope = { ...run, role: membership.role };
 
   const parsed = def.input.safeParse(args ?? {});
   if (!parsed.success) return fail(`Invalid arguments for "${def.name}": ${issuesText(parsed.error)}`);
   const input = parsed.data;
+  // the scopes where its writes land, or on the resource the call names (a lost project stops this call)
+  const denied = await toolDenial(ctx, caller, def, input);
+  if (denied) return fail(denied);
 
   let result: unknown;
   try {
-    const gate = await approvals.gate(run, def, input, toolCallId);
+    const gate = await approvals.gate(live, def, input, toolCallId);
     if (gate.decision === 'refuse') return fail(redactSecrets(gate.reason));
     if (gate.decision === 'suspended') {
       // the card waits; the model reads the placeholder until the person answers (L3 replaces it)
       await saveResult(ctx, run, toolCallId, def.name, gate.placeholder);
       return gate.placeholder;
     }
-    result = await def.handler(ctx, run, input);
+    result = await def.handler(ctx, live, input);
   } catch (error) {
     if (error instanceof ToolCallError) throw error;
     if (run.signal.aborted) throw error;

@@ -1,6 +1,6 @@
 /**
  * Assistant tools: read the turn's attached files (P5-74, lane L11; n8n IA `parse-file.tool.ts`).
- * `parse_file` is a viewer read tool with no card. `attachmentIndex` counts into `run.attachments`, the
+ * `parse_file` is a read tool (`instanceAi:message`) with no card. `attachmentIndex` counts into `run.attachments`, the
  * files of this turn's user message (a resumed turn reloads them), so the model never names an id and
  * another thread's file cannot be reached. CSV, TSV and JSON are read here with `papaparse` and
  * `JSON.parse` and their rows paged; PDF, DOCX, XLSX, HTML, text and markdown come from nodes-base
@@ -226,7 +226,7 @@ const parseFileTool: AssistantToolDefinition<ParseFileInput> = {
       .optional()
       .describe('Rows (or lines) to return, at most 1000'),
   }),
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   untrusted: 'attached-file',
   available: (run) => run.attachments.some((file) => !isImageAttachment(file)),
   handler: parseFile,

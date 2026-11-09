@@ -30,11 +30,13 @@ import { type AssistantStoredDraft, assistantThreads } from '../../db/schema';
 import type { AuthContext } from '../../http/auth';
 import { ApiError, parse } from '../../http/errors';
 import { workflowDataSchema } from '../../http/schemas';
+import { MISSING_SCOPE_MESSAGE } from '../access';
 import { validateDefinition } from '../ai-builder/tools';
 import { assertCredentialsInTenant } from '../mcp/tools/builder/credential-check';
 import { McpToolError } from '../mcp/workflow-gate';
 import { cloneDefinition, toDefinition } from '../workflow-model';
 import type { Actor } from '../workflows';
+import { assertScope, scopesOn, writeProject } from './types';
 
 /** a credential Accept assigns to a node that has none (first of its type in the tenant) */
 export interface AssistantDraftAssignment {
@@ -93,13 +95,15 @@ export function draftDto(stored: AssistantStoredDraft): AssistantDraftDTO {
 }
 
 /**
- * For each node without credentials: the required credential slots it shows, each filled with the
- * workspace's first credential of that type (the oldest). A type the workspace has none of is skipped.
+ * For each node without credentials: the required credential slots it shows, each filled with the first
+ * credential of that type (the oldest) that `projectId` can use (owned by it, shared with it or global).
+ * A type with none is skipped. Without a project the whole workspace counts (system callers only).
  */
 export async function credentialAssignments(
   ctx: ServerContext,
   tenantId: string,
   definition: WorkflowDefinition,
+  projectId?: string,
 ): Promise<AssistantDraftAssignment[]> {
   const nodeTypes = ctx.registries.nodeTypes;
   const firstOfType = new Map<string, { id: string; name: string } | null>();
@@ -115,7 +119,9 @@ export async function credentialAssignments(
     ).filter((slot) => slot.required === true);
     for (const slot of slots) {
       if (!firstOfType.has(slot.name)) {
-        const rows = await ctx.repos.credentials.list(tenantId, slot.name);
+        const rows = projectId
+          ? await usableCredentials(ctx, tenantId, projectId, slot.name)
+          : await ctx.repos.credentials.list(tenantId, slot.name);
         const first = [...rows].sort(
           (a, b) =>
             new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime() || a.id.localeCompare(b.id),
@@ -133,6 +139,14 @@ export async function credentialAssignments(
     }
   }
   return assignments;
+}
+
+/** the credentials of `type` the project can use: its own, shared with it, and global ones */
+async function usableCredentials(ctx: ServerContext, tenantId: string, projectId: string, type: string) {
+  const own = await ctx.repos.credentials.list(tenantId, { type, projectId });
+  const global = (await ctx.repos.credentials.list(tenantId, { type })).filter((row) => row.isGlobal);
+  const seen = new Set(own.map((row) => row.id));
+  return [...own, ...global.filter((row) => !seen.has(row.id))];
 }
 
 const EMPTY: WorkflowDefinition = { name: '', nodes: [], connections: {} };
@@ -205,13 +219,36 @@ export class AssistantDrafts {
     return row ? toDefinition(row) : EMPTY;
   }
 
+  /**
+   * The project the draft is saved in: the workflow's own when it changes a saved one, else the project the
+   * build named (`projectId` on the draft), else the caller's default (`targetProject`).
+   */
+  private async projectOf(auth: AuthContext, stored: AssistantStoredDraft): Promise<string> {
+    if (stored.workflowId) {
+      const row = await this.deps.repos.workflows.get(auth.tenant.id, stored.workflowId);
+      if (row) return row.projectId;
+    }
+    const named = typeof stored.projectId === 'string' ? stored.projectId : undefined;
+    return this.ctx.access.targetProject(auth, named);
+  }
+
   /** the caller's draft on the caller's thread; 404 otherwise */
   async get(auth: AuthContext, threadId: string, draftId: string): Promise<AssistantDraftView> {
     const stored = await this.load(auth, threadId, draftId);
+    // the saved workflow a draft changes is shown as the base: only to someone who may read it
+    if (stored.workflowId) {
+      const held = await scopesOn(this.ctx, auth, { workflowId: stored.workflowId }).catch(() => null);
+      if (held && !held.has('workflow:read')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+    }
     const base = await this.baseOf(auth.tenant.id, stored);
     const assignments =
       draftStatus(stored) === 'open'
-        ? await credentialAssignments(this.ctx, auth.tenant.id, stored.definition)
+        ? await credentialAssignments(
+            this.ctx,
+            auth.tenant.id,
+            stored.definition,
+            await this.projectOf(auth, stored),
+          )
         : [];
     return { draft: draftDto(stored), diff: diffWorkflows(base, stored.definition), assignments };
   }
@@ -232,6 +269,17 @@ export class AssistantDrafts {
     const shown = await this.load(auth, threadId, draftId);
     if (draftStatus(shown) !== 'open') throw ApiError.conflict(ASSISTANT_DRAFT_TEXTS.notOpen);
     if (draftVersion(shown) !== body.updatedAt) throw ApiError.conflict(ASSISTANT_DRAFT_TEXTS.changed);
+    // the scope on the draft's target now: `workflow:update` on the workflow it changes, or `workflow:create`
+    // in the project it was built for (the caller's default when it names none)
+    const projectId = shown.workflowId
+      ? undefined
+      : await writeProject(
+          this.ctx,
+          auth,
+          'workflow:create',
+          typeof shown.projectId === 'string' ? shown.projectId : undefined,
+        );
+    if (shown.workflowId) await assertScope(this.ctx, auth, 'workflow:update', { workflowId: shown.workflowId });
     // one conditional update: open to accepted, only the version the person saw; a second Accept finds none
     const stored = await this.moveStatus(auth, threadId, draftId, {
       from: 'open',
@@ -247,7 +295,7 @@ export class AssistantDrafts {
     const by = actor ?? { userId: auth.user.id };
     let written: Awaited<ReturnType<AssistantDrafts['save']>>;
     try {
-      written = await this.save(auth, stored, body, by);
+      written = await this.save(auth, stored, body, by, projectId);
     } catch (error) {
       // nothing was written: the draft is open again, at the same version
       await this.moveStatus(auth, threadId, draftId, {
@@ -266,6 +314,7 @@ export class AssistantDrafts {
     stored: AssistantStoredDraft,
     body: AssistantAcceptDraftBody,
     actor: Actor,
+    projectId?: string,
   ): Promise<{
     saved: { id: string; name: string; versionId: string };
     definition: WorkflowDefinition;
@@ -287,7 +336,12 @@ export class AssistantDrafts {
       throw error;
     }
 
-    const assignments = await credentialAssignments(ctx, tenantId, definition);
+    const assignments = await credentialAssignments(
+      ctx,
+      tenantId,
+      definition,
+      projectId ?? (await this.projectOf(auth, stored)),
+    );
     for (const assignment of assignments) {
       const node = definition.nodes.find((n) => n.name === assignment.nodeName);
       if (!node) continue;
@@ -339,7 +393,7 @@ export class AssistantDrafts {
     } else {
       saved = await ctx.workflows.create(
         tenantId,
-        { ...input, folderId: null } as unknown as Parameters<typeof ctx.workflows.create>[1],
+        { ...input, folderId: null, projectId } as unknown as Parameters<typeof ctx.workflows.create>[1],
         actor,
       );
     }

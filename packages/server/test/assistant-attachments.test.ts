@@ -248,7 +248,7 @@ describe('Assistant attachments (P5-74)', () => {
   });
 
   it('offers parse_file to every role, as a read tool', async () => {
-    await h.expectToolRoles({ parse_file: 'viewer' });
+    await h.expectToolRoles({ parse_file: 'instanceAi:message' });
   });
 
   it('a sent PDF is read by the tool, inside the untrusted wrapper', async () => {

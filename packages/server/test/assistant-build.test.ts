@@ -507,7 +507,7 @@ describe('build_workflow', () => {
   });
 
   it('a viewer has no build_workflow or verify_workflow, and no tool reaches Accept', async () => {
-    await h.expectToolRoles({ build_workflow: 'editor', verify_workflow: 'editor' });
+    await h.expectToolRoles({ build_workflow: 'workflow:create', verify_workflow: 'workflow:create' });
     expect(buildTools.map((t) => t.name)).toEqual(['build_workflow', 'verify_workflow']);
     for (const tool of buildTools) expect(tool.permission).toBeUndefined();
     for (const tool of builtInAssistantTools()) {

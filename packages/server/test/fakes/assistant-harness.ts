@@ -18,6 +18,7 @@ import type {
   AssistantEvent,
   AssistantStatusDTO,
   DataObject,
+  Scope,
 } from '@workflow/workflow';
 import type { LightMyRequestResponse } from 'fastify';
 import { expect } from 'vitest';
@@ -29,8 +30,7 @@ import {
   effectiveAssistantSettings,
 } from '../../src/services/assistant/settings';
 import { assistantTools, builtInAssistantTools } from '../../src/services/assistant/tools';
-import type { AssistantToolDefinition } from '../../src/services/assistant/types';
-import { hasRole } from '../../src/services/auth';
+import { type AssistantToolDefinition, toolAccess } from '../../src/services/assistant/types';
 import {
   createTestServer,
   createWorkflow,
@@ -152,8 +152,11 @@ export interface AssistantHarness {
     requestId: string,
     answer: AssistantConfirmAnswer,
   ): Promise<LightMyRequestResponse>;
-  /** each named tool exists with this minimum role, and is offered to exactly the roles at or above it */
-  expectToolRoles(table: Record<string, Role>): Promise<void>;
+  /**
+   * each named tool exists with this scope (`access`), and is offered to exactly the roles whose scopes
+   * hold it (the legacy role map until L24: owner, admin, editor and viewer of the workspace)
+   */
+  expectToolRoles(table: Record<string, Scope>): Promise<void>;
   /** a scripted model call of `name(args)` through the whole path (thread, chat, run loop, tool, result) */
   callTool(user: HarnessUser, name: string, args: DataObject): Promise<CallToolResult>;
   /** fails on a dangling tool call id or a duplicate tool name in any recorded request */
@@ -473,17 +476,21 @@ export async function createAssistantHarness(
     const confirm = (user: HarnessUser, requestId: string, answer: AssistantConfirmAnswer) =>
       user.client.post(`/rest/assistant/confirm/${requestId}`, answer);
 
-    const expectToolRoles = async (table: Record<string, Role>) => {
+    const expectToolRoles = async (table: Record<string, Scope>) => {
       const row = await ctx.repos.tenants.get(tenantId);
       const settings = effectiveAssistantSettings(ctx.config, (row?.settings ?? {}) as TenantSettings);
       const all = [...builtInAssistantTools(), ...extraTools];
-      for (const [name, minRole] of Object.entries(table)) {
+      for (const [name, scope] of Object.entries(table)) {
         const def = all.find((d) => d.name === name);
         expect(def, `tool ${name} exists`).toBeDefined();
-        expect(def?.minRole, `minimum role of ${name}`).toBe(minRole);
+        expect(def ? toolAccess(def) : undefined, `scope of ${name}`).toBe(scope);
         for (const role of HARNESS_ROLES) {
-          const offered = assistantTools(role, settings, extraTools).some((d) => d.name === name);
-          expect(offered, `${name} offered to ${role}`).toBe(hasRole(role, minRole));
+          const byRole: Record<string, HarnessUser> = { owner, admin, editor, viewer };
+          const user = await ctx.repos.users.get((byRole[role] as HarnessUser).userId);
+          const caller = { tenant: row as NonNullable<typeof row>, user: user as NonNullable<typeof user>, role };
+          const offered = (await assistantTools(ctx, caller, settings, extraTools)).some((d) => d.name === name);
+          const held = (await ctx.access.globalScopes(tenantId, role)).has(scope);
+          expect(offered, `${name} offered to ${role}`).toBe(held);
         }
       }
     };

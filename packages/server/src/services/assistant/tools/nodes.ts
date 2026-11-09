@@ -1,12 +1,14 @@
 /**
  * Assistant tools: node search, node details, parameter options and running one node (P5-69, lane L6).
  *
- * - `search_nodes`, `get_node_types` (viewer): S4's `searchNodes` and `nodeDetails` on the node registry;
+ * - `search_nodes`, `get_node_types` (`instanceAi:message`): S4's `searchNodes` and `nodeDetails` on the node registry;
  *   static descriptions, so no untrusted wrapper. A node type is only ever looked up with `nodeTypes.get`.
- * - `get_node_parameter_options` (editor, as `POST /node-types/options`): `loadNodeOptions` for one
- *   parameter or method; a credential must be this workspace's; the list comes from an outside API, so the
+ * - `get_node_parameter_options` (`workflow:update`, as `POST /node-types/options`): `loadNodeOptions` for one
+ *   parameter or method, always with `workflowId` (the workflow's project) or `projectId` (the named one, else
+ *   the caller's default, with `workflow:create` there); a credential must be this workspace's and usable in
+ *   that project (`assertCredentialsUsable`), so another project's credential is refused; the list comes from an outside API, so the
  *   result is wrapped (`node-options`), and so is the node's own error (the adapter's `shapeToolError`).
- * - `execute_node` (editor, `executeNode`): always a card unless this thread holds the grant
+ * - `execute_node` (`workflow:execute` in the caller's project or the named `projectId`, `executeNode`): always a card unless this thread holds the grant
  *   `nodes:execute:<type>:<resource>:<operation>` (a node with neither is scoped by the first of `mode`,
  *   `url`, `query`, `command`, `action` it declares, else by its type alone; no grant is offered past 200
  *   characters, so one URL never stands for all, nor when a value the key uses is an expression, which the
@@ -31,14 +33,20 @@ import {
 } from '@workflow/workflow';
 import { z } from 'zod';
 import type { ServerContext } from '../../../context';
-import type { AuthContext } from '../../../http/auth';
+import { assertCredentialsUsable } from '../../credential-usable';
 import { nodeDetails, searchNodes } from '../../ai-builder/tools';
 import { assertCredentialsInTenant } from '../../mcp/tools/builder/credential-check';
 import { McpToolError } from '../../mcp/workflow-gate';
 import { loadNodeOptions } from '../../node-options';
 import { approvalPreview } from '../approvals';
 import { previewOutput, runAndCollect } from '../run-helper';
-import type { AssistantRunScope, AssistantToolDefinition } from '../types';
+import {
+  type AssistantRunScope,
+  type AssistantToolDefinition,
+  assertScope,
+  authOf,
+  writeProject,
+} from '../types';
 
 /** the longest run of one node */
 export const EXECUTE_NODE_MAX_MS = 60_000;
@@ -84,7 +92,7 @@ const searchNodesTool: AssistantToolDefinition<SearchNodesInput> = {
   description:
     'Search the node types of this instance by name, service or purpose. Use short service names ("Slack", "HTTP Request"), not whole sentences.',
   input: searchNodesInput,
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   async handler(ctx, _run, input) {
     const queries = [...(input.query ? [input.query] : []), ...(input.queries ?? [])].slice(0, 10);
     return { results: searchNodes(ctx.registries.nodeTypes, queries) };
@@ -130,7 +138,7 @@ const getNodeTypesTool: AssistantToolDefinition<GetNodeTypesInput> = {
   description:
     'Get the exact parameters, credential slots, inputs and outputs of one to ten node types, by type name from search_nodes.',
   input: getNodeTypesInput,
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   async handler(ctx, _run, input) {
     const definitions = input.nodeTypes.map((request) => {
       const spec: Exclude<NodeTypeRequest, string> =
@@ -186,6 +194,11 @@ const optionsInput = z
       .describe('Parameters a dependent list needs, e.g. the selected resource'),
     filter: z.string().max(1000).optional(),
     paginationToken: z.string().max(2000).optional(),
+    workflowId: z.uuid().optional().describe('The saved workflow the node belongs to (its project is used)'),
+    projectId: z
+      .uuid()
+      .optional()
+      .describe('For a workflow not saved yet: the project it goes in; yours when left out'),
   })
   .refine((value) => value.parameterPath !== undefined || value.methodName !== undefined, {
     message: 'Give "parameterPath", or "methodName" with "methodType"',
@@ -272,7 +285,7 @@ const parameterOptionsTool: AssistantToolDefinition<OptionsInput> = {
   description:
     'List the live values of a dynamic node parameter (channels, sheets, models, ...) through a credential of this workspace. The values come from an outside service.',
   input: optionsInput,
-  minRole: 'editor',
+  access: 'workflow:update',
   untrusted: 'node-options',
   async handler(ctx, run, input) {
     const nodeType = ctx.registries.nodeTypes.get(input.nodeType);
@@ -302,8 +315,35 @@ const parameterOptionsTool: AssistantToolDefinition<OptionsInput> = {
     const checked = await tenantCredentials(ctx, run, refs);
     const credentials = Object.fromEntries(checked.map((c) => [c.type, { id: c.id, name: c.name }]));
 
-    const auth: AuthContext = { user: run.user, tenant: run.tenant, role: run.role };
-    const result = await loadNodeOptions(ctx, auth, {
+    // the project the method runs in: the workflow's (the caller must be able to change it) or the named
+    // one (they must be able to create there); the credentials must be usable in it
+    let projectId: string;
+    if (input.workflowId) {
+      await assertScope(ctx, run, 'workflow:update', { workflowId: input.workflowId });
+      projectId = (await ctx.workflows.get(run.tenant.id, input.workflowId)).projectId;
+    } else {
+      projectId = await writeProject(ctx, run, 'workflow:create', input.projectId);
+    }
+    if (checked.length) {
+      await assertCredentialsUsable(ctx, run.tenant.id, projectId, {
+        name: 'Assistant node options',
+        nodes: [
+          {
+            id: 'assistant-options',
+            name: 'Options',
+            type: input.nodeType,
+            typeVersion: input.version,
+            position: [0, 0],
+            parameters: {},
+            credentials,
+          },
+        ],
+        connections: {},
+      });
+    }
+
+    const result = await loadNodeOptions(ctx, authOf(run), {
+      ...(input.workflowId ? { workflowId: input.workflowId } : { projectId }),
       nodeType: input.nodeType,
       method: method.method,
       kind: method.kind,
@@ -343,6 +383,10 @@ const executeNodeInput = z.object({
     .optional()
     .describe('Input items; one empty item when left out'),
   timeoutMs: z.number().int().min(1).optional().describe('At most 60000'),
+  projectId: z
+    .uuid()
+    .optional()
+    .describe('The project the node runs in (its credentials must be usable there); yours when left out'),
 });
 type ExecuteNodeInput = z.infer<typeof executeNodeInput>;
 
@@ -416,6 +460,8 @@ interface PreparedNode {
   node: WorkflowNode;
   definition: WorkflowDefinition;
   credentials: Array<{ type: string; id: string; name: string }>;
+  /** the project the node runs in */
+  projectId: string;
 }
 
 /** every check that runs before a card and again before the run */
@@ -453,10 +499,14 @@ async function prepareNode(
     ...(input.config.credentials ? { credentials: input.config.credentials } : {}),
   };
   const definition: WorkflowDefinition = { name: 'Assistant node run', nodes: [node], connections: {} };
+  // the caller's project (the named one, else their default) with `workflow:execute` there, read now
+  const projectId = await writeProject(ctx, run, 'workflow:execute', input.projectId);
   // inline workflows in the parameters are checked too
   await assertTenantCredentials(ctx, run.tenant.id, definition);
   const credentials = await tenantCredentials(ctx, run, input.config.credentials ?? {});
-  return { nodeType, node, definition, credentials };
+  // and every credential must be usable in that project (another project's is refused before any card)
+  await assertCredentialsUsable(ctx, run.tenant.id, projectId, definition);
+  return { nodeType, node, definition, credentials, projectId };
 }
 
 function nodeFacts(prepared: PreparedNode, input: ExecuteNodeInput, label: string | null) {
@@ -517,7 +567,8 @@ const executeNodeTool: AssistantToolDefinition<ExecuteNodeInput> = {
   description:
     "Run one node on its own with real credentials, parameters and input items, and read its output (to learn its exact output shape or test it). It really runs, so it needs the person's approval. Triggers, webhooks and nodes that wait cannot run this way.",
   input: executeNodeInput,
-  minRole: 'editor',
+  access: 'workflow:execute',
+  target: (input) => (input.projectId ? { projectId: input.projectId } : null),
   permission: 'executeNode',
   // the card (or a thread grant) comes from `suspendFor`, so the grant uses the node's defaults
   async suspendFor(ctx, run, input) {
@@ -552,8 +603,8 @@ const executeNodeTool: AssistantToolDefinition<ExecuteNodeInput> = {
         workflow: prepared.definition,
         startNode: prepared.node.name,
         triggerItems: items,
-        // P6 S1: no workflow row: the workspace's default project until L16 runs it in the caller's
-        projectId: await ctx.repos.projects.defaultProjectFor(run.tenant.id),
+        // no workflow row: the node runs in the caller's chosen project
+        projectId: prepared.projectId,
       },
       timeoutMs,
     );

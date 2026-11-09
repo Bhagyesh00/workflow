@@ -1,8 +1,8 @@
 /**
  * /rest/assistant (P5-67, lane L1): threads, messages, status, chat, cancel and the SSE event stream.
- * Gates, rate limits and the chat body limit are final from C0. Every route is viewer (n8n's
+ * Gates, rate limits and the chat body limit are final from C0. Every route needs `instanceAi:message` (n8n's
  * `instanceAi:message` holds for every member). The gate: signed out 401, the Assistant off for this
- * workspace 404, then the role (403, `requireRole`). Threads are the caller's own: another user's or
+ * workspace 404, then the scope (403, `requireScope`). Threads are the caller's own: another user's or
  * another tenant's thread is 404. Nothing about a message or a body is logged.
  * `requireAssistant`, `assistantRouteOptions` and `ASSISTANT_CHAT_BODY_LIMIT` are shared with the
  * confirm and draft routes.
@@ -12,18 +12,18 @@
  * stream sends each event as JSON in a `data:` line, with `id:` for stored events and `event:` for its
  * type; a comment line keeps it alive every 15 s and re-checks access as routes/push.ts does.
  */
-import type { AssistantEvent } from '@workflow/workflow';
+import type { AssistantEvent, Scope } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import type { Role } from '../db/schema';
-import { type AuthContext, clientIp, requireAuth, requireRole } from '../http/auth';
+import { type AuthContext, clientIp, requireAuth, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { paginationQuery } from '../http/pagination';
 import type { TenantSettings } from '../plans';
 import { AI_ROUTE_RATE_LIMIT } from '../services/ai-builder/types';
 import { effectiveAssistantSettings } from '../services/assistant/settings';
-import type { EffectiveAssistantSettings } from '../services/assistant/types';
+import { MISSING_SCOPE_MESSAGE } from '../services/access';
+import { type EffectiveAssistantSettings, homeScopes } from '../services/assistant/types';
 
 /** a chat body holds up to 10 files of 10 MB base64 and 16 MB in all, plus the message: 18 MB */
 export const ASSISTANT_CHAT_BODY_LIMIT = 18 * 1024 * 1024;
@@ -50,18 +50,36 @@ export function assistantRouteOptions(name: string, kind: 'read' | 'write') {
 /**
  * The gate of the Assistant's thread, chat, confirm and draft routes: 401 signed out, 404 while the
  * Assistant is off for this workspace (`TenantSettings.assistant.enabled`, else `INSTANCE_AI_ENABLED`,
- * else on; `AI_ENABLED` plays no part), then `minimum` role (403). The settings come back for the handler.
+ * else on; `AI_ENABLED` plays no part), then the scope (403, one of `scope` is enough). The settings
+ * come back for the handler.
  */
-export function requireAssistant(
+export async function requireAssistant(
   request: FastifyRequest,
   ctx: ServerContext,
-  minimum: Role,
-): { auth: AuthContext; settings: EffectiveAssistantSettings } {
+  scope: Scope | readonly Scope[],
+): Promise<{ auth: AuthContext; settings: EffectiveAssistantSettings }> {
   const signedIn = requireAuth(request);
   const settings = effectiveAssistantSettings(ctx.config, signedIn.tenant.settings as TenantSettings);
   if (!settings.enabled) throw ApiError.notFound();
-  const auth = requireRole(request, minimum);
+  const auth = await requireScope(request, scope);
   return { auth, settings };
+}
+
+/**
+ * The gate of the draft routes that change something (accept, discard): `instanceAi:message`, and a
+ * right to write workflows where the caller's work lands (`workflow:create` or `workflow:update` there or
+ * everywhere). Accept checks the draft's own project or workflow again before it saves.
+ */
+export async function requireAssistantWriter(
+  request: FastifyRequest,
+  ctx: ServerContext,
+): Promise<{ auth: AuthContext; settings: EffectiveAssistantSettings }> {
+  const gate = await requireAssistant(request, ctx, 'instanceAi:message');
+  const held = await homeScopes(ctx, gate.auth);
+  if (!held.has('workflow:create') && !held.has('workflow:update')) {
+    throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+  }
+  return gate;
 }
 
 /** the SSE keep-alive and authorization re-check interval */
@@ -119,7 +137,11 @@ export function registerAssistantRoutes(rest: FastifyInstance, ctx: ServerContex
       const session = await ctx.repos.sessions.get(auth.sessionId);
       if (session?.tenantId !== auth.tenant.id) return false;
     }
-    if (!(await ctx.repos.memberships.get(auth.tenant.id, auth.user.id))) return false;
+    const membership = await ctx.repos.memberships.get(auth.tenant.id, auth.user.id);
+    if (!membership) return false;
+    // a role narrowed since the stream opened ends it too
+    const held = await ctx.access.globalScopes(auth.tenant.id, membership.role);
+    if (!held.has('instanceAi:message')) return false;
     const tenant = await ctx.repos.tenants.get(auth.tenant.id);
     if (!tenant) return false;
     return effectiveAssistantSettings(ctx.config, (tenant.settings ?? {}) as TenantSettings).enabled;
@@ -131,13 +153,13 @@ export function registerAssistantRoutes(rest: FastifyInstance, ctx: ServerContex
   });
 
   rest.post('/assistant/threads', assistantRouteOptions('threads-create', 'write'), async (request) => {
-    const { auth } = requireAssistant(request, ctx, 'viewer');
+    const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
     const body = parse(createSchema, request.body ?? {});
     return { data: await ctx.assistant.createThread(auth, body) };
   });
 
   rest.get('/assistant/threads', assistantRouteOptions('threads-list', 'read'), async (request) => {
-    const { auth } = requireAssistant(request, ctx, 'viewer');
+    const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
     const query = parse(listSchema, request.query ?? {});
     return { data: await ctx.assistant.listThreads(auth, query) };
   });
@@ -146,7 +168,7 @@ export function registerAssistantRoutes(rest: FastifyInstance, ctx: ServerContex
     '/assistant/threads/:threadId',
     assistantRouteOptions('threads-rename', 'write'),
     async (request) => {
-      const { auth } = requireAssistant(request, ctx, 'viewer');
+      const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
       const { threadId } = parse(threadParams, request.params);
       const body = parse(renameSchema, request.body ?? {});
       return { data: await ctx.assistant.renameThread(auth, threadId, body.title) };
@@ -157,7 +179,7 @@ export function registerAssistantRoutes(rest: FastifyInstance, ctx: ServerContex
     '/assistant/threads/:threadId',
     assistantRouteOptions('threads-delete', 'write'),
     async (request) => {
-      const { auth } = requireAssistant(request, ctx, 'viewer');
+      const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
       const { threadId } = parse(threadParams, request.params);
       await ctx.assistant.deleteThread(auth, threadId);
       return { data: { ok: true as const } };
@@ -168,7 +190,7 @@ export function registerAssistantRoutes(rest: FastifyInstance, ctx: ServerContex
     '/assistant/threads/:threadId/messages',
     assistantRouteOptions('messages', 'read'),
     async (request) => {
-      const { auth } = requireAssistant(request, ctx, 'viewer');
+      const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
       const { threadId } = parse(threadParams, request.params);
       return { data: await ctx.assistant.messages(auth, threadId) };
     },
@@ -178,7 +200,7 @@ export function registerAssistantRoutes(rest: FastifyInstance, ctx: ServerContex
     '/assistant/threads/:threadId/status',
     assistantRouteOptions('status', 'read'),
     async (request) => {
-      const { auth } = requireAssistant(request, ctx, 'viewer');
+      const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
       const { threadId } = parse(threadParams, request.params);
       return { data: await ctx.assistant.status(auth, threadId) };
     },
@@ -188,7 +210,7 @@ export function registerAssistantRoutes(rest: FastifyInstance, ctx: ServerContex
     '/assistant/chat/:threadId',
     { ...assistantRouteOptions('chat', 'write'), bodyLimit: ASSISTANT_CHAT_BODY_LIMIT },
     async (request) => {
-      const { auth } = requireAssistant(request, ctx, 'viewer');
+      const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
       const { threadId } = parse(threadParams, request.params);
       const body = parse(chatSchema, request.body ?? {});
       const actor = { userId: auth.user.id, ip: clientIp(request) };
@@ -197,7 +219,7 @@ export function registerAssistantRoutes(rest: FastifyInstance, ctx: ServerContex
   );
 
   rest.post('/assistant/chat/:threadId/cancel', assistantRouteOptions('cancel', 'write'), async (request) => {
-    const { auth } = requireAssistant(request, ctx, 'viewer');
+    const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
     const { threadId } = parse(threadParams, request.params);
     await ctx.assistant.cancel(auth, threadId);
     return { data: { ok: true as const } };
@@ -205,7 +227,7 @@ export function registerAssistantRoutes(rest: FastifyInstance, ctx: ServerContex
 
   // SSE as routes/push.ts: subscribe, replay after the cursor, then live; each ping re-checks access
   rest.get('/assistant/events/:threadId', assistantRouteOptions('events', 'read'), async (request, reply) => {
-    const { auth } = requireAssistant(request, ctx, 'viewer');
+    const { auth } = await requireAssistant(request, ctx, 'instanceAi:message');
     const { threadId } = parse(threadParams, request.params);
     const after = cursorOf(request);
     // a thread that is not the caller's is 404 before the stream opens

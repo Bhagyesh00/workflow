@@ -14,22 +14,159 @@ import type {
   AssistantPermissionKey,
   AssistantPermissions,
   BinaryData,
+  Scope,
 } from '@workflow/workflow';
-import type { z } from 'zod';
+import { z } from 'zod';
 import type { ServerContext } from '../../context';
 import type { Role, TenantRow, UserRow } from '../../db/schema';
+import type { AuthContext } from '../../http/auth';
+import { ApiError } from '../../http/errors';
+import { type AccessTarget, MISSING_SCOPE_MESSAGE } from '../access';
 import type { Actor } from '../workflows';
 
 /**
  * Who a turn runs for. `actor` is `Actor` of services/workflows.ts: `ip` comes from the chat or confirm
  * request and is empty when a sweep resumes a turn (`deleteCredential` gets `run.actor.ip ?? ''`).
- * `role` is the role at the start of the turn; `toAiTools` re-reads it before each call.
+ * `role` is the workspace role at the start of the turn and `scopes` the scopes it gave then, global ones
+ * plus those of the project the caller's writes default to. Neither is trusted later: `toAiTools` and an
+ * approved call re-read the membership and the scopes (`homeScopes`, `scopesOn`) before each call.
  */
 export interface AssistantCaller {
   tenant: TenantRow;
   user: UserRow;
   role: Role;
+  /** absent in a scope built by hand (a test); nothing trusts it, the checks read the scopes themselves */
+  scopes?: ReadonlySet<Scope>;
   actor: Actor;
+}
+
+/** a fresh `AuthContext` of the caller (no scope cache: every call reads the scopes anew) */
+export function authOf(caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>): AuthContext {
+  return { user: caller.user, tenant: caller.tenant, role: caller.role };
+}
+
+/**
+ * The scopes the caller holds where its writes land: the global ones plus those of the project
+ * `AccessService.targetProject` names without an id (the personal project once L24 has cut over). This
+ * is what decides whether a tool is offered; a call with a target checks the target as well.
+ */
+export async function homeScopes(
+  ctx: ServerContext,
+  caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>,
+): Promise<ReadonlySet<Scope>> {
+  const auth = authOf(caller);
+  return ctx.access.scopesForAuth(auth, { projectId: await ctx.access.targetProject(auth) });
+}
+
+/** the scopes the caller holds on `target` (a project, workflow, credential, data table, folder or run) */
+export async function scopesOn(
+  ctx: ServerContext,
+  caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>,
+  target: AccessTarget,
+): Promise<ReadonlySet<Scope>> {
+  return ctx.access.scopesForAuth(authOf(caller), target);
+}
+
+/** 403 with n8n's text unless the caller holds `scope` on `target` (a project or resource) */
+export async function assertScope(
+  ctx: ServerContext,
+  caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>,
+  scope: Scope,
+  target: AccessTarget,
+): Promise<void> {
+  if (!(await scopesOn(ctx, caller, target)).has(scope)) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+}
+
+/**
+ * The project a write lands in: the one the call names (it must be a project of the workspace, 404
+ * otherwise), else the caller's default (`targetProject`); the caller must hold `scope` there.
+ */
+export async function writeProject(
+  ctx: ServerContext,
+  caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>,
+  scope: Scope,
+  projectId?: string | null,
+): Promise<string> {
+  const id = await ctx.access.targetProject(authOf(caller), projectId);
+  await assertScope(ctx, caller, scope, { projectId: id });
+  return id;
+}
+
+/**
+ * The scope a definition needs. Tools written before scopes (a test seam that still says `minRole`) map
+ * to the scope that role held in the legacy map; nothing else in the product sets `minRole`.
+ */
+export function toolAccess(def: Pick<AssistantToolDefinition, 'access' | 'minRole'>): Scope {
+  if (def.access) return def.access;
+  if (def.minRole === 'viewer') return 'instanceAi:message';
+  if (def.minRole === 'editor') return 'workflow:update';
+  return 'instanceAi:manage';
+}
+
+/** what the model reads when the caller has lost the access a tool needs (also while a call is checked) */
+export const ASSISTANT_TOOL_NO_ACCESS = 'You no longer have access to this tool';
+
+/**
+ * Why the caller may not use a tool now, or null. Without a target, or while the tool is only listed,
+ * the scopes where the caller's writes land decide. With the target the input names (a project, a
+ * workflow, a data table, a run...) that target decides, read now: a lost project or a narrowed role
+ * stops the next call and an approved call that was waiting. A target of another workspace is left to
+ * the handler, which answers "not found".
+ */
+export async function toolDenial(
+  ctx: ServerContext,
+  caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>,
+  def: Pick<AssistantToolDefinition, 'access' | 'minRole' | 'target'>,
+  input?: unknown,
+): Promise<string | null> {
+  const scope = toolAccess(def);
+  const target = input !== undefined && def.target ? def.target(input) : null;
+  if (!target) return (await homeScopes(ctx, caller)).has(scope) ? null : ASSISTANT_TOOL_NO_ACCESS;
+  try {
+    return (await scopesOn(ctx, caller, target)).has(scope) ? null : MISSING_SCOPE_MESSAGE;
+  } catch (error) {
+    if (error instanceof ApiError && error.statusCode === 404) return null;
+    throw error;
+  }
+}
+
+/** the `projectId` every list and create tool takes: one project of the workspace, checked against the caller's scopes */
+export const projectIdInput = z
+  .uuid()
+  .optional()
+  .describe('Only this project; it must be one you can reach (see list_projects)');
+
+/** the `scope` of the list tools: which of the caller's work a list shows */
+export const listScopeInput = z
+  .enum(['all', 'personal', 'shared'])
+  .default('all')
+  .describe(
+    '"all" shows everything you can read, "personal" only your own project, "shared" only what others shared with your project',
+  );
+
+export interface ListNarrowing {
+  projectId?: string;
+  onlySharedWithMe?: boolean;
+  /** true: the caller has no personal project, so `scope` matches nothing */
+  none?: boolean;
+}
+
+/**
+ * Turns `projectId` and `scope` of a list tool into the service's narrowing. It only narrows: the list
+ * service still applies the caller's access filter, and a `projectId` the caller cannot list is 403 there.
+ */
+export async function listNarrowing(
+  ctx: ServerContext,
+  caller: Pick<AssistantCaller, 'tenant' | 'user'>,
+  input: { projectId?: string; scope?: 'all' | 'personal' | 'shared' },
+): Promise<ListNarrowing> {
+  if (input.projectId) return { projectId: input.projectId, onlySharedWithMe: input.scope === 'shared' };
+  if (input.scope === 'shared') return { onlySharedWithMe: true };
+  if (input.scope === 'personal') {
+    const personal = await ctx.repos.projects.getPersonal(caller.tenant.id, caller.user.id);
+    return personal ? { projectId: personal.id } : { none: true };
+  }
+  return {};
 }
 
 /** an attachment of the turn: the reference the DTO shows plus the stored binary (never sent to a client) */
@@ -107,7 +244,16 @@ export interface AssistantToolDefinition<I = any> {
   name: string;
   description: string;
   input: z.ZodType<I>;
-  minRole: Role;
+  /**
+   * The scope the caller needs (P6-37): held where the writes land to be offered, then on `target`. Every
+   * built-in tool sets it; only a test seam that predates scopes leaves it out and says `minRole`, which
+   * `toolAccess` maps to the scope that role held. An MCP tool sets it too.
+   */
+  access?: Scope;
+  /** @deprecated only a test seam that predates scopes sets it; `toolAccess` maps it */
+  minRole?: Role;
+  /** what the call acts on, from its input: a project (`projectId` given), a workflow, a data table...; absent or null: the home scopes decide */
+  target?(input: I): AccessTarget | null;
   permission?: AssistantPermissionKey;
   available?(run: AssistantRunScope): boolean;
   artifact?(input: I, result: unknown): AssistantArtifact | null;

@@ -75,7 +75,7 @@ const echoTool: AssistantToolDefinition = {
   name: 'harness_echo',
   description: 'Echo the input (test seam)',
   input: z.object({ text: z.string() }),
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   async handler(_ctx, _run, input) {
     return input;
   },

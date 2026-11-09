@@ -173,7 +173,7 @@ const unwrap = (text: string) => {
 
 describe('Assistant web research (P5-73)', () => {
   it('has both tools at editor and offers neither to a viewer', async () => {
-    await h.expectToolRoles({ web_search: 'editor', fetch_url: 'editor' });
+    await h.expectToolRoles({ web_search: 'workflow:create', fetch_url: 'workflow:create' });
   });
 
   describe('web_search', () => {

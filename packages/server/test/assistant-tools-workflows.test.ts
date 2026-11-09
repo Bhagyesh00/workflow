@@ -8,7 +8,7 @@
  */
 import type { AssistantConfirmation } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Role } from '../src/db/schema';
+import type { Scope } from '@workflow/workflow';
 import {
   type AssistantHarness,
   CANARY,
@@ -20,20 +20,21 @@ import { chain, createWorkflow, node, setNode, waitFor } from './helpers';
 
 const SECRET = 'sk-proj-WorkflowToolSecret0123456789abcdef';
 
-/** the route roles (routes/workflows.ts): GET viewer, every write editor */
-const ROLES: Record<string, Role> = {
-  list_workflows: 'viewer',
-  get_workflow: 'viewer',
-  list_workflow_versions: 'viewer',
-  validate_workflow: 'viewer',
-  archive_workflow: 'editor',
-  unarchive_workflow: 'editor',
-  publish_workflow: 'editor',
-  unpublish_workflow: 'editor',
-  restore_workflow_version: 'editor',
-  update_workflow_version: 'editor',
+/** the route scopes (routes/workflows.ts): GET read or list, every write its own scope */
+const ROLES: Record<string, Scope> = {
+  list_workflows: 'workflow:list',
+  get_workflow: 'workflow:read',
+  list_workflow_versions: 'workflow:read',
+  validate_workflow: 'workflow:read',
+  archive_workflow: 'workflow:delete',
+  unarchive_workflow: 'workflow:delete',
+  publish_workflow: 'workflow:publish',
+  unpublish_workflow: 'workflow:unpublish',
+  restore_workflow_version: 'workflow:update',
+  update_workflow_version: 'workflow:update',
 };
-const WRITES = Object.keys(ROLES).filter((name) => ROLES[name] === 'editor');
+const READS = new Set<string>(['workflow:list', 'workflow:read']);
+const WRITES = Object.keys(ROLES).filter((name) => !READS.has(ROLES[name] as string));
 
 type Body = { tools?: Array<{ function?: { name?: string } }> };
 

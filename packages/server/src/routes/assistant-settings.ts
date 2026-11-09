@@ -14,7 +14,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import { clientIp, requireRole } from '../http/auth';
+import { clientIp, requireScope } from '../http/auth';
 import { parse } from '../http/errors';
 import { assistantRouteOptions } from './assistant';
 
@@ -59,13 +59,13 @@ const patchSchema = z
 
 export function registerAssistantSettingsRoutes(rest: FastifyInstance, ctx: ServerContext): void {
   rest.get('/assistant/settings', assistantRouteOptions('settings-read', 'read'), async (request) => {
-    const auth = requireRole(request, 'admin');
+    const auth = await requireScope(request, 'instanceAi:manage');
     const tenant = (await ctx.repos.tenants.get(auth.tenant.id)) ?? auth.tenant;
     return { data: await ctx.assistantSettings.dto(tenant) };
   });
 
   rest.patch('/assistant/settings', assistantRouteOptions('settings-patch', 'write'), async (request) => {
-    const auth = requireRole(request, 'admin');
+    const auth = await requireScope(request, 'instanceAi:manage');
     const body = parse(patchSchema, request.body ?? {});
     const actor = { userId: auth.user.id, ip: clientIp(request) };
     return { data: await ctx.assistantSettings.patch(auth, body, actor) };

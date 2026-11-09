@@ -82,21 +82,21 @@ async function eventsOf(user: HarnessUser, threadId: string): Promise<AssistantE
 describe('Assistant data table tools (P5-69)', () => {
   it('has the eleven tools at the roles of the data table routes', async () => {
     await h.expectToolRoles({
-      list_data_tables: 'viewer',
-      get_data_table_schema: 'viewer',
-      query_data_table_rows: 'viewer',
-      create_data_table: 'editor',
-      delete_data_table: 'editor',
-      add_data_table_column: 'editor',
-      delete_data_table_column: 'editor',
-      rename_data_table_column: 'editor',
-      insert_data_table_rows: 'editor',
-      update_data_table_rows: 'editor',
-      delete_data_table_rows: 'editor',
+      list_data_tables: 'dataTable:listProject',
+      get_data_table_schema: 'dataTable:read',
+      query_data_table_rows: 'dataTable:readRow',
+      create_data_table: 'dataTable:create',
+      delete_data_table: 'dataTable:delete',
+      add_data_table_column: 'dataTable:writeColumn',
+      delete_data_table_column: 'dataTable:writeColumn',
+      rename_data_table_column: 'dataTable:writeColumn',
+      insert_data_table_rows: 'dataTable:writeRow',
+      update_data_table_rows: 'dataTable:writeRow',
+      delete_data_table_rows: 'dataTable:writeRow',
     });
     expect(dataTablesTools).toHaveLength(11);
     for (const tool of dataTablesTools) {
-      const read = tool.minRole === 'viewer';
+      const read = ['dataTable:listProject', 'dataTable:read', 'dataTable:readRow'].includes(tool.access as string);
       expect(tool.permission === undefined, `${tool.name} permission`).toBe(read);
       expect(tool.untrusted !== undefined, `${tool.name} untrusted`).toBe(read);
     }

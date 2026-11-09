@@ -9,7 +9,7 @@
  */
 import type { AssistantConfirmation, WorkflowDefinition } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Role } from '../src/db/schema';
+import type { Scope } from '@workflow/workflow';
 import { FORM_FIELDS_WRAPPED, triggerPinData } from '../src/services/assistant/run-helper';
 import { runNodeGrantKey } from '../src/services/assistant/tools/executions';
 import {
@@ -23,16 +23,16 @@ import { chain, createWorkflow, node, waitFor, waitForExecution } from './helper
 
 const SECRET = 'sk-proj-ExecutionToolSecret0123456789abcdef';
 
-/** the route roles: GET /executions viewer; run (POST /workflows/:id/run) and stop editor */
-const ROLES: Record<string, Role> = {
-  list_executions: 'viewer',
-  get_execution: 'viewer',
-  debug_execution: 'viewer',
-  get_node_output: 'viewer',
-  get_resolved_node_parameters: 'viewer',
-  run_workflow: 'editor',
-  run_node: 'editor',
-  stop_execution: 'editor',
+/** the route scopes: GET /executions list and read; run (POST /workflows/:id/run) and stop execute */
+const ROLES: Record<string, Scope> = {
+  list_executions: 'execution:list',
+  get_execution: 'execution:read',
+  debug_execution: 'execution:read',
+  get_node_output: 'execution:read',
+  get_resolved_node_parameters: 'execution:read',
+  run_workflow: 'workflow:execute',
+  run_node: 'workflow:execute',
+  stop_execution: 'workflow:execute',
 };
 
 const approve = { kind: 'approval', approved: true } as const;

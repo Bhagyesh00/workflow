@@ -1,10 +1,11 @@
 /**
  * Assistant tools: workflows (P5-69, lane L4; n8n IA/docs/tools.md, the single-purpose workflow tools).
- * Each tool calls the service its REST route calls (routes/workflows.ts), at that route's role, with
- * `run.tenant.id` and `run.actor`. Reads (`list_workflows`, `get_workflow`, `list_workflow_versions`,
- * `validate_workflow`) are viewer tools without a card, and what they return is untrusted data: workflow
+ * Each tool calls the service its REST route calls (routes/workflows.ts), at that route's scope (`access`), with
+ * `run.tenant.id` and `run.actor`; the adapter checks that scope on the workflow the input names (`target`)
+ * before the card and again before an approved call runs. Reads (`list_workflows`, `get_workflow`,
+ * `list_workflow_versions`, `validate_workflow`) are tools without a card, and what they return is untrusted data: workflow
  * definitions go through `sanitizeForModel` (no credentials, values redacted, structure only when
- * `sendValues` is false). Writes are editor tools behind a card with a thread grant
+ * `sendValues` is false). Writes are tools behind a card with a thread grant
  * `<tool>:<workflowId>`; the card's facts are read by the server from the tenant's rows. Archive never
  * deletes; restore never publishes; a publish blocked by an open review comes back as text.
  */
@@ -15,7 +16,16 @@ import type { WorkflowRow } from '../../../db/schema';
 import { ApiError } from '../../../http/errors';
 import { sanitizeForModel } from '../../ai-builder/context';
 import { toDefinition } from '../../workflow-model';
-import type { ApprovalCopy, AssistantCaller, AssistantRunScope, AssistantToolDefinition } from '../types';
+import {
+  type ApprovalCopy,
+  type AssistantCaller,
+  type AssistantRunScope,
+  type AssistantToolDefinition,
+  authOf,
+  listNarrowing,
+  listScopeInput,
+  projectIdInput,
+} from '../types';
 
 const workflowId = z.uuid().describe('The id of the workflow');
 const versionId = z.uuid().describe('The id of a saved version of the workflow');
@@ -24,6 +34,9 @@ const approvalSummary = z
   .max(500)
   .optional()
   .describe('One sentence for the person: what this change does and why');
+
+/** the workflow a call names: its project decides (`target` of the tools below, checked by the adapter) */
+const onWorkflow = (input: { workflowId: string }) => ({ workflowId: input.workflowId });
 
 /** the caller's workflow, or "Workflow not found" (another tenant's id never matches) */
 async function workflowRow(ctx: ServerContext, caller: AssistantCaller, id: string): Promise<WorkflowRow> {
@@ -90,6 +103,8 @@ const listWorkflows: AssistantToolDefinition<{
   query?: string;
   status: 'active' | 'archived' | 'all';
   published?: boolean;
+  projectId?: string;
+  scope: 'all' | 'personal' | 'shared';
   limit: number;
   cursor?: string;
 }> = {
@@ -100,15 +115,23 @@ const listWorkflows: AssistantToolDefinition<{
     query: z.string().max(128).optional().describe('Part of the workflow name'),
     status: z.enum(['active', 'archived', 'all']).default('active'),
     published: z.boolean().optional(),
+    projectId: projectIdInput,
+    scope: listScopeInput,
     limit: z.number().int().min(1).max(100).default(50),
     cursor: z.string().max(512).optional().describe('The nextCursor of an earlier page'),
   }),
-  minRole: 'viewer',
+  access: 'workflow:list',
+  target: (input) => (input.projectId ? { projectId: input.projectId } : null),
   untrusted: 'workflow-list',
   async handler(ctx, run, input) {
-    const page = await ctx.workflows.list(run.tenant.id, {
+    const narrow = await listNarrowing(ctx, run, input);
+    if (narrow.none) return { workflows: [], nextCursor: null };
+    // only what the caller may list: the service applies the access filter of `workflow:list`
+    const page = await ctx.workflows.listFor(authOf(run), {
       search: input.query,
       active: input.published,
+      projectId: narrow.projectId,
+      onlySharedWithMe: narrow.onlySharedWithMe,
       archived: input.status === 'active' ? 'false' : input.status === 'archived' ? 'true' : 'all',
       limit: input.limit,
       cursor: input.cursor,
@@ -120,6 +143,8 @@ const listWorkflows: AssistantToolDefinition<{
         published: w.active,
         archived: w.isArchived,
         folderId: w.folderId,
+        projectId: w.projectId,
+        project: w.homeProject?.name ?? null,
         tags: w.tags.map((t) => t.name),
         updatedAt: w.updatedAt,
       })),
@@ -134,7 +159,8 @@ const getWorkflow: AssistantToolDefinition<{ workflowId: string; versionId?: str
   description:
     'Read a workflow (or one saved version of it): its nodes with their parameters, connections and settings. Credentials are never shown, only which nodes use one.',
   input: z.object({ workflowId, versionId: versionId.optional() }),
-  minRole: 'viewer',
+  access: 'workflow:read',
+  target: onWorkflow,
   untrusted: 'workflow',
   artifact: (_input, result) => workflowArtifact(result),
   async handler(ctx, run, input) {
@@ -176,7 +202,8 @@ const listWorkflowVersions: AssistantToolDefinition<{
     limit: z.number().int().min(1).max(100).default(20),
     cursor: z.string().max(512).optional(),
   }),
-  minRole: 'viewer',
+  access: 'workflow:read',
+  target: onWorkflow,
   untrusted: 'workflow-versions',
   async handler(ctx, run, input) {
     const page = await ctx.workflows.listVersions(run.tenant.id, input.workflowId, input.limit, input.cursor);
@@ -196,7 +223,8 @@ const validateWorkflow: AssistantToolDefinition<{ workflowId: string }> = {
   description:
     'Check a saved workflow for problems without running it: what would stop it from being published, and the canvas warnings for each node.',
   input: z.object({ workflowId }),
-  minRole: 'viewer',
+  access: 'workflow:read',
+  target: onWorkflow,
   untrusted: 'validation',
   async handler(ctx, run, input) {
     const row = await workflowRow(ctx, run, input.workflowId);
@@ -232,7 +260,8 @@ const archiveWorkflow: AssistantToolDefinition<WorkflowWrite> = {
   description:
     "Archive a workflow (a soft delete: it can be unarchived). A published workflow is unpublished first. Needs the person's approval.",
   input: z.object({ workflowId, approvalSummary }),
-  minRole: 'editor',
+  access: 'workflow:delete',
+  target: onWorkflow,
   permission: 'deleteWorkflow',
   grantKey: (input) => `archive_workflow:${input.workflowId}`,
   approval: (ctx, caller, input) =>
@@ -248,7 +277,8 @@ const unarchiveWorkflow: AssistantToolDefinition<WorkflowWrite> = {
   description:
     "Unarchive a workflow. It stays unpublished; publish it on its own when wanted. Needs the person's approval.",
   input: z.object({ workflowId, approvalSummary }),
-  minRole: 'editor',
+  access: 'workflow:delete',
+  target: onWorkflow,
   permission: 'deleteWorkflow',
   grantKey: (input) => `unarchive_workflow:${input.workflowId}`,
   approval: (ctx, caller, input) =>
@@ -280,7 +310,8 @@ const publishWorkflow: AssistantToolDefinition<WorkflowWrite & { versionId?: str
     versionId: versionId.optional().describe('A saved version to publish; omit for the latest draft'),
     approvalSummary,
   }),
-  minRole: 'editor',
+  access: 'workflow:publish',
+  target: onWorkflow,
   permission: 'publishWorkflow',
   grantKey: (input) => `publish_workflow:${input.workflowId}`,
   approval: (ctx, caller, input) =>
@@ -304,7 +335,8 @@ const unpublishWorkflow: AssistantToolDefinition<WorkflowWrite> = {
   description:
     "Unpublish a workflow: its triggers stop running in production. The draft is kept. Needs the person's approval.",
   input: z.object({ workflowId, approvalSummary }),
-  minRole: 'editor',
+  access: 'workflow:unpublish',
+  target: onWorkflow,
   permission: 'publishWorkflow',
   grantKey: (input) => `unpublish_workflow:${input.workflowId}`,
   approval: (ctx, caller, input) =>
@@ -319,7 +351,8 @@ const restoreWorkflowVersion: AssistantToolDefinition<WorkflowWrite & { versionI
   description:
     "Make a saved version the workflow's draft again (the current draft is replaced; it stays in the history). It does not publish. Needs the person's approval.",
   input: z.object({ workflowId, versionId, approvalSummary }),
-  minRole: 'editor',
+  access: 'workflow:update',
+  target: onWorkflow,
   permission: 'restoreWorkflowVersion',
   grantKey: (input) => `restore_workflow_version:${input.workflowId}`,
   async approval(ctx, caller, input) {
@@ -361,7 +394,8 @@ const updateWorkflowVersion: AssistantToolDefinition<
     .refine((v) => v.name !== undefined || v.description !== undefined, {
       message: 'Give name or description',
     }),
-  minRole: 'editor',
+  access: 'workflow:update',
+  target: onWorkflow,
   permission: 'updateWorkflow',
   grantKey: (input) => `update_workflow_version:${input.workflowId}`,
   async approval(ctx, caller, input) {

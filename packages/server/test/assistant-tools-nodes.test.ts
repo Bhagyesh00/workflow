@@ -300,14 +300,15 @@ describe('Assistant node and model tools (P5-69)', () => {
 
   it('offers every L6 tool from its minimum role', async () => {
     await h.expectToolRoles({
-      search_nodes: 'viewer',
-      get_node_types: 'viewer',
-      get_node_parameter_options: 'editor',
-      execute_node: 'editor',
-      search_models: 'viewer',
-      ask_user: 'viewer',
-      update_tasks: 'viewer',
-      setup_credentials: 'editor',
+      search_nodes: 'instanceAi:message',
+      get_node_types: 'instanceAi:message',
+      get_node_parameter_options: 'workflow:update',
+      execute_node: 'workflow:execute',
+      search_models: 'instanceAi:message',
+      list_projects: 'project:list',
+      ask_user: 'instanceAi:message',
+      update_tasks: 'instanceAi:message',
+      setup_credentials: 'credential:create',
     });
   });
 

@@ -19,6 +19,7 @@ import type { AuthContext } from '../../http/auth';
 import { ApiError } from '../../http/errors';
 import type { TenantSettings } from '../../plans';
 import { CREDENTIAL_MISMATCH, credentialFitsModel, isBuilderModelNode } from '../ai-builder/model';
+import { assertCredentialsUsable } from '../credential-usable';
 import type { Actor } from '../workflows';
 import type { EffectiveAssistantSettings } from './types';
 
@@ -120,6 +121,33 @@ export class AssistantSettingsService {
     };
   }
 
+  /**
+   * The credential an admin pins for the whole workspace (the model, the search key) must be one the
+   * admin can use (`assertCredentialsUsable` in the admin's own project). Members' turns then use it
+   * through the server's allow list, in whatever project they work.
+   */
+  private async assertAdminUsable(
+    auth: AuthContext,
+    credential: { id: string; name: string; type: string },
+  ): Promise<void> {
+    const ctx = this.deps.context();
+    await assertCredentialsUsable(ctx, auth.tenant.id, await ctx.access.targetProject(auth), {
+      name: 'Assistant settings',
+      nodes: [
+        {
+          id: 'assistant-settings',
+          name: 'Assistant settings',
+          type: 'assistant.settings',
+          typeVersion: 1,
+          position: [0, 0],
+          parameters: {},
+          credentials: { [credential.type]: { id: credential.id, name: credential.name } },
+        },
+      ],
+      connections: {},
+    });
+  }
+
   /** checks and saves a change (audit `tenant.settings_updated`), then the new view */
   async patch(
     auth: AuthContext,
@@ -157,6 +185,8 @@ export class AssistantSettingsService {
         if (next.nodeType && !credentialFitsModel(ctx, next.nodeType, credential.type)) {
           throw ApiError.badRequest(CREDENTIAL_MISMATCH);
         }
+        // the admin who saves it must be able to use it; every project's turn then uses it (workspace-wide)
+        if (patch.credentialId) await this.assertAdminUsable(auth, credential);
       }
       changed.push('model');
     }
@@ -174,6 +204,7 @@ export class AssistantSettingsService {
         if (!SEARCH_CREDENTIAL_TYPES.includes(credential.type)) {
           throw ApiError.badRequest('The search credential must be a Brave Search or SearXNG credential');
         }
+        await this.assertAdminUsable(auth, credential);
         next.searchCredentialId = patch.searchCredentialId;
         next.searchDisabled = false;
       }

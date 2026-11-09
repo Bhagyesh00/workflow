@@ -1,6 +1,7 @@
 /**
- * Assistant tools: tags, folders and test executions (P5-69, lane L5). Reads are viewer and their text
- * is untrusted (tag and folder names are written by people). Writes are editor, as the REST routes
+ * Assistant tools: tags, folders and test executions (P5-69, lane L5). Reads need the list scopes and their text
+ * is untrusted (tag and folder names are written by people). Writes need the scopes of the REST routes,
+ * checked on the workflow or folder they name (`target`), which are
  * (/rest/tags is read here, /rest/folders, /rest/workflows/move, DELETE /rest/executions/:id), name a
  * permission key and show a card whose facts are read from the workspace. A workflow, folder or tag
  * id of another workspace is a 404 before any card. `delete_folder` has a null `grantKey`: a card every
@@ -9,14 +10,28 @@
 
 import { z } from 'zod';
 import type { ServerContext } from '../../../context';
+import { ApiError } from '../../../http/errors';
 import { deleteExecution, executionListQuery, listExecutions } from '../../../routes/executions';
 import { createTag, tagDTO } from '../../../routes/resources';
+import { MISSING_SCOPE_MESSAGE } from '../../access';
 import { folderCreateSchema, folderDeleteSchema, folderListQuerySchema } from '../../folders';
 import { assertNotArchived } from '../../workflow-rules';
-import type { AssistantCaller, AssistantRunScope, AssistantToolDefinition } from '../types';
+import {
+  type AssistantCaller,
+  type AssistantRunScope,
+  type AssistantToolDefinition,
+  assertScope,
+  authOf,
+  listNarrowing,
+  listScopeInput,
+  projectIdInput,
+} from '../types';
 
 const actorOf = (run: AssistantRunScope) => ({ userId: run.actor.userId ?? run.user.id, ip: run.actor.ip });
 const fact = (label: string, value: unknown) => ({ label, value: String(value) });
+
+/** the workflow a call names: its project's role (or a global scope) decides, read now */
+const onWorkflow = (input: { workflowId: string }) => ({ workflowId: input.workflowId });
 
 const folderRef = z.union([z.uuid(), z.literal('root')]);
 
@@ -63,7 +78,7 @@ const listTags: AssistantToolDefinition<z.output<typeof noInput>> = {
   name: 'list_tags',
   description: 'List the workflow tags of the workspace.',
   input: noInput,
-  minRole: 'viewer',
+  access: 'tag:list',
   untrusted: 'tags',
   async handler(ctx, run) {
     return { data: (await ctx.repos.tags.list(run.tenant.id)).map(tagDTO) };
@@ -83,7 +98,8 @@ const tagWorkflow: AssistantToolDefinition<z.output<typeof tagWorkflowInput>> = 
   name: 'tag_workflow',
   description: 'Add tags to a workflow (existing tags stay). Tags that do not exist yet are created.',
   input: tagWorkflowInput,
-  minRole: 'editor',
+  access: 'workflow:update',
+  target: onWorkflow,
   permission: 'tagWorkflow',
   grantKey: () => 'tagWorkflow',
   async approval(ctx, caller, input) {
@@ -110,9 +126,13 @@ const tagWorkflow: AssistantToolDefinition<z.output<typeof tagWorkflowInput>> = 
     assertNotArchived(row, 'update');
     const keep = ((await ctx.repos.workflows.tagsFor(tenantId, [row.id])).get(row.id) ?? []).map((t) => t.id);
     const ids = new Set(keep);
+    const mayCreateTags = (await ctx.access.scopesForAuth(authOf(run))).has('tag:create');
     for (const tag of new Set(input.tags)) {
+      const existing = await ctx.repos.tags.getByName(tenantId, tag);
+      // a tag that does not exist yet is made: that needs `tag:create`, as POST /tags
+      if (!existing && !mayCreateTags) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
       const found =
-        (await ctx.repos.tags.getByName(tenantId, tag)) ??
+        existing ??
         (await createTag(ctx, tenantId, tag).catch(async (error) => {
           // a parallel create of the same name: use that tag
           const raced = await ctx.repos.tags.getByName(tenantId, tag);
@@ -145,7 +165,8 @@ const cleanupTestExecutions: AssistantToolDefinition<z.output<typeof cleanupInpu
   description:
     'Delete the finished manual (test) executions of one workflow. Running or waiting ones are left alone. Scheduled, webhook and other production executions are never touched.',
   input: cleanupInput,
-  minRole: 'editor',
+  access: 'execution:delete',
+  target: onWorkflow,
   permission: 'cleanupTestExecutions',
   grantKey: (input) => `cleanupTestExecutions:${input.workflowId}`,
   async approval(ctx, caller, input) {
@@ -180,6 +201,8 @@ const cleanupTestExecutions: AssistantToolDefinition<z.output<typeof cleanupInpu
 const listFoldersInput = z.object({
   parentFolderId: folderRef.optional().describe('A folder id, or "root" for the top level'),
   search: z.string().max(128).optional().describe('Part of the folder name'),
+  projectId: projectIdInput,
+  scope: listScopeInput,
   limit: z.number().int().min(1).max(100).default(50),
   cursor: z.string().max(512).optional(),
 });
@@ -188,10 +211,19 @@ const listFolders: AssistantToolDefinition<z.output<typeof listFoldersInput>> = 
   name: 'list_folders',
   description: 'List the folders of the workspace, optionally inside one parent folder or by name.',
   input: listFoldersInput,
-  minRole: 'viewer',
+  access: 'folder:list',
+  target: (input) => (input.projectId ? { projectId: input.projectId } : null),
   untrusted: 'folders',
   async handler(ctx, run, input) {
-    return ctx.folders.list(run.tenant.id, folderListQuerySchema.parse(input));
+    const { projectId: _project, scope: _scope, ...query } = input;
+    const narrow = await listNarrowing(ctx, run, input);
+    if (narrow.none) return { data: [], nextCursor: null };
+    // only the folders of projects the caller may list; `projectId` and `scope` only narrow that
+    return ctx.folders.listFor(authOf(run), {
+      ...folderListQuerySchema.parse(query),
+      projectId: narrow.projectId,
+      onlySharedWithMe: narrow.onlySharedWithMe,
+    });
   },
 };
 
@@ -202,13 +234,20 @@ const createFolderInput = z.object({
     .nullable()
     .optional()
     .describe('The parent folder; null or left out for the top level'),
+  projectId: projectIdInput.describe('The project for the folder: the parent folder project, else yours'),
 });
 
 const createFolder: AssistantToolDefinition<z.output<typeof createFolderInput>> = {
   name: 'create_folder',
   description: 'Create a folder, at the top level or inside a parent folder.',
   input: createFolderInput,
-  minRole: 'editor',
+  access: 'folder:create',
+  target: (input) =>
+    input.parentFolderId
+      ? { folderId: input.parentFolderId }
+      : input.projectId
+        ? { projectId: input.projectId }
+        : null,
   permission: 'createFolder',
   grantKey: () => 'createFolder',
   async approval(ctx, caller, input) {
@@ -223,7 +262,13 @@ const createFolder: AssistantToolDefinition<z.output<typeof createFolderInput>> 
   },
   async handler(ctx, run, input) {
     const body = folderCreateSchema.parse({ name: input.name, parentFolderId: input.parentFolderId });
-    return ctx.folders.create(run.tenant.id, body, actorOf(run));
+    // the parent's project, else the named one, else the caller's default (the scope was checked on it)
+    const parent = input.parentFolderId
+      ? await ctx.repos.folders.get(run.tenant.id, input.parentFolderId)
+      : undefined;
+    const projectId = parent?.projectId ?? (await ctx.access.targetProject(authOf(run), input.projectId));
+    await assertScope(ctx, run, 'folder:create', { projectId });
+    return ctx.folders.create(run.tenant.id, { ...body, projectId }, actorOf(run));
   },
 };
 
@@ -241,7 +286,8 @@ const deleteFolder: AssistantToolDefinition<z.output<typeof deleteFolderInput>> 
   description:
     'Delete a folder. Name where its workflows go with transferToFolderId; left out, every workflow inside is archived. This cannot be undone, so a person approves it every time.',
   input: deleteFolderInput,
-  minRole: 'editor',
+  access: 'folder:delete',
+  target: (input) => ({ folderId: input.folderId }),
   permission: 'deleteFolder',
   grantKey: () => null,
   async approval(ctx, caller, input) {
@@ -272,6 +318,10 @@ const deleteFolder: AssistantToolDefinition<z.output<typeof deleteFolderInput>> 
   },
   async handler(ctx, run, input) {
     const body = folderDeleteSchema.parse({ transferToFolderId: input.transferToFolderId });
+    // where the contents go must be a folder the caller can see
+    if (input.transferToFolderId && input.transferToFolderId !== 'root') {
+      await assertScope(ctx, run, 'folder:read', { folderId: input.transferToFolderId });
+    }
     await ctx.folders.delete(run.tenant.id, input.folderId, body, actorOf(run));
     return { deleted: true, folderId: input.folderId };
   },
@@ -286,7 +336,8 @@ const moveWorkflowToFolder: AssistantToolDefinition<z.output<typeof moveInput>> 
   name: 'move_workflow_to_folder',
   description: 'Move a workflow into a folder (null for the top level).',
   input: moveInput,
-  minRole: 'editor',
+  access: 'workflow:update',
+  target: onWorkflow,
   permission: 'moveWorkflowToFolder',
   grantKey: () => 'moveWorkflowToFolder',
   async approval(ctx, caller, input) {
@@ -303,6 +354,8 @@ const moveWorkflowToFolder: AssistantToolDefinition<z.output<typeof moveInput>> 
   async handler(ctx, run, input) {
     const tenantId = run.tenant.id;
     const row = await ctx.workflows.get(tenantId, input.workflowId);
+    // the folder it goes into must be one the caller can see (and be of the workflow's project: the service checks)
+    if (input.folderId) await assertScope(ctx, run, 'folder:read', { folderId: input.folderId });
     return ctx.workflowArchive.move(tenantId, [row.id], input.folderId, actorOf(run));
   },
 };

@@ -17,7 +17,7 @@ import {
   redactSecrets,
 } from '@workflow/workflow';
 import { z } from 'zod';
-import type { AssistantToolDefinition } from '../types';
+import { type AssistantToolDefinition, assertScope } from '../types';
 
 const MAX_QUESTIONS = 10;
 const MAX_OPTIONS = 20;
@@ -139,7 +139,7 @@ const askUser: AssistantToolDefinition<AskUserInput> = {
   description:
     'Ask the person one or more questions when only they can decide (a choice between options, a name, a missing detail). The turn waits for their answers. A skipped or dismissed question is not permission for anything.',
   input: askUserInput,
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   async suspendFor(_ctx, _run, input) {
     const questions = questionsWithIds(input.questions);
     return {
@@ -194,7 +194,7 @@ const updateTasks: AssistantToolDefinition<UpdateTasksInput> = {
   description:
     'Show the person a checklist of the steps of the current work and their status. Send the whole list each time; it replaces the last one.',
   input: updateTasksInput,
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   async handler(ctx, run, input) {
     const tasks: AssistantTask[] = input.tasks.map((task) => ({
       id: task.id,
@@ -223,7 +223,7 @@ const setupCredentials: AssistantToolDefinition<SetupCredentialsInput> = {
   description:
     'Ask the person to pick or create a credential of one type in the editor. You never see its secret values; the result is its id, name and type, or that none was picked.',
   input: setupCredentialsInput,
-  minRole: 'editor',
+  access: 'credential:create',
   permission: 'createCredential',
   // the credential name is workspace text, written by any member
   untrusted: 'credential',
@@ -256,6 +256,8 @@ const setupCredentials: AssistantToolDefinition<SetupCredentialsInput> = {
         `The picked credential is not a "${input.credentialType}" credential of this workspace`,
       );
     }
+    // the id comes from the person's answer: it must be a credential they may read, or it is not theirs to name
+    await assertScope(ctx, run, 'credential:read', { credentialId: row.id });
     return { completed: true, credential: { id: row.id, name: redactSecrets(row.name), type: row.type } };
   },
   async handler(_ctx, _run, input) {

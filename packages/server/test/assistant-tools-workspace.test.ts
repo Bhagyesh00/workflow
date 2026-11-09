@@ -76,17 +76,17 @@ const getWorkflow = (id: string) =>
 describe('Assistant workspace and credential tools (P5-69)', () => {
   it('has the roles of the REST routes, a permission on every write and untrusted on the reads', async () => {
     await h.expectToolRoles({
-      list_tags: 'viewer',
-      tag_workflow: 'editor',
-      cleanup_test_executions: 'editor',
-      list_folders: 'viewer',
-      create_folder: 'editor',
-      delete_folder: 'editor',
-      move_workflow_to_folder: 'editor',
-      list_credentials: 'viewer',
-      search_credential_types: 'viewer',
-      test_credential: 'editor',
-      delete_credential: 'editor',
+      list_tags: 'tag:list',
+      tag_workflow: 'workflow:update',
+      cleanup_test_executions: 'execution:delete',
+      list_folders: 'folder:list',
+      create_folder: 'folder:create',
+      delete_folder: 'folder:delete',
+      move_workflow_to_folder: 'workflow:update',
+      list_credentials: 'credential:list',
+      search_credential_types: 'instanceAi:message',
+      test_credential: 'credential:read',
+      delete_credential: 'credential:delete',
     });
     const all = [...workspaceTools, ...credentialsTools];
     expect(all).toHaveLength(11);
