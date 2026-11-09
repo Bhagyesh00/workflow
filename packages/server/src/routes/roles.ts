@@ -2,8 +2,9 @@
  * /rest/roles (P6-32, L11): n8n's eight role routes. Gates as n8n's role controller: the lists and one
  * role need a signed-in member only; `/members` needs `role:read`; the writes and the assignment lists
  * need `role:manage` or `role:manageProject` (any one: the service checks the one the role's type needs).
- * C0 registers each with its final path and gate; the handlers reach `ctx.roles`, a stub that throws
- * until L11.
+ * C0 registered each with its final path and gate; the handlers reach `ctx.roles` (RoleService,
+ * services/roles.ts, filled by L11), which checks `role:manage` for global roles and either scope for
+ * project roles.
  */
 import { SCOPES, type Scope } from '@workflow/workflow';
 import type { FastifyInstance } from 'fastify';
