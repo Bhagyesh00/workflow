@@ -157,12 +157,20 @@ describe('the check', () => {
     expect(viewer.statusCode).toBe(403);
   });
 
-  it("names neither: the caller's personal project (P6-39), with workflow:create there", async () => {
-    const { member, owner } = await setup();
-    const own = await member.client.post('/rest/node-types/options', body('readTarget'));
-    expect(own.statusCode).toBe(200);
-    const allowed = await owner.client.post('/rest/node-types/options', body('readTarget'));
-    expect(allowed.statusCode).toBe(200);
+  it('names neither: refused with 400, on the route and on the service (credentials-4)', async () => {
+    const { member, owner, tenantId } = await setup();
+    const NEITHER = "Couldn't load the options: the request names no workflowId and no projectId";
+    const res = await member.client.post('/rest/node-types/options', body('readTarget'));
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toBe(NEITHER);
+    // the owner too, called as the Assistant tool calls it (the test client would add a projectId)
+    const tenant = (await server.ctx.repos.tenants.get(tenantId))!;
+    const user = (await server.ctx.repos.users.get(owner.user.id))!;
+    const auth = { tenant, user, role: 'owner' } as unknown as Parameters<typeof loadNodeOptions>[1];
+    await expect(loadNodeOptions(server.ctx, auth, body('readTarget'))).rejects.toMatchObject({
+      statusCode: 400,
+      message: NEITHER,
+    });
   });
 
   it('refuses before it looks at the body: a member without the scope gets 403, not 400', async () => {

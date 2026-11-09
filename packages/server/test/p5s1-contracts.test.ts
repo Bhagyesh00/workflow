@@ -111,7 +111,9 @@ beforeEach(async () => {
 
 type Client = Awaited<ReturnType<typeof signup>>['client'];
 
-const optionsBody = (method: string, parameters: DataObject = {}) => ({
+/** P6-27: the body names the project (`workflowId` or `projectId` is required) */
+const optionsBody = (client: Client, method: string, parameters: DataObject = {}) => ({
+  projectId: client.defaultProjectId,
   nodeType: 'test.p5s1Mapper',
   method,
   kind: 'resourceMapping',
@@ -119,7 +121,9 @@ const optionsBody = (method: string, parameters: DataObject = {}) => ({
 });
 
 const mapping = (client: Client, method: string, parameters?: DataObject) =>
-  client.data<ResourceMapperFields>(client.post('/rest/node-types/options', optionsBody(method, parameters)));
+  client.data<ResourceMapperFields>(
+    client.post('/rest/node-types/options', optionsBody(client, method, parameters)),
+  );
 
 const ids = (result: ResourceMapperFields) => result.fields.map((f) => f.id);
 
@@ -139,12 +143,12 @@ describe('POST /rest/node-types/options, kind resourceMapping', () => {
   it('refuses a method the kind does not have, and inherited names', async () => {
     const { client } = await signup(server.app);
     for (const method of ['missing', 'constructor', '__proto__', 'toString']) {
-      const response = await client.post('/rest/node-types/options', optionsBody(method));
+      const response = await client.post('/rest/node-types/options', optionsBody(client, method));
       expect(response.statusCode, method).toBe(400);
     }
     // a method of another kind
     const other = await client.post('/rest/node-types/options', {
-      ...optionsBody('nodesOfTarget'),
+      ...optionsBody(client, 'nodesOfTarget'),
       kind: 'loadOptions',
     });
     expect(other.statusCode).toBe(400);
@@ -153,7 +157,7 @@ describe('POST /rest/node-types/options, kind resourceMapping', () => {
   it('is closed to a viewer', async () => {
     const owner = await signup(server.app);
     const { client: viewer } = await memberAs(owner, 'viewer', { name: 'Viewer' });
-    const response = await viewer.post('/rest/node-types/options', optionsBody('allWorkflows'));
+    const response = await viewer.post('/rest/node-types/options', optionsBody(viewer, 'allWorkflows'));
     expect(response.statusCode).toBe(403);
   });
 });

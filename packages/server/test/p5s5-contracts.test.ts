@@ -247,6 +247,7 @@ describe('POST /rest/node-types/options (moved to services/node-options.ts)', ()
     const owner = await signup(server.app);
     const viewer = await inviteMember(owner, 'viewer');
     const body = {
+      projectId: owner.client.defaultProjectId,
       nodeType: 'test.p5s5Options',
       method: 'colors',
       kind: 'loadOptions',
@@ -278,6 +279,7 @@ describe('POST /rest/node-types/options (moved to services/node-options.ts)', ()
     const user = (await server.ctx.repos.users.get(owner.user.id)) as UserRow;
     const auth = { tenant, user, role: 'owner' } as unknown as Parameters<typeof loadNodeOptions>[1];
     const result = (await loadNodeOptions(server.ctx, auth, {
+      projectId: owner.client.defaultProjectId,
       nodeType: 'test.p5s5Options',
       method: 'workflows',
       kind: 'listSearch',

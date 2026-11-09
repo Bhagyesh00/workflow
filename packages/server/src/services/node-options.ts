@@ -5,8 +5,8 @@
  *
  * P6-27: the access check and the project binding live here, so no caller can skip them. The body names
  * `workflowId` (the caller needs `workflow:update` on it; its project is the run's project) or, for a
- * workflow not saved yet, `projectId` (`workflow:create` in it); with neither, the project a create goes to
- * by default (`workflow:create` there). The method's services (credentials, data
+ * workflow not saved yet, `projectId` (`workflow:create` in it); a body with neither is refused with 400.
+ * The method's services (credentials, data
  * tables, variables) are bound to that project, and the workflow pickers list through the caller's access
  * filter. This function parses the body itself.
  */
@@ -63,8 +63,8 @@ const optionsTarget = z.object({ workflowId: z.string().optional(), projectId: z
 
 /**
  * The project the method runs in, after the scope check: `workflow:update` on `workflowId`, else
- * `workflow:create` in `projectId`. A caller who named neither gets the project a create goes to without one
- * (`targetProject`) and needs `workflow:create` there. Another workspace's id, a missing or malformed id is 404.
+ * `workflow:create` in `projectId`. A caller who named neither is refused with 400 (decisions.md, node
+ * options: one of the two is required). Another workspace's id, a missing or malformed id is 404.
  */
 async function projectOfOptions(ctx: ServerContext, auth: AuthContext, rawBody: unknown): Promise<string> {
   const { access, repos } = ctx;
@@ -82,11 +82,7 @@ async function projectOfOptions(ctx: ServerContext, auth: AuthContext, rawBody: 
     if (!held.has('workflow:create')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
     return projectId;
   }
-  // neither named: the project a create would go to without one (`targetProject`), with the create scope there
-  const fallback = await access.targetProject(auth);
-  const held = await access.scopesForAuth(auth, { projectId: fallback });
-  if (!held.has('workflow:create')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
-  return fallback;
+  throw ApiError.badRequest("Couldn't load the options: the request names no workflowId and no projectId");
 }
 
 /**
