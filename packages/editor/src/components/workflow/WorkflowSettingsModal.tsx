@@ -18,8 +18,8 @@ function timezones(): string[] {
 }
 
 const CALLER_POLICIES: Array<{ value: CallerPolicy; label: string }> = [
-  { value: 'any', label: 'Any workflow in this workspace' },
   { value: 'sameProject', label: 'Workflows in the same project' },
+  { value: 'any', label: 'Any workflow in this workspace, from any project' },
   { value: 'allowList', label: 'Only the workflows listed below' },
   { value: 'none', label: 'No other workflow' },
 ];
@@ -193,12 +193,12 @@ export function WorkflowSettingsModal({
         </div>
         <FormField
           label="Who can call this workflow"
-          hint="Applies to other workflows that run it as a sub-workflow."
+          hint="Applies to other workflows that run it as a sub-workflow. Not set means the same project."
         >
           {(id) => (
             <Select
               id={id}
-              value={draft.callerPolicy ?? 'any'}
+              value={draft.callerPolicy ?? 'sameProject'}
               onChange={(e) => set({ callerPolicy: e.target.value as CallerPolicy })}
             >
               {CALLER_POLICIES.map((p) => (

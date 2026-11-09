@@ -1,12 +1,13 @@
 /** Settings: personal account, members and invitations, API keys, variables. */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, Copy, KeyRound, Plus, Trash2, UserPlus, Variable as VariableIcon } from 'lucide-react';
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useMemo, useState } from 'react';
 import { NavLink, Outlet } from 'react-router';
 import { errorMessage } from '../api/client';
 import { apiKeysApi, membersApi, variablesApi } from '../api/endpoints';
-import { queryKeys, useMe, useSettings } from '../api/queries';
-import { ROLES, type Role, type Variable } from '../api/types';
+import { queryKeys, useMe, useProjects, useRoles, useSettings } from '../api/queries';
+import type { MemberRemovalChoice, Role, Variable } from '../api/types';
+import { ViewProjectsModal } from '../components/projects/ViewProjectsModal';
 import { ApiKeyScopesField } from '../components/settings/ApiKeyScopesField';
 import { Button, IconButton } from '../components/ui/Button';
 import { cx } from '../components/ui/cx';
@@ -20,18 +21,20 @@ import { toast, useUiStore } from '../stores/ui-store';
 
 const ROLE_HINTS: Record<Role, string> = {
   owner: 'Everything, including billing and deleting the workspace',
-  admin: 'Members and all resources',
-  member: 'Only the projects they belong to',
+  admin: 'Members, projects and all resources',
+  member: 'Only the projects they belong to, with the role they get in each',
   editor: 'Workflows, credentials and executions',
   viewer: 'Read-only, cannot read credentials',
 };
 
-function canManage(role: Role | undefined): boolean {
-  return role === 'owner' || role === 'admin';
+/** the old words stay offered until the cutover removes them (L24); a new invitation still defaults to editor */
+const LEGACY_WORDS: readonly string[] = ['editor', 'viewer'];
+
+function titleCase(slug: string): string {
+  return slug.charAt(0).toUpperCase() + slug.slice(1);
 }
 
 export function SettingsLayout() {
-  const me = useMe();
   const { can } = usePermissions();
   const links = [
     { to: '/settings/account', label: 'Your account' },
@@ -41,15 +44,14 @@ export function SettingsLayout() {
     { to: '/settings/api-keys', label: 'API keys' },
     { to: '/settings/variables', label: 'Variables' },
     { to: '/settings/security', label: 'Security' },
-    ...(canManage(me.data?.role)
-      ? [
-          { to: '/settings/external-secrets', label: 'External secrets' },
-          // P5-09: the builder's model; admins only
-          { to: '/settings/ai', label: 'AI' },
-          // P5-71: the Assistant's model, search, permissions and MCP connections; admins only
-          { to: '/settings/assistant', label: 'Assistant' },
-        ]
+    // P6-45: each link by the scope its page needs (owner and admin hold all three)
+    ...(can('externalSecretsProvider:list')
+      ? [{ to: '/settings/external-secrets', label: 'External secrets' }]
       : []),
+    // P5-09: the builder's model
+    ...(can('aiAssistant:manage') ? [{ to: '/settings/ai', label: 'AI' }] : []),
+    // P5-71: the Assistant's model, search, permissions and MCP connections
+    ...(can('instanceAi:manage') ? [{ to: '/settings/assistant', label: 'Assistant' }] : []),
     // P5-04: every role (the page shows each role what it may do; the MCP key is per user)
     { to: '/settings/mcp', label: 'MCP' },
   ];
@@ -157,11 +159,90 @@ function inviteLink(result: Record<string, unknown> | null): string | null {
   return null;
 }
 
+/** the server needs a choice for the removed member's personal work (P6-31): move it to a project, or delete it */
+function RemoveMemberDialog({
+  name,
+  onClose,
+  onRemove,
+}: {
+  name: string;
+  onClose(): void;
+  onRemove(choice: MemberRemovalChoice): Promise<void>;
+}) {
+  const projects = useProjects();
+  const [choice, setChoice] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await onRemove(choice === 'delete' ? { deleteData: true } : { transferToProjectId: choice });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Remove ${name}?`}
+      size="sm"
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="danger" onClick={() => void submit()} loading={busy} disabled={!choice}>
+            Remove member
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-ink-2">
+          They lose access to this workspace immediately. Choose what happens to the workflows, credentials
+          and data in their personal space.
+        </p>
+        <FormField label="Their work">
+          {(id) => (
+            <Select id={id} value={choice} onChange={(e) => setChoice(e.target.value)}>
+              <option value="">Choose what to do</option>
+              <option value="delete">Delete it</option>
+              {(projects.data ?? []).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {`Move it to ${p.type === 'personal' ? 'my personal space' : p.name}`}
+                </option>
+              ))}
+            </Select>
+          )}
+        </FormField>
+      </div>
+    </Dialog>
+  );
+}
+
 export function MembersSettingsPage() {
   const me = useMe();
   const queryClient = useQueryClient();
-  const manage = canManage(me.data?.role);
+  const { can } = usePermissions();
+  const canInvite = can('user:create');
+  const canChangeRole = can('user:changeRole');
+  const canRemove = can('user:delete');
+  const canViewProjects = can('project:list');
   const members = useQuery({ queryKey: queryKeys.members, queryFn: membersApi.list });
+  const roles = useRoles();
+  const [projectsOf, setProjectsOf] = useState<string | null>(null);
+  // system roles first, then the custom workspace roles, then the old words (until L24)
+  const roleOptions = useMemo(() => {
+    const named = (roles.data?.global ?? [])
+      .filter((r) => r.slug !== 'owner')
+      .map((r) => ({ slug: r.slug, label: r.displayName, hint: r.description ?? ROLE_HINTS[r.slug] ?? '' }));
+    const legacy = LEGACY_WORDS.filter((w) => !named.some((n) => n.slug === w)).map((w) => ({
+      slug: w,
+      label: titleCase(w),
+      hint: ROLE_HINTS[w] ?? '',
+    }));
+    return [...named, ...legacy];
+  }, [roles.data]);
+  const roleLabel = (slug: string) =>
+    roles.data?.global.find((r) => r.slug === slug)?.displayName ?? titleCase(slug);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<Role>('editor');
@@ -186,17 +267,12 @@ export function MembersSettingsPage() {
     },
     onError: (error) => toast.error('Could not change the role', errorMessage(error)),
   });
-  const remove = async (userId: string, name: string) => {
-    const ok = await confirmDialog({
-      title: `Remove ${name}?`,
-      description: 'They lose access to this workspace immediately.',
-      confirmLabel: 'Remove member',
-      tone: 'danger',
-    });
-    if (!ok) return;
+  const [removing, setRemoving] = useState<{ userId: string; name: string } | null>(null);
+  const remove = async (userId: string, choice: MemberRemovalChoice) => {
     try {
-      await membersApi.remove(userId);
+      await membersApi.remove(userId, choice);
       await refresh();
+      setRemoving(null);
       toast.success('Member removed');
     } catch (error) {
       toast.error('Could not remove the member', errorMessage(error));
@@ -207,7 +283,7 @@ export function MembersSettingsPage() {
       title="Members"
       description="People in this workspace and what they can do."
       action={
-        manage && (
+        canInvite && (
           <Button variant="primary" icon={<UserPlus size={15} />} onClick={() => setInviteOpen(true)}>
             Invite
           </Button>
@@ -239,27 +315,35 @@ export function MembersSettingsPage() {
                   </span>
                   <span className="block truncate text-xs text-ink-3">{m.email}</span>
                 </span>
-                {manage && !isMe && m.role !== 'owner' ? (
+                {canViewProjects && (
+                  <Button size="sm" variant="ghost" onClick={() => setProjectsOf(m.userId)}>
+                    View projects
+                  </Button>
+                )}
+                {canChangeRole && !isMe && m.role !== 'owner' ? (
                   <Select
                     aria-label={`Role of ${m.name || m.email}`}
-                    className="w-32"
+                    className="w-36"
                     value={m.role}
                     onChange={(e) => updateRole.mutate({ userId: m.userId, role: e.target.value as Role })}
                   >
-                    {ROLES.filter((r) => r !== 'owner' || me.data?.role === 'owner').map((r) => (
-                      <option key={r} value={r} title={ROLE_HINTS[r]}>
-                        {r.charAt(0).toUpperCase() + r.slice(1)}
+                    {!roleOptions.some((o) => o.slug === m.role) && (
+                      <option value={m.role}>{roleLabel(m.role)}</option>
+                    )}
+                    {roleOptions.map((o) => (
+                      <option key={o.slug} value={o.slug} title={o.hint}>
+                        {o.label}
                       </option>
                     ))}
                   </Select>
                 ) : (
-                  <span className="text-sm text-ink-2 capitalize">{m.role}</span>
+                  <span className="text-sm text-ink-2">{roleLabel(m.role)}</span>
                 )}
-                {manage && !isMe && m.role !== 'owner' && (
+                {canRemove && !isMe && m.role !== 'owner' && (
                   <IconButton
                     label={`Remove ${m.name || m.email}`}
                     size="sm"
-                    onClick={() => void remove(m.userId, m.name || m.email)}
+                    onClick={() => setRemoving({ userId: m.userId, name: m.name || m.email })}
                   >
                     <Trash2 size={14} />
                   </IconButton>
@@ -306,9 +390,9 @@ export function MembersSettingsPage() {
           <FormField label="Role" hint={ROLE_HINTS[role]}>
             {(id) => (
               <Select id={id} value={role} onChange={(e) => setRole(e.target.value as Role)}>
-                {ROLES.filter((r) => r !== 'owner').map((r) => (
-                  <option key={r} value={r}>
-                    {r.charAt(0).toUpperCase() + r.slice(1)}
+                {roleOptions.map((o) => (
+                  <option key={o.slug} value={o.slug}>
+                    {o.label}
                   </option>
                 ))}
               </Select>
@@ -330,6 +414,14 @@ export function MembersSettingsPage() {
           )}
         </div>
       </Dialog>
+      {removing && (
+        <RemoveMemberDialog
+          name={removing.name}
+          onClose={() => setRemoving(null)}
+          onRemove={(choice) => remove(removing.userId, choice)}
+        />
+      )}
+      {projectsOf && <ViewProjectsModal userId={projectsOf} onClose={() => setProjectsOf(null)} />}
     </Panel>
   );
 }
@@ -480,9 +572,17 @@ export function ApiKeysSettingsPage() {
   );
 }
 
-const VARIABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const VARIABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-function VariableRow({ variable, onSaved }: { variable: Variable; onSaved: () => void }) {
+export function VariableRow({
+  variable,
+  onSaved,
+  readOnly = false,
+}: {
+  variable: Variable;
+  onSaved: () => void;
+  readOnly?: boolean;
+}) {
   const [key, setKey] = useState(variable.key);
   const [value, setValue] = useState(variable.value);
   const dirty = key !== variable.key || value !== variable.value;
@@ -515,27 +615,33 @@ function VariableRow({ variable, onSaved }: { variable: Variable; onSaved: () =>
         aria-label="Key"
         className="font-mono"
         value={key}
+        readOnly={readOnly}
         onChange={(e) => setKey(e.target.value)}
         aria-invalid={!VARIABLE_KEY.test(key) || undefined}
       />
       <TextInput
         aria-label={`Value of ${variable.key}`}
         value={value}
+        readOnly={readOnly}
         onChange={(e) => setValue(e.target.value)}
       />
       <span className="flex gap-1">
-        <Button
-          size="sm"
-          variant={dirty ? 'primary' : 'ghost'}
-          disabled={!dirty || !VARIABLE_KEY.test(key)}
-          loading={save.isPending}
-          onClick={() => save.mutate()}
-        >
-          Save
-        </Button>
-        <IconButton label={`Delete ${variable.key}`} size="sm" onClick={() => void remove()}>
-          <Trash2 size={14} />
-        </IconButton>
+        {!readOnly && (
+          <Button
+            size="sm"
+            variant={dirty ? 'primary' : 'ghost'}
+            disabled={!dirty || !VARIABLE_KEY.test(key)}
+            loading={save.isPending}
+            onClick={() => save.mutate()}
+          >
+            Save
+          </Button>
+        )}
+        {!readOnly && (
+          <IconButton label={`Delete ${variable.key}`} size="sm" onClick={() => void remove()}>
+            <Trash2 size={14} />
+          </IconButton>
+        )}
       </span>
     </li>
   );
@@ -543,6 +649,9 @@ function VariableRow({ variable, onSaved }: { variable: Variable; onSaved: () =>
 
 export function VariablesSettingsPage() {
   const queryClient = useQueryClient();
+  const { can } = usePermissions();
+  const canCreate = can('variable:create');
+  const canEdit = can('variable:update') && can('variable:delete');
   const variables = useQuery({ queryKey: queryKeys.variables, queryFn: variablesApi.list });
   const [key, setKey] = useState('');
   const [value, setValue] = useState('');
@@ -558,52 +667,56 @@ export function VariablesSettingsPage() {
     onError: (error) => toast.error('Could not create the variable', errorMessage(error)),
   });
   const validKey = VARIABLE_KEY.test(key.trim());
+  // a project variable is set and edited from its project's tab
+  const workspaceVariables = (variables.data ?? []).filter((v) => !v.projectId);
   return (
     <Panel
       title="Variables"
-      description="Workspace-wide values, read in expressions as $vars.name. Do not store secrets here; use credentials."
+      description="Workspace-wide values, read in expressions as $vars.name. A project's own variables are set on its Variables tab and win over these. Do not store secrets here; use credentials."
     >
-      <form
-        className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] items-end gap-2 border-b border-line px-5 py-4"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (validKey) create.mutate();
-        }}
-      >
-        <FormField
-          label="Key"
-          error={key && !validKey ? 'Letters, digits and _ only; no leading digit' : undefined}
+      {canCreate && (
+        <form
+          className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] items-end gap-2 border-b border-line px-5 py-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (validKey) create.mutate();
+          }}
         >
-          {(id) => (
-            <TextInput
-              id={id}
-              className="font-mono"
-              placeholder="api_region"
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-            />
-          )}
-        </FormField>
-        <FormField label="Value">
-          {(id) => <TextInput id={id} value={value} onChange={(e) => setValue(e.target.value)} />}
-        </FormField>
-        <Button
-          type="submit"
-          variant="primary"
-          icon={<Plus size={15} />}
-          disabled={!validKey}
-          loading={create.isPending}
-        >
-          Add
-        </Button>
-      </form>
+          <FormField
+            label="Key"
+            error={key && !validKey ? 'Letters, digits and _ only; no leading digit' : undefined}
+          >
+            {(id) => (
+              <TextInput
+                id={id}
+                className="font-mono"
+                placeholder="api_region"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+              />
+            )}
+          </FormField>
+          <FormField label="Value">
+            {(id) => <TextInput id={id} value={value} onChange={(e) => setValue(e.target.value)} />}
+          </FormField>
+          <Button
+            type="submit"
+            variant="primary"
+            icon={<Plus size={15} />}
+            disabled={!validKey}
+            loading={create.isPending}
+          >
+            Add
+          </Button>
+        </form>
+      )}
       {variables.isLoading ? (
         <PageLoader />
       ) : variables.error ? (
         <Callout tone="err" className="m-4">
           {errorMessage(variables.error)}
         </Callout>
-      ) : !variables.data?.length ? (
+      ) : !workspaceVariables.length ? (
         <EmptyState
           icon={<VariableIcon size={20} />}
           title="No variables yet"
@@ -611,8 +724,13 @@ export function VariablesSettingsPage() {
         />
       ) : (
         <ul>
-          {variables.data.map((v) => (
-            <VariableRow key={`${v.id}:${v.key}:${v.value}`} variable={v} onSaved={refresh} />
+          {workspaceVariables.map((v) => (
+            <VariableRow
+              key={`${v.id}:${v.key}:${v.value}`}
+              variable={v}
+              onSaved={refresh}
+              readOnly={!canEdit}
+            />
           ))}
         </ul>
       )}

@@ -9,21 +9,26 @@ import type { NodeParameters, WorkflowNode } from '@workflow/workflow';
 import { resolveNodeParameters } from '@workflow/workflow';
 import { Lock, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { errorMessage } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import { secretsApi } from '../api/endpoints';
-import { queryKeys, useMe } from '../api/queries';
+import { queryKeys, useMe, useProjects } from '../api/queries';
 import type { SecretConnection, SecretConnectionState, SecretProviderTypeInfo } from '../api/types';
 import { ParameterContext, type ParameterContextValue } from '../components/parameters/context';
 import { ParameterList } from '../components/parameters/ParameterForm';
 import { Button } from '../components/ui/Button';
 import { confirmDialog, Dialog } from '../components/ui/Dialog';
-import { FormField, Select, Switch, TextInput } from '../components/ui/Field';
+import { Checkbox, FormField, Select, Switch, TextInput } from '../components/ui/Field';
 import { Badge, Callout, EmptyState, PageLoader } from '../components/ui/misc';
+import { usePermissions } from '../lib/permissions';
 import { setIn } from '../lib/workflow-ops';
 import { toast } from '../stores/ui-store';
 
 /** the server's rule for the name used in `$secrets.<name>.<secret>` */
 const CONNECTION_KEY = /^[a-zA-Z][a-zA-Z0-9]*$/;
+
+/** P6-28: the workspace switch that lets project admins and editors use project vaults through their system role */
+const SYSTEM_ROLES_PATH = '/external-secrets/settings';
+const SYSTEM_ROLES_KEY = ['secret-providers', 'system-roles'] as const;
 
 const STATE_META: Record<
   SecretConnectionState,
@@ -42,7 +47,7 @@ export function stateLabel(connection: SecretConnection): string {
   return STATE_META[connection.state]?.label ?? connection.state;
 }
 
-function StateBadge({ connection }: { connection: SecretConnection }) {
+export function StateBadge({ connection }: { connection: SecretConnection }) {
   const meta = connection.isEnabled
     ? (STATE_META[connection.state] ?? STATE_META.initializing)
     : STATE_META.initialized;
@@ -55,8 +60,30 @@ function StateBadge({ connection }: { connection: SecretConnection }) {
 
 export function SecretsSettingsPage() {
   const me = useMe();
-  const isAdmin = me.data?.role === 'owner' || me.data?.role === 'admin';
+  const { can } = usePermissions();
+  // P6-45: by scope (owner and admin hold it); the project role's vaults are on the project's settings
+  const isAdmin = can('externalSecretsProvider:list');
+  const canUpdate = can('externalSecretsProvider:update');
   const queryClient = useQueryClient();
+  const systemRoles = useQuery({
+    queryKey: SYSTEM_ROLES_KEY,
+    queryFn: () => api.get<{ systemRolesEnabled: boolean }>(SYSTEM_ROLES_PATH),
+    enabled: isAdmin,
+    retry: false,
+  });
+  const setSystemRoles = useMutation({
+    mutationFn: (systemRolesEnabled: boolean) =>
+      api.post<{ systemRolesEnabled: boolean }>(SYSTEM_ROLES_PATH, { systemRolesEnabled }),
+    onSuccess: async (result) => {
+      queryClient.setQueryData(SYSTEM_ROLES_KEY, result);
+      toast.success(
+        result.systemRolesEnabled
+          ? 'Project roles can use project vaults'
+          : 'Project vaults follow their own roles',
+      );
+    },
+    onError: (error) => toast.error("Couldn't change the setting", errorMessage(error)),
+  });
   const types = useQuery({
     queryKey: queryKeys.secretProviderTypes,
     queryFn: secretsApi.types,
@@ -151,6 +178,22 @@ export function SecretsSettingsPage() {
         </Button>
       </header>
 
+      <div className="flex items-start justify-between gap-4 rounded-xl border border-line bg-surface p-4">
+        <div className="min-w-0">
+          <p className="font-semibold text-ink">Project roles use project vaults</p>
+          <p className="mt-0.5 text-sm text-ink-2">
+            When on, a project admin can manage and a project editor can read the vaults of their project
+            through the project role. When off, only members with a vault permission in that project can.
+          </p>
+        </div>
+        <Switch
+          label="Project roles use project vaults"
+          checked={systemRoles.data?.systemRolesEnabled === true}
+          disabled={!canUpdate || systemRoles.isLoading || setSystemRoles.isPending}
+          onChange={(on) => setSystemRoles.mutate(on)}
+        />
+      </div>
+
       {connections.isLoading ? (
         <PageLoader />
       ) : connections.isError ? (
@@ -188,6 +231,11 @@ export function SecretsSettingsPage() {
                     {' · '}
                     {c.credentialsCount} {c.credentialsCount === 1 ? 'credential' : 'credentials'}
                   </p>
+                  {(c.projects ?? []).length > 0 && (
+                    <p className="mt-0.5 text-sm text-ink-3">
+                      Shared with {(c.projects ?? []).map((p) => p.name).join(', ')}
+                    </p>
+                  )}
                 </div>
                 <Switch
                   label={`${c.providerKey} enabled`}
@@ -248,11 +296,16 @@ export function SecretsSettingsPage() {
   );
 }
 
-function ConnectionDialog({
+/**
+ * The add and edit dialog. With `projectId` it saves a vault owned by that project (the project settings'
+ * Add store); without it a workspace vault, which can be shared with projects.
+ */
+export function ConnectionDialog({
   connection,
   types,
   typesLoading,
   existingKeys,
+  projectId,
   onClose,
   onSaved,
 }: {
@@ -260,6 +313,7 @@ function ConnectionDialog({
   types: SecretProviderTypeInfo[];
   typesLoading: boolean;
   existingKeys: string[];
+  projectId?: string;
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
@@ -268,6 +322,8 @@ function ConnectionDialog({
   const [type, setType] = useState(connection?.type ?? '');
   const [settings, setSettings] = useState<NodeParameters>((connection?.settings ?? {}) as NodeParameters);
   const [touched, setTouched] = useState(false);
+  const teamProjects = (useProjects(!projectId).data ?? []).filter((p) => p.type === 'team');
+  const [sharedIds, setSharedIds] = useState<string[]>((connection?.projects ?? []).map((p) => p.id));
   useEffect(() => {
     if (!type && types[0]) setType(types[0].name);
   }, [type, types]);
@@ -285,8 +341,17 @@ function ConnectionDialog({
   const save = useMutation({
     mutationFn: async () => {
       const values = resolveNodeParameters(properties, settings) as Record<string, unknown>;
-      if (editing) return secretsApi.updateConnection(connection.providerKey, { settings: values });
-      return secretsApi.createConnection({ providerKey, type, settings: values });
+      if (projectId) {
+        if (editing)
+          return secretsApi.updateProjectConnection(projectId, connection.providerKey, { settings: values });
+        return secretsApi.createProjectConnection(projectId, { providerKey, type, settings: values });
+      }
+      if (editing)
+        return secretsApi.updateConnection(connection.providerKey, {
+          settings: values,
+          projectIds: sharedIds,
+        });
+      return secretsApi.createConnection({ providerKey, type, settings: values, projectIds: sharedIds });
     },
     onSuccess: async (saved) => {
       toast.success(editing ? 'Connection saved' : 'Connection added', saved.providerKey);
@@ -384,6 +449,21 @@ function ConnectionDialog({
           <ParameterContext.Provider value={context}>
             <ParameterList properties={properties} values={settings} path={[]} />
           </ParameterContext.Provider>
+          {!projectId && teamProjects.length > 0 && (
+            <fieldset className="flex flex-col gap-1.5">
+              <legend className="mb-1 text-sm font-semibold">Share with projects</legend>
+              {teamProjects.map((p) => (
+                <Checkbox
+                  key={p.id}
+                  label={p.name}
+                  checked={sharedIds.includes(p.id)}
+                  onChange={(e) =>
+                    setSharedIds((ids) => (e.target.checked ? [...ids, p.id] : ids.filter((i) => i !== p.id)))
+                  }
+                />
+              ))}
+            </fieldset>
+          )}
           {!editing && <Callout>A new connection is off until you turn it on.</Callout>}
         </div>
       )}
