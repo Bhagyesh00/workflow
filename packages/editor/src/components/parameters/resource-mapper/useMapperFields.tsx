@@ -13,8 +13,8 @@ import {
 import { useMemo } from 'react';
 import { errorMessage } from '../../../api/client';
 import { nodeTypesApi } from '../../../api/endpoints';
+import { useOptionsScope } from '../../../features/editor/open-resources';
 import { getIn } from '../../../lib/workflow-ops';
-import { useWorkflowStore } from '../../../stores/workflow-store';
 import { useParameterContext } from '../context';
 
 export function emptyMapperValue(): ResourceMapperValue {
@@ -117,7 +117,7 @@ export interface MapperFieldsState {
 export function useMapperFields(prop: NodeProperty): MapperFieldsState {
   const ctx = useParameterContext();
   const method = prop.typeOptions?.resourceMapper?.resourceMapperMethod;
-  const workflowId = useWorkflowStore((s) => s.meta.id);
+  const { workflowId, projectId, ready } = useOptionsScope();
   const dependsOn = (prop.typeOptions?.loadOptionsDependsOn ?? []).map((path) =>
     getIn(ctx.rootValues, path.replace(/^\//, '').split('.')),
   );
@@ -134,6 +134,7 @@ export function useMapperFields(prop: NodeProperty): MapperFieldsState {
     queryKey: [
       'resource-mapping',
       workflowId,
+      projectId,
       ctx.node.type,
       method,
       ctx.node.name,
@@ -141,7 +142,7 @@ export function useMapperFields(prop: NodeProperty): MapperFieldsState {
       JSON.stringify(ctx.node.credentials ?? {}),
     ],
     // the options route needs the editor role: a viewer sees the stored fields and no error
-    enabled: Boolean(method && ctx.description) && !ctx.readOnly,
+    enabled: Boolean(method && ctx.description) && !ctx.readOnly && ready,
     staleTime: 60_000,
     retry: false,
     queryFn: () =>
@@ -151,6 +152,7 @@ export function useMapperFields(prop: NodeProperty): MapperFieldsState {
         kind: 'resourceMapping',
         node: { ...ctx.node, parameters },
         workflowId,
+        projectId,
       }),
   });
   return {

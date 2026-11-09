@@ -9,7 +9,7 @@ import { Plug } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { errorMessage } from '../api/client';
 import { mcpApi } from '../api/endpoints';
-import { useMe } from '../api/queries';
+import { useMe, useProjects } from '../api/queries';
 import type { McpToggleAccessBody, McpWorkflowSummary } from '../api/types';
 import { McpClientsTable } from '../components/settings/McpClientsTable';
 import { McpConnectDialog } from '../components/settings/McpConnectDialog';
@@ -45,7 +45,12 @@ export function McpSettingsPage() {
   // `mcp:manage` turns MCP on and sets clients; the workflow table needs `workflow:update` (it flips access)
   const loaded = Boolean(me.data);
   const isAdmin = canWith(me.data, 'mcp:manage');
-  const isEditor = isAdmin || canWith(me.data, 'workflow:update');
+  // (a project role holds it too: the server lists what `workflow:update` reaches in any project)
+  const projects = useProjects(loaded);
+  const isEditor =
+    isAdmin ||
+    canWith(me.data, 'workflow:update') ||
+    (projects.data ?? []).some((p) => canWith(me.data, 'workflow:update', p));
   const [connectOpen, setConnectOpen] = useState(false);
   const [search, setSearch] = useState('');
   const term = useDebounced(search.trim(), 250);

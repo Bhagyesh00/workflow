@@ -216,6 +216,23 @@ describe('command bar search', () => {
   });
 });
 
+describe('command bar New workflow', () => {
+  it('on a project page creates the workflow in that project first, then opens it', async () => {
+    const demo = backend();
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
+    const { router } = await renderShell(`/projects/${team.id}/workflows`);
+    await openBar();
+    const user = userEvent.setup();
+    await user.type(input(), 'new workflow');
+    await inBar().findByRole('option', { name: /New workflow/ });
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(router.state.location.pathname).toMatch(/^\/workflow\/[^/]+$/), {
+      timeout: 20_000,
+    });
+    expect(demo.workflows.find((w) => w.name === 'My workflow')?.projectId).toBe(team.id);
+  });
+});
+
 describe('command bar in the editor', () => {
   it('"edit fields" + Enter adds Edit Fields after the selected node and selects it', async () => {
     const wf = backend().seedWorkflow({ name: 'Greeter', nodes: [trigger], connections: {} });

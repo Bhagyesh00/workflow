@@ -101,9 +101,25 @@ export function useCanEditWorkflow(): boolean {
 }
 
 /**
+ * The project a node's credential picker works in: the working project (the open workflow's), else the
+ * personal project, where an unsaved workflow on `/workflow/new` is saved. Null while that one loads.
+ */
+export function useCredentialProjectId(): string | null {
+  const working = useWorkingProjectId();
+  const personal = useQuery({
+    queryKey: queryKeys.personalProject,
+    queryFn: projectsApi.personal,
+    enabled: !working,
+    staleTime: 60_000,
+    retry: false,
+  });
+  return working ?? personal.data?.id ?? null;
+}
+
+/**
  * What a node option, list or mapper call names so the server knows whose credentials it may use: the saved
- * workflow, else the working project (the personal project on `/home/*`). `ready` is false while the personal
- * project is still loading.
+ * workflow, else the working project (the personal project on `/home/*`). `ready` is false until one of the
+ * two ids is known, so a call never goes out naming neither.
  */
 export function useOptionsScope(): { workflowId?: string; projectId?: string; ready: boolean } {
   const workflowId = useWorkflowStore((s) => s.meta.id);
@@ -117,7 +133,7 @@ export function useOptionsScope(): { workflowId?: string; projectId?: string; re
   });
   if (workflowId) return { workflowId, ready: true };
   const projectId = working ?? personal.data?.id;
-  return { projectId, ready: Boolean(projectId) || personal.isError };
+  return { projectId, ready: Boolean(projectId) };
 }
 
 export interface SubWorkflowTarget {

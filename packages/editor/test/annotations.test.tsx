@@ -119,7 +119,9 @@ describe('execution detail panel', () => {
     );
   });
 
-  it('is read-only for a viewer', async () => {
+  // n8n's rule (PATCH /executions/:id needs `execution:read`): a project viewer rates and tags a run too
+  it('lets a project viewer rate and tag a run', async () => {
+    const user = userEvent.setup();
     signedIn();
     const [run] = await seedRuns(1);
     const tagId = await makeTag('billing');
@@ -128,9 +130,12 @@ describe('execution detail panel', () => {
     renderApp(`/executions/${run.id}`);
     const panel = await screen.findByRole('region', { name: 'Execution annotation' }, LONG);
     expect(await within(panel).findByText('billing')).toBeTruthy();
-    expect((within(panel).getByRole('button', { name: 'Bad run' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(within(panel).queryByRole('button', { name: /Edit annotation tags/ })).toBeNull();
-    expect(within(panel).queryByRole('button', { name: 'Remove tag billing' })).toBeNull();
+    expect((within(panel).getByRole('button', { name: 'Bad run' }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+    expect(within(panel).getByRole('button', { name: /Edit annotation tags/ })).toBeTruthy();
+    await user.click(within(panel).getByRole('button', { name: 'Good run' }));
+    await waitFor(() => expect(backend().executions[0].annotation?.vote).toBe('up'));
   });
 });
 

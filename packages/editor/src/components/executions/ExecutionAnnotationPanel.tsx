@@ -15,8 +15,8 @@ import { AnnotationTagsEditor } from './AnnotationTagsEditor';
 
 export function ExecutionAnnotationPanel({ execution }: { execution: ExecutionDetail }) {
   const queryClient = useQueryClient();
-  // rating and tagging a run is part of running it: `workflow:execute` by the execution's own scopes
-  const canWrite = usePermissions().can('workflow:execute', execution);
+  // the server lets anyone who can read the run rate and tag it (n8n): `execution:read` by the run's own scopes
+  const canWrite = usePermissions().can('execution:read', execution);
   const vote = execution.annotation?.vote ?? null;
   const tags: Tag[] = execution.annotation?.tags ?? [];
 

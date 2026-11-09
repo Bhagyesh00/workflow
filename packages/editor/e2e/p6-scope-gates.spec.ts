@@ -9,6 +9,10 @@
  */
 import { expect, type Page, test } from '@playwright/test';
 
+// the server's CSRF check refuses a cookie write with no Origin header: every request the spec makes sends it
+const origin = new URL(process.env.E2E_BASE_URL ?? 'http://localhost:8080').origin;
+test.use({ extraHTTPHeaders: { origin } });
+
 interface Invited {
   userId: string;
   page: Page;
@@ -24,7 +28,7 @@ async function joinAsMember(
   const invite = await owner.request.post('/rest/members/invite', { data: { email, role: 'member' } });
   expect(invite.ok()).toBe(true);
   const { token } = (await invite.json()).data as { token: string };
-  const context = await browser.newContext();
+  const context = await browser.newContext({ extraHTTPHeaders: { origin } });
   const page = await context.newPage();
   const accepted = await page.request.post(`/rest/invitations/${token}/accept`, {
     data: { name, password: `member-pass-${token.slice(0, 6)}1` },

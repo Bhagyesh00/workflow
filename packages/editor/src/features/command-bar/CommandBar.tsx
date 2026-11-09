@@ -57,7 +57,9 @@ function useShellCommands(): void {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const me = useMe().data;
-  const { canCreate } = useProjectListScope('workflows');
+  const { canCreate, kind, createProjectId } = useProjectListScope('workflows');
+  // on a project page the row is created in that project first (a new workflow in the editor saves to the personal one)
+  const newInProject = kind === 'project' ? createProjectId : undefined;
   const viewer = !canCreate('workflow:create');
   const inEditor = Boolean(useMatch('/workflow/:id'));
   const executionId = useMatch('/executions/:id')?.params.id;
@@ -91,7 +93,21 @@ function useShellCommands(): void {
         description: 'Workflows',
         keywords: ['create'],
         path: '/workflow/new',
-        run: () => navigate('/workflow/new'),
+        run: async () => {
+          if (!newInProject) return navigate('/workflow/new');
+          try {
+            const dto = await workflowsApi.create({
+              name: 'My workflow',
+              nodes: [],
+              connections: {},
+              projectId: newInProject,
+            });
+            await queryClient.invalidateQueries({ queryKey: ['workflows'] });
+            navigate(`/workflow/${encodeURIComponent(dto.id)}`);
+          } catch (error) {
+            toast.error('Could not create the workflow', errorMessage(error));
+          }
+        },
       });
       // the editor registers its own Import from file
       if (!inEditor)
@@ -116,7 +132,7 @@ function useShellCommands(): void {
       list.push({ id, title, description: 'Navigate', path, run: () => navigate(path) });
     }
     return list;
-  }, [navigate, viewer, inEditor]);
+  }, [navigate, queryClient, viewer, inEditor, newInProject]);
   useEffect(() => registerCommands('app', commands), [commands]);
 
   const executionCommands = useMemo<Command[]>(() => {

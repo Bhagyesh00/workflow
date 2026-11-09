@@ -11,7 +11,7 @@ import {
 import { Pencil, Plus } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 import { useCredentials, useCredentialTypes, useMe, useProject } from '../../api/queries';
-import { useWorkingProjectId } from '../../features/editor/open-resources';
+import { useCredentialProjectId } from '../../features/editor/open-resources';
 import { nodeCredentialSlots } from '../../lib/doctor';
 import { canWith } from '../../lib/permissions';
 import { ExpressionInput } from '../parameters/ExpressionInput';
@@ -35,8 +35,9 @@ function CredentialSelect({
   const id = useId();
   const types = useCredentialTypes();
   // the credentials this workflow's project may use (its own, shared to it, global), not the whole workspace's
-  const projectId = useWorkingProjectId();
-  const list = useCredentials(credential.name, projectId ?? undefined);
+  // (the personal project on a workflow not saved yet, where it will be saved)
+  const projectId = useCredentialProjectId();
+  const list = useCredentials(credential.name, projectId ?? undefined, Boolean(projectId));
   const project = useProject(projectId);
   const canCreate = canWith(useMe().data, 'credential:create', project.data);
   const [modal, setModal] = useState<{ mode: 'create' } | { mode: 'edit'; id: string } | null>(null);

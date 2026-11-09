@@ -250,10 +250,11 @@ export function useCredentialTypes(): CredentialTypeIndex & { isLoading: boolean
 }
 
 /** P6-24: with `projectId`, the credentials usable in that project (its own, shared to it, global) */
-export function useCredentials(type?: string, projectId?: string) {
+export function useCredentials(type?: string, projectId?: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.credentials(type, projectId),
     queryFn: () => credentialsApi.list(type, projectId ? { projectId } : {}),
+    enabled,
   });
 }
 

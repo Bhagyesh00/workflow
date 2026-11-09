@@ -33,7 +33,8 @@ describe('Settings > MCP (P5-15)', () => {
     const user = userEvent.setup();
     signedIn();
     renderApp('/settings/mcp');
-    const status = await screen.findByRole('switch', { name: 'MCP access' });
+    // the first render of the page loads its code: allow more than the default wait
+    const status = await screen.findByRole('switch', { name: 'MCP access' }, { timeout: 10_000 });
     expect(status.getAttribute('aria-checked')).toBe('false');
     await user.click(status);
     await waitFor(() =>
@@ -62,16 +63,18 @@ describe('Settings > MCP (P5-15)', () => {
     expect(screen.getByText(/set by the server environment/)).toBeTruthy();
   });
 
-  it('a viewer sees no switch and no tables, and can use the key', async () => {
+  // a member holds no workspace-wide workflow:update: the table shows from a project role (here the member's own
+  // personal project), as the server lists what workflow:update reaches in any project
+  it('a member sees no switch and no clients, sees the workflows of their projects, and can use the key', async () => {
     const user = userEvent.setup();
     as('viewer');
     renderApp('/settings/mcp');
     const status = await screen.findByTestId('mcp-status');
     expect(status.textContent).toBe('Off');
     expect(screen.queryByRole('switch')).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Workflows' })).toBeNull();
+    expect(await screen.findByRole('heading', { name: 'Workflows' })).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Connected clients' })).toBeNull();
-    expect(sent('GET', '/mcp/workflows')).toHaveLength(0);
+    expect(sent('GET', '/mcp/workflows').length).toBeGreaterThan(0);
     expect(sent('GET', '/mcp/oauth-clients')).toHaveLength(0);
 
     await user.click(screen.getByRole('button', { name: /Connect/ }));
