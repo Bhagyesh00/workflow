@@ -72,11 +72,16 @@ export class WorkflowArchiveService {
   ): Promise<{ moved: string[] }> {
     const { repos } = this.deps;
     await assertFolderInTenant(repos, tenantId, folderId);
+    // P6-22: every workflow and the folder are in one project
+    const folder = folderId ? await repos.folders.get(tenantId, folderId) : undefined;
     const unique = [...new Set(workflowIds)];
     for (const id of unique) {
       const row = await repos.workflows.get(tenantId, id);
       if (!row) throw ApiError.notFound('Workflow');
       assertNotArchived(row, 'update');
+      if (folder && row.projectId !== folder.projectId) {
+        throw ApiError.badRequest('The workflows and the folder must be in the same project.');
+      }
     }
     const moved = await repos.workflows.setFolder(tenantId, unique, folderId);
     for (const id of moved) {

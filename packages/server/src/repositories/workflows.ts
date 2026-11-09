@@ -6,6 +6,7 @@ import {
   users,
   type WorkflowRow,
   type WorkflowVersionRow,
+  workflowShares,
   workflows,
   workflowTags,
   workflowVersions,
@@ -25,6 +26,8 @@ export interface WorkflowSummaryRow {
   active: boolean;
   isArchived: boolean;
   folderId: string | null;
+  /** P6-22: the owning project */
+  projectId: string;
   publishedVersionId: string | null;
   updatedAt: Date;
   createdAt: Date;
@@ -121,6 +124,7 @@ export class WorkflowRepository {
         active: workflows.active,
         isArchived: workflows.isArchived,
         folderId: workflows.folderId,
+        projectId: workflows.projectId,
         publishedVersionId: workflows.publishedVersionId,
         updatedAt: workflows.updatedAt,
         createdAt: workflows.createdAt,
@@ -132,6 +136,20 @@ export class WorkflowRepository {
       .where(and(...conditions))
       .orderBy(desc(workflows.updatedAt), desc(workflows.id))
       .limit(filter.limit + 1);
+  }
+
+  /** P6-22: the projects each workflow is shared with (`sharedWithProjects` of list rows and GET one) */
+  async sharedProjectIds(tenantId: string, workflowIds: string[]): Promise<Map<string, string[]>> {
+    const ids = workflowIds.filter(isUuid);
+    const result = new Map<string, string[]>();
+    if (!ids.length) return result;
+    const rows = await this.db
+      .select({ workflowId: workflowShares.workflowId, projectId: workflowShares.projectId })
+      .from(workflowShares)
+      .where(and(eq(workflowShares.tenantId, tenantId), inArray(workflowShares.workflowId, ids)));
+    for (const row of rows)
+      result.set(row.workflowId, [...(result.get(row.workflowId) ?? []), row.projectId]);
+    return result;
   }
 
   async get(tenantId: string, id: string): Promise<WorkflowRow | undefined> {

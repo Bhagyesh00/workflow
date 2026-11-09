@@ -19,6 +19,7 @@ import {
   type Item,
   planPartialRun,
   type RunData,
+  type Scope,
   serializeError,
   sortByPosition,
   validateWorkflowNodeGroups,
@@ -32,7 +33,8 @@ import type { z } from 'zod';
 import type { Config } from '../config';
 import type { ServerContext } from '../context';
 import type { Database } from '../db/client';
-import { type TenantRow, type WorkflowRow, workflows } from '../db/schema';
+import { type ProjectRow, type TenantRow, type WorkflowRow, workflows } from '../db/schema';
+import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { decodeCursor, encodeCursor, page } from '../http/pagination';
 import type {
@@ -45,6 +47,7 @@ import type {
 } from '../http/schemas';
 import type { TenantSettings } from '../plans';
 import { createRepositories, type Repositories, type TagRef } from '../repositories';
+import { type AccessFilter, MISSING_SCOPE_MESSAGE } from './access';
 import type { ActiveWorkflowManager, ValidationIssue } from './active-workflows';
 import { assertCredentialsUsable } from './credential-usable';
 import type { ExecutionService } from './executions';
@@ -104,6 +107,28 @@ export interface WorkflowListQuery {
   matchTags?: boolean;
   limit: number;
   cursor?: string;
+  /** P6-22 (the access service's list filter): the rows the caller may see; absent = every row */
+  filter?: AccessFilter;
+  /** P6-22: only rows owned by or shared with this project */
+  projectId?: string;
+  /** P6-22: only rows shared into `projectId` */
+  onlySharedWithMe?: boolean;
+}
+
+/** a project as list rows and GET one name it (`homeProject`, `sharedWithProjects`) */
+export interface WorkflowProjectRef {
+  id: string;
+  name: string;
+  type: ProjectRow['type'];
+  icon: ProjectRow['icon'];
+}
+
+/** the access fields of a workflow row (P6-22): owner project, sharees and, when asked, the caller's scopes */
+export interface WorkflowAccessFields {
+  projectId: string;
+  homeProject: WorkflowProjectRef | null;
+  sharedWithProjects: WorkflowProjectRef[];
+  scopes?: Scope[];
 }
 
 export const MANUAL_TRIGGER = 'core.manualTrigger';
@@ -199,6 +224,7 @@ export class WorkflowService {
         active: r.active,
         isArchived: r.isArchived,
         folderId: r.folderId,
+        projectId: r.projectId,
         publishedVersionId: r.publishedVersionId,
         tags: tags.get(r.id) ?? [],
         updatedAt: r.updatedAt.toISOString(),
@@ -207,6 +233,74 @@ export class WorkflowService {
       })),
       nextCursor,
     };
+  }
+
+  /**
+   * The list of GET /workflows for a caller (P6-22): the access filter of `workflow:list`, the project filter
+   * (`projectId` needs `workflow:list` in that project; `onlySharedWithMe` reads the caller's personal
+   * project), and every row with its `homeProject`, `sharedWithProjects` and, with `includeScopes`, `scopes`.
+   */
+  async listFor(auth: AuthContext, query: WorkflowListQuery & { includeScopes?: boolean }) {
+    const { access, repos } = this.deps.context();
+    const tenantId = auth.tenant.id;
+    const { includeScopes, ...rest } = query;
+    let projectId = rest.projectId;
+    if (projectId) {
+      const held = await access.scopesForAuth(auth, { projectId });
+      if (!held.has('workflow:list')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+    } else if (rest.onlySharedWithMe) {
+      projectId = (await repos.projects.getPersonal(tenantId, auth.user.id))?.id;
+      if (!projectId) return { data: [], nextCursor: null };
+    }
+    const filter = await access.listFilter(auth, 'workflow:list');
+    const result = await this.list(tenantId, { ...rest, projectId, filter });
+    const fields = await this.accessFields(auth, result.data, includeScopes === true);
+    return { ...result, data: result.data.map((row) => ({ ...row, ...fields.get(row.id) })) };
+  }
+
+  /** `homeProject`, `sharedWithProjects` and (with `includeScopes`) the caller's `scopes` of each row */
+  async accessFields(
+    auth: AuthContext,
+    rows: Array<{ id: string; projectId: string }>,
+    includeScopes: boolean,
+  ): Promise<Map<string, WorkflowAccessFields>> {
+    const { access } = this.deps.context();
+    const tenantId = auth.tenant.id;
+    const result = new Map<string, WorkflowAccessFields>();
+    if (!rows.length) return result;
+    const refs = new Map<string, WorkflowProjectRef>();
+    for (const p of await this.repos.projects.listAll(tenantId)) {
+      refs.set(p.id, { id: p.id, name: p.name, type: p.type, icon: p.icon ?? null });
+    }
+    const shared = await this.repos.workflows.sharedProjectIds(
+      tenantId,
+      rows.map((r) => r.id),
+    );
+    for (const row of rows) {
+      result.set(row.id, {
+        projectId: row.projectId,
+        homeProject: refs.get(row.projectId) ?? null,
+        sharedWithProjects: (shared.get(row.id) ?? []).flatMap((id) => refs.get(id) ?? []),
+      });
+    }
+    if (includeScopes) {
+      for (let i = 0; i < rows.length; i += 10) {
+        await Promise.all(
+          rows.slice(i, i + 10).map(async (row) => {
+            const held = await access.scopesForAuth(auth, { workflowId: row.id });
+            result.get(row.id)!.scopes = [...held].sort();
+          }),
+        );
+      }
+    }
+    return result;
+  }
+
+  /** a workflow as GET one, POST and PATCH answer it: the DTO plus its access fields and the caller's scopes */
+  async dtoFor<T extends WorkflowDTO>(auth: AuthContext, dto: T, row?: WorkflowRow) {
+    const projectId = row?.projectId ?? (await this.get(auth.tenant.id, dto.id)).projectId;
+    const fields = await this.accessFields(auth, [{ id: dto.id, projectId }], true);
+    return { ...dto, ...fields.get(dto.id)! };
   }
 
   private async checkTags(repos: Repositories, tenantId: string, tagIds: string[]): Promise<string[]> {
@@ -226,13 +320,26 @@ export class WorkflowService {
     await assertFolderInTenant(this.repos, tenantId, input.folderId);
     // P6 S1: the project the route resolved (`AccessService.targetProject`), else the workspace's default (L24 makes it required)
     const projectId = input.projectId ?? (await this.repos.projects.defaultProjectFor(tenantId));
+    // P6-22: a workflow and its folder are in one project
+    if (input.folderId) {
+      const folder = await this.repos.folders.get(tenantId, input.folderId);
+      if (folder && folder.projectId !== projectId) {
+        throw ApiError.badRequest('The folder belongs to another project.');
+      }
+    }
     // P6 S1: every credential the workflow uses must be usable in its project (L4 fills the check)
     await assertCredentialsUsable(this.deps, tenantId, projectId, input as unknown as WorkflowDefinition);
     const id = randomUUID();
     const versionId = randomUUID();
     const settings: NonNullable<CreateInput['settings']> = { ...(input.settings ?? {}) };
     // P5-04: a new workflow is available in MCP when the tenant auto exposes new workflows (unless the input says)
-    if (settings.availableInMCP === undefined) {
+    // (it needs `workflow:update` on the new workflow, so a caller who cannot edit it does not expose it)
+    const canExpose = actor.userId
+      ? (await this.deps.context().access.scopesFor(tenantId, actor.userId, { projectId })).has(
+          'workflow:update',
+        )
+      : true;
+    if (settings.availableInMCP === undefined && canExpose) {
       const tenant = await this.repos.tenants.get(tenantId);
       if ((tenant?.settings as TenantSettings | null | undefined)?.mcp?.autoExposeNewWorkflows === true) {
         settings.availableInMCP = true;

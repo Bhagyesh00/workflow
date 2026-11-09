@@ -61,6 +61,11 @@ describe('workflows', () => {
         'tags',
         'createdAt',
         'updatedAt',
+        // P6-22: POST returns the access fields and the caller's scopes (as n8n)
+        'projectId',
+        'homeProject',
+        'sharedWithProjects',
+        'scopes',
       ].sort(),
     );
 
