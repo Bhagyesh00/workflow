@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { ServerContext } from '../context';
 import type { TagRow, VariableRow } from '../db/schema';
 import { API_KEY_SCOPES } from '../http/api-key-scopes';
-import { requireAuth, requireScope } from '../http/auth';
+import { type AuthContext, requireAuth, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { page, paginationQuery } from '../http/pagination';
 import { idParams, tagSchema, variableCreateSchema, variableUpdateSchema } from '../http/schemas';
@@ -110,6 +110,20 @@ export async function updateVariable(
   }
 }
 
+/**
+ * A caller gives a workspace role only when it holds every scope of that role itself (an owner holds them
+ * all). So a custom role with `user:changeRole` or `user:create` cannot hand out admin or a wider custom role.
+ * `member` is the floor every workspace user starts from, so it can always be given.
+ */
+async function assertGrantable(ctx: ServerContext, auth: AuthContext, role: string, action: string) {
+  if (auth.role === 'owner' || role === 'member') return;
+  const mine = await ctx.access.scopesForAuth(auth);
+  const given = await ctx.access.globalScopes(auth.tenant.id, role);
+  if ([...given].some((scope) => !mine.has(scope))) {
+    throw ApiError.forbidden(`Couldn't ${action}: the role gives scopes you don't have`);
+  }
+}
+
 export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext): void {
   const { repos, auth: authService, config, variables } = ctx;
 
@@ -209,6 +223,7 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
     const auth = await requireScope(request, 'user:create');
     const body = parse(z.object({ email: z.email().max(254), role: memberRoleSchema }), request.body);
     await authService.assertMemberRole(auth.tenant.id, body.role);
+    await assertGrantable(ctx, auth, body.role, 'invite the member');
     const { invitation, token } = await authService.invite(
       auth.tenant.id,
       { id: auth.user.id, role: auth.role },
@@ -254,6 +269,9 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
     ) {
       throw ApiError.conflict('A workspace needs at least one owner');
     }
+    // as n8n (after the last owner check, so the only owner still hears why)
+    if (userId === auth.user.id) throw ApiError.forbidden('Cannot change your own global role');
+    await assertGrantable(ctx, auth, role, 'change the role');
     await repos.memberships.updateRole(auth.tenant.id, userId, role);
     await repos.audit.add(auth.tenant.id, {
       userId: auth.user.id,

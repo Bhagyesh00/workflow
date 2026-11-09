@@ -2,8 +2,8 @@
  * P6-31 (L10): member roles and member removal. A true `member` (`realMember`) holds the global member
  * scopes plus what its project relations give; removing one asks where its personal work goes.
  */
-import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createHash, randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   addToProject,
   createTestServer,
@@ -157,6 +157,55 @@ describe('member roles', () => {
     expect((await member.client.get('/rest/audit-log')).statusCode).toBe(403);
     expect((await member.client.get('/rest/invitations')).statusCode).toBe(403);
   });
+
+  it('a custom role holder never changes its own role nor gives a role wider than its own (roles-1)', async () => {
+    const owner = await ws();
+    const tenantId = owner.tenant.id;
+    await repos().roles.create(tenantId, {
+      slug: 'global:people',
+      displayName: 'People',
+      roleType: 'global',
+      scopes: ['user:changeRole', 'user:create', 'user:list'],
+    });
+    await repos().roles.create(tenantId, {
+      slug: 'global:tagger',
+      displayName: 'Tagger',
+      roleType: 'global',
+      scopes: ['tag:list'],
+    });
+    const hr = await realMember(owner);
+    await owner.client.data(owner.client.patch(`/rest/members/${hr.user.id}`, { role: 'global:people' }));
+    const other = await realMember(owner);
+
+    const self = await hr.client.patch(`/rest/members/${hr.user.id}`, { role: 'admin' });
+    expect(self.statusCode).toBe(403);
+    expect(self.json().error.message).toBe('Cannot change your own global role');
+    expect((await repos().memberships.get(tenantId, hr.user.id))?.role).toBe('global:people');
+
+    const up = await hr.client.patch(`/rest/members/${other.user.id}`, { role: 'admin' });
+    expect(up.statusCode).toBe(403);
+    expect(up.json().error.message).toBe("Couldn't change the role: the role gives scopes you don't have");
+    expect((await repos().memberships.get(tenantId, other.user.id))?.role).toBe('member');
+
+    const email = `wide-${randomUUID().slice(0, 8)}@example.com`;
+    const invite = await hr.client.post('/rest/members/invite', { email, role: 'admin' });
+    expect(invite.statusCode).toBe(403);
+    expect(invite.json().error.message).toBe(
+      "Couldn't invite the member: the role gives scopes you don't have",
+    );
+    expect((await repos().invitations.listPending(tenantId)).map((i) => i.email)).not.toContain(email);
+
+    // a role inside its own scopes, and member (the floor), still go
+    const narrow = await hr.client.patch(`/rest/members/${other.user.id}`, { role: 'global:tagger' });
+    expect(narrow.statusCode).toBe(200);
+    const floor = await hr.client.patch(`/rest/members/${other.user.id}`, { role: 'member' });
+    expect(floor.statusCode).toBe(200);
+    const plain = await hr.client.post('/rest/members/invite', {
+      email: `plain-${randomUUID().slice(0, 8)}@example.com`,
+      role: 'member',
+    });
+    expect(plain.statusCode).toBe(200);
+  });
 });
 
 describe('removing a member', () => {
@@ -303,6 +352,123 @@ describe('removing a member', () => {
     expect(denied.json().error.message).toBe(MISSING_SCOPE);
     expect(await repos().memberships.get(owner.tenant.id, member.user.id)).toBeDefined();
     expect((await repos().workflows.get(owner.tenant.id, workflow.id))?.projectId).not.toBe(team.id);
+  });
+
+  it('a move into a project the caller cannot fill is 403 before its contents are named (roles-3)', async () => {
+    const owner = await ws();
+    const tenantId = owner.tenant.id;
+    const { member, personal } = await memberWithWork(owner);
+    await dataTableIn(server, tenantId, personal.id, 'payroll');
+    await repos().roles.create(tenantId, {
+      slug: 'global:hr',
+      displayName: 'HR',
+      roleType: 'global',
+      scopes: ['user:delete', 'user:list'],
+    });
+    const hr = await realMember(owner);
+    await owner.client.patch(`/rest/members/${hr.user.id}`, { role: 'global:hr' });
+    const team = await projectIn(server, tenantId, 'Payroll team');
+    await dataTableIn(server, tenantId, team.id, 'payroll');
+
+    const denied = await removeWith(hr as unknown as Owner, member.user.id, { transferToProjectId: team.id });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.message).toBe(MISSING_SCOPE);
+    expect(denied.body).not.toContain('payroll');
+    const unknown = await removeWith(hr as unknown as Owner, member.user.id, {
+      transferToProjectId: randomUUID(),
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(await repos().memberships.get(tenantId, member.user.id)).toBeDefined();
+    // the owner, who can fill it, still hears the clash
+    expect((await removeWith(owner, member.user.id, { transferToProjectId: team.id })).statusCode).toBe(409);
+  });
+
+  it('deleteData ends the ways in before the wipe; work saved during it refuses with 409 (roles-2)', async () => {
+    const owner = await ws();
+    const tenantId = owner.tenant.id;
+    const { member, personal } = await memberWithWork(owner);
+    await member.client.data(member.client.post('/rest/api-keys', { name: 'mine' }));
+    const { workflows } = server.ctx;
+    const original = workflows.delete.bind(workflows);
+    let keysDuringWipe = -1;
+    const spy = vi.spyOn(workflows, 'delete').mockImplementation(async (...args) => {
+      spy.mockRestore();
+      keysDuringWipe = (await repos().apiKeys.list(tenantId, member.user.id)).length;
+      // a save that slipped in while the work was being deleted
+      await workflowIn(server, tenantId, personal.id, { name: 'Late flow' });
+      return original(...args);
+    });
+    const res = await removeWith(owner, member.user.id, { deleteData: true });
+    spy.mockRestore();
+    expect(keysDuringWipe).toBe(0);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.message).toBe(
+      "Couldn't delete the work: new work was saved during the removal. Try again.",
+    );
+    expect(await repos().memberships.get(tenantId, member.user.id)).toBeDefined();
+    // a second try removes the member
+    expect((await removeWith(owner, member.user.id, { deleteData: true })).statusCode).toBe(200);
+    expect(await repos().memberships.get(tenantId, member.user.id)).toBeUndefined();
+  });
+
+  it('two owners removing each other with deleteData: the second is refused before its wipe (roles-2)', async () => {
+    const owner = await ws();
+    const tenantId = owner.tenant.id;
+    const ownerPersonal = (await repos().projects.getPersonal(tenantId, owner.user.id))!;
+    const ownerFlow = await workflowIn(server, tenantId, ownerPersonal.id, { name: 'Owner flow' });
+    const { member: second } = await memberWithWork(owner);
+    await owner.client.data(owner.client.patch(`/rest/members/${second.user.id}`, { role: 'owner' }));
+    const { workflows } = server.ctx;
+    const original = workflows.delete.bind(workflows);
+    let inner: Awaited<ReturnType<typeof removeWith>> | undefined;
+    const spy = vi.spyOn(workflows, 'delete').mockImplementation(async (...args) => {
+      spy.mockRestore();
+      // while the owner's removal of `second` wipes, `second` removes the owner
+      inner = await removeWith(second as unknown as Owner, owner.user.id, { deleteData: true });
+      return original(...args);
+    });
+    const res = await removeWith(owner, second.user.id, { deleteData: true });
+    spy.mockRestore();
+    expect(res.statusCode).toBe(200);
+    expect([401, 409]).toContain(inner?.statusCode);
+    expect((await repos().memberships.get(tenantId, owner.user.id))?.role).toBe('owner');
+    expect(await repos().workflows.get(tenantId, ownerFlow.id)).toBeDefined();
+    expect(await repos().memberships.get(tenantId, second.user.id)).toBeUndefined();
+  });
+
+  it("removal ends the member's MCP OAuth grants, so a new invitation does not bring them back (roles-4)", async () => {
+    const owner = await ws();
+    const tenantId = owner.tenant.id;
+    const member = await realMember(owner);
+    const { mcpOAuth } = repos();
+    const clientId = `client-${randomUUID()}`;
+    await mcpOAuth.createClient({
+      id: clientId,
+      tenantId,
+      name: 'Member client',
+      redirectUris: ['http://localhost:4444/cb'],
+      grantTypes: ['authorization_code', 'refresh_token'],
+      tokenEndpointAuthMethod: 'none',
+    });
+    await mcpOAuth.saveConsent({ tenantId, userId: member.user.id, clientId, scope: ['workflow:read'] });
+    const row = {
+      tenantId,
+      clientId,
+      userId: member.user.id,
+      resource: 'http://localhost/mcp-server/x/http',
+      scope: ['workflow:read'],
+      expiresAt: new Date(Date.now() + 3_600_000),
+    };
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+    const access = hash(`wfo_at_${randomUUID()}`);
+    const refresh = hash(`wfo_rt_${randomUUID()}`);
+    await mcpOAuth.saveTokens({ ...row, tokenHash: access }, { ...row, tokenHash: refresh });
+
+    expect((await removeWith(owner, member.user.id, { deleteData: true })).statusCode).toBe(200);
+    expect(await mcpOAuth.getAccessToken(tenantId, access)).toBeUndefined();
+    expect(await mcpOAuth.getRefreshToken(tenantId, refresh)).toBeUndefined();
+    expect(await mcpOAuth.getConsent(tenantId, member.user.id, clientId)).toBeUndefined();
+    expect(await mcpOAuth.getClient(tenantId, clientId)).toBeDefined();
   });
 
   it('the last owner stays, and only an owner removes an owner', async () => {

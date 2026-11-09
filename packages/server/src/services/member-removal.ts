@@ -5,11 +5,19 @@
  * personal project and its relations cascade with it). S2 and S3 call these (P6-02, P6-12, P6-21).
  * Only this workspace is touched: the user, their other memberships and their other personal projects stay.
  */
+import { and, eq } from 'drizzle-orm';
 import type { ServerContext } from '../context';
-import type { ProjectRow } from '../db/schema';
+import type { DbOrTx } from '../db/client';
+import {
+  oauthAccessTokens,
+  oauthAuthorizationCodes,
+  oauthRefreshTokens,
+  oauthUserConsents,
+  type ProjectRow,
+} from '../db/schema';
 import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
-import { createRepositories, type Repositories } from '../repositories';
+import { createRepositories } from '../repositories';
 import { MISSING_SCOPE_MESSAGE } from './access';
 
 /** the caller's choice for the removed member's personal work */
@@ -50,16 +58,39 @@ async function requireTarget(
 }
 
 /**
+ * Ends every way in of a member in this workspace: sessions, API keys, and MCP OAuth grants (consents,
+ * codes and tokens, which only cascade with the user row and would work again after a new invitation).
+ */
+async function revokeAccess(tx: DbOrTx, tenantId: string, userId: string): Promise<void> {
+  const repos = createRepositories(tx);
+  await repos.sessions.deleteForUserInTenant(tenantId, userId);
+  await repos.apiKeys.deleteAllForUser(tenantId, userId);
+  await tx
+    .delete(oauthUserConsents)
+    .where(and(eq(oauthUserConsents.tenantId, tenantId), eq(oauthUserConsents.userId, userId)));
+  await tx
+    .delete(oauthAuthorizationCodes)
+    .where(and(eq(oauthAuthorizationCodes.tenantId, tenantId), eq(oauthAuthorizationCodes.userId, userId)));
+  await tx
+    .delete(oauthAccessTokens)
+    .where(and(eq(oauthAccessTokens.tenantId, tenantId), eq(oauthAccessTokens.userId, userId)));
+  await tx
+    .delete(oauthRefreshTokens)
+    .where(and(eq(oauthRefreshTokens.tenantId, tenantId), eq(oauthRefreshTokens.userId, userId)));
+}
+
+/**
  * Deletes what the personal project owns, except the project itself (the removal of the membership
  * cascades it). Workflows and data tables go through their services (they stop triggers and drop the
- * tables), credentials and folders through `repos`.
+ * tables), credentials and folders through `repos` in the last transaction, which reads the contents
+ * again: a workflow or table saved during the wipe refuses with 409 instead of failing the removal.
  */
 async function wipeWork(
   ctx: ServerContext,
   tenantId: string,
   actorId: string | null,
   personalId: string,
-  finish: (repos: Repositories) => Promise<void>,
+  finish: (tx: DbOrTx) => Promise<void>,
 ): Promise<void> {
   const contents = await ctx.repos.projects.contents(tenantId, personalId);
   for (const id of contents.workflowIds) {
@@ -68,12 +99,16 @@ async function wipeWork(
   for (const table of contents.dataTables) await ctx.dataTables.delete(tenantId, table.id);
   await ctx.database.db.transaction(async (tx) => {
     const repos = createRepositories(tx);
-    for (const id of contents.credentialIds) await repos.credentials.delete(tenantId, id);
-    for (const id of contents.folderIds) {
+    const left = await repos.projects.contents(tenantId, personalId);
+    if (left.workflowIds.length || left.dataTables.length) {
+      throw ApiError.conflict("Couldn't delete the work: new work was saved during the removal. Try again.");
+    }
+    for (const id of left.credentialIds) await repos.credentials.delete(tenantId, id);
+    for (const id of left.folderIds) {
       await repos.favorites.removeForResource(tenantId, 'folder', id);
       await repos.folders.delete(tenantId, id);
     }
-    await finish(repos);
+    await finish(tx);
   });
 }
 
@@ -103,17 +138,18 @@ export async function removeMember(
 
   let destination: ProjectRow | undefined;
   if ('transferToProjectId' in choice) {
-    if (personal) destination = await requireTarget(ctx, tenantId, personal, choice.transferToProjectId);
-    else if (!(await repos.projects.get(tenantId, choice.transferToProjectId))) {
-      throw ApiError.notFound('Project');
-    }
+    // the scopes on the target first (an unknown id is 404): nothing about a project the caller can't fill
     const scopes = await ctx.access.scopesForAuth(auth, { projectId: choice.transferToProjectId });
     for (const scope of TARGET_SCOPES) if (!scopes.has(scope)) throw missingScope();
+    if (personal) destination = await requireTarget(ctx, tenantId, personal, choice.transferToProjectId);
   }
 
   /** the last step, in one transaction with whatever work was left: the membership and its leftovers */
-  const finish = async (txRepos: Repositories): Promise<void> => {
-    if (target.role === 'owner' && (await txRepos.memberships.lockOwners(tenantId)) <= 1) {
+  const finish = async (tx: DbOrTx): Promise<void> => {
+    const txRepos = createRepositories(tx);
+    const current = await txRepos.memberships.get(tenantId, userId);
+    if (!current) throw ApiError.notFound('Member');
+    if (current.role === 'owner' && (await txRepos.memberships.lockOwners(tenantId)) <= 1) {
       throw ApiError.conflict('A workspace needs at least one owner');
     }
     if (destination && personal) {
@@ -134,15 +170,27 @@ export async function removeMember(
         metadata: { deleteData: true },
       });
     }
-    await txRepos.sessions.deleteForUserInTenant(tenantId, userId);
-    await txRepos.apiKeys.deleteAllForUser(tenantId, userId);
+    await revokeAccess(tx, tenantId, userId);
     if (!(await txRepos.memberships.remove(tenantId, userId))) throw ApiError.notFound('Member');
   };
 
   if (destination || !personal) {
-    await ctx.database.db.transaction(async (tx) => finish(createRepositories(tx)));
+    await ctx.database.db.transaction(finish);
     return;
   }
+  // Decide before anything is deleted, under the owner lock: the last owner stays, an owner leaves the
+  // owner count (so removing another owner at the same time is refused first), and the member's ways in
+  // end, so nothing new is saved during the wipe.
+  await ctx.database.db.transaction(async (tx) => {
+    const txRepos = createRepositories(tx);
+    if (target.role === 'owner') {
+      if ((await txRepos.memberships.lockOwners(tenantId)) <= 1) {
+        throw ApiError.conflict('A workspace needs at least one owner');
+      }
+      await txRepos.memberships.updateRole(tenantId, userId, 'member');
+    }
+    await revokeAccess(tx, tenantId, userId);
+  });
   await wipeWork(ctx, tenantId, auth.user.id, personal.id, finish);
 }
 
