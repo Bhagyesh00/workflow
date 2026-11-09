@@ -22,6 +22,7 @@ import {
   credentialIn,
   createTestServer,
   flushRedis,
+  memberAs,
   node,
   projectIn,
   realMember,
@@ -168,8 +169,13 @@ function read(ctx: ServerContext, tenantId: string, projectId: string | null, ke
   }
 }
 
-/** a manual run in `projectId` of a node reading `testApi` whose apiKey is `expression` */
-async function runWith(owner: Owner, projectId: string, expression: string) {
+/** a manual run in `projectId` of a node reading `testApi` whose apiKey is `expression`, started by `runner` */
+async function runWith(
+  owner: Owner,
+  projectId: string,
+  expression: string,
+  runner: Pick<Owner, 'client'> = owner,
+) {
   const credential = await credentialIn(server, owner.tenant.id, projectId, { data: { apiKey: expression } });
   const wf = await workflowIn(server, owner.tenant.id, projectId, {
     nodes: [
@@ -180,9 +186,9 @@ async function runWith(owner: Owner, projectId: string, expression: string) {
     ],
     connections: chain('Start', 'Use'),
   });
-  const { executionId } = await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/run`, {}));
+  const { executionId } = await runner.client.data(runner.client.post(`/rest/workflows/${wf.id}/run`, {}));
   const done = await waitForExecution(server.ctx, owner.tenant.id, executionId, ['success', 'error']);
-  const detail = await owner.client.data(owner.client.get(`/rest/executions/${executionId}`));
+  const detail = await runner.client.data(runner.client.get(`/rest/executions/${executionId}`));
   return { status: done.status, text: JSON.stringify(detail) };
 }
 
@@ -212,17 +218,23 @@ describe('$secrets by the credential home project', () => {
     expect(read(server.ctx, owner.tenant.id, null, 'everyone', 'key')).toBe('value-for-all');
     expect(Object.keys(server.ctx.secrets.secretsFor(owner.tenant.id, b.id))).toEqual(['everyone']);
 
-    const inA = await runWith(owner, a.id, '={{ $secrets.vaultA.key }}');
+    // true members, each an editor of one project only
+    const editorOfA = await realMember(owner);
+    const editorOfB = await realMember(owner);
+    await addToProject(server, owner.tenant.id, a.id, editorOfA.user.id, 'project:editor');
+    await addToProject(server, owner.tenant.id, b.id, editorOfB.user.id, 'project:editor');
+
+    const inA = await runWith(owner, a.id, '={{ $secrets.vaultA.key }}', editorOfA);
     expect(inA.status).toBe('success');
     expect(inA.text).toContain('"keyLength":10');
 
-    const inB = await runWith(owner, b.id, '={{ $secrets.vaultA.key }}');
+    const inB = await runWith(owner, b.id, '={{ $secrets.vaultA.key }}', editorOfB);
     expect(inB.status).toBe('error');
     expect(inB.text).toContain('Could not load secrets');
     expect(inB.text).toContain(NOT_REACHABLE);
     expect(inB.text).not.toContain('value-of-a');
 
-    const shared = await runWith(owner, b.id, '={{ $secrets.everyone.key }}');
+    const shared = await runWith(owner, b.id, '={{ $secrets.everyone.key }}', editorOfB);
     expect(shared.status).toBe('success');
   });
 
@@ -237,26 +249,61 @@ describe('$secrets by the credential home project', () => {
       data: { baseUrl: remoteUrl, apiKey: '={{ $secrets.vaultA.key }}' },
     });
 
+    // true members, each an editor of one project only
+    const editorOfA = await realMember(owner);
+    const editorOfB = await realMember(owner);
+    await addToProject(server, owner.tenant.id, a.id, editorOfA.user.id, 'project:editor');
+    await addToProject(server, owner.tenant.id, b.id, editorOfB.user.id, 'project:editor');
+    const test = (caller: typeof editorOfB, payload: Record<string, unknown>) =>
+      caller.client.data(caller.client.post('/rest/credentials/test', payload));
+
     received.length = 0;
-    const fromB = await owner.client.data(owner.client.post('/rest/credentials/test', body(b.id)));
+    const fromB = await test(editorOfB, body(b.id));
     expect(fromB.status).toBe('Error');
     expect(fromB.message).toContain('Could not load secrets');
     expect(received).toEqual([]);
 
-    const fromA = await owner.client.data(owner.client.post('/rest/credentials/test', body(a.id)));
+    const fromA = await test(editorOfA, body(a.id));
     expect(fromA.status).toBe('OK');
     expect(received.at(-1)?.headers['x-api-key']).toBe('test-value-a');
     expect(JSON.stringify(fromA)).not.toContain('test-value-a');
 
-    // a stored credential of B, tested by id, resolves under B
+    // a stored credential of B, tested by id by B's editor, resolves under B
     const stored = await credentialIn(server, owner.tenant.id, b.id, {
       data: { baseUrl: remoteUrl, apiKey: '={{ $secrets.vaultA.key }}' },
     });
-    const byId = await owner.client.data(
-      owner.client.post('/rest/credentials/test', { id: stored.id, type: 'testApi', data: {} }),
-    );
+    received.length = 0;
+    const byId = await test(editorOfB, { id: stored.id, type: 'testApi', data: {} });
     expect(byId.status).toBe('Error');
     expect(JSON.stringify(byId)).not.toContain('test-value-a');
+    expect(received).toEqual([]);
+
+    // a credential of A that B only reads (shared to B, or global): its body data is ignored, so B's
+    // editor cannot resolve A's vault into it or send it elsewhere
+    const sharedToB = await credentialIn(server, owner.tenant.id, a.id, {
+      data: { baseUrl: remoteUrl, apiKey: 'stored-shared' },
+    });
+    const share = { shareWithIds: [b.id] };
+    await owner.client.data(owner.client.put(`/rest/credentials/${sharedToB.id}/share`, share));
+    const global = await credentialIn(server, owner.tenant.id, a.id, {
+      data: { baseUrl: remoteUrl, apiKey: 'stored-global' },
+      isGlobal: true,
+    });
+    for (const [credential, storedKey] of [
+      [sharedToB, 'stored-shared'],
+      [global, 'stored-global'],
+    ] as const) {
+      received.length = 0;
+      const answer = await test(editorOfB, {
+        id: credential.id,
+        type: 'testApi',
+        data: { baseUrl: `${remoteUrl}/elsewhere`, apiKey: '={{ $secrets.vaultA.key }}' },
+      });
+      expect(JSON.stringify(answer), storedKey).not.toContain('test-value-a');
+      expect(received, storedKey).toHaveLength(1);
+      expect(received[0].url, storedKey).toBe('/check');
+      expect(received[0].headers['x-api-key'], storedKey).toBe(storedKey);
+    }
   });
 
   it('a workspace connection with projectIds is shared to those projects only, and to all again when emptied', async () => {
@@ -450,6 +497,58 @@ describe('the externalSecrets.systemRolesEnabled switch', () => {
     expect((await admin.client.get(projectVaults(a.id))).statusCode).toBe(403);
     await setSwitch(owner.tenant.id, false);
     expect((await editor.client.get(projectVaults(a.id))).statusCode).toBe(403);
+  });
+
+  it('GET and POST /external-secrets/settings: workspace owner and admin only; the switch then opens the vault', async () => {
+    const SWITCH = '/rest/external-secrets/settings';
+    const owner = await signup(server.app);
+    const tenantId = owner.tenant.id;
+    const a = await projectIn(server, tenantId, 'A');
+    await projectVault(owner, a.id, 'ofA', { key: 'a' });
+    await owner.client.data(owner.client.patch('/rest/settings', { timezone: 'Europe/Berlin' }));
+    const member = await realMember(owner);
+    await addToProject(server, tenantId, a.id, member.user.id, 'project:editor');
+
+    // a true member, even an editor of a project, neither reads nor turns the switch
+    for (const answer of [
+      await member.client.get(SWITCH),
+      await member.client.post(SWITCH, { systemRolesEnabled: true }),
+    ]) {
+      expect(answer.statusCode).toBe(403);
+      expect(answer.json().error.message).toBe(MISSING_SCOPE);
+    }
+    expect(await server.ctx.secrets.systemRolesEnabled(tenantId)).toBe(false);
+    expect((await member.client.get(projectVaults(a.id))).statusCode).toBe(403);
+
+    expect(await owner.client.data(owner.client.get(SWITCH))).toEqual({ systemRolesEnabled: false });
+    expect((await owner.client.post(SWITCH, { systemRolesEnabled: 'yes' })).statusCode).toBe(400);
+    expect((await owner.client.post(SWITCH, {})).statusCode).toBe(400);
+    expect(await owner.client.data(owner.client.post(SWITCH, { systemRolesEnabled: true }))).toEqual({
+      systemRolesEnabled: true,
+    });
+    expect(await owner.client.data(owner.client.get(SWITCH))).toEqual({ systemRolesEnabled: true });
+    // the other settings stay, and the change is audited
+    const tenant = await server.ctx.repos.tenants.get(tenantId);
+    expect(tenant?.settings).toMatchObject({ timezone: 'Europe/Berlin' });
+    const audit = (await server.ctx.repos.audit.list(tenantId, 50)).filter(
+      (row) => row.action === 'tenant.settings_updated' && Object.hasOwn(row.metadata, 'externalSecrets'),
+    );
+    expect(audit.map((row) => [row.userId, row.metadata])).toEqual([
+      [owner.user.id, { externalSecrets: { systemRolesEnabled: true } }],
+    ]);
+
+    // the project editor now reads the vault
+    expect((await member.client.get(projectVaults(a.id))).statusCode).toBe(200);
+
+    // a workspace admin turns it off; another workspace is not touched
+    const other = await signup(server.app);
+    const admin = await memberAs(owner, 'admin');
+    expect(await admin.client.data(admin.client.get(SWITCH))).toEqual({ systemRolesEnabled: true });
+    expect(await admin.client.data(admin.client.post(SWITCH, { systemRolesEnabled: false }))).toEqual({
+      systemRolesEnabled: false,
+    });
+    expect((await member.client.get(projectVaults(a.id))).statusCode).toBe(403);
+    expect(await other.client.data(other.client.get(SWITCH))).toEqual({ systemRolesEnabled: false });
   });
 });
 

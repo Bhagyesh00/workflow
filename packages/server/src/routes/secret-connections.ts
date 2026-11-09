@@ -43,6 +43,9 @@ const updateBody = z.object({
   projectIds: projectIds.optional(),
 });
 
+/** P6-28: n8n's UpdateExternalSecretsSettingsDto */
+const systemRolesBody = z.object({ systemRolesEnabled: z.boolean() });
+
 /** a type as the settings form reads it, without `create` */
 const typeDTO = ({ name, displayName, properties }: SecretProviderType) => ({
   name,
@@ -81,6 +84,20 @@ export function registerSecretConnectionRoutes(
   /** the caller's workspace wide scopes, which pass n8n's connection role check */
   const workspaceScopes = async (request: FastifyRequest, auth: AuthContext): Promise<ReadonlySet<Scope>> =>
     request.server.access ? request.server.access.scopesForAuth(auth) : new Set<Scope>();
+
+  // P6-28: the system role switch, n8n's POST /external-secrets/settings (workspace scope); the GET is
+  // the read n8n gives through its module settings, for the settings page
+  app.get('/external-secrets/settings', async (request) => {
+    const auth = await requireScope(request, 'externalSecretsProvider:read');
+    return { data: { systemRolesEnabled: await secrets.systemRolesEnabled(auth.tenant.id) } };
+  });
+
+  app.post('/external-secrets/settings', async (request) => {
+    const auth = await requireScope(request, 'externalSecretsProvider:update');
+    const { systemRolesEnabled } = parse(systemRolesBody, request.body);
+    const enabled = await secrets.setSystemRolesEnabled(auth.tenant.id, systemRolesEnabled, actor(request));
+    return { data: { systemRolesEnabled: enabled } };
+  });
 
   app.get('/secret-providers/types', async (request) => {
     await requireScope(request, 'externalSecretsProvider:list');

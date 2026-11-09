@@ -44,7 +44,7 @@ import type {
   SecretProviderType,
 } from './types';
 
-const RELOAD_CHANNEL = 'secrets:reload';
+export const RELOAD_CHANNEL = 'secrets:reload';
 /** connections connected at once, at startup and on a timer tick */
 const CONCURRENCY = 10;
 const DISCONNECT_TIMEOUT_MS = 5000;
@@ -272,6 +272,29 @@ export class SecretsManager {
     const tenant = await this.deps.repos.tenants.get(tenantId);
     const settings = (tenant?.settings ?? {}) as { externalSecrets?: { systemRolesEnabled?: unknown } };
     return settings.externalSecrets?.systemRolesEnabled === true;
+  }
+
+  /**
+   * P6-28: turns the switch on or off (n8n's POST /external-secrets/settings), the other tenant settings
+   * kept. `systemRoleAllows` reads it on every call, so nothing is cached to clear.
+   */
+  async setSystemRolesEnabled(tenantId: string, enabled: boolean, actor?: SecretActor): Promise<boolean> {
+    const { repos } = this.deps;
+    const settings = ((await repos.tenants.get(tenantId))?.settings ?? {}) as Record<string, unknown>;
+    const current = (settings.externalSecrets ?? {}) as Record<string, unknown>;
+    await repos.tenants.updateSettings(tenantId, {
+      ...settings,
+      externalSecrets: { ...current, systemRolesEnabled: enabled },
+    });
+    await repos.audit.add(tenantId, {
+      userId: actor?.userId,
+      action: 'tenant.settings_updated',
+      resourceType: 'tenant',
+      resourceId: tenantId,
+      metadata: { externalSecrets: { systemRolesEnabled: enabled } },
+      ip: actor?.ip,
+    });
+    return this.systemRolesEnabled(tenantId);
   }
 
   /**
