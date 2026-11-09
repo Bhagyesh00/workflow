@@ -10,7 +10,11 @@
  */
 import type { WorkflowDefinition, WorkflowNode } from '@workflow/workflow';
 import type { ServerContext } from '../../../../context';
-import { assertCredentialsUsable, InaccessibleCredentialError } from '../../../credential-usable';
+import {
+  assertCredentialsUsable,
+  InaccessibleCredentialError,
+  InvalidCredentialError,
+} from '../../../credential-usable';
 import { McpToolError } from '../../workflow-gate';
 
 /** how deep inline workflows may nest before the rest is refused */
@@ -105,7 +109,7 @@ export async function assertCredentialsInTenant(
   try {
     await assertCredentialsUsable(ctx, tenantId, projectId, { ...definition, nodes: flat });
   } catch (error) {
-    if (error instanceof InaccessibleCredentialError) {
+    if (error instanceof InaccessibleCredentialError || error instanceof InvalidCredentialError) {
       throw new McpToolError(`${error.message}. ${error.description}`);
     }
     throw error;
