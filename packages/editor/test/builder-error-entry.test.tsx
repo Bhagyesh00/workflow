@@ -68,7 +68,7 @@ describe('Fix with AI (P5-65)', () => {
   });
 
   it('is hidden for a viewer', async () => {
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     serve();
     withProviders(<ErrorPanel error={ERROR} />);
     await screen.findByTestId('node-error');

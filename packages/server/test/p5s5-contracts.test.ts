@@ -24,12 +24,13 @@ import { loadNodeOptions, nodeOptionsSchema } from '../src/services/node-options
 import {
   chain,
   createTestServer,
+  memberAs,
   node,
-  ORIGIN,
   setNode,
   signup,
   TestClient,
   type TestServer,
+  teamProjectOf,
   testConfig,
   waitFor,
 } from './helpers';
@@ -99,17 +100,8 @@ afterEach(() => {
 });
 
 async function inviteMember(owner: Awaited<ReturnType<typeof signup>>, role: 'admin' | 'editor' | 'viewer') {
-  const invite = await owner.client.data<{ token: string }>(
-    owner.client.post('/rest/members/invite', {
-      email: `${role}-${Date.now()}-${Math.random()}@example.com`,
-      role,
-    }),
-  );
-  const client = new TestClient(server.app, ORIGIN);
-  const accepted = await client.data<{ user: { id: string } }>(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: role, password: 'Passw0rd!' }),
-  );
-  return { client, userId: accepted.user.id };
+  const { client, user } = await memberAs(owner, role);
+  return { client, userId: user.id };
 }
 
 async function saveAssistant(tenantId: string, assistant: Record<string, unknown> | undefined) {
@@ -394,7 +386,10 @@ describe('runAndCollect', () => {
     const outcome = await runAndCollect(
       server.ctx,
       run,
-      { workflow: { name: 'Draft', nodes: [setNode('Set', 'greeting', 'hello', [0, 0])], connections: {} } },
+      {
+        projectId: await teamProjectOf(server, owner.tenant.id),
+        workflow: { name: 'Draft', nodes: [setNode('Set', 'greeting', 'hello', [0, 0])], connections: {} },
+      },
       10_000,
     );
     expect(outcome.status).toBe('success');
@@ -412,6 +407,7 @@ describe('runAndCollect', () => {
       server.ctx,
       await scopeOf(owner),
       {
+        projectId: await teamProjectOf(server, owner.tenant.id),
         workflow: {
           name: 'Parks',
           nodes: [
@@ -430,6 +426,7 @@ describe('runAndCollect', () => {
       server.ctx,
       await scopeOf(owner),
       {
+        projectId: await teamProjectOf(server, owner.tenant.id),
         workflow: {
           name: 'Slow',
           nodes: [node('Start', 'core.manualTrigger'), node('Sleep', 'test.sleep', { ms: 20_000 }, [200, 0])],
@@ -448,7 +445,10 @@ describe('runAndCollect', () => {
       runAndCollect(
         server.ctx,
         await scopeOf(owner, controller.signal),
-        { workflow: { name: 'x', nodes: [], connections: {} } },
+        {
+          projectId: await teamProjectOf(server, owner.tenant.id),
+          workflow: { name: 'x', nodes: [], connections: {} },
+        },
         1000,
       ),
     ).rejects.toThrow();

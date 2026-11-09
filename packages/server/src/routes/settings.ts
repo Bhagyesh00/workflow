@@ -106,6 +106,11 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
           : {}),
         autosaveEnabled: !config.autosaveDisabled,
         workflowReviews: { enabled: tenantSettings.workflowReviews?.enabled === true },
+        /** P6-33: the personal space policy, read from the same key as the access service (absent = on) */
+        securityPolicy: {
+          personalSpacePublishing: tenantSettings.securityPolicy?.personalSpacePublishing !== false,
+          personalSpaceSharing: tenantSettings.securityPolicy?.personalSpaceSharing !== false,
+        },
         /** P5-11: read only, the editor caps the "run in parallel" slider with it; PATCH never takes it */
         evaluationConcurrencyLimit: config.evaluationConcurrencyLimit,
         /** P5-09: the builder's model setup, admins only (it names a credential) */

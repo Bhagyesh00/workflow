@@ -11,9 +11,10 @@ import { type FakeLlm, type FakeLlmStep, startFakeLlm } from './fakes/fake-llm';
 import {
   createTestServer,
   createWorkflow,
+  memberAs,
   resetDatabase,
   signup,
-  TestClient,
+  type TestClient,
   type TestServer,
 } from './helpers';
 
@@ -56,14 +57,7 @@ async function withModel(script: FakeLlmStep[]): Promise<Owner> {
 
 /** a member of the owner's workspace with `role` */
 async function member(owner: Owner, role: 'editor' | 'viewer'): Promise<TestClient> {
-  const invite = await owner.client.data(
-    owner.client.post('/rest/members/invite', { email: `m-${Date.now()}-${role}@example.com`, role }),
-  );
-  const client = new TestClient(server.app);
-  await client.data(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: 'Member', password: 'Passw0rd!' }),
-  );
-  return client;
+  return (await memberAs(owner, role, { name: 'Member' })).client;
 }
 
 async function build(client: TestClient, body: Record<string, unknown>) {

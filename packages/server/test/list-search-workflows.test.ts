@@ -86,6 +86,7 @@ describe('Execute Workflow listSearch searchWorkflows', () => {
     const { client, tenant } = await signup(server.app);
     const total = 120;
     const ids: string[] = [];
+    const projectId = await server.ctx.repos.projects.defaultProjectFor(tenant.id);
     for (let i = 0; i < total; i++) {
       const id = randomUUID();
       ids.push(id);
@@ -98,6 +99,7 @@ describe('Execute Workflow listSearch searchWorkflows', () => {
         settings: {},
         pinData: {},
         stickyNotes: [],
+        projectId,
       });
     }
     const seen: string[] = [];

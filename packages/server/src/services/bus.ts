@@ -110,14 +110,22 @@ export class RedisBus implements MessageBus {
 export interface PushEvent {
   type: string;
   data: unknown;
+  /**
+   * P6 S1: the workflow the event is about, on the envelope (not in `data`), so the stream can drop it for a
+   * user who cannot read that workflow (the filter is L5's). Absent = the event is for the whole tenant.
+   */
+  workflowId?: string;
 }
 
 /** Editor push events (SSE), always scoped to one tenant. */
 export class PushService {
   constructor(private readonly bus: MessageBus) {}
 
-  send(tenantId: string, type: string, data: unknown): void {
-    void this.bus.publish(`push:${tenantId}`, { type, data }).catch(() => {});
+  send(tenantId: string, type: string, data: unknown, options: { workflowId?: string } = {}): void {
+    const event: PushEvent = options.workflowId
+      ? { type, data, workflowId: options.workflowId }
+      : { type, data };
+    void this.bus.publish(`push:${tenantId}`, event).catch(() => {});
   }
 
   subscribe(tenantId: string, handler: (event: PushEvent) => void): Promise<() => void> {

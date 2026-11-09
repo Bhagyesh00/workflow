@@ -207,7 +207,7 @@ describe('command bar search', () => {
     await user.type(input(), 'go to exec');
     await inBar().findByRole('option', { name: /Go to Executions/ });
     await user.keyboard('{Enter}');
-    await waitFor(() => expect(router.state.location.pathname).toBe('/executions'));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/home/executions'));
     await openBar();
     await user.type(input(), 'tabbed');
     await waitFor(() => expect(optionTitles()).toEqual(['Tabbed']));

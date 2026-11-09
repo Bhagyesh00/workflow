@@ -10,6 +10,7 @@ import { createDatabase, type Database, runMigrations } from './db/client';
 import { createLogger, type PinoLogger } from './logger';
 import { buildRegistries, loadNodePackages, type Registries } from './node-packages';
 import { createRepositories, type Repositories } from './repositories';
+import { AccessService } from './services/access';
 import { ActiveWorkflowManager } from './services/active-workflows';
 import { AiBuilderService } from './services/ai-builder/builder';
 import type { AiRuntime } from './services/ai-builder/runtime';
@@ -37,15 +38,21 @@ import { McpTriggerService } from './services/mcp-trigger';
 import { Metrics } from './services/metrics';
 import { OAuth1Service } from './services/oauth1';
 import { OAuth2Service } from './services/oauth2';
+import { ProjectService } from './services/projects';
 import { PublishHistoryService } from './services/publish-history';
 import { ExecutionQueue, type Leadership, RedisLeader, SingleLeader } from './services/queue';
+import { RoleService } from './services/roles';
 import { SecretsManager } from './services/secrets/manager';
 import type { SecretProviderType } from './services/secrets/types';
+import { SecuritySettingsService } from './services/security-settings';
+import { SharingService } from './services/sharing';
 import {
   MemoryTestWebhookStore,
   RedisTestWebhookStore,
   type TestWebhookStore,
 } from './services/test-webhooks';
+import { TransferService } from './services/transfer';
+import { VariableService } from './services/variables';
 import { WebhookService } from './services/webhooks';
 import { WorkflowArchiveService } from './services/workflow-archive';
 import { WorkflowImportUrlService } from './services/workflow-import-url';
@@ -118,6 +125,20 @@ export interface ServerContext {
   assistantDrafts: AssistantDrafts;
   /** P5-67 (L8): a tenant's Assistant settings */
   assistantSettings: AssistantSettingsService;
+  /** P6-03: scope checks (`requireScope` reads it as `app.access`), list filters, target projects */
+  access: AccessService;
+  /** P6-03 (L1): projects */
+  projects: ProjectService;
+  /** P6-29 (L9): shares of workflows and credentials */
+  sharing: SharingService;
+  /** P6-30 (L9): moves between projects */
+  transfer: TransferService;
+  /** P6-31 (L10): global and project variables */
+  variables: VariableService;
+  /** P6-32 (L11): custom roles */
+  roles: RoleService;
+  /** P6-33 (L12): the personal space policy */
+  securitySettings: SecuritySettingsService;
   /** start leader duties (triggers, wait tracker, pruning) on mains */
   startMain(): Promise<void>;
   /** consume the execution queue (queue mode workers) */
@@ -293,6 +314,14 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const assistantApprovals = new AssistantApprovals(serviceDeps, options.assistantTools ?? []);
   const assistantDrafts = new AssistantDrafts(serviceDeps);
   const assistantSettings = new AssistantSettingsService(serviceDeps);
+  // P6-03: the access service is FULL; the other five are C0 stubs whose methods throw until their lane
+  const access = new AccessService(repos);
+  const projects = new ProjectService(serviceDeps);
+  const sharing = new SharingService(serviceDeps);
+  const transfer = new TransferService(serviceDeps);
+  const variables = new VariableService(serviceDeps);
+  const roles = new RoleService(serviceDeps);
+  const securitySettings = new SecuritySettingsService(serviceDeps);
   let assistantTimers: AssistantTimers | undefined;
   const stopAssistantTimers = async () => {
     const timers = assistantTimers;
@@ -414,6 +443,13 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     assistantApprovals,
     assistantDrafts,
     assistantSettings,
+    access,
+    projects,
+    sharing,
+    transfer,
+    variables,
+    roles,
+    securitySettings,
 
     async startMain() {
       if (started) return;

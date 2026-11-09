@@ -89,7 +89,7 @@ describe('page', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
     const confirm = await screen.findByRole('dialog', { name: 'Delete data table' });
     await user.click(within(confirm).getByRole('button', { name: 'Delete' }));
-    await waitFor(() => expect(router.state.location.pathname).toBe('/data-tables'));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/home/data-tables'));
   });
 
   it('clears the rows after a confirm', async () => {
@@ -546,7 +546,7 @@ describe('viewers', () => {
   it('see the rows but no way to change them', async () => {
     const table = await dataTablesApi.create({ name: 'Leads', columns: COLUMNS });
     await dataTablesApi.insertRows(table.id, [ANN], 'count');
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     renderApp(`/data-tables/${table.id}`);
     const ann = await cell('Ann');
     await userEvent.click(ann);

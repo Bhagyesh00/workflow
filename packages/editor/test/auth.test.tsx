@@ -21,7 +21,7 @@ describe('authentication', () => {
     await user.type(screen.getByLabelText('Password'), 'analytical-1');
     await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
-    await waitFor(() => expect(router.state.location.pathname).toBe('/executions'));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/home/executions'));
     expect(await screen.findByRole('heading', { name: 'Executions' })).toBeTruthy();
     // the session cookie equivalent: the backend now has a session and the shell shows the workspace
     expect(await screen.findAllByText('Engines')).not.toHaveLength(0);
@@ -58,7 +58,7 @@ describe('authentication', () => {
     await user.clear(screen.getByLabelText('Password'));
     await user.type(screen.getByLabelText('Password'), 'cobol-1959');
     await user.click(screen.getByRole('button', { name: 'Create workspace' }));
-    await waitFor(() => expect(router.state.location.pathname).toBe('/workflows'));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/home/workflows'));
     expect(await screen.findByText('Build your first workflow')).toBeTruthy();
     expect(backend().tenants.map((t) => t.name)).toEqual(['Compilers']);
   });
@@ -81,7 +81,7 @@ describe('authentication', () => {
     await user.type(await screen.findByLabelText('Your name'), 'Newcomer');
     await user.type(screen.getByLabelText('Password'), 'welcome-123');
     await user.click(screen.getByRole('button', { name: 'Accept invitation' }));
-    await waitFor(() => expect(router.state.location.pathname).toBe('/workflows'));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/home/workflows'));
     expect(backend().memberships.some((m) => m.tenantId === tenant.id && m.role === 'editor')).toBe(true);
   });
 });

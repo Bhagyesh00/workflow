@@ -4,6 +4,7 @@
  * paths C0c calls. No database: each register function takes its services as explicit deps, so these
  * run on a bare Fastify with recording fakes. Stub return values are never asserted (lanes fill those).
  */
+import { GLOBAL_ROLE_SCOPES, type Scope } from '@workflow/workflow';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ServiceDeps } from '../src/context';
@@ -18,6 +19,7 @@ import { registerDataTableRoutes } from '../src/routes/data-tables';
 import { registerFormAuthRoutes } from '../src/routes/form-auth';
 import { PUBLIC_DATA_TABLE_ROUTES, publicDataTableHandlers } from '../src/routes/public-data-tables';
 import { registerSecretConnectionRoutes } from '../src/routes/secret-connections';
+import { type AccessService, LEGACY_ROLE_SCOPES } from '../src/services/access';
 import { DataTableService } from '../src/services/data-tables';
 import { FormAuthService } from '../src/services/form-auth';
 import { FormTokenService } from '../src/services/form-tokens';
@@ -30,6 +32,7 @@ const TENANT = '00000000-0000-4000-8000-000000000001';
 const USER = '00000000-0000-4000-8000-000000000002';
 const TABLE = '00000000-0000-4000-8000-000000000003';
 const COLUMN = '00000000-0000-4000-8000-000000000004';
+const PROJECT = '00000000-0000-4000-8000-000000000005';
 const deps = {} as ServiceDeps;
 
 type Role = 'viewer' | 'editor' | 'admin' | 'owner';
@@ -60,10 +63,25 @@ afterEach(async () => {
   app = undefined;
 });
 
+/**
+ * P6 S1: `requireScope` reads `request.server.access`. This fake answers the scopes of the legacy role
+ * map (owner and admin: their global scopes) without a row lookup, so a converted data table or vault
+ * route keeps today's rule on this bare app.
+ */
+const legacyFakeAccess = {
+  async scopesForAuth(auth: AuthContext): Promise<ReadonlySet<Scope>> {
+    const role = auth.role as string;
+    if (role === 'owner' || role === 'admin') return GLOBAL_ROLE_SCOPES[role];
+    if (role === 'editor' || role === 'viewer') return LEGACY_ROLE_SCOPES[role];
+    return new Set();
+  },
+} as unknown as AccessService;
+
 async function build(register: (rest: FastifyInstance) => void): Promise<FastifyInstance> {
   const instance = Fastify();
   instance.setErrorHandler(handleError);
   instance.decorateRequest('auth', null);
+  instance.decorate('access', legacyFakeAccess);
   instance.addHook('onRequest', async (request) => {
     const role = request.headers['x-test-role'];
     if (role) {
@@ -561,8 +579,8 @@ describe('services/secrets', () => {
 });
 
 describe('boot paths C0c builds on', () => {
-  it('forTenant hands out an access object: every execution builds one, so it must not throw', () => {
-    const access = new DataTableService(deps).forTenant(TENANT, { workflowId: 'w1' });
+  it('forProject hands out an access object: every execution builds one, so it must not throw', () => {
+    const access = new DataTableService(deps).forProject(TENANT, PROJECT, { workflowId: 'w1' });
     for (const method of [
       'listTables',
       'getTable',
@@ -580,7 +598,7 @@ describe('boot paths C0c builds on', () => {
     ] as const) {
       expect(typeof access[method], method).toBe('function');
     }
-    expect(typeof new DataTableService(deps).forTenant(TENANT).getRows).toBe('function');
+    expect(typeof new DataTableService(deps).forProject(TENANT, PROJECT).getRows).toBe('function');
   });
 
   it('the services build with their deps alone', () => {

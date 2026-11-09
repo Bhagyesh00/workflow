@@ -10,6 +10,7 @@ describe('Python memory cap', () => {
     target.ctx.executions.buildServices({
       tenant: (await target.ctx.repos.tenants.get(tenantId))!,
       executionId: '',
+      projectId: await target.ctx.repos.projects.defaultProjectFor(tenantId),
       mode: 'manual',
     });
 

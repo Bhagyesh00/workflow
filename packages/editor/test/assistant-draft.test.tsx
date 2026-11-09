@@ -172,9 +172,7 @@ describe('DraftCard', () => {
 
   it('a viewer sees why Accept and Discard are off', async () => {
     await draftOfSavedWorkflow();
-    const { user, tenant } = backend().auth();
-    const membership = backend().memberships.find((m) => m.userId === user.id && m.tenantId === tenant.id);
-    if (membership) membership.role = 'viewer';
+    backend().setDemoRole('viewer');
     renderCard(draftDto());
     const card = await loadedCard('Draft Hook poster');
     await within(card).findByText(DRAFT_VIEWER_REASON, undefined, WAIT);

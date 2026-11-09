@@ -7,6 +7,7 @@ import {
   createTestServer,
   createWorkflow,
   hookRegistry,
+  memberAs,
   node,
   resetDatabase,
   signup,
@@ -122,13 +123,10 @@ describe('R53: DELETE /workflows/:id/listen-test-webhook', () => {
     const wf = await createWorkflow(owner.client, { nodes: [webhook('Webhook', 'roles')] });
     await listen(owner.client, wf.id, 'Webhook');
 
-    const invite = await owner.client.data(
-      owner.client.post('/rest/members/invite', { email: 'viewer-a4@example.com', role: 'viewer' }),
-    );
-    const viewer = new TestClient(server.app);
-    await viewer.data(
-      viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'Viewer', password: 'Passw0rd!' }),
-    );
+    const { client: viewer } = await memberAs(owner, 'viewer', {
+      email: 'viewer-a4@example.com',
+      name: 'Viewer',
+    });
     expect((await stop(viewer, wf.id, 'Webhook')).statusCode).toBe(403);
     expect((await stop(new TestClient(server.app), wf.id, 'Webhook')).statusCode).toBe(401);
     expect(await server.ctx.testWebhooks.list(owner.tenant.id)).toHaveLength(1);

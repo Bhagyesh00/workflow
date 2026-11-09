@@ -422,7 +422,7 @@ describe('import and download', () => {
 describe('viewers', () => {
   it('reads, downloads and stars but cannot change anything', async () => {
     await dataTablesApi.create({ name: 'Leads', columns: [] });
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     await expect(dataTablesApi.create({ name: 'No', columns: [] })).rejects.toBeInstanceOf(ApiError);
     const user = userEvent.setup();
     await openList();
@@ -437,7 +437,7 @@ describe('viewers', () => {
   });
 
   it('gets no create dialog from a link', async () => {
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     await dataTablesApi.limits();
     renderApp('/data-tables?new=1');
     await screen.findByRole('heading', { name: 'Data tables' });
@@ -511,7 +511,7 @@ describe('links into data tables', () => {
     const input = await screen.findByRole('combobox', { name: 'Search the command bar' });
     await user.type(input, 'data tables');
     await user.click(await screen.findByRole('option', { name: /Go to Data tables/ }));
-    await waitFor(() => expect(router.state.location.pathname).toBe('/data-tables'));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/home/data-tables'));
   });
 
   it("the locator's create link opens the create dialog in a new tab, with the typed name", async () => {

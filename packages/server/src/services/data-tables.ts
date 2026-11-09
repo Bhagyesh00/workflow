@@ -158,6 +158,8 @@ export interface DataTableActor {
 export interface DataTableCreateInput {
   name: string;
   columns: DataTableCreateColumn[];
+  /** P6 S1: the project the route resolved; absent: the workspace's default (L24 makes it required) */
+  projectId?: string;
   /** CSV text whose rows go in with the new table (columns then come from it) */
   csv?: string;
   hasHeaders?: boolean;
@@ -400,8 +402,13 @@ export class DataTableService {
 
   constructor(readonly deps: ServiceDeps) {}
 
-  /** the tenant-bound access nodes use; `workflowId` is the running workflow */
-  forTenant(tenantId: string, options: { workflowId?: string } = {}): DataTableAccess {
+  /**
+   * the access nodes use; `workflowId` is the running workflow. P6 S1: `projectId` is the run's project;
+   * until L3 the access stays tenant wide.
+   */
+  forProject(tenantId: string, projectId: string, options: { workflowId?: string } = {}): DataTableAccess {
+    // stub (L3): the access is not narrowed to the project yet
+    void projectId;
     return new TenantDataTableAccess(this, tenantId, options.workflowId);
   }
 
@@ -461,13 +468,14 @@ export class DataTableService {
     }
     assertColumnInputs(name, columns);
     const stored = cells.map((row) => this.toCells(row, columns));
+    const projectId = input.projectId ?? (await this.deps.repos.projects.defaultProjectFor(tenantId));
     try {
       const made = await this.deps.database.db.transaction(async (tx) => {
         const repos = createRepositories(tx);
         if (await repos.dataTables.getByName(tenantId, name)) {
           throw ApiError.conflict(DATA_TABLE_ERRORS.tableNameExists(name));
         }
-        const table = await repos.dataTables.create(tenantId, name);
+        const table = await repos.dataTables.create(tenantId, projectId, name);
         const columnRows: DataTableColumnRow[] = [];
         for (const [position, column] of columns.entries()) {
           columnRows.push(

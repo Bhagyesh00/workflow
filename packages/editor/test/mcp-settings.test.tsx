@@ -19,7 +19,7 @@ afterEach(() => setCurrentTenant(null));
 
 function as(role: 'viewer' | 'editor' | 'admin') {
   const mock = signedIn();
-  mock.memberships[0].role = role;
+  mock.setDemoRole(role);
   return mock;
 }
 

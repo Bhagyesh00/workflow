@@ -6,7 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { hash, verify } from '@node-rs/argon2';
 import type { Config } from '../config';
 import type { Database } from '../db/client';
-import type { Role, TenantRow, UserRow } from '../db/schema';
+import type { LegacyRole, Role, SystemRole, TenantRow, UserRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import { createRepositories, type Repositories } from '../repositories';
 import { PUBLIC_API_AUDIENCE } from '../repositories/accounts';
@@ -17,10 +17,26 @@ export const SESSION_TTL_MS = 14 * 86_400_000;
 export const SESSION_REFRESH_MS = 3_600_000;
 const INVITATION_TTL_MS = 7 * 86_400_000;
 
-export const ROLE_RANK: Record<Role, number> = { viewer: 1, editor: 2, admin: 3, owner: 4 };
+/**
+ * The legacy rank of `requireRole` and the unconverted `hasRole` gates. P6-03: `member` ranks 0 and so
+ * does any other slug (a custom role), so every unconverted gate refuses them (fail closed).
+ */
+export const ROLE_RANK: Readonly<Record<SystemRole | LegacyRole, number>> = {
+  member: 0,
+  viewer: 1,
+  editor: 2,
+  admin: 3,
+  owner: 4,
+};
 
+function rankOf(role: Role): number {
+  return Object.hasOwn(ROLE_RANK, role) ? ROLE_RANK[role as SystemRole | LegacyRole] : 0;
+}
+
+/** fail closed: an unknown role ranks 0, and a minimum that is not a ranked role is never met */
 export function hasRole(role: Role, minimum: Role): boolean {
-  return ROLE_RANK[role] >= ROLE_RANK[minimum];
+  if (!Object.hasOwn(ROLE_RANK, minimum)) return false;
+  return rankOf(role) >= rankOf(minimum);
 }
 
 export function sha256(value: string): string {
@@ -164,6 +180,13 @@ export class AuthService {
         plan: this.config.defaultPlan,
       });
       await repos.memberships.add(tenant.id, user.id, 'owner');
+      // P6-03: the workspace's team project (named after it) and the owner's personal project
+      await repos.projects.create(tenant.id, {
+        name: input.workspaceName.slice(0, 255),
+        type: 'team',
+        creatorId: user.id,
+      });
+      await repos.projects.ensurePersonal(tenant.id, user);
       return { user, tenant };
     });
     const token = await this.createSession(user.id, tenant.id, meta);
@@ -254,6 +277,8 @@ export class AuthService {
     const accepted = await this.repos.invitations.markAccepted(invitation.tenantId, invitation.id);
     if (!accepted) throw ApiError.notFound('Invitation');
     await this.repos.memberships.add(invitation.tenantId, user.id, invitation.role);
+    // P6-03: every member has a personal project in the workspace
+    await this.repos.projects.ensurePersonal(invitation.tenantId, user);
     const tenant = (await this.repos.tenants.get(invitation.tenantId))!;
     const sessionToken = await this.createSession(user.id, tenant.id, meta);
     await this.repos.audit.add(tenant.id, {

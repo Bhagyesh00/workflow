@@ -66,6 +66,10 @@ type User = Awaited<ReturnType<typeof signup>>;
 async function memberOf(owner: User, role: 'editor' | 'viewer' = 'editor') {
   const other = await signup();
   await server.ctx.repos.memberships.add(owner.tenant.id, other.user.id, role);
+  await server.ctx.repos.projects.ensurePersonal(
+    owner.tenant.id,
+    (await server.ctx.repos.users.get(other.user.id))!,
+  );
   return other;
 }
 

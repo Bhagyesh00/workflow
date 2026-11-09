@@ -2,7 +2,15 @@ import { createHmac } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createTestServer, resetDatabase, signup, TEST_REDIS, TestClient, type TestServer } from './helpers';
+import {
+  createTestServer,
+  memberAs,
+  resetDatabase,
+  signup,
+  TEST_REDIS,
+  type TestClient,
+  type TestServer,
+} from './helpers';
 
 const enc = (s: string) =>
   encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
@@ -179,13 +187,10 @@ describe('OAuth1 sign-in flow', () => {
   it('is bound to the user who started it and to OAuth1 credentials', async () => {
     const { client } = await signup(server.app);
     const credential = await makeCredential(client);
-    const invite = await client.data(
-      client.post('/rest/members/invite', { email: 'ed@example.com', role: 'editor' }),
-    );
-    const editor = new TestClient(server.app);
-    const joined = await editor.data(
-      editor.post(`/rest/invitations/${invite.token}/accept`, { name: 'Ed', password: 'Passw0rd!' }),
-    );
+    const { client: editor, ...joined } = await memberAs({ client }, 'editor', {
+      email: 'ed@example.com',
+      name: 'Ed',
+    });
     const started = await editor.data(editor.get(`/rest/oauth1/authorize?credentialId=${credential.id}`));
     expect(new URL(started.url).searchParams.get('oauth_token')).toBe('rt-1');
     await client.data(client.patch(`/rest/members/${joined.user.id}`, { role: 'viewer' }));

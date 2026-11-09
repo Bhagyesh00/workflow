@@ -80,7 +80,7 @@ const testCredentialTool: AssistantToolDefinition<z.output<typeof idInput>> = {
     ctx.credentials.resolvedType(row.type);
     let resolved: DataObject;
     try {
-      resolved = await ctx.credentials.resolveData(tenantId, data);
+      resolved = await ctx.credentials.resolveData(tenantId, row.projectId, data);
     } catch (error) {
       return { status: 'Error', message: credentialReadErrorText(error) };
     }

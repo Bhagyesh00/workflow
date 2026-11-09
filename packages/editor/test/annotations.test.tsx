@@ -124,7 +124,7 @@ describe('execution detail panel', () => {
     const [run] = await seedRuns(1);
     const tagId = await makeTag('billing');
     await annotate(run.id, { tags: [tagId], vote: 'down' });
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     renderApp(`/executions/${run.id}`);
     const panel = await screen.findByRole('region', { name: 'Execution annotation' }, LONG);
     expect(await within(panel).findByText('billing')).toBeTruthy();

@@ -85,6 +85,13 @@ export interface OpenSubNodes {
   close(): Promise<void>;
 }
 
+/** P6 S1: where sub-nodes opened outside a workflow run: a project, and the credential ids a server path allows */
+export interface SubNodeAccess {
+  projectId: string;
+  /** ids the server path read itself (a setting's or a connection's credential), never from node data or a body */
+  allowCredentials: string[];
+}
+
 /**
  * Opens the sub-nodes of `parentName` in `definition` for `tenant` (services mode `internal`), with no
  * hand-built context. The builder's model and the Assistant's model and MCP tools (L9) use it.
@@ -95,11 +102,18 @@ export async function openSubNodes(
   definition: WorkflowDefinition,
   parentName: string,
   signal: AbortSignal,
+  access: SubNodeAccess,
 ): Promise<OpenSubNodes> {
   const workflow = new Workflow(definition, ctx.registries.nodeTypes);
   const node = workflow.nodes[parentName];
   if (!node) throw new Error(`The definition has no node "${parentName}"`);
-  const services = await ctx.executions.buildServices({ tenant, executionId: '', mode: 'internal' });
+  const services = await ctx.executions.buildServices({
+    tenant,
+    executionId: '',
+    projectId: access.projectId,
+    allowCredentials: access.allowCredentials,
+    mode: 'internal',
+  });
   const deps: ContextDeps = {
     workflow,
     node,
@@ -184,7 +198,11 @@ export async function loadModelFromSetting(
       },
     },
   };
-  const subNodes = await openSubNodes(ctx, tenant, definition, BUILDER_NODE_NAME, signal);
+  // P6 S1: the setting's credential runs in its own project, and only that credential is allowed
+  const subNodes = await openSubNodes(ctx, tenant, definition, BUILDER_NODE_NAME, signal, {
+    projectId: credential.projectId,
+    allowCredentials: [credential.id],
+  });
   let supplied: unknown;
   try {
     supplied = await subNodes.get('ai_languageModel');

@@ -17,10 +17,10 @@ import {
   createWorkflow,
   executionsOf,
   hookRegistry,
+  memberAs,
   node,
   resetDatabase,
   signup,
-  TestClient,
   type TestServer,
   testConfig,
   testPackage,
@@ -334,14 +334,8 @@ async function openStream(cookie: string): Promise<Stream> {
 }
 
 async function invitedViewer(owner: Awaited<ReturnType<typeof signup>>) {
-  const invite = await owner.client.data(
-    owner.client.post('/rest/members/invite', { email: `viewer-${Date.now()}@example.com`, role: 'viewer' }),
-  );
-  const viewer = new TestClient(server.app);
-  const accepted = await viewer.data(
-    viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'Viewer', password: 'Passw0rd!' }),
-  );
-  return { viewer, userId: accepted.user.id as string };
+  const viewer = await memberAs(owner, 'viewer', { name: 'Viewer' });
+  return { viewer: viewer.client, userId: viewer.user.id };
 }
 
 describe('R39: push streams are re-validated', () => {

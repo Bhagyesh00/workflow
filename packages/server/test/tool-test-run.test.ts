@@ -8,10 +8,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   signup,
-  TestClient,
+  type TestClient,
   type TestServer,
   waitForExecution,
 } from './helpers';
@@ -322,17 +323,7 @@ describe('POST /workflows/:id/run with agentRequest', () => {
     const url = `/rest/workflows/${wf.id}/run`;
     const body = { destinationNode: 'Tool', agentRequest };
 
-    const invited = async (role: 'viewer' | 'editor') => {
-      const email = `${role}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-      const invite = await owner.client.data<{ token: string }>(
-        owner.client.post('/rest/members/invite', { email, role }),
-      );
-      const member = new TestClient(server.app);
-      await member.data(
-        member.post(`/rest/invitations/${invite.token}/accept`, { name: role, password: 'Passw0rd!' }),
-      );
-      return member;
-    };
+    const invited = async (role: 'viewer' | 'editor') => (await memberAs(owner, role)).client;
     expect((await (await invited('viewer')).post(url, body)).statusCode).toBe(403);
     const other = await signup(server.app);
     expect((await other.client.post(url, body)).statusCode).toBe(404);

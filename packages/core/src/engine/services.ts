@@ -123,6 +123,8 @@ export interface ExecutionLimits {
 
 export interface ExecutionServices {
   tenantId: string;
+  /** the project the running workflow belongs to (its home project); the run's credentials, variables and data tables come from it */
+  projectId: string;
   executionId: string;
   mode: ExecutionMode;
   timezone: string;

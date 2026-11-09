@@ -25,6 +25,7 @@ const ROLE_NOTES: Record<Role, string> = {
   editor:
     'The person is an editor of this workspace: they can build and run workflows but not change workspace settings.',
   viewer: 'The person is a viewer of this workspace: they can look at things but not change them.',
+  member: 'The person is a member of this workspace: what they can do depends on the projects they belong to.',
 };
 
 /** the date line, in the workspace's timezone when it is a valid one */

@@ -313,6 +313,7 @@ export const credentialTypes = new CredentialTypes(testCredentialTypes);
 export function services(overrides: Partial<ExecutionServices> = {}): ExecutionServices {
   return {
     tenantId: 't1',
+    projectId: 'p1',
     executionId: 'e1',
     mode: 'manual',
     timezone: 'UTC',

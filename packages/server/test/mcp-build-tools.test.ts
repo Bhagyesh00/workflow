@@ -51,7 +51,7 @@ const EXPECTED: Record<string, { scopes: McpScope[]; minRole: Role }> = {
   restore_workflow_version: { scopes: ['workflow:write'], minRole: 'editor' },
   explore_node_resources: { scopes: ['credential:read'], minRole: 'editor' },
 };
-const RANK: Record<Role, number> = { viewer: 1, editor: 2, admin: 3, owner: 4 };
+const RANK: Record<Role, number> = { member: 0, viewer: 1, editor: 2, admin: 3, owner: 4 };
 const ROLES: Role[] = ['viewer', 'editor', 'admin', 'owner'];
 
 async function signup() {
@@ -81,6 +81,10 @@ type User = Awaited<ReturnType<typeof signup>>;
 async function member(owner: User, role: Role) {
   const other = await signup();
   await server.ctx.repos.memberships.add(owner.tenant.id, other.user.id, role);
+  await server.ctx.repos.projects.ensurePersonal(
+    owner.tenant.id,
+    (await server.ctx.repos.users.get(other.user.id))!,
+  );
   const key = (
     await server.ctx.auth.createApiKey(owner.tenant.id, other.user.id, MCP_KEY_LABEL, [], MCP_KEY_AUDIENCE)
   ).key;

@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MasterKey } from '@workflow/core';
-import { type InstanceLimits, MAX_EVALUATION_CONCURRENCY } from '@workflow/workflow';
+import { type CallerPolicy, type InstanceLimits, MAX_EVALUATION_CONCURRENCY } from '@workflow/workflow';
 import { z } from 'zod';
 
 const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -171,6 +171,13 @@ const envSchema = z.object({
   DISABLE_PUBLIC_CHAT_TRIGGER: bool(false),
   /** P5-02: evaluation cases run at once per workspace; read as at most 10 */
   CONCURRENCY_EVALUATION_LIMIT: int(5, 1),
+  /**
+   * P6-25: the caller policy of a workflow whose settings name none (n8n's
+   * WORKFLOW_CALLER_POLICY_DEFAULT_OPTION, default same project); an explicit setting always wins
+   */
+  WORKFLOW_CALLER_POLICY_DEFAULT_OPTION: z
+    .enum(['any', 'none', 'sameProject', 'allowList'] satisfies CallerPolicy[])
+    .default('sameProject'),
   /** P5-04: the public origin MCP clients reach (default BASE_URL); its host is the only one MCP routes accept */
   MCP_BASE_URL: z.url().optional(),
   /** P5-04: when true, MCP access is set by MCP_ACCESS_ENABLED and the settings page cannot change it */
@@ -301,6 +308,8 @@ export interface Config {
   disablePublicChatTrigger: boolean;
   /** P5-02: CONCURRENCY_EVALUATION_LIMIT, 1 to 10 (MAX_EVALUATION_CONCURRENCY) */
   evaluationConcurrencyLimit: number;
+  /** P6-25: WORKFLOW_CALLER_POLICY_DEFAULT_OPTION, for a workflow with no `callerPolicy` (L5 reads it) */
+  workflowCallerPolicyDefault: CallerPolicy;
   /** P5-03, P5-04, P5-13, P5-14: MCP_*, ENDPOINT_MCP*, OAUTH_SERVER_* */
   mcp: {
     /** MCP_BASE_URL or baseUrl, without trailing slash; MCP URLs and the Host check use it */
@@ -499,6 +508,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     chatWidgetDist: path.resolve(e.CHAT_WIDGET_DIST ?? path.join(PACKAGE_DIR, '..', 'chat-widget', 'dist')),
     disablePublicChatTrigger: e.DISABLE_PUBLIC_CHAT_TRIGGER,
     evaluationConcurrencyLimit: Math.min(e.CONCURRENCY_EVALUATION_LIMIT, MAX_EVALUATION_CONCURRENCY),
+    workflowCallerPolicyDefault: e.WORKFLOW_CALLER_POLICY_DEFAULT_OPTION,
     mcp: {
       baseUrl: e.MCP_BASE_URL ? e.MCP_BASE_URL.replace(/\/+$/, '') : baseUrl,
       managedByEnv: e.MCP_MANAGED_BY_ENV,

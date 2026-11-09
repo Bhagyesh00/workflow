@@ -210,7 +210,7 @@ describe('demo.resourceMapper', () => {
     await expect(load({})).rejects.toMatchObject({ status: 401 });
     signedIn();
     await expect(load({}, 'nope')).rejects.toMatchObject({ status: 400, code: 'unknown_method' });
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     await expect(load({})).rejects.toMatchObject({ status: 403 });
   });
 });

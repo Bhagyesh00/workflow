@@ -1,6 +1,6 @@
 /** OAuth2 popup isolation, per-tab workspace binding, invitation links and token material on save. */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createTestServer, resetDatabase, signup, TestClient, type TestServer } from './helpers';
+import { createTestServer, memberAs, resetDatabase, signup, type TestServer } from './helpers';
 
 let server: TestServer;
 
@@ -18,15 +18,7 @@ beforeEach(async () => {
 async function twoWorkspaces() {
   const owner = await signup(server.app, { workspaceName: 'Workspace A' });
   const member = await signup(server.app, { workspaceName: 'Workspace B' });
-  const invite = await owner.client.data(
-    owner.client.post('/rest/members/invite', { email: member.user.email, role: 'editor' }),
-  );
-  await new TestClient(server.app).data(
-    new TestClient(server.app).post(`/rest/invitations/${invite.token}/accept`, {
-      name: 'Member',
-      password: 'Passw0rd!',
-    }),
-  );
+  await memberAs(owner, 'editor', { email: member.user.email, name: 'Member' });
   return { owner, member, a: owner.tenant.id, b: member.tenant.id };
 }
 

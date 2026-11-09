@@ -115,7 +115,7 @@ describe('secrets settings page (P4-07)', () => {
 
   it('is for admins: an editor sees a notice and no request for connections', async () => {
     const mock = signedIn();
-    mock.memberships[0].role = 'editor';
+    mock.setDemoRole('editor');
     renderApp('/settings/external-secrets');
     expect(await screen.findByText('Only admins can manage external secrets.')).toBeTruthy();
     expect(mock.requests.some((r) => r.path === '/secret-providers/connections')).toBe(false);

@@ -8,10 +8,12 @@ import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import { type FolderRow, folders, folderTags, tags, workflows } from '../db/schema';
 import type { Cursor } from '../http/pagination';
+import { type AccessListOptions, projectRowConditions } from './shares';
 import { isUuid, now } from './util';
 import type { TagRef } from './workflows';
 
-export interface FolderListFilter {
+/** with `AccessListOptions` (P6-26): folders belong to one project and are never shared */
+export interface FolderListFilter extends AccessListOptions {
   /** a folder id, or 'root' for the top level; undefined = every folder */
   parentFolderId?: string;
   search?: string;
@@ -50,7 +52,9 @@ export class FolderRepository {
 
   /** one extra row (limit + 1) tells the caller whether a next page exists */
   async list(tenantId: string, filter: FolderListFilter): Promise<FolderRow[]> {
-    const conditions = [eq(folders.tenantId, tenantId)];
+    const access = projectRowConditions(folders.projectId, filter);
+    if (!access) return [];
+    const conditions = [eq(folders.tenantId, tenantId), ...access];
     if (filter.parentFolderId !== undefined) {
       if (filter.parentFolderId === 'root') conditions.push(isNull(folders.parentFolderId));
       else if (!isUuid(filter.parentFolderId)) return [];
@@ -84,10 +88,18 @@ export class FolderRepository {
       .limit(filter.limit + 1);
   }
 
-  async create(tenantId: string, input: { name: string; parentFolderId: string | null }): Promise<FolderRow> {
+  async create(
+    tenantId: string,
+    input: { name: string; parentFolderId: string | null; projectId: string },
+  ): Promise<FolderRow> {
     const [row] = await this.db
       .insert(folders)
-      .values({ tenantId, name: input.name, parentFolderId: input.parentFolderId })
+      .values({
+        tenantId,
+        name: input.name,
+        parentFolderId: input.parentFolderId,
+        projectId: input.projectId,
+      })
       .returning();
     return row;
   }

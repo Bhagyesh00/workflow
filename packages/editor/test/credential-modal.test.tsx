@@ -165,7 +165,7 @@ describe('workspace binding per tab (R11)', () => {
     expect(
       await screen.findByText('Workspace switched in another tab', {}, { timeout: 10_000 }),
     ).toBeTruthy();
-    await waitFor(() => expect(router.state.location.pathname).toBe('/workflows'));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/home/workflows'));
     expect((await screen.findAllByText('Second Space')).length).toBeGreaterThan(0);
     await waitFor(() => expect(connections).toBeGreaterThan(before));
     await waitFor(() =>

@@ -24,7 +24,7 @@ afterEach(() => setCurrentTenant(null));
 
 function as(role: Role) {
   const mock = signedIn();
-  mock.memberships[0].role = role;
+  mock.setDemoRole(role);
   setCurrentTenant(mock.session!.tenantId);
   return mock;
 }
@@ -229,7 +229,7 @@ describe('Settings > Assistant > MCP servers', () => {
   it.each(['editor', 'viewer'] as const)('shows %s the list and none of the buttons', async (role) => {
     const mock = as('admin');
     await assistantApi.createMcpConnection({ name: 'Files', url: 'https://f.example.com/mcp' });
-    mock.memberships[0].role = role;
+    mock.setDemoRole(role);
     withProviders(
       <>
         <AssistantMcpConnections />
@@ -294,7 +294,7 @@ describe('Settings > Assistant > MCP servers', () => {
   it('the demo server keeps each workspace to its own list and refuses a write below admin', async () => {
     const mock = as('admin');
     await assistantApi.createMcpConnection({ name: 'Mine', url: 'https://mine.example.com/mcp' });
-    mock.memberships[0].role = 'editor';
+    mock.setDemoRole('editor');
     await expect(
       assistantApi.createMcpConnection({ name: 'B', url: 'https://b.example.com/mcp' }),
     ).rejects.toThrow();

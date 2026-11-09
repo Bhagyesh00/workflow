@@ -17,6 +17,7 @@ import {
   BASE_URL,
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   signup,
@@ -48,14 +49,7 @@ beforeEach(async () => {
 const MCP_HOST = new URL(BASE_URL).host;
 
 async function withViewer(owner: Awaited<ReturnType<typeof signup>>) {
-  const invite = await owner.client.data(
-    owner.client.post('/rest/members/invite', { email: `v-${Date.now()}@example.com`, role: 'viewer' }),
-  );
-  const viewer = new TestClient(server.app);
-  await viewer.data(
-    viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'V', password: 'Passw0rd!' }),
-  );
-  return viewer;
+  return (await memberAs(owner, 'viewer', { name: 'V' })).client;
 }
 
 async function openAiCredential(client: TestClient): Promise<string> {

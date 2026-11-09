@@ -19,12 +19,14 @@ import {
   BASE_URL,
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   signup as signupFrom,
   TEST_REDIS,
   TestClient,
   type TestServer,
+  teamProjectOf,
   testConfig,
   waitFor,
 } from './helpers';
@@ -139,13 +141,7 @@ let signups = 0;
 const signup = (app: TestServer['app']) => signupFrom(app, { remoteAddress: `10.0.0.${++signups}` });
 
 async function member(owner: Awaited<ReturnType<typeof signup>>, role: 'admin' | 'editor' | 'viewer') {
-  const email = `${role}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await owner.client.data(owner.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app);
-  await client.data(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: role, password: 'Passw0rd!' }),
-  );
-  return client;
+  return (await memberAs(owner, role)).client;
 }
 
 const formTrigger = (path: string) => node('Form', 'core.formTrigger', { path });
@@ -535,7 +531,7 @@ describe('every new /rest route requires its role', () => {
 describe('favorites', () => {
   const tableIn = async (tenantId: string, name: string) => {
     const { rows } = await pool().query<{ id: string }>(
-      'insert into data_tables (tenant_id, name) values ($1, $2) returning id',
+      `insert into data_tables (tenant_id, name, project_id) values ($1, $2, (select id from projects where tenant_id = $1 and type = 'team' order by created_at, id limit 1)) returning id`,
       [tenantId, name],
     );
     return rows[0].id;
@@ -715,7 +711,14 @@ describe('config, plans and logger', () => {
 describe('execution services', () => {
   const services = async (ctx: TestServer['ctx'], tenantId: string, executionId: string) => {
     const tenant = (await ctx.repos.tenants.get(tenantId))!;
-    return ctx.executions.buildServices({ tenant, executionId, mode: 'manual', workflowId: UNKNOWN_ID });
+    const projectId = await ctx.repos.projects.defaultProjectFor(tenantId);
+    return ctx.executions.buildServices({
+      tenant,
+      executionId,
+      projectId,
+      mode: 'manual',
+      workflowId: UNKNOWN_ID,
+    });
   };
 
   it('resumeFormUrl is /form-waiting/<id> with its own signature', async () => {
@@ -755,10 +758,12 @@ describe('execution services', () => {
 
   it('binds the data tables to the tenant and the workflow', async () => {
     const owner = await signup(server.app);
-    const forTenant = vi.spyOn(server.ctx.dataTables, 'forTenant');
+    const forProject = vi.spyOn(server.ctx.dataTables, 'forProject');
     await services(server.ctx, owner.tenant.id, UNKNOWN_ID);
-    expect(forTenant).toHaveBeenCalledWith(owner.tenant.id, { workflowId: UNKNOWN_ID });
-    forTenant.mockRestore();
+    expect(forProject).toHaveBeenCalledWith(owner.tenant.id, await teamProjectOf(server, owner.tenant.id), {
+      workflowId: UNKNOWN_ID,
+    });
+    forProject.mockRestore();
   });
 
   it('runActivationErrorWorkflow is public', () => {
@@ -797,6 +802,7 @@ describe('context and test helpers', () => {
     const on = await server.ctx.executions.buildServices({
       tenant: (await server.ctx.repos.tenants.get(owner.tenant.id))!,
       executionId: '',
+      projectId: await teamProjectOf(server, owner.tenant.id),
       mode: 'manual',
     });
     const options = (on.pythonRunner as PyodideCodeRunner).options;
@@ -817,6 +823,7 @@ describe('context and test helpers', () => {
       const built = await off.ctx.executions.buildServices({
         tenant: (await off.ctx.repos.tenants.get(owner.tenant.id))!,
         executionId: '',
+        projectId: await teamProjectOf(server, owner.tenant.id),
         mode: 'manual',
       });
       expect(built.pythonRunner).toBeUndefined();

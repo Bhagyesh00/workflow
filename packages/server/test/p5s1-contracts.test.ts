@@ -19,10 +19,10 @@ import { testCredential } from '../src/services/credential-test';
 import {
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   signup,
-  TestClient,
   type TestServer,
 } from './helpers';
 
@@ -152,13 +152,7 @@ describe('POST /rest/node-types/options, kind resourceMapping', () => {
 
   it('is closed to a viewer', async () => {
     const owner = await signup(server.app);
-    const invite = await owner.client.data<{ token: string }>(
-      owner.client.post('/rest/members/invite', { email: `v-${Date.now()}@example.com`, role: 'viewer' }),
-    );
-    const viewer = new TestClient(server.app);
-    await viewer.data(
-      viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'Viewer', password: 'Passw0rd!' }),
-    );
+    const { client: viewer } = await memberAs(owner, 'viewer', { name: 'Viewer' });
     const response = await viewer.post('/rest/node-types/options', optionsBody('allWorkflows'));
     expect(response.statusCode).toBe(403);
   });

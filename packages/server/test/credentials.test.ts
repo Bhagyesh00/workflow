@@ -7,11 +7,11 @@ import {
   chain,
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   outputOf,
   resetDatabase,
   signup,
-  TestClient,
   type TestServer,
   testConfig,
   waitForExecution,
@@ -324,13 +324,10 @@ describe('credentials', () => {
     expect(after.scope).toBe('read');
 
     // the flow is bound to the user who started it: losing edit rights invalidates it
-    const invite = await client.data(
-      client.post('/rest/members/invite', { email: 'ed@example.com', role: 'editor' }),
-    );
-    const editor = new TestClient(server.app);
-    const joined = await editor.data(
-      editor.post(`/rest/invitations/${invite.token}/accept`, { name: 'Ed', password: 'Passw0rd!' }),
-    );
+    const { client: editor, ...joined } = await memberAs({ client }, 'editor', {
+      email: 'ed@example.com',
+      name: 'Ed',
+    });
     const started = await editor.data(editor.get(`/rest/oauth2/authorize?credentialId=${credential.id}`));
     await client.data(client.patch(`/rest/members/${joined.user.id}`, { role: 'viewer' }));
     const editorState = new URL(started.url).searchParams.get('state')!;

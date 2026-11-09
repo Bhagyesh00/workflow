@@ -107,7 +107,7 @@ describe('S5 routes', () => {
 
   /** the main nav once /me and /settings have loaded */
   async function mainNav(role: Role, feature: AssistantFeature) {
-    backend().memberships[0].role = role;
+    backend().setDemoRole(role);
     backend().options.assistant = feature;
     const { queryClient } = renderApp('/workflows');
     await waitFor(
@@ -154,12 +154,12 @@ describe('S5 routes', () => {
   }
 
   it.each(['owner', 'admin'] as const)('shows the Assistant settings link to an %s', async (role) => {
-    backend().memberships[0].role = role;
+    backend().setDemoRole(role);
     expect(await settingsLinks()).toContain('Assistant');
   });
 
   it.each(['editor', 'viewer'] as const)('hides the Assistant settings link from an %s', async (role) => {
-    backend().memberships[0].role = role;
+    backend().setDemoRole(role);
     const links = await settingsLinks();
     expect(links).toContain('MCP');
     expect(links).not.toContain('Assistant');

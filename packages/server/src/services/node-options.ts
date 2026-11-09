@@ -76,6 +76,8 @@ export async function loadNodeOptions(
   const services = await ctx.executions.buildServices({
     tenant: auth.tenant,
     executionId: '',
+    // P6 S1: the workspace's default project until L7 resolves the caller's (body.workflowId's row or targetProject)
+    projectId: await repos.projects.defaultProjectFor(auth.tenant.id),
     mode: 'manual',
   });
   const base = createBaseContext({

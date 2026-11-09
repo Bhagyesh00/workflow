@@ -1,9 +1,10 @@
 /** Executions and their (separately stored) run data. */
 import { and, count, desc, eq, inArray, lt, lte, ne, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
-import { type ExecutionDataRow, type ExecutionRow, executionData, executions } from '../db/schema';
+import { type ExecutionDataRow, type ExecutionRow, executionData, executions, workflows } from '../db/schema';
 import type { Cursor } from '../http/pagination';
 import { type AnnotationVote, annotationConditions } from './annotations';
+import { type AccessListOptions, sharedRowConditions } from './shares';
 import { isUuid, now } from './util';
 
 /** LIKE wildcards and the escape character matched literally */
@@ -93,7 +94,12 @@ export class ExecutionRepository {
 
   async list(
     tenantId: string,
-    filter: {
+    /**
+     * `AccessListOptions` (P6-25) go through the run's workflow: a run is listed when its workflow is; a
+     * run with no workflow row (`workflow_id` null) only with `filter.all` or no filter. They AND with
+     * every other condition, the custom data filter included.
+     */
+    filter: AccessListOptions & {
       workflowId?: string;
       status?: string[];
       /** P3-10: executions of one workflow version */
@@ -110,7 +116,15 @@ export class ExecutionRepository {
       cursor?: Cursor;
     },
   ): Promise<ExecutionRow[]> {
-    const conditions: SQL[] = [eq(executions.tenantId, tenantId)];
+    const access = sharedRowConditions({
+      tenantId,
+      kind: 'workflow',
+      id: executions.workflowId,
+      project: sql`(select ${workflows.projectId} from ${workflows} where ${workflows.id} = ${executions.workflowId} and ${workflows.tenantId} = ${tenantId}::uuid)`,
+      options: filter,
+    });
+    if (!access) return [];
+    const conditions: SQL[] = [eq(executions.tenantId, tenantId), ...access];
     if (filter.workflowId) {
       if (!isUuid(filter.workflowId)) return [];
       conditions.push(eq(executions.workflowId, filter.workflowId));

@@ -6,6 +6,7 @@ import {
   chain,
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   setNode,
@@ -34,13 +35,7 @@ const pool = () => server.ctx.database.pool;
 type Owner = Awaited<ReturnType<typeof signup>>;
 
 async function member(owner: Owner, role: 'admin' | 'editor' | 'viewer') {
-  const email = `${role}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await owner.client.data(owner.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app);
-  await client.data(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: role, password: 'Passw0rd!' }),
-  );
-  return client;
+  return (await memberAs(owner, role)).client;
 }
 
 const manual = (name = 'W') => ({

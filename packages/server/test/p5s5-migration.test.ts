@@ -65,8 +65,8 @@ async function insertThread(w: Workspace): Promise<string> {
 
 async function insertCredential(w: Workspace): Promise<string> {
   const { rows } = await pool().query<{ id: string }>(
-    `insert into credentials (id, tenant_id, name, type, data_enc)
-     values (gen_random_uuid(), $1, 'MCP key', 'httpBearerAuth', 'x') returning id`,
+    `insert into credentials (id, tenant_id, name, type, data_enc, project_id)
+     values (gen_random_uuid(), $1, 'MCP key', 'httpBearerAuth', 'x', (select id from projects where tenant_id = $1 and type = 'team' order by created_at, id limit 1)) returning id`,
     [w.tenantId],
   );
   return rows[0].id;

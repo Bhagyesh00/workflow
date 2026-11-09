@@ -16,6 +16,7 @@ import type {
   BuilderMessage,
   DataObject,
   EvaluationMetrics,
+  Scope,
   TestCaseErrorCode,
   TestCaseStatus,
   TestRunErrorCode,
@@ -42,6 +43,7 @@ import {
   uuid,
   varchar,
 } from 'drizzle-orm/pg-core';
+import type { Role } from './role-types';
 
 // millisecond precision so keyset cursors (JS Dates) round-trip exactly
 const nowMs = sql`date_trunc('milliseconds', now())`;
@@ -84,6 +86,102 @@ export const memberships = pgTable(
     createdAt: createdAt(),
   },
   (t) => [primaryKey({ columns: [t.tenantId, t.userId] }), index('memberships_user_idx').on(t.userId)],
+);
+
+/** project icon as n8n stores it: an icon name or an emoji */
+export interface ProjectIcon {
+  type: 'icon' | 'emoji';
+  value: string;
+}
+
+/**
+ * Projects (P6-01): every workflow, credential, folder and data table belongs to one. Each workspace has team
+ * projects (shared, members join through `project_relations`) and one personal project per member, owned by
+ * `owner_user_id`. Removing the member removes the personal project; the app moves or wipes its work first.
+ */
+export const projects = pgTable(
+  'projects',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 255 }).notNull(),
+    type: text('type').$type<'personal' | 'team'>().notNull(),
+    icon: jsonb('icon').$type<ProjectIcon>(),
+    description: varchar('description', { length: 512 }),
+    /** the member a personal project belongs to; null for team projects */
+    ownerUserId: uuid('owner_user_id'),
+    creatorId: uuid('creator_id').references(() => users.id, { onDelete: 'set null' }),
+    /** custom telemetry tags (P6-67) */
+    customTelemetryTags: jsonb('custom_telemetry_tags').$type<unknown[]>().notNull().default([]),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique('projects_tenant_id_unique').on(t.tenantId, t.id),
+    uniqueIndex('projects_tenant_personal_owner_idx')
+      .on(t.tenantId, t.ownerUserId)
+      .where(sql`${t.type} = 'personal'`),
+    index('projects_tenant_type_idx').on(t.tenantId, t.type),
+    check('projects_type_check', sql`${t.type} in ('personal', 'team')`),
+    foreignKey({
+      name: 'projects_owner_membership_fk',
+      columns: [t.tenantId, t.ownerUserId],
+      foreignColumns: [memberships.tenantId, memberships.userId],
+    }).onDelete('cascade'),
+  ],
+);
+
+/**
+ * A member's role in a project (`project:admin`, `project:editor`, `project:viewer`, `project:personalOwner`
+ * or a custom project role slug). Composite keys keep both ends inside the tenant.
+ */
+export const projectRelations = pgTable(
+  'project_relations',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    projectId: uuid('project_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    role: text('role').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.projectId, t.userId] }),
+    foreignKey({
+      name: 'project_relations_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'project_relations_membership_fk',
+      columns: [t.tenantId, t.userId],
+      foreignColumns: [memberships.tenantId, memberships.userId],
+    }).onDelete('cascade'),
+    index('project_relations_tenant_user_idx').on(t.tenantId, t.userId),
+  ],
+);
+
+/** custom roles (P6-11): a project or global role with its own scope list, per workspace */
+export const roles = pgTable(
+  'roles',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    slug: text('slug').notNull(),
+    displayName: text('display_name').notNull(),
+    description: text('description'),
+    roleType: text('role_type').$type<'project' | 'global'>().notNull(),
+    scopes: text('scopes').array().$type<Scope[]>().notNull().default(sql`'{}'`),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique('roles_tenant_slug_unique').on(t.tenantId, t.slug),
+    unique('roles_tenant_display_name_unique').on(t.tenantId, t.displayName),
+    check('roles_role_type_check', sql`${t.roleType} in ('project', 'global')`),
+  ],
 );
 
 export const sessions = pgTable(
@@ -160,13 +258,23 @@ export const folders = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
+    /** owning project (P6-01) */
+    projectId: uuid('project_id').notNull(),
     parentFolderId: uuid('parent_folder_id').references((): AnyPgColumn => folders.id, {
       onDelete: 'cascade',
     }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index('folders_tenant_parent_idx').on(t.tenantId, t.parentFolderId)],
+  (t) => [
+    index('folders_tenant_parent_idx').on(t.tenantId, t.parentFolderId),
+    index('folders_tenant_project_parent_idx').on(t.tenantId, t.projectId, t.parentFolderId),
+    foreignKey({
+      name: 'folders_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }),
+  ],
 );
 
 export const workflows = pgTable(
@@ -177,6 +285,8 @@ export const workflows = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
+    /** owning project (P6-01) */
+    projectId: uuid('project_id').notNull(),
     nodes: jsonb('nodes').$type<unknown[]>().notNull().default([]),
     connections: jsonb('connections').$type<Record<string, unknown>>().notNull().default({}),
     settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
@@ -198,6 +308,13 @@ export const workflows = pgTable(
     index('workflows_tenant_updated_idx').on(t.tenantId, t.updatedAt, t.id),
     index('workflows_active_idx').on(t.active),
     index('workflows_tenant_folder_idx').on(t.tenantId, t.folderId),
+    index('workflows_tenant_project_updated_idx').on(t.tenantId, t.projectId, t.updatedAt, t.id),
+    unique('workflows_tenant_id_unique').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'workflows_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }),
   ],
 );
 
@@ -229,7 +346,7 @@ export const workflowVersions = pgTable(
   (t) => [index('workflow_versions_workflow_idx').on(t.tenantId, t.workflowId, t.createdAt)],
 );
 
-/** per-user favorites (P3-07, P4-03): workflows, folders and data tables */
+/** per-user favorites (P3-07, P4-03, P6-01): workflows, folders, data tables and projects */
 export const userFavorites = pgTable(
   'user_favorites',
   {
@@ -239,7 +356,7 @@ export const userFavorites = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    resourceType: text('resource_type').$type<'workflow' | 'folder' | 'dataTable'>().notNull(),
+    resourceType: text('resource_type').$type<'workflow' | 'folder' | 'dataTable' | 'project'>().notNull(),
     resourceId: uuid('resource_id').notNull(),
     createdAt: createdAt(),
   },
@@ -248,7 +365,7 @@ export const userFavorites = pgTable(
     index('user_favorites_tenant_user_idx').on(t.tenantId, t.userId),
     check(
       'user_favorites_resource_type_check',
-      sql`${t.resourceType} in ('workflow', 'folder', 'dataTable')`,
+      sql`${t.resourceType} in ('workflow', 'folder', 'dataTable', 'project')`,
     ),
   ],
 );
@@ -313,11 +430,24 @@ export const credentials = pgTable(
     dataEnc: text('data_enc').notNull(),
     /** external secret names the credential reads (P4-07), never their values */
     secretKeys: text('secret_keys').array().notNull().default(sql`'{}'`),
+    /** owning project (P6-01) */
+    projectId: uuid('project_id').notNull(),
+    /** usable by every project of the workspace (n8n's `isGlobal`) */
+    isGlobal: boolean('is_global').notNull().default(false),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index('credentials_tenant_idx').on(t.tenantId, t.type)],
+  (t) => [
+    index('credentials_tenant_idx').on(t.tenantId, t.type),
+    index('credentials_tenant_project_type_idx').on(t.tenantId, t.projectId, t.type),
+    unique('credentials_tenant_id_unique').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'credentials_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }),
+  ],
 );
 
 export const executions = pgTable(
@@ -399,12 +529,24 @@ export const variables = pgTable(
     tenantId: uuid('tenant_id')
       .notNull()
       .references(() => tenants.id, { onDelete: 'cascade' }),
+    /** null = a workspace variable; else a project variable, which wins over the workspace one in its project */
+    projectId: uuid('project_id'),
     key: text('key').notNull(),
     value: text('value').notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [uniqueIndex('variables_tenant_key_idx').on(t.tenantId, t.key)],
+  (t) => [
+    uniqueIndex('variables_tenant_key_global_idx').on(t.tenantId, t.key).where(sql`${t.projectId} is null`),
+    uniqueIndex('variables_tenant_project_key_idx')
+      .on(t.tenantId, t.projectId, t.key)
+      .where(sql`${t.projectId} is not null`),
+    foreignKey({
+      name: 'variables_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }).onDelete('cascade'),
+  ],
 );
 
 export const auditLog = pgTable(
@@ -678,13 +820,20 @@ export const dataTables = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: 'cascade' }),
     name: varchar('name', { length: 128 }).notNull(),
+    /** owning project (P6-01) */
+    projectId: uuid('project_id').notNull(),
     nextRowId: bigint('next_row_id', { mode: 'number' }).notNull().default(1),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
-    unique('data_tables_tenant_name_unique').on(t.tenantId, t.name),
+    unique('data_tables_tenant_project_name_unique').on(t.tenantId, t.projectId, t.name),
     unique('data_tables_tenant_id_unique').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'data_tables_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }),
   ],
 );
 
@@ -752,11 +901,98 @@ export const secretConnections = pgTable(
       .notNull()
       .default('initializing'),
     lastError: text('last_error'),
+    /** owning project (P6-28); null = a workspace connection. The provider key stays unique per workspace */
+    projectId: uuid('project_id'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [unique('secret_connections_tenant_provider_key_unique').on(t.tenantId, t.providerKey)],
+  (t) => [
+    unique('secret_connections_tenant_provider_key_unique').on(t.tenantId, t.providerKey),
+    unique('secret_connections_tenant_id_unique').on(t.tenantId, t.id),
+    foreignKey({
+      name: 'secret_connections_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+/** a workflow shared with another project (P6-29); the sharee gets `role` (`workflow:editor`) */
+export const workflowShares = pgTable(
+  'workflow_shares',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    workflowId: uuid('workflow_id').notNull(),
+    projectId: uuid('project_id').notNull(),
+    role: text('role').notNull().default('workflow:editor'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workflowId, t.projectId] }),
+    foreignKey({
+      name: 'workflow_shares_workflow_fk',
+      columns: [t.tenantId, t.workflowId],
+      foreignColumns: [workflows.tenantId, workflows.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'workflow_shares_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }).onDelete('cascade'),
+    index('workflow_shares_tenant_project_idx').on(t.tenantId, t.projectId),
+  ],
+);
+
+/** a credential shared with another project (P6-29); the sharee gets `role` (`credential:user`) */
+export const credentialShares = pgTable(
+  'credential_shares',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    credentialId: uuid('credential_id').notNull(),
+    projectId: uuid('project_id').notNull(),
+    role: text('role').notNull().default('credential:user'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.credentialId, t.projectId] }),
+    foreignKey({
+      name: 'credential_shares_credential_fk',
+      columns: [t.tenantId, t.credentialId],
+      foreignColumns: [credentials.tenantId, credentials.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'credential_shares_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }).onDelete('cascade'),
+    index('credential_shares_tenant_project_idx').on(t.tenantId, t.projectId),
+  ],
+);
+
+/** a project's access to a vault connection (P6-28); `role` is `secretsProviderConnection:user` */
+export const projectSecretAccess = pgTable(
+  'project_secret_access',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    connectionId: uuid('connection_id').notNull(),
+    projectId: uuid('project_id').notNull(),
+    role: text('role').notNull().default('secretsProviderConnection:user'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.connectionId, t.projectId] }),
+    foreignKey({
+      name: 'project_secret_access_connection_fk',
+      columns: [t.tenantId, t.connectionId],
+      foreignColumns: [secretConnections.tenantId, secretConnections.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'project_secret_access_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }).onDelete('cascade'),
+    index('project_secret_access_tenant_project_idx').on(t.tenantId, t.projectId),
+  ],
 );
 
 /**
@@ -1124,7 +1360,7 @@ export const assistantMcpConnections = pgTable(
   (t) => [unique('assistant_mcp_connections_tenant_name_unique').on(t.tenantId, t.name)],
 );
 
-export type Role = 'owner' | 'admin' | 'editor' | 'viewer';
+export type { LegacyRole, Role, SystemRole } from './role-types';
 
 export type TenantRow = typeof tenants.$inferSelect;
 export type UserRow = typeof users.$inferSelect;
@@ -1144,6 +1380,12 @@ export type DataTableRow = typeof dataTables.$inferSelect;
 export type DataTableColumnRow = typeof dataTableColumns.$inferSelect;
 export type DataTableRowRow = typeof dataTableRows.$inferSelect;
 export type SecretConnectionRow = typeof secretConnections.$inferSelect;
+export type ProjectRow = typeof projects.$inferSelect;
+export type ProjectRelationRow = typeof projectRelations.$inferSelect;
+export type CustomRoleRow = typeof roles.$inferSelect;
+export type WorkflowShareRow = typeof workflowShares.$inferSelect;
+export type CredentialShareRow = typeof credentialShares.$inferSelect;
+export type ProjectSecretAccessRow = typeof projectSecretAccess.$inferSelect;
 export type TestRunRow = typeof testRuns.$inferSelect;
 export type TestCaseExecutionRow = typeof testCaseExecutions.$inferSelect;
 export type AnnotationTagRow = typeof annotationTags.$inferSelect;

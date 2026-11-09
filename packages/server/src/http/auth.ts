@@ -4,10 +4,12 @@
  * - `/api/v1`: `X-API-KEY`.
  */
 import type {} from '@fastify/cookie';
+import type { Scope } from '@workflow/workflow';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Config } from '../config';
 import type { Role, TenantRow, UserRow } from '../db/schema';
 import type { Repositories } from '../repositories';
+import { type AccessService, type AccessTarget, MISSING_SCOPE_MESSAGE } from '../services/access';
 import {
   type AuthService,
   hasRole,
@@ -21,16 +23,26 @@ import { ApiError } from './errors';
 export interface AuthContext {
   user: UserRow;
   tenant: TenantRow;
+  /** the workspace role: a system slug (owner, admin, member), a legacy one (editor, viewer) or a custom slug */
   role: Role;
   sessionId?: string;
   apiKeyId?: string;
   /** the key's scopes; empty = every route the role allows (checked by assertApiKeyScope) */
   apiKeyScopes?: string[];
+  /**
+   * P6-03: the caller's scopes per target (`accessTargetKey`), filled by `AccessService.scopesForAuth`.
+   * It lives on this request only and is never shared or stored.
+   */
+  scopeCache?: Map<string, ReadonlySet<Scope>>;
 }
 
 declare module 'fastify' {
   interface FastifyRequest {
     auth: AuthContext | null;
+  }
+  interface FastifyInstance {
+    /** P6-03: the scope checks (`ctx.access`), decorated in buildApp; `requireScope` reads it */
+    access: AccessService;
   }
 }
 
@@ -119,9 +131,43 @@ export function requireAuth(request: FastifyRequest): AuthContext {
   return request.auth;
 }
 
+/**
+ * The legacy gate (fail closed): `member`, an unknown or a custom slug ranks 0, so a route that still
+ * uses it refuses them. Routes move to `requireScope` lane by lane; `PATCH /executions/:id` keeps it
+ * until the cutover (L24).
+ */
 export function requireRole(request: FastifyRequest, minimum: Role): AuthContext {
   const auth = requireAuth(request);
   if (!hasRole(auth.role, minimum)) throw ApiError.forbidden();
+  return auth;
+}
+
+/**
+ * P6-03: the scope gate. 401 without a session; with a target, the target is looked up first (another
+ * workspace's id or a non-uuid id is the service's 404); 403 with n8n's text when the caller's scopes on
+ * the target (or the global scopes, with no target) hold none of `scope`. An array passes when any one
+ * is held (n8n's `anyOf`, e.g. `role:manage` or `role:manageProject`). The scopes are cached on the
+ * request (`auth.scopeCache`). API key scopes stay checked by `assertApiKeyScope` on the public routes.
+ */
+export async function requireScope(
+  request: FastifyRequest,
+  scope: Scope | readonly Scope[],
+  target?: AccessTarget,
+): Promise<AuthContext> {
+  const auth = requireAuth(request);
+  const access = request.server?.access;
+  // fail closed: an app built without the decorator refuses rather than allows
+  if (!access) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+  const held = await access.scopesForAuth(auth, target);
+  const wanted: readonly Scope[] = typeof scope === 'string' ? [scope] : scope;
+  if (!wanted.some((s) => held.has(s))) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+  return auth;
+}
+
+/** P6-03: the workspace owner only (`DELETE /tenant`; n8n has no tenants, so no scope names it) */
+export function requireOwner(request: FastifyRequest): AuthContext {
+  const auth = requireAuth(request);
+  if (auth.role !== 'owner') throw ApiError.forbidden();
   return auth;
 }
 

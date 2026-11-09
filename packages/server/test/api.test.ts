@@ -33,14 +33,8 @@ async function apiKey(role: 'owner' | 'viewer' = 'owner') {
     const key = await owner.client.data(owner.client.post('/rest/api-keys', { name: 'test' }));
     return { ...owner, key: key.key as string };
   }
-  const invite = await owner.client.data(
-    owner.client.post('/rest/members/invite', { email: 'v@example.com', role }),
-  );
-  const { TestClient } = await import('./helpers');
-  const viewer = new TestClient(server.app);
-  await viewer.data(
-    viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'V', password: 'Passw0rd!' }),
-  );
+  const { memberAs } = await import('./helpers');
+  const { client: viewer } = await memberAs(owner, role, { email: 'v@example.com', name: 'V' });
   const key = await viewer.data(viewer.post('/rest/api-keys', { name: 'viewer' }));
   return { ...owner, key: key.key as string };
 }
@@ -252,14 +246,8 @@ describe('system endpoints', () => {
       nodes: [node('Hook', 'core.webhook', { path: 'gone', httpMethod: 'POST' }, [0, 0], { webhookId: 'g' })],
     });
     await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/activate`));
-    const invite = await owner.client.data(
-      owner.client.post('/rest/members/invite', { email: 'adm@example.com', role: 'admin' }),
-    );
-    const { TestClient } = await import('./helpers');
-    const admin = new TestClient(server.app);
-    await admin.data(
-      admin.post(`/rest/invitations/${invite.token}/accept`, { name: 'A', password: 'Passw0rd!' }),
-    );
+    const { memberAs } = await import('./helpers');
+    const { client: admin } = await memberAs(owner, 'admin', { email: 'adm@example.com', name: 'A' });
     expect((await admin.request('DELETE', '/rest/tenant', { confirm: owner.tenant.slug })).statusCode).toBe(
       403,
     );

@@ -234,7 +234,7 @@ describe('S4 routes', () => {
   });
 
   it.each(['editor', 'viewer'] as const)('shows the MCP link but not the AI link to an %s', async (role) => {
-    backend().memberships[0].role = role;
+    backend().setDemoRole(role);
     const links = await settingsLinks();
     expect(links).toContain('MCP');
     expect(links).not.toContain('AI');

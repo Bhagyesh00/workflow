@@ -24,7 +24,7 @@ afterEach(() => setCurrentTenant(null));
 
 function as(role: Role) {
   const mock = signedIn();
-  mock.memberships[0].role = role;
+  mock.setDemoRole(role);
   setCurrentTenant(mock.session!.tenantId);
   return mock;
 }
@@ -85,14 +85,14 @@ describe('Settings > Assistant: the model', () => {
     noModel();
     const { model } = await seedCredentials();
     // an editor with no model: no link
-    mock.memberships[0].role = 'editor';
+    mock.setDemoRole('editor');
     const before = renderApp('/workflows');
     await screen.findByRole('link', { name: /Workflows/ }, WAIT);
     expect(screen.queryByRole('link', { name: 'Assistant' })).toBeNull();
     before.unmount();
 
     // the admin saves a model
-    mock.memberships[0].role = 'admin';
+    mock.setDemoRole('admin');
     const second = renderApp('/settings/assistant');
     await waitFor(() => expect(screen.getByRole('option', { name: 'Chat Model' })).toBeTruthy(), WAIT);
     await user.selectOptions(screen.getByLabelText(/Model provider/), 'ai.lmChatDemo');
@@ -101,7 +101,7 @@ describe('Settings > Assistant: the model', () => {
     await screen.findByText('Assistant model saved', undefined, WAIT);
     second.unmount();
 
-    mock.memberships[0].role = 'editor';
+    mock.setDemoRole('editor');
     renderApp('/workflows');
     expect(await screen.findByRole('link', { name: 'Assistant' }, WAIT)).toBeTruthy();
   });

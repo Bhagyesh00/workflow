@@ -3,6 +3,7 @@ import { sha256 } from '../src/services/auth';
 import {
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   ORIGIN,
   resetDatabase,
@@ -171,13 +172,7 @@ describe('auth', () => {
   it('switches between workspaces the user belongs to', async () => {
     const owner = await signup(server.app, { workspaceName: 'Main' });
     const other = await signup(server.app, { workspaceName: 'Other' });
-    const invite = await owner.client.data(
-      owner.client.post('/rest/members/invite', { email: other.user.email, role: 'editor' }),
-    );
-    const accept = new TestClient(server.app);
-    const accepted = await accept.data(
-      accept.post(`/rest/invitations/${invite.token}/accept`, { name: 'Other', password: 'Passw0rd!' }),
-    );
+    const accepted = await memberAs(owner, 'editor', { email: other.user.email, name: 'Other' });
     expect(accepted.tenant.id).toBe(owner.tenant.id);
     expect(accepted.role).toBe('editor');
 
@@ -246,14 +241,11 @@ describe('members and roles', () => {
 
   it('manages roles and protects the last owner', async () => {
     const owner = await signup(server.app);
-    const invite = await owner.client.data(
-      owner.client.post('/rest/members/invite', { email: 'admin@example.com', role: 'admin' }),
-    );
-    const admin = new TestClient(server.app);
-    const joined = await admin.data(
-      admin.post(`/rest/invitations/${invite.token}/accept`, { name: 'Admin', password: 'Passw0rd!' }),
-    );
-    const adminId = joined.user.id;
+    const { client: admin, user } = await memberAs(owner, 'admin', {
+      email: 'admin@example.com',
+      name: 'Admin',
+    });
+    const adminId = user.id;
 
     // admins cannot touch owners or grant ownership
     expect((await admin.patch(`/rest/members/${owner.user.id}`, { role: 'viewer' })).statusCode).toBe(403);

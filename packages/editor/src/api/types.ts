@@ -25,17 +25,27 @@ import type {
   NodeProperty,
   NodeTypeDescription,
   RunData,
+  Scope,
   StickyNote,
   TaskData,
   TestRunStatus,
+  DataTableInfo as WorkflowDataTableInfo,
   WorkflowDiff,
   WorkflowNode,
   WorkflowNodeGroup,
   WorkflowSettings,
 } from '@workflow/workflow';
 
-export type Role = 'owner' | 'admin' | 'editor' | 'viewer';
+export type { Scope };
 
+/** P6-39: the old words, mapped by the server's legacy role map until L24 removes them */
+export type LegacyRole = 'editor' | 'viewer';
+/** P6-03: the system workspace roles */
+export type SystemRole = 'owner' | 'admin' | 'member';
+/** a workspace role: a system role, an old word, or a custom global role slug (as the server's db/role-types.ts) */
+export type Role = SystemRole | LegacyRole | (string & {});
+
+/** the roles the member pages offer today; L24 changes the list */
 export const ROLES: Role[] = ['owner', 'admin', 'editor', 'viewer'];
 
 export interface User {
@@ -54,6 +64,8 @@ export interface AuthResult {
   user: User;
   tenant: Tenant;
   role: Role;
+  /** P6-03: the workspace role's scopes (`/auth/switch-tenant` answers them too) */
+  globalScopes?: Scope[];
 }
 
 export interface TenantMembership extends Tenant {
@@ -62,6 +74,8 @@ export interface TenantMembership extends Tenant {
 
 export interface Me extends AuthResult {
   tenants: TenantMembership[];
+  /** P6-03: the scopes of the workspace role; `can()` (lib/permissions.ts) reads them */
+  globalScopes: Scope[];
 }
 
 export interface Brand {
@@ -85,6 +99,8 @@ export interface Settings {
   evaluationConcurrencyLimit?: number;
   /** P5-09: the AI builder's model; admins only (the credential id never reaches a lower role) */
   ai?: TenantAiSettings;
+  /** P6-33: the personal space policy (absent flags are on) */
+  securityPolicy?: { personalSpacePublishing?: boolean; personalSpaceSharing?: boolean };
 }
 
 /** body of PATCH /settings (admin) */
@@ -101,7 +117,257 @@ export interface Tag {
   name: string;
 }
 
-export interface WorkflowSummary {
+// ---------------------------------------------------------------------------------------------
+// Projects, roles, sharing and moving (Phase 6 S1: P6-03, P6-29, P6-30, P6-32, P6-33)
+// ---------------------------------------------------------------------------------------------
+
+export type ProjectType = 'personal' | 'team';
+
+/** n8n's project icon: an emoji or a named icon */
+export interface ProjectIcon {
+  type: 'emoji' | 'icon';
+  value: string;
+  color?: string;
+}
+
+/** a project as rows name it (`homeProject`, `sharedWithProjects`, pickers) */
+export interface ProjectRef {
+  id: string;
+  name: string;
+  type: ProjectType;
+  icon: ProjectIcon | null;
+}
+
+/** a row of GET /projects, /projects/my-projects; `role` and `scopes` are the caller's in it */
+export interface Project extends ProjectRef {
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** the caller's project role slug (system or custom); absent when the caller reaches it through a global role */
+  role?: string;
+  scopes?: Scope[];
+}
+
+/** a member of a project (GET /projects/:id `relations`) */
+export interface ProjectRelation {
+  id: string;
+  email: string;
+  name: string;
+  /** a project role slug: `project:admin`, `project:editor`, `project:viewer`, `project:personalOwner` or a custom one */
+  role: string;
+}
+
+/** a user who reaches a team project through a global role (owner, admin); never part of `relations` */
+export interface ProjectImplicitMember {
+  id: string;
+  email: string;
+  name: string;
+  globalRole: { slug: string; displayName: string };
+}
+
+/** GET /projects/:id, /projects/personal */
+export interface ProjectDetail extends Project {
+  relations: ProjectRelation[];
+  implicitMembers: ProjectImplicitMember[];
+  /** what the caller may do in this project */
+  scopes: Scope[];
+  customTelemetryTags?: Array<{ key: string; value: string }>;
+  creatorId?: string | null;
+}
+
+/** GET /projects with `take` or `skip` */
+export interface ProjectPage {
+  count: number;
+  data: Project[];
+}
+
+/** GET /projects/count */
+export type ProjectCount = Record<ProjectType, number>;
+
+/** GET /projects query: no `take` and no `skip` answers a bare array */
+export interface ProjectListQuery {
+  take?: number;
+  skip?: number;
+  search?: string;
+  type?: ProjectType;
+}
+
+/** POST /projects */
+export interface ProjectCreateBody {
+  name: string;
+  icon?: ProjectIcon;
+}
+
+/** PATCH /projects/:id */
+export interface ProjectPatchBody {
+  name?: string;
+  icon?: ProjectIcon;
+  description?: string;
+  customTelemetryTags?: Array<{ key: string; value: string }>;
+}
+
+/** one member in POST /projects/:id/users */
+export interface ProjectRelationInput {
+  userId: string;
+  role: string;
+}
+
+/** POST /projects/:id/users: 201 with `conflicts` when some were already members, 409 when none was added */
+export interface ProjectAddUsersResult {
+  conflicts?: Array<{ userId: string; currentRole: string; requestedRole: string }>;
+}
+
+export type RoleType = 'global' | 'project' | 'workflow' | 'credential' | 'secretsProviderConnection';
+
+/** a role of GET /roles: a system role (in code) or a custom one (`roles` table) */
+export interface CustomRole {
+  slug: string;
+  displayName: string;
+  description: string | null;
+  systemRole: boolean;
+  roleType: RoleType;
+  scopes: Scope[];
+  usedByUsers?: number;
+  usedByProjects?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** GET /roles: every role by type, as n8n's `AllRolesMap` */
+export interface RolesMap {
+  global: CustomRole[];
+  project: CustomRole[];
+  workflow: CustomRole[];
+  credential: CustomRole[];
+  secretsProviderConnection: CustomRole[];
+}
+
+/** POST /roles */
+export interface RoleCreateBody {
+  /** 2 to 100 characters */
+  displayName: string;
+  /** at most 500 characters */
+  description?: string;
+  roleType: 'project' | 'global';
+  scopes: Scope[];
+}
+
+/** PATCH /roles/:slug */
+export interface RolePatchBody {
+  displayName?: string;
+  description?: string;
+  scopes?: Scope[];
+}
+
+/** a project that uses a project role (GET /roles/:slug/assignments) */
+export interface RoleAssignment {
+  projectId: string;
+  projectName: string;
+  projectIcon: ProjectIcon | null;
+  memberCount: number;
+  lastAssigned: string | null;
+}
+
+export interface RoleAssignmentsPage {
+  projects: RoleAssignment[];
+  totalProjects: number;
+}
+
+/** GET /roles/:slug/members, /roles/:slug/assignments/:projectId/members */
+export interface RoleMember {
+  userId: string;
+  name: string;
+  email: string;
+  role: string;
+}
+
+export interface RoleMembersPage {
+  members: RoleMember[];
+  total?: number;
+}
+
+/** what the access fields of a project-owned row carry (lists with `includeScopes`, GET one) */
+export interface ProjectOwnedFields {
+  projectId?: string;
+  homeProject?: ProjectRef | null;
+  sharedWithProjects?: ProjectRef[];
+  /** the caller's scopes on this row */
+  scopes?: Scope[];
+}
+
+/** the project filter of the list calls */
+export interface ProjectListFilter {
+  projectId?: string;
+  /** only rows shared with the caller's projects (the Shared page) */
+  onlySharedWithMe?: boolean;
+  /** each row carries the caller's `scopes` */
+  includeScopes?: boolean;
+}
+
+/** one reason a move leaves something restricted (n8n's PolicyViolation; open strings) */
+export interface PolicyViolation {
+  kind: string;
+  checkId: string;
+  message: string;
+  subject?: string;
+  subjectType?: string;
+  scope?: string;
+  matchedRuleId?: string;
+  projectId?: string;
+  optInAvailable?: boolean;
+}
+
+/** GET /{workflows,credentials,folders}/:id/transfer-preview?destinationProjectId= (advisory) */
+export interface TransferPreview {
+  /** types the destination project does not allow */
+  restricted: PolicyViolation[];
+  /** a policy check failed, so the lists can be incomplete */
+  checkFailed: boolean;
+  /** workflow: why the move would unpublish it (empty when it would not) */
+  unpublishReasons?: PolicyViolation[];
+  /** folder: published workflows in the tree the move would unpublish */
+  workflowsToUnpublish?: Array<{ id: string; name: string }>;
+}
+
+/** PUT /workflows/:id/transfer */
+export interface WorkflowTransferBody {
+  destinationProjectId: string;
+  /** credential ids the move shares into the destination */
+  shareCredentials?: string[];
+  destinationParentFolderId?: string;
+}
+
+/** PUT /credentials/:id/transfer */
+export interface CredentialTransferBody {
+  destinationProjectId: string;
+}
+
+/** PUT /folders/:id/transfer (the whole tree) */
+export interface FolderTransferBody {
+  destinationProjectId: string;
+  destinationParentFolderId?: string;
+  shareCredentials?: string[];
+}
+
+/** GET /settings/security (`securitySettings:manage`): the personal space policy with its existing counts */
+export interface SecurityPolicy {
+  personalSpacePublishing: boolean;
+  personalSpaceSharing: boolean;
+  publishedPersonalWorkflowsCount: number;
+  sharedPersonalWorkflowsCount: number;
+  sharedPersonalCredentialsCount: number;
+}
+
+/** POST /settings/security */
+export interface SecurityPolicyPatch {
+  personalSpacePublishing?: boolean;
+  personalSpaceSharing?: boolean;
+}
+
+/** DELETE /members/:userId (P6-31): the removed member's personal work moves to a project or is deleted */
+export type MemberRemovalChoice = { transferToProjectId: string } | { deleteData: true };
+
+export interface WorkflowSummary extends ProjectOwnedFields {
   id: string;
   name: string;
   active: boolean;
@@ -114,7 +380,7 @@ export interface WorkflowSummary {
   publishedVersionId: string | null;
 }
 
-export interface WorkflowDTO {
+export interface WorkflowDTO extends ProjectOwnedFields {
   id: string;
   name: string;
   nodes: WorkflowNode[];
@@ -149,10 +415,21 @@ export interface WorkflowCreateBody {
   nodeGroups?: WorkflowNodeGroup[];
   /** P3-07: create inside this folder (null or omitted = root) */
   folderId?: string | null;
+  /** P6-22: the project the workflow goes to (omitted = the server's default project) */
+  projectId?: string;
 }
 
 export type WorkflowPatchBody = Partial<
-  Omit<WorkflowDTO, 'id' | 'createdAt' | 'updatedAt' | 'folderId' | 'isArchived' | 'publishedVersionId'>
+  Omit<
+    WorkflowDTO,
+    | 'id'
+    | 'createdAt'
+    | 'updatedAt'
+    | 'folderId'
+    | 'isArchived'
+    | 'publishedVersionId'
+    | keyof ProjectOwnedFields
+  >
 > & {
   versionId: string;
   tagIds?: string[];
@@ -266,7 +543,7 @@ export interface PublishTimelineEntry {
 // Folders and favorites (P3-07)
 // ---------------------------------------------------------------------------------------------
 
-export interface Folder {
+export interface Folder extends ProjectOwnedFields {
   id: string;
   name: string;
   /** null = top level */
@@ -291,7 +568,7 @@ export interface FolderDetail extends Folder {
   subFolderCount: number;
 }
 
-export interface FolderListQuery {
+export interface FolderListQuery extends ProjectListFilter {
   /** a folder id, or 'root' for the top level; omitted = every folder */
   parentFolderId?: string;
   search?: string;
@@ -304,6 +581,8 @@ export interface FolderListQuery {
 export interface FolderCreateBody {
   name: string;
   parentFolderId?: string | null;
+  /** P6-26: the project the folder goes to (omitted = the server's default project) */
+  projectId?: string;
 }
 
 export interface FolderUpdateBody {
@@ -313,7 +592,8 @@ export interface FolderUpdateBody {
   tagIds?: string[];
 }
 
-export type FavoriteResourceType = 'workflow' | 'folder' | 'dataTable';
+/** P6-41: `project` (the server's `user_favorites.resource_type` gains it in 0022) */
+export type FavoriteResourceType = 'workflow' | 'folder' | 'dataTable' | 'project';
 
 export interface Favorite {
   resourceType: FavoriteResourceType;
@@ -380,21 +660,55 @@ export interface ExecutionDetail extends ExecutionSummary {
     nodeGroups?: WorkflowNodeGroup[];
   };
   state: ExecutionState;
+  /** P6-25: the caller's scopes on the execution's workflow */
+  scopes?: Scope[];
 }
 
-export interface CredentialSummary {
+export interface CredentialSummary extends ProjectOwnedFields {
   id: string;
   name: string;
   type: string;
   createdAt: string;
   updatedAt: string;
+  /** P6-24: usable by every member, read only (`credential:shareGlobally` sets it) */
+  isGlobal?: boolean;
 }
 
-export interface CredentialDetail {
+export interface CredentialDetail extends ProjectOwnedFields {
   id: string;
   name: string;
   type: string;
   data: Record<string, unknown>;
+  isGlobal?: boolean;
+}
+
+/** GET /credentials query (P6-24) */
+export interface CredentialListQuery extends ProjectListFilter {
+  type?: string;
+}
+
+/** POST /credentials */
+export interface CredentialCreateBody {
+  name: string;
+  type: string;
+  data: Record<string, unknown>;
+  /** the project the credential goes to (omitted = the server's default project) */
+  projectId?: string;
+}
+
+/** PATCH /credentials/:id; `isGlobal` needs `credential:shareGlobally` */
+export interface CredentialPatchBody {
+  name?: string;
+  data?: Record<string, unknown>;
+  isGlobal?: boolean;
+}
+
+/** POST /credentials/test: `projectId` names the project whose vaults the data may read */
+export interface CredentialTestBody {
+  type: string;
+  data: Record<string, unknown>;
+  id?: string;
+  projectId?: string;
 }
 
 export interface CredentialTestResult {
@@ -406,6 +720,15 @@ export interface Variable {
   id: string;
   key: string;
   value: string;
+  /** P6-31: null or absent = a global variable */
+  projectId?: string | null;
+}
+
+/** POST, PATCH /variables: with `projectId` a project variable (`projectVariable:*`) */
+export interface VariableBody {
+  key: string;
+  value: string;
+  projectId?: string;
 }
 
 export interface Member {
@@ -627,7 +950,6 @@ export type {
   DataTableFilter,
   DataTableFilterClause,
   DataTableFilterCondition,
-  DataTableInfo,
   DataTableInsertResult,
   DataTableInsertReturnType,
   DataTableListQuery,
@@ -639,8 +961,13 @@ export type {
   DataTableSortDirection,
 } from '@workflow/workflow';
 
+/** the engine's table info plus the project fields (P6-23) */
+export type DataTableInfo = WorkflowDataTableInfo & ProjectOwnedFields;
+
 /** POST /data-tables; with `csv` the rows of the CSV text become the first rows */
 export interface DataTableCreateBody {
+  /** P6-23: the project the table goes to (omitted = the server's default project) */
+  projectId?: string;
   name: string;
   /** `csvColumnName`: the header of the CSV column that fills the column */
   columns: Array<DataTableColumnInput & { csvColumnName?: string }>;
@@ -732,12 +1059,18 @@ export interface SecretConnection {
   credentialsCount: number;
   createdAt: string;
   updatedAt: string;
+  /** P6-28: the owning project (null or absent = a workspace connection) */
+  projectId?: string | null;
+  /** P6-28: the projects a workspace connection is shared with */
+  projects?: ProjectRef[];
 }
 
 export interface SecretConnectionCreateBody {
   providerKey: string;
   type: string;
   settings: Record<string, unknown>;
+  /** P6-28: a workspace connection shared with these projects */
+  projectIds?: string[];
 }
 
 /** a blanked secret sent back keeps its stored value */
@@ -745,6 +1078,8 @@ export interface SecretConnectionPatchBody {
   type?: string;
   settings?: Record<string, unknown>;
   isEnabled?: boolean;
+  /** P6-28: replaces the projects a workspace connection is shared with */
+  projectIds?: string[];
 }
 
 export interface SecretConnectionTestResult {

@@ -1,10 +1,13 @@
 /**
- * /rest/secret-providers (P4-07), n8n's connections model without projects. Admin and owner manage
- * connections and read provider types; editor and above list secret names, never values.
+ * /rest/secret-providers (P4-07), n8n's connections model. Admin and owner manage connections and read
+ * provider types; editor and above list secret names, never values. P6-28 (L8): project vaults under
+ * `/secret-providers/projects/:projectId/connections` and the project's secret names, gated by
+ * `externalSecretsProvider:*` and `externalSecret:list` on the project; C0 registers those 7 routes with
+ * their final path and gate, and their handlers throw until L8.
  */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { requireRole } from '../http/auth';
+import { requireRole, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import type { SecretsManager } from '../services/secrets/manager';
 import type { SecretActor, SecretProviderType } from '../services/secrets/types';
@@ -18,6 +21,8 @@ const providerKey = z
 const keyParams = z.object({ providerKey });
 const typeName = z.string().min(1).max(128);
 const typeParams = z.object({ type: typeName });
+/** P6-28: the project's id (a non-uuid is the access service's 404) */
+const projectParams = z.object({ projectId: z.string() });
 const settings = z.record(z.string(), z.unknown());
 
 const createBody = z.object({
@@ -113,5 +118,46 @@ export function registerSecretConnectionRoutes(
     const auth = requireRole(request, 'admin');
     const params = parse(keyParams, request.params);
     return { data: await secrets.reloadConnection(auth.tenant.id, params.providerKey, actor(request)) };
+  });
+
+  // P6-28 (L8): project vaults, n8n's project connections controller; C0 stubs, gate first
+  const projectOf = (request: FastifyRequest) => parse(projectParams, request.params).projectId;
+  const notImplemented = (): never => {
+    throw new Error('not implemented (L8)');
+  };
+
+  app.post('/secret-providers/projects/:projectId/connections', async (request) => {
+    await requireScope(request, 'externalSecretsProvider:create', { projectId: projectOf(request) });
+    return notImplemented();
+  });
+
+  app.get('/secret-providers/projects/:projectId/connections', async (request) => {
+    await requireScope(request, 'externalSecretsProvider:list', { projectId: projectOf(request) });
+    return notImplemented();
+  });
+
+  app.get('/secret-providers/projects/:projectId/connections/:providerKey', async (request) => {
+    await requireScope(request, 'externalSecretsProvider:read', { projectId: projectOf(request) });
+    return notImplemented();
+  });
+
+  app.patch('/secret-providers/projects/:projectId/connections/:providerKey', async (request) => {
+    await requireScope(request, 'externalSecretsProvider:update', { projectId: projectOf(request) });
+    return notImplemented();
+  });
+
+  app.delete('/secret-providers/projects/:projectId/connections/:providerKey', async (request) => {
+    await requireScope(request, 'externalSecretsProvider:delete', { projectId: projectOf(request) });
+    return notImplemented();
+  });
+
+  app.post('/secret-providers/projects/:projectId/connections/:providerKey/test', async (request) => {
+    await requireScope(request, 'externalSecretsProvider:update', { projectId: projectOf(request) });
+    return notImplemented();
+  });
+
+  app.get('/secret-providers/completions/secrets/project/:projectId', async (request) => {
+    await requireScope(request, 'externalSecret:list', { projectId: projectOf(request) });
+    return notImplemented();
   });
 }

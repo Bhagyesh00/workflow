@@ -195,7 +195,7 @@ describe('Assistant page (P5-67)', () => {
   });
 
   it('lets a viewer chat', async () => {
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     const { composer, user } = await openPage();
     await send(user, composer, 'Hi from a viewer');
     expect(await screen.findByText(/This is the demo Assistant/, undefined, WAIT)).toBeTruthy();
@@ -222,7 +222,7 @@ describe('Assistant page (P5-67)', () => {
   });
 
   it.each(['owner', 'admin'] as const)('gives an %s the setup wizard while no model is set', async (role) => {
-    backend().memberships[0].role = role;
+    backend().setDemoRole(role);
     backend().options.assistant = { enabled: true, modelSet: false };
     renderApp('/assistant');
     expect(await screen.findByRole('region', { name: 'Set up the Assistant' }, WAIT)).toBeTruthy();
@@ -231,7 +231,7 @@ describe('Assistant page (P5-67)', () => {
   });
 
   it.each(['editor', 'viewer'] as const)('tells an %s that an admin sets the model', async (role) => {
-    backend().memberships[0].role = role;
+    backend().setDemoRole(role);
     backend().options.assistant = { enabled: true, modelSet: false };
     renderApp('/assistant');
     expect(await screen.findByText(ASSISTANT_NO_MODEL_TEXT, undefined, WAIT)).toBeTruthy();

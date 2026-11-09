@@ -22,6 +22,7 @@ import { ExecutionRepository } from './executions';
 import { FavoriteRepository } from './favorites';
 import { FolderRepository } from './folders';
 import { McpOAuthRepository } from './mcp-oauth';
+import { ProjectRepository } from './projects';
 import { PublishHistoryRepository } from './publish-history';
 import {
   AuditRepository,
@@ -32,8 +33,10 @@ import {
   WebhookRepository,
 } from './resources';
 import { ReviewRepository } from './reviews';
+import { RoleRepository } from './roles';
 import { ScheduleSlotRepository } from './schedule-slots';
 import { SecretConnectionRepository } from './secrets';
+import { ShareRepository } from './shares';
 import { StaticDataRepository } from './static-data';
 import { TestRunRepository } from './test-runs';
 import { TagRepository, WorkflowRepository, WorkflowVersionRepository } from './workflows';
@@ -82,6 +85,12 @@ export interface Repositories {
   assistantConfirmations: AssistantConfirmationRepository;
   /** P5-72 (L9) */
   assistantMcp: AssistantMcpRepository;
+  /** P6-03 (L1): projects and their relations (`projects.relations`) */
+  projects: ProjectRepository;
+  /** P6-29 (L9): workflow and credential shares */
+  shares: ShareRepository;
+  /** P6-32 (L11): custom roles */
+  roles: RoleRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -117,6 +126,9 @@ export function createRepositories(db: DbOrTx): Repositories {
     assistantThreads: new AssistantThreadRepository(db),
     assistantConfirmations: new AssistantConfirmationRepository(db),
     assistantMcp: new AssistantMcpRepository(db),
+    projects: new ProjectRepository(db),
+    shares: new ShareRepository(db),
+    roles: new RoleRepository(db),
   };
 }
 
@@ -150,8 +162,27 @@ export type {
   OAuthUserConsentInsert,
   OAuthUserConsentRow,
 } from './mcp-oauth';
+export type {
+  MovedResources,
+  ProjectCreateInput,
+  ProjectMemberRecord,
+  ProjectPatch,
+  UserProjectRecord,
+} from './projects';
+export { PERSONAL_OWNER_ROLE, ProjectRelationRepository, ProjectRepository } from './projects';
 export type { PublishEvent, PublishTimelineEntry } from './publish-history';
-export type { AuditEntry } from './resources';
+export type { AuditEntry, CredentialListOptions, VariableListOptions } from './resources';
+export type { RoleCreateInput, RolePatch, RoleType } from './roles';
+export { RoleRepository } from './roles';
+export type {
+  AccessListOptions,
+  CredentialShareRecord,
+  ShareKind,
+  ShareProjectRef,
+  ShareSetResult,
+  WorkflowShareRecord,
+} from './shares';
+export { DEFAULT_SHARE_ROLE, ShareRepository } from './shares';
 export type {
   TestCaseListOptions,
   TestCasePatch,

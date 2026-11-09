@@ -15,11 +15,13 @@ import { FormField, Select, TextInput } from '../components/ui/Field';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
 import { Segmented } from '../components/ui/Tabs';
 import { formatRelative } from '../lib/format';
+import { usePermissions } from '../lib/permissions';
 import { toast, useUiStore } from '../stores/ui-store';
 
 const ROLE_HINTS: Record<Role, string> = {
   owner: 'Everything, including billing and deleting the workspace',
   admin: 'Members and all resources',
+  member: 'Only the projects they belong to',
   editor: 'Workflows, credentials and executions',
   viewer: 'Read-only, cannot read credentials',
 };
@@ -30,9 +32,12 @@ function canManage(role: Role | undefined): boolean {
 
 export function SettingsLayout() {
   const me = useMe();
+  const { can } = usePermissions();
   const links = [
     { to: '/settings/account', label: 'Your account' },
     { to: '/settings/members', label: 'Members' },
+    // P6-46: project and instance roles
+    ...(can('role:manage') ? [{ to: '/settings/roles', label: 'Roles' }] : []),
     { to: '/settings/api-keys', label: 'API keys' },
     { to: '/settings/variables', label: 'Variables' },
     { to: '/settings/security', label: 'Security' },

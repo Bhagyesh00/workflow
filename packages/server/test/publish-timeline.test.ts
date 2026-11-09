@@ -8,6 +8,7 @@ import {
   chain,
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   setNode,
@@ -45,15 +46,7 @@ const published = (path: string) => ({
 });
 
 async function viewerOf(owner: Owner) {
-  const email = `viewer-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await owner.client.data(
-    owner.client.post('/rest/members/invite', { email, role: 'viewer' }),
-  );
-  const client = new TestClient(server.app);
-  await client.data(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: 'Vera Viewer', password: 'Passw0rd!' }),
-  );
-  return client;
+  return (await memberAs(owner, 'viewer', { name: 'Vera Viewer' })).client;
 }
 
 const timeline = (client: TestClient, id: string, query = '') =>

@@ -23,13 +23,13 @@ import {
   createTestServer,
   createWorkflow,
   flushRedis,
+  memberAs,
   node,
-  ORIGIN,
   resetDatabase,
   signup as signupFrom,
   TEST_REDIS,
-  TestClient,
   type TestServer,
+  teamProjectOf,
   testConfig,
   testPackage,
   waitFor,
@@ -191,13 +191,7 @@ const signup = (app: TestServer['app']) => {
 };
 
 async function member(owner: Awaited<ReturnType<typeof signup>>, role: 'admin' | 'editor' | 'viewer') {
-  const email = `${role}-${randomUUID().slice(0, 8)}@example.com`;
-  const invite = await owner.client.data(owner.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app, ORIGIN);
-  await client.data(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: role, password: 'Passw0rd!' }),
-  );
-  return client;
+  return (await memberAs(owner, role)).client;
 }
 
 /** an enabled connection whose vault holds `secrets` */
@@ -827,7 +821,7 @@ describe('states, retries and refresh', () => {
         data: { apiKey: '={{ $secrets.main.key }}' },
       });
       const read = await fresh.credentials
-        .provider(owner.tenant.id)
+        .provider(owner.tenant.id, await teamProjectOf(server, owner.tenant.id))
         .get({ id: credential.id, name: 'C' }, 'testApi');
       expect(read.apiKey).toBe('value');
       await fresh.secrets.stop();
@@ -1056,7 +1050,7 @@ describe('credentials read secrets', () => {
       data: { apiKey: '={{ $vars.prefix + $secrets.main.key }}' },
     });
     const data = await server.ctx.credentials
-      .provider(owner.tenant.id)
+      .provider(owner.tenant.id, await teamProjectOf(server, owner.tenant.id))
       .get({ id: credential.id, name: 'C' }, 'testApi');
     expect(data.apiKey).toBe('p-vault-value');
   });
@@ -1136,7 +1130,10 @@ describe('credentials read secrets', () => {
     expect(afterCallback.oauthTokenData).toMatchObject({ access_token: 'access-1' });
 
     // what core's refresh hands to provider().update: the resolved data and the new token
-    const provider = server.ctx.credentials.provider(owner.tenant.id);
+    const provider = server.ctx.credentials.provider(
+      owner.tenant.id,
+      await teamProjectOf(server, owner.tenant.id),
+    );
     const ref = { id: credential.id, name: 'OAuth' };
     const resolved = await provider.get(ref, 'testPkceOAuth2Api');
     expect(resolved.clientSecret).toBe('secret-from-vault');
@@ -1213,7 +1210,7 @@ describe('credentials read secrets', () => {
     const map = vi.spyOn(server.ctx.repos.variables, 'map');
     const secretsFor = vi.spyOn(server.ctx.secrets, 'secretsFor');
     const data = await server.ctx.credentials
-      .provider(owner.tenant.id)
+      .provider(owner.tenant.id, await teamProjectOf(server, owner.tenant.id))
       .get({ id: credential.id, name: 'Plain' }, 'testApi');
     expect(data.apiKey).toBe('typed');
     expect(map).not.toHaveBeenCalled();

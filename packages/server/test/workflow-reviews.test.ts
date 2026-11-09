@@ -8,11 +8,12 @@ import {
   chain,
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   setNode,
   signup,
-  TestClient,
+  type TestClient,
   type TestServer,
 } from './helpers';
 
@@ -38,13 +39,8 @@ interface Member {
 }
 
 async function member(owner: Owner, role: 'admin' | 'editor' | 'viewer'): Promise<Member> {
-  const email = `${role}-${Math.random().toString(36).slice(2, 10)}@example.com`;
-  const invite = await owner.client.data(owner.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app);
-  const accepted = await client.data<{ user: { id: string } }>(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: `${role} user`, password: 'Passw0rd!' }),
-  );
-  return { client, id: accepted.user.id };
+  const { client, user } = await memberAs(owner, role, { name: `${role} user` });
+  return { client, id: user.id };
 }
 
 async function workspace(enabled = true) {

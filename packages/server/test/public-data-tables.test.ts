@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { API_KEY_SCOPES, assertApiKeyScope } from '../src/http/api-key-scopes';
 import type { AuthContext } from '../src/http/auth';
-import { createTestServer, resetDatabase, signup, TestClient, type TestServer } from './helpers';
+import { createTestServer, memberAs, resetDatabase, signup, type TestServer } from './helpers';
 
 let server: TestServer;
 
@@ -24,13 +24,7 @@ async function setup(scopes: string[] = []) {
 
 async function viewerKey() {
   const owner = await signup(server.app);
-  const invite = await owner.client.data(
-    owner.client.post('/rest/members/invite', { email: 'v@example.com', role: 'viewer' }),
-  );
-  const viewer = new TestClient(server.app);
-  await viewer.data(
-    viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'V', password: 'Passw0rd!' }),
-  );
+  const { client: viewer } = await memberAs(owner, 'viewer', { email: 'v@example.com', name: 'V' });
   const key = await viewer.data(viewer.post('/rest/api-keys', { name: 'v' }));
   return key.key as string;
 }

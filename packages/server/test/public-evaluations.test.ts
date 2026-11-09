@@ -5,10 +5,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   signup,
-  TestClient,
   type TestServer,
   waitFor,
 } from './helpers';
@@ -44,13 +44,7 @@ async function keyFor(owner: Owner, scopes: string[]) {
 }
 
 async function viewerKey(owner: Owner, scopes: string[]) {
-  const invite = await owner.client.data(
-    owner.client.post('/rest/members/invite', { email: `v${Date.now()}@example.com`, role: 'viewer' }),
-  );
-  const viewer = new TestClient(server.app);
-  await viewer.data(
-    viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'V', password: 'Passw0rd!' }),
-  );
+  const { client: viewer } = await memberAs(owner, 'viewer', { name: 'V' });
   const key = await viewer.data(viewer.post('/rest/api-keys', { name: 'v', scopes }));
   return key.key as string;
 }

@@ -13,6 +13,7 @@ import {
   chain,
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   signup as signupAs,
@@ -442,13 +443,10 @@ describe('POST /workflows/:id/listen-test-trigger', () => {
     expect((await listen(b.client, wf.id, 'Events')).statusCode).toBe(404);
     expect((await b.client.delete(url(wf.id))).statusCode).toBe(404);
 
-    const invite = await a.client.data<{ token: string }>(
-      a.client.post('/rest/members/invite', { email: 'viewer-p4@example.com', role: 'viewer' }),
-    );
-    const viewer = new TestClient(server.app);
-    await viewer.data(
-      viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'Viewer', password: 'Passw0rd!' }),
-    );
+    const { client: viewer } = await memberAs(a, 'viewer', {
+      email: 'viewer-p4@example.com',
+      name: 'Viewer',
+    });
     expect((await listen(viewer, wf.id, 'Events')).statusCode).toBe(403);
     expect((await viewer.delete(url(wf.id))).statusCode).toBe(403);
     expect((await new TestClient(server.app).post(url(wf.id), { nodeName: 'Events' })).statusCode).toBe(401);

@@ -49,22 +49,30 @@ export class CredentialService {
    * use it comes through here (or `readResolved`); what is stored stays the expression. Errors thrown
    * have fixed texts.
    */
-  async resolveData(tenantId: string, data: DataObject): Promise<DataObject> {
+  async resolveData(tenantId: string, projectId: string | null, data: DataObject): Promise<DataObject> {
     if (!hasCredentialExpressions(data)) return data;
+    // P6 S1: `projectId` is the credential's project (null for a body with no project): its `$vars` and
+    // `$secrets`; the vaults a project may read are L8's (`SecretsManager.secretsFor`)
     return resolveCredentialData(data, {
       tenantId,
-      vars: await this.repos.variables.map(tenantId),
+      projectId,
+      vars: await this.repos.variables.map(tenantId, projectId ?? undefined),
       secrets: this.secrets,
     });
   }
 
   /** a stored credential as a node or a token call uses it. Type defaults are not expressions of the user. */
   async readResolved(row: CredentialRow): Promise<DataObject> {
-    return this.withDefaults(row.type, await this.resolveData(row.tenantId, this.decrypt(row)));
+    return this.withDefaults(
+      row.type,
+      await this.resolveData(row.tenantId, row.projectId, this.decrypt(row)),
+    );
   }
 
   private async saveSecretKeys(row: CredentialRow, data: DataObject): Promise<CredentialRow> {
-    const vars = hasCredentialExpressions(data) ? await this.repos.variables.map(row.tenantId) : {};
+    const vars = hasCredentialExpressions(data)
+      ? await this.repos.variables.map(row.tenantId, row.projectId)
+      : {};
     const secretKeys = collectSecretKeys(data, vars);
     if (secretKeys.join() === row.secretKeys.join()) return row;
     await this.repos.secrets.setCredentialSecretKeys(row.tenantId, row.id, secretKeys);
@@ -120,8 +128,14 @@ export class CredentialService {
     return out;
   }
 
-  async create(tenantId: string, input: { name: string; type: string; data: DataObject }, userId?: string) {
+  async create(
+    tenantId: string,
+    input: { name: string; type: string; data: DataObject; projectId?: string },
+    userId?: string,
+  ) {
     this.resolvedType(input.type);
+    // P6 S1: the project the route resolved, else the workspace's default (L24 makes it required)
+    const projectId = input.projectId ?? (await this.repos.projects.defaultProjectFor(tenantId));
     const id = randomUUID();
     const clean = stripSentinels(input.data);
     const row = await this.repos.credentials.create(tenantId, {
@@ -129,6 +143,7 @@ export class CredentialService {
       name: input.name,
       type: input.type,
       dataEnc: this.encrypt(tenantId, id, clean),
+      projectId,
       createdBy: userId,
     });
     return this.saveSecretKeys(row, clean);
@@ -162,8 +177,14 @@ export class CredentialService {
     await this.repos.credentials.update(tenantId, id, { dataEnc: this.encrypt(tenantId, id, data) });
   }
 
-  /** CredentialsProvider for executions of one tenant */
-  provider(tenantId: string): CredentialsProvider {
+  /**
+   * CredentialsProvider for executions of one tenant. P6 S1: the run's `projectId` and the ids a server path
+   * allows (`options.allow`, never from a node or a body); until L4 the lookup stays tenant wide.
+   */
+  provider(tenantId: string, projectId: string, options: { allow?: string[] } = {}): CredentialsProvider {
+    // stub (L4): the project and the allow list do not narrow the lookup yet
+    void projectId;
+    void options;
     const find = async (ref: NodeCredentialRef, type: string): Promise<CredentialRow> => {
       let row = ref.id ? await this.repos.credentials.get(tenantId, ref.id) : undefined;
       if (!row && !ref.id && ref.name) {
@@ -171,7 +192,8 @@ export class CredentialService {
           .list()
           .map((t) => t.name)
           .filter((name) => this.types.isA(name, type));
-        row = await this.repos.credentials.findByName(tenantId, ref.name, candidates);
+        // null keeps the workspace-wide name lookup until L4 passes the run's project
+        row = await this.repos.credentials.findByName(tenantId, null, ref.name, candidates);
       }
       if (!row) throw new Error(`Credential "${ref.name || ref.id}" was not found`);
       if (row.type !== type && !this.types.isA(row.type, type)) {

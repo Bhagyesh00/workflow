@@ -24,6 +24,7 @@ import { Redis } from 'ioredis';
 import { buildApp } from '../src/app';
 import { type Config, loadConfig } from '../src/config';
 import { createContext, type ServerContext } from '../src/context';
+import type { CredentialRow, DataTableRow, FolderRow, ProjectRow, Role, WorkflowRow } from '../src/db/schema';
 import type { AiRuntime } from '../src/services/ai-builder/runtime';
 import type { AssistantToolDefinition } from '../src/services/assistant/types';
 import type { SecretProviderType } from '../src/services/secrets/types';
@@ -348,6 +349,11 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'workflow_shares',
+  'credential_shares',
+  'project_secret_access',
+  'project_relations',
+  'roles',
   'assistant_pending_confirmations',
   'assistant_events',
   'assistant_messages',
@@ -392,6 +398,7 @@ const TABLES = [
   'api_keys',
   'invitations',
   'sessions',
+  'projects',
   'memberships',
   'users',
   'tenants',
@@ -568,6 +575,150 @@ export async function signup(
     role: string;
   };
   return { client, ...data };
+}
+
+// ---------------------------------------------------------------------------------------------
+// members and projects (P6 S1)
+
+/** a member made by `memberAs` / `realMember`: a client signed in to the owner's workspace */
+export interface TestMember {
+  client: TestClient;
+  user: { id: string; email: string; name: string };
+  tenant: { id: string; slug: string; name: string };
+  role: string;
+  email: string;
+}
+
+/**
+ * Invites a new user into `owner`'s workspace with `role` and accepts the invitation on a new client
+ * (invite plus accept, as the old tests did by hand). `owner` is any signed-in admin or owner, such as
+ * the answer of `signup`. L24 changes only this body (legacy roles become `member` plus a project role).
+ */
+export async function memberAs(
+  owner: { client: TestClient },
+  role: Role,
+  options: { email?: string; name?: string; password?: string; remoteAddress?: string; origin?: string } = {},
+): Promise<TestMember> {
+  counter++;
+  const email = options.email ?? `${role}-${counter}-${randomUUID().slice(0, 8)}@example.com`;
+  const invite = await owner.client.data<{ token: string }>(
+    owner.client.post('/rest/members/invite', { email, role }),
+  );
+  const client = new TestClient(owner.client.app, options.origin ?? ORIGIN, options.remoteAddress);
+  const accepted = await client.data<Omit<TestMember, 'client' | 'email'>>(
+    client.post(`/rest/invitations/${invite.token}/accept`, {
+      name: options.name ?? role,
+      password: options.password ?? 'Passw0rd!',
+    }),
+  );
+  return { client, ...accepted, email };
+}
+
+/** a real `member` of `owner`'s workspace (invited as `member`): it holds only what its projects give it */
+export async function realMember(
+  owner: { client: TestClient },
+  options: Parameters<typeof memberAs>[2] = {},
+): Promise<TestMember> {
+  return memberAs(owner, 'member', options);
+}
+
+/** the id of the workspace's team project, where the old tests' work lives (signup makes it) */
+export async function teamProjectOf(server: { ctx: ServerContext }, tenantId: string): Promise<string> {
+  return server.ctx.repos.projects.defaultProjectFor(tenantId);
+}
+
+/** a team project of the workspace, made through the repository (no route) */
+export async function projectIn(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  name: string,
+  options: { icon?: ProjectRow['icon']; description?: string; creatorId?: string } = {},
+): Promise<ProjectRow> {
+  return server.ctx.repos.projects.create(tenantId, { name, type: 'team', ...options });
+}
+
+/** gives `userId` the project role `role` (such as `project:editor`); an existing relation takes the new role */
+export async function addToProject(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  projectId: string,
+  userId: string,
+  role: string,
+): Promise<void> {
+  const { relations } = server.ctx.repos.projects;
+  if (!(await relations.add(tenantId, projectId, userId, role))) {
+    await relations.updateRole(tenantId, projectId, userId, role);
+  }
+}
+
+/** a saved workflow owned by `projectId`, made through the repository */
+export async function workflowIn(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  projectId: string,
+  input: {
+    name?: string;
+    nodes?: WorkflowNode[];
+    connections?: Record<string, unknown>;
+    settings?: DataObject;
+    folderId?: string | null;
+    createdBy?: string;
+  } = {},
+): Promise<WorkflowRow> {
+  return server.ctx.repos.workflows.create(tenantId, {
+    name: input.name ?? `Workflow ${randomUUID().slice(0, 8)}`,
+    nodes: input.nodes ?? [],
+    connections: input.connections ?? {},
+    settings: input.settings ?? {},
+    pinData: {},
+    stickyNotes: [],
+    versionId: randomUUID(),
+    folderId: input.folderId ?? null,
+    createdBy: input.createdBy,
+    projectId,
+  });
+}
+
+/** a credential owned by `projectId` (data encrypted by the credential service, no route) */
+export async function credentialIn(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  projectId: string,
+  input: { name?: string; type?: string; data?: DataObject; isGlobal?: boolean; createdBy?: string } = {},
+): Promise<CredentialRow> {
+  const created = await server.ctx.credentials.create(
+    tenantId,
+    {
+      name: input.name ?? `Credential ${randomUUID().slice(0, 8)}`,
+      type: input.type ?? 'testApi',
+      data: input.data ?? { apiKey: 'secret' },
+      projectId,
+    },
+    input.createdBy,
+  );
+  if (input.isGlobal) await server.ctx.repos.credentials.update(tenantId, created.id, { isGlobal: true });
+  return (await server.ctx.repos.credentials.get(tenantId, created.id))!;
+}
+
+/** an empty data table owned by `projectId`, made through the repository */
+export async function dataTableIn(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  projectId: string,
+  name = `table_${randomUUID().slice(0, 8)}`,
+): Promise<DataTableRow> {
+  return server.ctx.repos.dataTables.create(tenantId, projectId, name);
+}
+
+/** a folder owned by `projectId`, made through the repository */
+export async function folderIn(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  projectId: string,
+  name = `Folder ${randomUUID().slice(0, 8)}`,
+  parentFolderId: string | null = null,
+): Promise<FolderRow> {
+  return server.ctx.repos.folders.create(tenantId, { name, parentFolderId, projectId });
 }
 
 // ---------------------------------------------------------------------------------------------

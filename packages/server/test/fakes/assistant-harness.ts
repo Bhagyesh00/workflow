@@ -12,7 +12,6 @@
  * test on a `tool_calls` id with no tool message answering it, or on a tool name offered twice in one
  * request: `startFakeLlm` accepts both, real providers refuse them.
  */
-import { randomUUID } from 'node:crypto';
 import { capabilitiesOf, nodesAiPackage, runAgent } from '@workflow/nodes-ai';
 import type {
   AssistantConfirmAnswer,
@@ -35,10 +34,10 @@ import { hasRole } from '../../src/services/auth';
 import {
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
-  ORIGIN,
   signup,
-  TestClient,
+  type TestClient,
   type TestServer,
   waitFor,
 } from '../helpers';
@@ -121,7 +120,8 @@ export interface AssistantHarness {
   admin: HarnessUser;
   editor: HarnessUser;
   viewer: HarnessUser;
-  users: Record<Role, HarnessUser>;
+  /** the four legacy-era roles (a `member` is made per test with `realMember`) */
+  users: Record<Exclude<Role, 'member'>, HarnessUser>;
   other: HarnessCanaries;
   extraTools: AssistantToolDefinition[];
   /** replaces `TenantSettings.assistant` of the first tenant (merged over the harness's model setup) */
@@ -272,18 +272,11 @@ function harnessAddress(): string {
 }
 
 async function invite(owner: HarnessUser, role: Role, address: string): Promise<HarnessUser> {
-  const email = `${role}-${randomUUID().slice(0, 8)}@example.com`;
-  const invitation = await owner.client.data<{ token: string }>(
-    owner.client.post('/rest/members/invite', { email, role }),
-  );
-  const client = new TestClient(owner.client.app, ORIGIN, address);
-  const accepted = await client.data<{ user: { id: string } }>(
-    client.post(`/rest/invitations/${invitation.token}/accept`, {
-      name: `Harness ${role}`,
-      password: 'Passw0rd!',
-    }),
-  );
-  return { client, userId: accepted.user.id, email, role, tenantId: owner.tenantId };
+  const { client, user, email } = await memberAs(owner, role, {
+    name: `Harness ${role}`,
+    remoteAddress: address,
+  });
+  return { client, userId: user.id, email, role, tenantId: owner.tenantId };
 }
 
 export async function createAssistantHarness(

@@ -53,7 +53,7 @@ export async function renameTag(ctx: ServerContext, tenantId: string, id: string
 
 export async function createVariable(ctx: ServerContext, tenantId: string, key: string, value: string) {
   try {
-    return variableDTO(await ctx.repos.variables.create(tenantId, key, value));
+    return variableDTO(await ctx.repos.variables.create(tenantId, { key, value }));
   } catch (error) {
     if (isUniqueViolation(error)) throw ApiError.conflict(`A variable "${key}" already exists`);
     throw error;

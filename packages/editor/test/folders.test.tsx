@@ -17,7 +17,13 @@ function seed(name: string, extra: Record<string, unknown> = {}) {
 async function openList(path = '/workflows', ready?: string) {
   const utils = renderApp(path);
   await screen.findByRole('region', { name: 'Workflow list' }, LONG);
-  if (ready) await screen.findAllByText(ready, undefined, LONG);
+  // the ready text must be in the list itself: a toast left by the previous test can show the same name while the
+  // list still loads after the /workflows -> /home/workflows redirect (the region is read again on every try)
+  if (ready)
+    await waitFor(
+      () => expect(within(screen.getByRole('region', { name: 'Workflow list' })).getAllByText(ready).length).toBeGreaterThan(0),
+      LONG,
+    );
   return utils;
 }
 
@@ -277,13 +283,13 @@ describe('archive', () => {
 describe('viewers', () => {
   it('cannot create, move, archive or drag, but can star', async () => {
     signedIn();
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     const f = await foldersApi.create({ name: 'Alpha' }).catch(() => null);
     expect(f).toBeNull();
-    backend().memberships[0].role = 'owner';
+    backend().setDemoRole('owner');
     await foldersApi.create({ name: 'Alpha' });
     seed('Plain');
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     await openList('/workflows', 'Plain');
     expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
     expect(row('Plain').getAttribute('draggable')).toBeNull();

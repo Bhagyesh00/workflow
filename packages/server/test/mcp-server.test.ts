@@ -308,6 +308,10 @@ describe('HTTP rules', () => {
     const owner = await signup();
     const member = await signup();
     await server.ctx.repos.memberships.add(owner.tenant.id, member.user.id, 'editor');
+    await server.ctx.repos.projects.ensurePersonal(
+      owner.tenant.id,
+      (await server.ctx.repos.users.get(member.user.id))!,
+    );
     const key = await mcpKey(owner.tenant.id, member.user.id);
     expect((await post(owner.url, rpc('tools/list'), bearer(key))).status).toBe(200);
     await server.ctx.repos.memberships.remove(owner.tenant.id, member.user.id);

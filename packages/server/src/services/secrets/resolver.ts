@@ -15,6 +15,8 @@ const LIMITS = { timeoutMs: 1000, maxSteps: 1_000_000 };
 
 export interface ResolveCredentialDataOptions {
   tenantId: string;
+  /** P6 S1: the credential's project (null or absent: none); `secretsFor` gets it */
+  projectId?: string | null;
   vars: Record<string, unknown>;
   /** where `$secrets` comes from */
   secrets?: Pick<SecretsManager, 'secretsFor'>;
@@ -74,7 +76,7 @@ export async function resolveCredentialData(
 ): Promise<DataObject> {
   const variables = {
     $secrets: options.secrets
-      ? options.secrets.secretsFor(options.tenantId)
+      ? options.secrets.secretsFor(options.tenantId, options.projectId)
       : createUnavailableSecretsProxy(),
     $vars: Object.freeze({ ...options.vars }),
   };

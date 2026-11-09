@@ -290,7 +290,12 @@ async function openConnection(
   dropBlocked: boolean,
 ): Promise<OpenedServer> {
   const definition = await connectionDefinition(ctx, tenant.id, row);
-  const sub = await openSubNodes(ctx, tenant, definition, PARENT_NAME, signal);
+  // P6 S1: the connection's credential is the one allowed (read from the row, never from node data);
+  // the workspace's default project until L16 runs the Assistant in the caller's project
+  const sub = await openSubNodes(ctx, tenant, definition, PARENT_NAME, signal, {
+    projectId: await ctx.repos.projects.defaultProjectFor(tenant.id),
+    allowCredentials: row.credentialId ? [row.credentialId] : [],
+  });
   const notes: string[] = [];
   const defs: AssistantToolDefinition[] = [];
   try {

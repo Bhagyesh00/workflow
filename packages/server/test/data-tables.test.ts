@@ -10,11 +10,12 @@ import { DataTableSizeCache, quotaStatus, warningBytes } from '../src/services/d
 import {
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   signup as signupFrom,
-  TestClient,
   type TestServer,
+  teamProjectOf,
   testConfig,
 } from './helpers';
 
@@ -37,13 +38,7 @@ beforeEach(async () => {
 });
 
 async function member(owner: Owner, role: 'editor' | 'viewer') {
-  const email = `${role}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await owner.client.data(owner.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app);
-  await client.data(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: role, password: 'Passw0rd!' }),
-  );
-  return client;
+  return (await memberAs(owner, role)).client;
 }
 
 const COLUMNS = [
@@ -350,7 +345,10 @@ describe('rows', () => {
       message: DATA_TABLE_ERRORS.unknownColumn('constructor'),
     });
     // the access of a node has no JSON parser in front of it
-    const access = server.ctx.dataTables.forTenant(owner.tenant.id);
+    const access = server.ctx.dataTables.forProject(
+      owner.tenant.id,
+      await teamProjectOf(server, owner.tenant.id),
+    );
     const hostile = JSON.parse('{"__proto__":"x"}') as Record<string, string>;
     await expect(access.insertRows(table.id, [hostile], 'count')).rejects.toThrow(
       DATA_TABLE_ERRORS.unknownColumn('__proto__'),
@@ -502,7 +500,7 @@ describe('rows', () => {
       expect(page.count).toBe(265);
       expect(page.data).toHaveLength(250);
       const viaAccess = await server.ctx.dataTables
-        .forTenant(owner.tenant.id)
+        .forProject(owner.tenant.id, await teamProjectOf(server, owner.tenant.id))
         .getRows(tableId, { take: 999 });
       expect(viaAccess.data).toHaveLength(250);
     });
@@ -694,8 +692,16 @@ describe('roles and tenants', () => {
 describe('what a node sees', () => {
   it('rows written through one workflow are read through another', async () => {
     const owner = await signup();
-    const writer = server.ctx.dataTables.forTenant(owner.tenant.id, { workflowId: 'workflow-a' });
-    const reader = server.ctx.dataTables.forTenant(owner.tenant.id, { workflowId: 'workflow-b' });
+    const writer = server.ctx.dataTables.forProject(
+      owner.tenant.id,
+      await teamProjectOf(server, owner.tenant.id),
+      { workflowId: 'workflow-a' },
+    );
+    const reader = server.ctx.dataTables.forProject(
+      owner.tenant.id,
+      await teamProjectOf(server, owner.tenant.id),
+      { workflowId: 'workflow-b' },
+    );
     const table = await writer.createTable({ name: 'Shared', columns: [{ name: 'city', type: 'string' }] });
     await writer.insertRows(table.id, [{ city: 'Pune' }, { city: 'Mumbai' }], 'count');
     const read = await reader.getRows(table.id, {
@@ -713,8 +719,14 @@ describe('what a node sees', () => {
   it('another tenant cannot reach the table, and getTable answers null', async () => {
     const owner = await signup();
     const stranger = await signup();
-    const mine = server.ctx.dataTables.forTenant(owner.tenant.id);
-    const theirs = server.ctx.dataTables.forTenant(stranger.tenant.id);
+    const mine = server.ctx.dataTables.forProject(
+      owner.tenant.id,
+      await teamProjectOf(server, owner.tenant.id),
+    );
+    const theirs = server.ctx.dataTables.forProject(
+      stranger.tenant.id,
+      await teamProjectOf(server, stranger.tenant.id),
+    );
     const table = await mine.createTable({ name: 'Mine', columns: [{ name: 'a', type: 'string' }] });
     expect(await theirs.getTable({ id: table.id })).toBeNull();
     expect(await theirs.getTable({ name: 'Mine' })).toBeNull();
@@ -729,7 +741,11 @@ describe('what a node sees', () => {
 
   it('runs every table and row method', async () => {
     const owner = await signup();
-    const access = server.ctx.dataTables.forTenant(owner.tenant.id, { workflowId: 'w' });
+    const access = server.ctx.dataTables.forProject(
+      owner.tenant.id,
+      await teamProjectOf(server, owner.tenant.id),
+      { workflowId: 'w' },
+    );
     const table = await access.createTable({ name: 'T', columns: [{ name: 'a', type: 'number' }] });
     const reused = await access.createTable({ name: 'T', columns: [], reuseExisting: true });
     expect(reused.id).toBe(table.id);
@@ -1276,7 +1292,10 @@ describe('fix round: text Postgres refuses, filters, size sort, CSV source, tabl
       await client.query('begin');
       await client.query('select 1 from data_tables where id = $1 for update', [table.id]);
       await client.query("update data_table_columns set name = 'town' where table_id = $1", [table.id]);
-      const access = server.ctx.dataTables.forTenant(owner.tenant.id);
+      const access = server.ctx.dataTables.forProject(
+        owner.tenant.id,
+        await teamProjectOf(server, owner.tenant.id),
+      );
       const pending = access.insertRows(table.id, [{ town: 'Pune' }], 'all');
       await new Promise((resolve) => setTimeout(resolve, 300));
       await client.query('commit');

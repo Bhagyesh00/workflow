@@ -46,6 +46,7 @@ import type {
 import type { TenantSettings } from '../plans';
 import { createRepositories, type Repositories, type TagRef } from '../repositories';
 import type { ActiveWorkflowManager, ValidationIssue } from './active-workflows';
+import { assertCredentialsUsable } from './credential-usable';
 import type { ExecutionService } from './executions';
 import type { FavoriteService } from './favorites';
 import type { FormTokenService } from './form-tokens';
@@ -215,10 +216,18 @@ export class WorkflowService {
     return unique;
   }
 
-  async create(tenantId: string, input: CreateInput, actor: Actor): Promise<WorkflowDTO> {
+  async create(
+    tenantId: string,
+    input: CreateInput & { projectId?: string },
+    actor: Actor,
+  ): Promise<WorkflowDTO> {
     assertGraph(input as unknown as WorkflowDefinition, this.deps.nodeTypes);
     assertNodeGroups(input as unknown as WorkflowDefinition, this.deps.nodeTypes);
     await assertFolderInTenant(this.repos, tenantId, input.folderId);
+    // P6 S1: the project the route resolved (`AccessService.targetProject`), else the workspace's default (L24 makes it required)
+    const projectId = input.projectId ?? (await this.repos.projects.defaultProjectFor(tenantId));
+    // P6 S1: every credential the workflow uses must be usable in its project (L4 fills the check)
+    await assertCredentialsUsable(this.deps, tenantId, projectId, input as unknown as WorkflowDefinition);
     const id = randomUUID();
     const versionId = randomUUID();
     const settings: NonNullable<CreateInput['settings']> = { ...(input.settings ?? {}) };
@@ -245,6 +254,7 @@ export class WorkflowService {
         ...content,
         id,
         versionId,
+        projectId,
         createdBy: actor.userId,
         folderId: input.folderId ?? null,
       });
@@ -292,6 +302,14 @@ export class WorkflowService {
     const { versionId: expected, tagIds, versionMessage, autosaved, ...patch } = input;
     const existing = await this.get(tenantId, id);
     assertNotArchived(existing, 'update');
+    // P6 S1: a save checks the credentials it would store against the workflow's project (L4 fills the check)
+    if (patch.nodes) {
+      await assertCredentialsUsable(this.deps, tenantId, existing.projectId, {
+        name: patch.name ?? existing.name,
+        nodes: patch.nodes as WorkflowNode[],
+        connections: (patch.connections ?? existing.connections) as WorkflowDefinition['connections'],
+      });
+    }
     if (patch.nodes || patch.connections) {
       assertGraph(
         {
@@ -683,7 +701,7 @@ export class WorkflowService {
     const reusesStart = this.reusesStartOutput(workflow, start, input, pinData, toolRoot);
     try {
       if (!triggerItems && !pinData[start.name] && !reusesStart) {
-        triggerItems = await this.manualTriggerItems(tenant, workflow, start, executionId);
+        triggerItems = await this.manualTriggerItems(tenant, row.projectId, workflow, start, executionId);
         if (!triggerItems) await this.deps.executions.removeBinaryData(tenant.id, executionId);
       }
       await this.deps.executions.start({
@@ -743,6 +761,8 @@ export class WorkflowService {
    */
   private async manualTriggerItems(
     tenant: TenantRow,
+    /** P6 S1: the workflow row's project */
+    projectId: string,
     workflow: Workflow,
     node: WorkflowNode,
     executionId: string,
@@ -752,6 +772,7 @@ export class WorkflowService {
     const services = await this.deps.executions.buildServices({
       tenant,
       executionId,
+      projectId,
       mode: 'manual',
       workflowId: workflow.id,
     });
@@ -902,7 +923,9 @@ export class WorkflowService {
     return this.deps.activeWorkflows.listenTestTrigger(tenant, workflow, node, type, {
       userId: actor.userId,
       onStarted: (executionId) =>
-        this.deps.context().push.send(tenant.id, 'testWebhookReceived', { workflowId: id, executionId }),
+        this.deps
+          .context()
+          .push.send(tenant.id, 'testWebhookReceived', { workflowId: id, executionId }, { workflowId: id }),
       onFailed: (executionId, error) => this.failTestListen(tenant, definition, node, executionId, error),
     });
   }
@@ -954,13 +977,14 @@ export class WorkflowService {
         );
     }
     const { push } = this.deps.context();
-    push.send(tenant.id, 'testWebhookReceived', { workflowId, executionId });
-    push.send(tenant.id, 'executionFinished', {
-      executionId,
-      workflowId,
-      status: 'error',
-      error: { message },
-    });
+    const about = { workflowId: workflowId ?? undefined };
+    push.send(tenant.id, 'testWebhookReceived', { workflowId, executionId }, about);
+    push.send(
+      tenant.id,
+      'executionFinished',
+      { executionId, workflowId, status: 'error', error: { message } },
+      about,
+    );
   }
 
   /** why the triggers of a workflow are down; as in n8n, a workflow out of reach is a 400 */

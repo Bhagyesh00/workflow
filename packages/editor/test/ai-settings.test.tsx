@@ -165,7 +165,7 @@ describe('AI settings page (P5-09)', () => {
 
   it('below admin: no form, only who can change it', async () => {
     await seedCredentials();
-    backend().memberships[0].role = 'editor';
+    backend().setDemoRole('editor');
     serve();
     renderApp('/settings/ai');
     expect(await screen.findByText('Only admins can change the AI settings.')).toBeTruthy();

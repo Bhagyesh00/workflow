@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { HttpClient } from '@workflow/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createTestServer, resetDatabase, signup, TestClient, type TestServer } from './helpers';
+import { createTestServer, memberAs, resetDatabase, signup, TestClient, type TestServer } from './helpers';
 
 const NOT_JSON = 'The URL does not point to valid JSON file!';
 const NOT_WORKFLOW = 'The data in the file does not seem to be a workflow JSON file!';
@@ -182,13 +182,7 @@ describe('import from URL (allowed host)', () => {
     expect((await call(owner.client, 'not a url')).statusCode).toBe(400);
     expect((await call(new TestClient(server.app), `${base}/wf.json`)).statusCode).toBe(401);
     const email = `viewer-${Math.random().toString(36).slice(2, 8)}@example.com`;
-    const invite = await owner.client.data(
-      owner.client.post('/rest/members/invite', { email, role: 'viewer' }),
-    );
-    const viewer = new TestClient(server.app);
-    await viewer.data(
-      viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'v', password: 'Passw0rd!' }),
-    );
+    const { client: viewer } = await memberAs(owner, 'viewer', { email, name: 'v' });
     const before = hits.length;
     expect((await call(viewer, `${base}/wf.json`)).statusCode).toBe(403);
     expect(hits.length).toBe(before);

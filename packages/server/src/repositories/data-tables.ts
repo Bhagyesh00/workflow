@@ -15,6 +15,7 @@ import {
   workflows,
 } from '../db/schema';
 import { rowSizeSql } from '../services/data-table-size';
+import { type AccessListOptions, projectRowConditions } from './shares';
 import { isUuid, now } from './util';
 
 /** rows per INSERT; about 5 bound values each, well under Postgres' 65535 */
@@ -22,7 +23,8 @@ const INSERT_BATCH = 1000;
 /** the Data Table node, and the tool the agent nodes make of it */
 const DATA_TABLE_NODE_TYPES = ['core.dataTable', 'core.dataTableTool'];
 
-export interface DataTableListOptions {
+/** with `AccessListOptions` (P6-23): a data table belongs to one project and is never shared */
+export interface DataTableListOptions extends AccessListOptions {
   name?: string;
   sortBy?: { column: 'name' | 'createdAt' | 'updatedAt' | 'size'; direction: 'asc' | 'desc' };
   take: number;
@@ -77,7 +79,9 @@ export class DataTableRepository {
     tenantId: string,
     options: DataTableListOptions,
   ): Promise<{ count: number; rows: DataTableRow[] }> {
-    const conditions = [eq(dataTables.tenantId, tenantId)];
+    const access = projectRowConditions(dataTables.projectId, options);
+    if (!access) return { count: 0, rows: [] };
+    const conditions = [eq(dataTables.tenantId, tenantId), ...access];
     if (options.name) {
       conditions.push(sql`${dataTables.name} ilike ${`%${escapeLike(options.name)}%`}`);
     }
@@ -120,8 +124,9 @@ export class DataTableRepository {
     return { count, rows };
   }
 
-  async create(tenantId: string, name: string): Promise<DataTableRow> {
-    const [row] = await this.db.insert(dataTables).values({ tenantId, name }).returning();
+  /** names are unique per project (a taken name is a unique violation) */
+  async create(tenantId: string, projectId: string, name: string): Promise<DataTableRow> {
+    const [row] = await this.db.insert(dataTables).values({ tenantId, projectId, name }).returning();
     return row;
   }
 

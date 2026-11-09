@@ -1,14 +1,18 @@
 /** Providers and routes. */
 import { type QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, type ReactNode, Suspense, useEffect, useState } from 'react';
 import {
   createBrowserRouter,
   createHashRouter,
   createMemoryRouter,
   Navigate,
   type RouteObject,
+  useLocation,
+  useParams,
 } from 'react-router';
 import { RouterProvider } from 'react-router/dom';
+import { ProjectDialogsHost } from './components/projects/ProjectDialogsHost';
+import { ProjectVariablesTab } from './components/projects/ProjectVariablesTab';
 import { AppShell } from './components/shell/AppShell';
 import { BrandApplier } from './components/shell/BrandMark';
 import { ConfirmHost } from './components/ui/Dialog';
@@ -18,9 +22,16 @@ import { applyTheme } from './lib/brand';
 import { AcceptInvitationPage, LoginPage, SignupPage } from './pages/auth/AuthPages';
 import { FormSignInPage } from './pages/auth/FormSignInPage';
 import { NotFoundPage, RouteErrorPage } from './pages/ErrorPages';
-import { ExecutionsPage } from './pages/ExecutionsPage';
 import { InboxPage } from './pages/InboxPage';
+import {
+  ProjectLayout,
+  type ProjectPageKind,
+  type ProjectResource,
+  ProjectResourcePage,
+} from './pages/ProjectPages';
+import { ProjectSettingsPage } from './pages/ProjectSettingsPage';
 import { ReviewDetailPage } from './pages/ReviewDetailPage';
+import { RoleEditorPage, type RoleKind, RolesPage } from './pages/RolesPages';
 import { SecretsSettingsPage } from './pages/SecretsSettingsPage';
 import { SecuritySettingsPage } from './pages/SecuritySettingsPage';
 import {
@@ -30,7 +41,6 @@ import {
   SettingsLayout,
   VariablesSettingsPage,
 } from './pages/SettingsPages';
-import { WorkflowsPage } from './pages/WorkflowsPage';
 import { useUiStore } from './stores/ui-store';
 
 // the canvas, node details view and code editors load on demand
@@ -39,12 +49,6 @@ const WorkflowEditorPage = lazy(() =>
 );
 const ExecutionDetailPage = lazy(() =>
   import('./pages/ExecutionDetailPage').then((m) => ({ default: m.ExecutionDetailPage })),
-);
-const CredentialsPage = lazy(() =>
-  import('./pages/CredentialsPage').then((m) => ({ default: m.CredentialsPage })),
-);
-const DataTablesPage = lazy(() =>
-  import('./pages/DataTablesPage').then((m) => ({ default: m.DataTablesPage })),
 );
 const DataTableDetailPage = lazy(() =>
   import('./pages/DataTableDetailPage').then((m) => ({ default: m.DataTableDetailPage })),
@@ -76,6 +80,67 @@ function Lazy({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<PageLoader />}>{children}</Suspense>;
 }
 
+/** P6-41: an old list path goes to its `/home/*` page and keeps the query string (`?folder=`, filters) */
+function RedirectKeepingQuery({ to }: { to: string }) {
+  const { search, hash } = useLocation();
+  return <Navigate to={{ pathname: to, search, hash }} replace />;
+}
+
+/** renders `children` with a route param (`:id`, `:slug`) */
+function WithParam({ name, children }: { name: string; children: (value: string) => ReactNode }) {
+  const value = useParams()[name];
+  return value ? children(value) : <NotFoundPage />;
+}
+
+/** the list tabs of one page family (`/home`, `/shared`, `/projects/:id`) */
+function resourceRoutes(kind: ProjectPageKind, resources: ProjectResource[]): RouteObject[] {
+  const page = (resource: ProjectResource) =>
+    kind === 'project' ? (
+      <WithParam name="id">
+        {(id) => <ProjectResourcePage kind={kind} resource={resource} projectId={id} />}
+      </WithParam>
+    ) : (
+      <ProjectResourcePage kind={kind} resource={resource} />
+    );
+  return [
+    { index: true, element: <Navigate to="workflows" replace /> },
+    ...resources.map((resource) => ({ path: resource, element: page(resource) })),
+  ];
+}
+
+/** P6-46: the role editor routes of one role type */
+function roleEditorRoutes(roleType: RoleKind): RouteObject[] {
+  return [
+    { path: 'new', element: <RoleEditorPage roleType={roleType} mode="new" /> },
+    {
+      path: 'edit/:slug',
+      element: (
+        <WithParam name="slug">
+          {(slug) => <RoleEditorPage roleType={roleType} mode="edit" slug={slug} />}
+        </WithParam>
+      ),
+    },
+    {
+      path: 'view/:slug',
+      element: (
+        <WithParam name="slug">
+          {(slug) => <RoleEditorPage roleType={roleType} mode="view" slug={slug} />}
+        </WithParam>
+      ),
+    },
+  ];
+}
+
+/** the signed-in layout plus the Share and Move dialogs, mounted once (P6-44) */
+function ShellRoot() {
+  return (
+    <>
+      <AppShell />
+      <ProjectDialogsHost />
+    </>
+  );
+}
+
 export const routes: RouteObject[] = [
   { path: '/signin', element: <LoginPage />, errorElement: <RouteErrorPage /> },
   { path: '/signup', element: <SignupPage />, errorElement: <RouteErrorPage /> },
@@ -96,11 +161,41 @@ export const routes: RouteObject[] = [
   },
   {
     path: '/',
-    element: <AppShell />,
+    element: <ShellRoot />,
     errorElement: <RouteErrorPage />,
     children: [
-      { index: true, element: <Navigate to="/workflows" replace /> },
-      { path: 'workflows', element: <WorkflowsPage /> },
+      { index: true, element: <Navigate to="/home/workflows" replace /> },
+      // P6-41: Overview, Shared with you and the project pages
+      {
+        path: 'home',
+        element: <ProjectLayout kind="home" />,
+        children: resourceRoutes('home', ['workflows', 'credentials', 'executions', 'data-tables']),
+      },
+      {
+        path: 'shared',
+        element: <ProjectLayout kind="shared" />,
+        children: resourceRoutes('shared', ['workflows', 'credentials']),
+      },
+      {
+        path: 'projects/:id',
+        element: <WithParam name="id">{(id) => <ProjectLayout kind="project" projectId={id} />}</WithParam>,
+        children: [
+          ...resourceRoutes('project', ['workflows', 'credentials', 'executions', 'data-tables', 'folders']),
+          {
+            path: 'variables',
+            element: <WithParam name="id">{(id) => <ProjectVariablesTab projectId={id} />}</WithParam>,
+          },
+          {
+            path: 'settings',
+            element: <WithParam name="id">{(id) => <ProjectSettingsPage projectId={id} />}</WithParam>,
+          },
+        ],
+      },
+      // the old list paths (links, bookmarks, `safeRedirect`'s default `/workflows`)
+      { path: 'workflows', element: <RedirectKeepingQuery to="/home/workflows" /> },
+      { path: 'executions', element: <RedirectKeepingQuery to="/home/executions" /> },
+      { path: 'credentials', element: <RedirectKeepingQuery to="/home/credentials" /> },
+      { path: 'data-tables', element: <RedirectKeepingQuery to="/home/data-tables" /> },
       {
         path: 'assistant',
         element: (
@@ -141,7 +236,6 @@ export const routes: RouteObject[] = [
           </Lazy>
         ),
       },
-      { path: 'executions', element: <ExecutionsPage /> },
       { path: 'inbox', element: <InboxPage /> },
       { path: 'inbox/:reviewId', element: <ReviewDetailPage /> },
       {
@@ -149,22 +243,6 @@ export const routes: RouteObject[] = [
         element: (
           <Lazy>
             <ExecutionDetailPage />
-          </Lazy>
-        ),
-      },
-      {
-        path: 'credentials',
-        element: (
-          <Lazy>
-            <CredentialsPage />
-          </Lazy>
-        ),
-      },
-      {
-        path: 'data-tables',
-        element: (
-          <Lazy>
-            <DataTablesPage />
           </Lazy>
         ),
       },
@@ -183,6 +261,10 @@ export const routes: RouteObject[] = [
           { index: true, element: <Navigate to="/settings/account" replace /> },
           { path: 'account', element: <AccountSettingsPage /> },
           { path: 'members', element: <MembersSettingsPage /> },
+          // P6-46: roles (`role:manage`) and the role editors
+          { path: 'roles', element: <RolesPage /> },
+          { path: 'project-roles', children: roleEditorRoutes('project') },
+          { path: 'instance-roles', children: roleEditorRoutes('global') },
           { path: 'api-keys', element: <ApiKeysSettingsPage /> },
           { path: 'variables', element: <VariablesSettingsPage /> },
           { path: 'security', element: <SecuritySettingsPage /> },
@@ -254,7 +336,7 @@ export type RouterMode = 'browser' | 'hash' | 'memory';
 
 function createRouter(mode: RouterMode) {
   if (mode === 'hash') return createHashRouter(routes);
-  if (mode === 'memory') return createMemoryRouter(routes, { initialEntries: ['/workflows'] });
+  if (mode === 'memory') return createMemoryRouter(routes, { initialEntries: ['/home/workflows'] });
   return createBrowserRouter(routes);
 }
 

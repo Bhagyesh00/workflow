@@ -138,7 +138,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     credentials.resolvedType(body.type);
     let resolved: DataObject;
     try {
-      resolved = await credentials.resolveData(auth.tenant.id, data);
+      resolved = await credentials.resolveData(auth.tenant.id, null, data);
     } catch (error) {
       return { data: { status: 'Error', message: credentialReadErrorText(error) } };
     }

@@ -3,15 +3,19 @@
  * system-level read the manager's startup load uses, which says so. `settingsEnc` is ciphertext; only
  * the manager decrypts it.
  */
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
-import { credentials, type SecretConnectionRow, secretConnections } from '../db/schema';
+import { credentials, projectSecretAccess, type SecretConnectionRow, secretConnections } from '../db/schema';
+import { type AccessListOptions, inUuids } from './shares';
 import { isUuid, now } from './util';
 
 export type SecretConnectionInsert = Pick<
   SecretConnectionRow,
   'id' | 'providerKey' | 'type' | 'settingsEnc' | 'isEnabled' | 'createdBy'
->;
+> & {
+  /** the owning project (P6-28); absent or null = a workspace connection */
+  projectId?: string | null;
+};
 
 export type SecretConnectionPatch = Partial<
   Pick<SecretConnectionRow, 'type' | 'settingsEnc' | 'isEnabled' | 'state' | 'lastError'>
@@ -20,11 +24,36 @@ export type SecretConnectionPatch = Partial<
 export class SecretConnectionRepository {
   constructor(readonly db: DbOrTx) {}
 
-  async list(tenantId: string): Promise<SecretConnectionRow[]> {
+  /**
+   * With `AccessListOptions` (P6-28): a connection is reached by the project that owns it or a project it
+   * is shared with (`project_secret_access`); a workspace connection (no owner) only with `filter.all`
+   * or no filter, unless it is shared. `onlySharedWithMe` keeps only shared connections of `projectId`.
+   */
+  async list(tenantId: string, options: AccessListOptions = {}): Promise<SecretConnectionRow[]> {
+    const sharedInto = (projectIds: string[]) =>
+      sql`${secretConnections.id} in (select ${projectSecretAccess.connectionId} from ${projectSecretAccess} where ${projectSecretAccess.tenantId} = ${tenantId}::uuid and ${inUuids(projectSecretAccess.projectId, projectIds)})`;
+    const conditions: SQL[] = [eq(secretConnections.tenantId, tenantId)];
+    const { filter } = options;
+    if (filter && !filter.all) {
+      const projectIds = [...new Set(filter.projectIds.filter(isUuid))];
+      if (!projectIds.length) return [];
+      conditions.push(
+        sql`(${inUuids(secretConnections.projectId, projectIds)} or ${sharedInto(projectIds)})`,
+      );
+    }
+    if (options.onlySharedWithMe) {
+      if (options.projectId === undefined || !isUuid(options.projectId)) return [];
+      conditions.push(sharedInto([options.projectId]));
+    } else if (options.projectId !== undefined) {
+      if (!isUuid(options.projectId)) return [];
+      conditions.push(
+        sql`(${secretConnections.projectId} = ${options.projectId}::uuid or ${sharedInto([options.projectId])})`,
+      );
+    }
     return this.db
       .select()
       .from(secretConnections)
-      .where(eq(secretConnections.tenantId, tenantId))
+      .where(and(...conditions))
       .orderBy(asc(secretConnections.providerKey));
   }
 
@@ -70,6 +99,20 @@ export class SecretConnectionRepository {
       .where(and(eq(secretConnections.tenantId, tenantId), eq(secretConnections.providerKey, providerKey)))
       .returning({ id: secretConnections.id });
     return rows.length > 0;
+  }
+
+  /** the projects a connection is shared with (`project_secret_access`) and the role each holds */
+  async accessFor(
+    tenantId: string,
+    connectionId: string,
+  ): Promise<Array<{ projectId: string; role: string }>> {
+    if (!isUuid(connectionId)) return [];
+    return this.db
+      .select({ projectId: projectSecretAccess.projectId, role: projectSecretAccess.role })
+      .from(projectSecretAccess)
+      .where(
+        and(eq(projectSecretAccess.tenantId, tenantId), eq(projectSecretAccess.connectionId, connectionId)),
+      );
   }
 
   /** credentials whose secret_keys hold this connection, for the delete warning */

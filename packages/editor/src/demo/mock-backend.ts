@@ -9,10 +9,15 @@ import {
   type DataObject,
   diffWorkflows,
   type ExecutionState,
+  GLOBAL_ROLE_SCOPES,
   type Item,
   isParameterDisplayed,
+  MANDATORY_INSTANCE_SCOPES,
+  PROJECT_ROLE_SCOPES,
+  personalOwnerScopes,
   type RunData,
   resolveNodeParameters,
+  type Scope,
   type StickyNote,
   splitTemplate,
   type TaskData,
@@ -28,9 +33,14 @@ import type {
   CredentialSummary,
   ExecutionDetail,
   ExecutionSummary,
+  LegacyRole,
   Member,
+  ProjectIcon,
+  ProjectRef,
+  ProjectType,
   PushEvent,
   Role,
+  SecurityPolicy,
   Settings,
   Tag,
   Variable,
@@ -62,9 +72,12 @@ import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
 import { registerFormAuthRoutes } from './mock-form-auth';
 import { copy, HttpError, now, page } from './mock-http';
 import { registerMcpRoutes } from './mock-mcp';
+import { registerProjectRoutes } from './mock-projects';
 import { registerPublishRoutes } from './mock-publish';
 import { registerReviewRoutes } from './mock-reviews';
+import { findCustomRole, registerRoleRoutes } from './mock-roles';
 import { registerSecretRoutes } from './mock-secrets';
+import { demoShares, registerSharingRoutes } from './mock-sharing';
 import {
   DEMO_MCP_TRIGGER_TYPE,
   demoHookFamily,
@@ -150,6 +163,125 @@ export interface StoredExecution extends ExecutionDetail {
 /** per-workspace settings PATCH /settings changes */
 interface StoredTenantSettings {
   workflowReviews: { enabled: boolean };
+  /** P6-33: the personal space policy (POST /settings/security), both on by default */
+  securityPolicy: { personalSpacePublishing: boolean; personalSpaceSharing: boolean };
+}
+
+/** P6-03: the old workspace words the Phase 3 to 5 demo modules rank (mock-reviews); L24 retires them */
+export type DemoRole = 'owner' | 'admin' | LegacyRole;
+
+/**
+ * A workspace membership of the demo. `role` keeps the old words for now (Phase 3 to 5 modules rank them);
+ * `globalRole` is set when the workspace role is no old word (`member` or a custom global role slug), and
+ * `role` is then `viewer`, so every unconverted gate refuses it (as the server's rank 0).
+ */
+export interface DemoMembership {
+  tenantId: string;
+  userId: string;
+  role: DemoRole;
+  globalRole?: string;
+}
+
+/** P6-03: a project of the demo (a workspace's team projects and each member's personal project) */
+export interface StoredProject {
+  id: string;
+  tenantId: string;
+  name: string;
+  type: ProjectType;
+  icon: ProjectIcon | null;
+  description: string | null;
+  /** the member a personal project belongs to (null for a team project) */
+  ownerUserId: string | null;
+  creatorId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** P6-03: a member of a project with a project role slug (`project:admin`, ..., or a custom one) */
+export interface StoredProjectRelation {
+  tenantId: string;
+  projectId: string;
+  userId: string;
+  role: string;
+}
+
+/** the 403 message of a missing scope, as the server's `requireScope` (n8n's) */
+export const MISSING_SCOPE = 'User is missing a scope required to perform this action';
+
+const LEGACY_VIEWER_SCOPES: readonly Scope[] = [
+  'workflow:read',
+  'workflow:list',
+  'execution:read',
+  'execution:list',
+  'credential:list',
+  'dataTable:list',
+  'dataTable:listProject',
+  'dataTable:read',
+  'dataTable:readColumn',
+  'dataTable:readRow',
+  'folder:read',
+  'folder:list',
+  'tag:read',
+  'tag:list',
+  'annotationTag:list',
+  'user:list',
+  'variable:read',
+  'variable:list',
+  'projectVariable:read',
+  'projectVariable:list',
+  'apiKey:create',
+  'mcp:oauth',
+  'mcpApiKey:create',
+  'mcpApiKey:rotate',
+  'instanceAi:message',
+  'project:list',
+  'project:read',
+];
+
+const LEGACY_EDITOR_EXTRA_SCOPES: readonly Scope[] = [
+  'workflow:create',
+  'workflow:update',
+  'workflow:delete',
+  'workflow:execute',
+  'workflow:publish',
+  'workflow:unpublish',
+  'execution:delete',
+  'credential:create',
+  'credential:read',
+  'credential:update',
+  'credential:delete',
+  'dataTable:create',
+  'dataTable:update',
+  'dataTable:delete',
+  'dataTable:writeColumn',
+  'dataTable:writeRow',
+  'folder:create',
+  'folder:update',
+  'folder:delete',
+  'tag:create',
+  'tag:update',
+  'tag:delete',
+  'annotationTag:create',
+  'annotationTag:update',
+  'annotationTag:delete',
+  'externalSecret:list',
+];
+
+/**
+ * P6-03: the old words' global scopes, mirroring the server's `LEGACY_ROLE_SCOPES` (services access.ts): today's
+ * minimum role per route (research-C2-routes "today" and "scope after"). Neither gets `project:create`, `role:*`,
+ * `securitySettings:manage`, `instanceAi:manage`, share or move scopes. L24 removes it with the old words.
+ */
+export const LEGACY_DEMO_SCOPES: Readonly<Record<LegacyRole, ReadonlySet<Scope>>> = {
+  viewer: new Set(LEGACY_VIEWER_SCOPES),
+  editor: new Set([...LEGACY_VIEWER_SCOPES, ...LEGACY_EDITOR_EXTRA_SCOPES]),
+};
+
+const OLD_WORDS: readonly string[] = ['owner', 'admin', 'editor', 'viewer'];
+
+/** the membership fields for a workspace role: an old word as is, else `viewer` plus `globalRole` */
+function membershipRole(role: Role): Pick<DemoMembership, 'role' | 'globalRole'> {
+  return OLD_WORDS.includes(role) ? { role: role as DemoRole } : { role: 'viewer', globalRole: role };
 }
 
 export type MockHandler = Handler;
@@ -219,8 +351,11 @@ const NOT_WORKFLOW = 'The data in the file does not seem to be a workflow JSON f
 export class MockBackend {
   users: StoredUser[] = [];
   tenants: StoredTenant[] = [];
-  memberships: Array<{ tenantId: string; userId: string; role: Role }> = [];
+  memberships: DemoMembership[] = [];
   invitations: Array<{ token: string; tenantId: string; email: string; role: Role }> = [];
+  /** P6-03: team and personal projects (mock-projects serves them) and their members */
+  projects: StoredProject[] = [];
+  projectRelations: StoredProjectRelation[] = [];
   workflows: StoredWorkflow[] = [];
   versions: StoredVersion[] = [];
   executions: StoredExecution[] = [];
@@ -261,6 +396,9 @@ export class MockBackend {
     registerAssistantDraftRoutes(this);
     registerAssistantSettingsRoutes(this);
     registerAssistantMcpRoutes(this);
+    registerProjectRoutes(this);
+    registerRoleRoutes(this);
+    registerSharingRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -295,7 +433,122 @@ export class MockBackend {
     this.users.push(user);
     this.tenants.push(tenant);
     this.memberships.push({ tenantId: tenant.id, userId: user.id, role: 'owner' });
+    // P6-03: as the server's signup until L24: the workspace's team project and the owner's personal one
+    this.createProject({ tenantId: tenant.id, name: tenant.name, type: 'team', creatorId: user.id });
+    this.personalProject(tenant.id, user.id);
     return { user, tenant };
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // P6-03 projects (mock-projects serves the routes; L18 owns that file)
+  // -------------------------------------------------------------------------------------------
+
+  /** adds a project; a personal one also gets its owner's `project:personalOwner` relation */
+  createProject(input: {
+    tenantId: string;
+    name: string;
+    type: ProjectType;
+    id?: string;
+    icon?: ProjectIcon | null;
+    description?: string | null;
+    ownerUserId?: string | null;
+    creatorId?: string | null;
+  }): StoredProject {
+    const project: StoredProject = {
+      id: input.id ?? newId(),
+      tenantId: input.tenantId,
+      name: input.name.slice(0, 255),
+      type: input.type,
+      icon: input.icon ?? null,
+      description: input.description ?? null,
+      ownerUserId: input.type === 'personal' ? (input.ownerUserId ?? null) : null,
+      creatorId: input.creatorId ?? input.ownerUserId ?? null,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    this.projects.push(project);
+    if (project.type === 'personal' && project.ownerUserId) {
+      this.projectRelations.push({
+        tenantId: project.tenantId,
+        projectId: project.id,
+        userId: project.ownerUserId,
+        role: 'project:personalOwner',
+      });
+    }
+    return project;
+  }
+
+  /** the member's personal project in the workspace, made on first use (named after the user) */
+  personalProject(tenantId: string, userId: string): StoredProject {
+    const found = this.projects.find(
+      (p) => p.tenantId === tenantId && p.type === 'personal' && p.ownerUserId === userId,
+    );
+    if (found) return found;
+    const user = this.users.find((u) => u.id === userId);
+    return this.createProject({
+      tenantId,
+      name: user?.name || user?.email || 'Personal',
+      type: 'personal',
+      ownerUserId: userId,
+    });
+  }
+
+  /**
+   * The project a new row goes to when the request names none: the workspace's oldest team project, as the
+   * server's `defaultProjectFor` until L24 (made, named after the workspace, when a test built none).
+   */
+  defaultProjectFor(tenantId: string): StoredProject {
+    const team = this.projects
+      .filter((p) => p.tenantId === tenantId && p.type === 'team')
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+    if (team) return team;
+    const tenant = this.tenants.find((t) => t.id === tenantId);
+    return this.createProject({ tenantId, name: tenant?.name ?? 'Workspace', type: 'team' });
+  }
+
+  /** `targetProject`: the named project of the signed-in workspace (404 otherwise), or the default one */
+  targetProject(projectId?: unknown): StoredProject {
+    const { tenant } = this.auth();
+    if (projectId === undefined || projectId === null || projectId === '')
+      return this.defaultProjectFor(tenant.id);
+    const project = this.projects.find((p) => p.id === projectId && p.tenantId === tenant.id);
+    if (!project) throw new HttpError(404, 'not_found', 'Project not found');
+    return project;
+  }
+
+  /** a project as rows name it (`homeProject`); null when unknown */
+  projectRef(projectId: string | null | undefined): ProjectRef | null {
+    const p = projectId ? this.projects.find((x) => x.id === projectId) : undefined;
+    return p ? { id: p.id, name: p.name, type: p.type, icon: p.icon ? copy(p.icon) : null } : null;
+  }
+
+  /** `projectId` and `homeProject` of a project-owned row (nothing for a row a test built without one) */
+  projectFields(row: { projectId?: string | null }): { projectId?: string; homeProject?: ProjectRef | null } {
+    if (!row.projectId) return {};
+    return { projectId: row.projectId, homeProject: this.projectRef(row.projectId) };
+  }
+
+  /**
+   * The signed-in user's scopes in a project: the workspace role's, plus the project role's when the user is
+   * a member of it (a personal project's owner through the workspace's personal space policy).
+   */
+  projectScopes(project: StoredProject): Scope[] {
+    const auth = this.auth();
+    const scopes = new Set(this.globalScopesOf(auth.globalRole, auth.tenant.id));
+    const relation = this.projectRelations.find(
+      (r) => r.projectId === project.id && r.userId === auth.user.id,
+    );
+    if (relation) {
+      const slug = relation.role;
+      const roleScopes =
+        slug === 'project:personalOwner'
+          ? personalOwnerScopes(this.settingsOf(project.tenantId).securityPolicy)
+          : slug in PROJECT_ROLE_SCOPES
+            ? PROJECT_ROLE_SCOPES[slug as keyof typeof PROJECT_ROLE_SCOPES]
+            : (findCustomRole(this, project.tenantId, slug, 'project')?.scopes ?? []);
+      for (const s of roleScopes) scopes.add(s);
+    }
+    return [...scopes];
   }
 
   signIn(email: string) {
@@ -324,6 +577,8 @@ export class MockBackend {
       folderId: input.folderId ?? null,
       isArchived: input.isArchived ?? false,
       publishedVersionId: null,
+      // P6-03: the named project, else the workspace's default (as the server's create until L24)
+      projectId: input.projectId ?? this.defaultProjectFor(tenantId).id,
       tenantId,
     };
     // a seeded active workflow is published at its version (as migration 0006 backfills)
@@ -386,22 +641,44 @@ export class MockBackend {
     this.routes.push([method, pattern, handler]);
   }
 
-  /** the signed-in user, workspace and role (401 when signed out) */
+  /**
+   * The signed-in user, workspace and role (401 when signed out). `role` is the old word Phase 3 to 5 modules
+   * rank; `globalRole` the workspace role the server answers (`member` or a custom slug when one is set).
+   */
   auth() {
     if (!this.session) throw new HttpError(401, 'unauthorized', 'Sign in to continue');
     const user = this.users.find((u) => u.id === this.session!.userId)!;
     const tenant = this.tenants.find((t) => t.id === this.session!.tenantId)!;
-    const role =
-      this.memberships.find((m) => m.userId === user.id && m.tenantId === tenant.id)?.role ?? 'viewer';
-    return { user, tenant, role };
+    const membership = this.memberships.find((m) => m.userId === user.id && m.tenantId === tenant.id);
+    const role: DemoRole = membership?.role ?? 'viewer';
+    const globalRole: Role = membership?.globalRole ?? role;
+    return { user, tenant, role, globalRole };
+  }
+
+  /**
+   * P6-03: the global scopes of a workspace role, as the server's `globalScopes`: owner, admin and member from
+   * `GLOBAL_ROLE_SCOPES`, the old words from `LEGACY_DEMO_SCOPES`, a custom global role's scopes plus n8n's
+   * baseline (`MANDATORY_INSTANCE_SCOPES`); an unknown slug holds none.
+   */
+  globalScopesOf(role: Role, tenantId: string): Scope[] {
+    if (Object.hasOwn(GLOBAL_ROLE_SCOPES, role))
+      return [...GLOBAL_ROLE_SCOPES[role as keyof typeof GLOBAL_ROLE_SCOPES]];
+    if (Object.hasOwn(LEGACY_DEMO_SCOPES, role)) return [...LEGACY_DEMO_SCOPES[role as LegacyRole]];
+    const custom = findCustomRole(this, tenantId, role, 'global');
+    return custom ? [...new Set<Scope>([...custom.scopes, ...MANDATORY_INSTANCE_SCOPES])] : [];
   }
 
   private authResult() {
-    const { user, tenant, role } = this.auth();
-    return { user: { id: user.id, email: user.email, name: user.name }, tenant: { ...tenant }, role };
+    const { user, tenant, globalRole } = this.auth();
+    return {
+      user: { id: user.id, email: user.email, name: user.name },
+      tenant: { ...tenant },
+      role: globalRole,
+      globalScopes: this.globalScopesOf(globalRole, tenant.id),
+    };
   }
 
-  /** 403 unless the signed-in role is at least `role` */
+  /** 403 unless the signed-in role is at least `role` (old words; `member` and custom slugs rank lowest) */
   requireRole(role: 'editor' | 'admin') {
     const auth = this.auth();
     const rank = { viewer: 0, editor: 1, admin: 2, owner: 3 } as const;
@@ -409,10 +686,48 @@ export class MockBackend {
     return auth;
   }
 
+  /**
+   * P6-03: 403 with n8n's message unless the signed-in user holds `scope` globally or on the row
+   * (`resource.scopes`, e.g. `projectScopes(project)`), as the server's `requireScope`.
+   */
+  requireScope(scope: Scope, resource?: { scopes?: readonly Scope[] } | null) {
+    const auth = this.auth();
+    const global = this.globalScopesOf(auth.globalRole, auth.tenant.id);
+    if (!global.includes(scope) && !resource?.scopes?.includes(scope))
+      throw new HttpError(403, 'forbidden', MISSING_SCOPE);
+    return auth;
+  }
+
+  /**
+   * Tests and demo: the signed-in user's workspace role (the first membership when signed out). An old word is
+   * stored as is; `member` or a custom slug sets `globalRole` (Phase 3 to 5 modules then rank it as viewer).
+   * L20 maps it to `member` plus a project role.
+   */
+  setDemoRole(role: Role): void {
+    const membership = this.session
+      ? this.memberships.find(
+          (m) => m.userId === this.session!.userId && m.tenantId === this.session!.tenantId,
+        )
+      : this.memberships[0];
+    if (!membership) throw new Error('No membership to set a role on');
+    const next = membershipRole(role);
+    membership.role = next.role;
+    if (next.globalRole === undefined) delete membership.globalRole;
+    else membership.globalRole = next.globalRole;
+  }
+
+  /** the workspace roles the member routes take: the old words, `member`, or a custom global role slug */
+  private assignableRole(value: unknown, tenantId: string): Role {
+    const role = typeof value === 'string' ? value : '';
+    if (OLD_WORDS.includes(role) || role === 'member') return role;
+    if (role && findCustomRole(this, tenantId, role, 'global')) return role;
+    throw new HttpError(400, 'invalid_role', 'Choose a valid role');
+  }
+
   toDto(wf: StoredWorkflow): WorkflowDTO {
     const { tenantId, ...dto } = wf;
     void tenantId;
-    return copy(dto);
+    return { ...copy(dto), ...this.projectFields(wf) };
   }
 
   /** the workflow in the signed-in workspace (404 otherwise) */
@@ -493,16 +808,41 @@ export class MockBackend {
       isArchived: w.isArchived,
       folderId: w.folderId,
       publishedVersionId: w.publishedVersionId,
+      ...this.projectFields(w),
     };
   }
 
   private settingsOf(tenantId: string): StoredTenantSettings {
     let settings = this.tenantSettings.get(tenantId);
     if (!settings) {
-      settings = { workflowReviews: { enabled: false } };
+      settings = {
+        workflowReviews: { enabled: false },
+        securityPolicy: { personalSpacePublishing: true, personalSpaceSharing: true },
+      };
       this.tenantSettings.set(tenantId, settings);
     }
     return settings;
+  }
+
+  /** P6-33: GET /settings/security: the policy and what personal projects publish and share today */
+  private securityPolicy(tenantId: string): SecurityPolicy {
+    const personal = new Set(
+      this.projects.filter((p) => p.tenantId === tenantId && p.type === 'personal').map((p) => p.id),
+    );
+    const inPersonal = (projectId: string | undefined) => projectId !== undefined && personal.has(projectId);
+    const workflows = this.workflows.filter((w) => w.tenantId === tenantId && inPersonal(w.projectId));
+    const credentials = this.credentials.filter((c) => c.tenantId === tenantId && inPersonal(c.projectId));
+    const shares = demoShares(this).filter((s) => s.tenantId === tenantId);
+    const sharedIds = (type: 'workflow' | 'credential') =>
+      new Set(shares.filter((s) => s.resourceType === type).map((s) => s.resourceId));
+    const sharedWorkflows = sharedIds('workflow');
+    const sharedCredentials = sharedIds('credential');
+    return {
+      ...copy(this.settingsOf(tenantId).securityPolicy),
+      publishedPersonalWorkflowsCount: workflows.filter((w) => w.publishedVersionId !== null).length,
+      sharedPersonalWorkflowsCount: workflows.filter((w) => sharedWorkflows.has(w.id)).length,
+      sharedPersonalCredentialsCount: credentials.filter((c) => sharedCredentials.has(c.id)).length,
+    };
   }
 
   validateForActivation(wf: StoredWorkflow) {
@@ -806,7 +1146,7 @@ export class MockBackend {
         ...result,
         tenants: this.memberships
           .filter((m) => m.userId === result.user.id)
-          .map((m) => ({ ...this.tenants.find((t) => t.id === m.tenantId)!, role: m.role })),
+          .map((m) => ({ ...this.tenants.find((t) => t.id === m.tenantId)!, role: m.globalRole ?? m.role })),
       };
     });
     this.on('POST', '/auth/switch-tenant', ({ body }) => {
@@ -829,7 +1169,13 @@ export class MockBackend {
         };
         this.users.push(user);
       }
-      this.memberships.push({ tenantId: invitation.tenantId, userId: user.id, role: invitation.role });
+      this.memberships.push({
+        tenantId: invitation.tenantId,
+        userId: user.id,
+        ...membershipRole(invitation.role),
+      });
+      // P6-03: every member has a personal project
+      this.personalProject(invitation.tenantId, user.id);
       this.invitations = this.invitations.filter((i) => i !== invitation);
       this.session = { userId: user.id, tenantId: invitation.tenantId };
       return this.authResult();
@@ -855,8 +1201,29 @@ export class MockBackend {
         workflowReviews: copy(
           this.session ? this.settingsOf(this.session.tenantId).workflowReviews : { enabled: false },
         ),
+        // P6-33: the personal space policy (absent when signed out)
+        ...(this.session
+          ? { securityPolicy: copy(this.settingsOf(this.session.tenantId).securityPolicy) }
+          : {}),
       }),
     );
+    // P6-33 (L12 owns the server route; FULL in the demo): the personal space policy and its counts
+    this.on('GET', '/settings/security', () => {
+      const { tenant } = this.requireScope('securitySettings:manage');
+      return this.securityPolicy(tenant.id);
+    });
+    this.on('POST', '/settings/security', ({ body }) => {
+      const { tenant } = this.requireScope('securitySettings:manage');
+      const policy = this.settingsOf(tenant.id).securityPolicy;
+      for (const key of ['personalSpacePublishing', 'personalSpaceSharing'] as const) {
+        if (body[key] === undefined) continue;
+        if (typeof body[key] !== 'boolean')
+          throw new HttpError(400, 'invalid_body', `${key} must be true or false`);
+        // turning a flag off does not undo what is published or shared already (P6-33)
+        policy[key] = body[key];
+      }
+      return this.securityPolicy(tenant.id);
+    });
     this.on('PATCH', '/settings', ({ body }) => {
       const { tenant } = this.requireRole('admin');
       const settings = this.settingsOf(tenant.id);
@@ -967,6 +1334,8 @@ export class MockBackend {
         folderId: typeof body.folderId === 'string' ? body.folderId : null,
         isArchived: false,
         publishedVersionId: null,
+        // P6-03: `projectId` of the body, else the workspace's default project (L20 sends the current one)
+        projectId: this.targetProject(body.projectId).id,
       };
       this.workflows.push(wf);
       this.recordVersion(wf, null);
@@ -1184,6 +1553,7 @@ export class MockBackend {
     // --- credentials ------------------------------------------------------------------------------
     const credential = (id: string) => {
       const { tenant, role } = this.auth();
+      // old viewers, `member` and custom slugs (ranked as viewer) cannot read one, as the server's editor gate
       if (role === 'viewer') throw new HttpError(403, 'forbidden', 'Viewers cannot read credentials');
       const c = this.credentials.find((x) => x.id === id && x.tenantId === tenant.id);
       if (!c) throw new HttpError(404, 'not_found', 'Credential not found');
@@ -1200,7 +1570,16 @@ export class MockBackend {
       const { tenant } = this.auth();
       return this.credentials
         .filter((c) => c.tenantId === tenant.id && (!query.type || c.type === query.type))
-        .map(({ id, name, type, createdAt, updatedAt }) => ({ id, name, type, createdAt, updatedAt }));
+        .filter((c) => !query.projectId || c.projectId === query.projectId)
+        .map(({ id, name, type, createdAt, updatedAt, projectId, isGlobal }) => ({
+          id,
+          name,
+          type,
+          createdAt,
+          updatedAt,
+          ...this.projectFields({ projectId }),
+          ...(isGlobal ? { isGlobal } : {}),
+        }));
     });
     this.on('POST', '/credentials', ({ body }) => {
       const { tenant } = this.auth();
@@ -1212,6 +1591,9 @@ export class MockBackend {
         data: copy((body.data as Record<string, unknown>) ?? {}),
         createdAt: now(),
         updatedAt: now(),
+        // P6-03: the body's project, else the workspace's default project
+        projectId: this.targetProject(body.projectId).id,
+        isGlobal: false,
       };
       this.credentials.push(c);
       return { id: c.id, name: c.name, type: c.type };
@@ -1227,10 +1609,24 @@ export class MockBackend {
       const data = Object.fromEntries(
         Object.entries(c.data).map(([k, v]) => [k, secrets.has(k) && v && !isExpression(v) ? REDACTED : v]),
       );
-      return { id: c.id, name: c.name, type: c.type, data };
+      return {
+        id: c.id,
+        name: c.name,
+        type: c.type,
+        data,
+        ...this.projectFields(c),
+        ...(c.isGlobal ? { isGlobal: true } : {}),
+      };
     });
     this.on('PATCH', '/credentials/:id', ({ params, body }) => {
       const c = credential(params[0]);
+      // P6-24 (FULL in the demo): usable by every member, read only; needs `credential:shareGlobally`
+      if (body.isGlobal !== undefined) {
+        if (typeof body.isGlobal !== 'boolean')
+          throw new HttpError(400, 'invalid_body', 'isGlobal must be true or false');
+        this.requireScope('credential:shareGlobally');
+        c.isGlobal = body.isGlobal;
+      }
       if (typeof body.name === 'string') c.name = body.name;
       if (body.data && typeof body.data === 'object') {
         const next = copy(body.data as Record<string, unknown>);
@@ -1293,32 +1689,58 @@ export class MockBackend {
       this.tags = this.tags.filter((t) => t.id !== params[0]);
       return { ok: true };
     });
-    this.on('GET', '/variables', () => {
+    // P6-31 (FULL in the demo, L22 does not own this file): a variable with `projectId` is a project variable
+    // (`projectVariable:*` on that project), one without a global one (`variable:*`, owner and admin today)
+    const variableOut = (v: Variable) =>
+      v.projectId
+        ? { id: v.id, key: v.key, value: v.value, projectId: v.projectId }
+        : { id: v.id, key: v.key, value: v.value };
+    const variableInTenant = (id: string) => {
       const { tenant } = this.auth();
+      const v = this.variables.find((x) => x.id === id && x.tenantId === tenant.id);
+      if (!v) throw new HttpError(404, 'not_found', 'Variable not found');
+      return v;
+    };
+    const requireVariableScope = (
+      action: 'create' | 'update' | 'delete',
+      projectId: string | null | undefined,
+    ) => {
+      if (!projectId) return this.requireScope(`variable:${action}`);
+      const project = this.targetProject(projectId);
+      return this.requireScope(`projectVariable:${action}`, { scopes: this.projectScopes(project) });
+    };
+    this.on('GET', '/variables', ({ query }) => {
+      const { tenant } = this.auth();
+      if (query.projectId) this.targetProject(query.projectId);
       return this.variables
         .filter((v) => v.tenantId === tenant.id)
-        .map(({ id, key, value }) => ({ id, key, value }));
+        .filter((v) => !query.projectId || v.projectId === query.projectId)
+        .map(variableOut);
     });
     this.on('POST', '/variables', ({ body }) => {
-      const { tenant } = this.auth();
+      const projectId = typeof body.projectId === 'string' && body.projectId ? body.projectId : null;
+      const { tenant } = requireVariableScope('create', projectId);
       const v = {
         id: newId(),
         key: String(body.key ?? ''),
         value: String(body.value ?? ''),
+        projectId,
         tenantId: tenant.id,
       };
       this.variables.push(v);
-      return { id: v.id, key: v.key, value: v.value };
+      return variableOut(v);
     });
     this.on('PATCH', '/variables/:id', ({ params, body }) => {
-      const v = this.variables.find((x) => x.id === params[0]);
-      if (!v) throw new HttpError(404, 'not_found', 'Variable not found');
+      const v = variableInTenant(params[0]);
+      requireVariableScope('update', v.projectId);
       v.key = String(body.key ?? v.key);
       v.value = String(body.value ?? v.value);
-      return { id: v.id, key: v.key, value: v.value };
+      return variableOut(v);
     });
     this.on('DELETE', '/variables/:id', ({ params }) => {
-      this.variables = this.variables.filter((v) => v.id !== params[0]);
+      const v = variableInTenant(params[0]);
+      requireVariableScope('delete', v.projectId);
+      this.variables = this.variables.filter((x) => x !== v);
       return { ok: true };
     });
 
@@ -1329,33 +1751,37 @@ export class MockBackend {
         .filter((m) => m.tenantId === tenant.id)
         .map((m) => {
           const u = this.users.find((x) => x.id === m.userId)!;
-          return { userId: u.id, email: u.email, name: u.name, role: m.role };
+          return { userId: u.id, email: u.email, name: u.name, role: m.globalRole ?? m.role };
         });
     });
+    // P6-03 (FULL in the demo, L22 does not own this file): the member routes take the old words, `member`
+    // and a custom global role slug; owner and admin only, as today (`user:create`, `user:changeRole`, `user:delete`)
     this.on('POST', '/members/invite', ({ body }) => {
-      const { tenant, role } = this.auth();
-      if (role !== 'owner' && role !== 'admin')
-        throw new HttpError(403, 'forbidden', 'Only admins can invite');
+      const { tenant } = this.requireScope('user:create');
+      const role = body.role === undefined ? 'editor' : this.assignableRole(body.role, tenant.id);
       const token = newId();
       this.invitations.push({
         token,
         tenantId: tenant.id,
         email: String(body.email ?? '').toLowerCase(),
-        role: (body.role as Role) ?? 'editor',
+        role,
       });
       const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
       return { inviteUrl: `${origin}/invitation/${token}` };
     });
     this.on('PATCH', '/members/:userId', ({ params, body }) => {
-      const { tenant } = this.auth();
+      const { tenant } = this.requireScope('user:changeRole');
       const m = this.memberships.find((x) => x.tenantId === tenant.id && x.userId === params[0]);
       if (!m) throw new HttpError(404, 'not_found', 'Member not found');
-      m.role = body.role as Role;
+      const next = membershipRole(this.assignableRole(body.role, tenant.id));
+      m.role = next.role;
+      if (next.globalRole === undefined) delete m.globalRole;
+      else m.globalRole = next.globalRole;
       const u = this.users.find((x) => x.id === m.userId)!;
-      return { userId: u.id, email: u.email, name: u.name, role: m.role };
+      return { userId: u.id, email: u.email, name: u.name, role: m.globalRole ?? m.role };
     });
     this.on('DELETE', '/members/:userId', ({ params }) => {
-      const { tenant } = this.auth();
+      const { tenant } = this.requireScope('user:delete');
       this.memberships = this.memberships.filter(
         (x) => !(x.tenantId === tenant.id && x.userId === params[0]),
       );

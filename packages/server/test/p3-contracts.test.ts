@@ -11,11 +11,11 @@ import {
   chain,
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   setNode,
   signup,
-  TestClient,
   type TestServer,
   waitForExecution,
 } from './helpers';
@@ -36,13 +36,7 @@ const pool = () => server.ctx.database.pool;
 
 /** a member of `owner`'s workspace with the given role */
 async function member(owner: Awaited<ReturnType<typeof signup>>, role: 'admin' | 'editor' | 'viewer') {
-  const email = `${role}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await owner.client.data(owner.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app);
-  await client.data(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: role, password: 'Passw0rd!' }),
-  );
-  return client;
+  return (await memberAs(owner, role)).client;
 }
 
 const api = (
@@ -264,7 +258,7 @@ describe('P3 workflows API', () => {
     const a = await createWorkflow(client, { name: 'A', nodes: [] });
     await createWorkflow(client, { name: 'B', nodes: [] });
     const { rows } = await pool().query(
-      `insert into folders (tenant_id, name) values ($1, 'F') returning id`,
+      `insert into folders (tenant_id, name, project_id) values ($1, 'F', (select id from projects where tenant_id = $1 and type = 'team' order by created_at, id limit 1)) returning id`,
       [tenant.id],
     );
     expect(await server.ctx.repos.workflows.setFolder(tenant.id, [a.id], rows[0].id)).toEqual([a.id]);

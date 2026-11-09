@@ -11,6 +11,7 @@ import type {
   ResourceMapperFields,
   WorkflowDefinition,
 } from '@workflow/workflow';
+import type { ProjectIcon } from '../api/types';
 
 const manualTrigger: NodeTypeDescription = {
   name: 'core.manualTrigger',
@@ -2249,3 +2250,16 @@ export const demoGroupedWorkflow: WorkflowDefinition & { name: string } = {
     { id: 'group-cleanup', name: 'Clean the lead', nodeIds: ['g-2', 'g-3'], description: 'Trim and tag.' },
   ],
 };
+
+/**
+ * P6-03: the demo seed's projects (demo/install.ts). The workspace's team project is named after the workspace
+ * (as migration 0022 backfills); every member has a personal project named after them. Seeded workflows and
+ * credentials go to the team project (the server's default project until L24).
+ */
+export const demoProjects = {
+  team: {
+    icon: { type: 'icon', value: 'layers' },
+    description: 'Shared workflows and credentials of the operations team',
+  },
+  personal: { icon: null },
+} as const satisfies Record<'team' | 'personal', { icon: ProjectIcon | null; description?: string }>;

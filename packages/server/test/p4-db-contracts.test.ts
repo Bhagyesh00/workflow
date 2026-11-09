@@ -39,7 +39,7 @@ const RLS_VIOLATION = '42501';
 
 async function insertTable(tenantId: string, name = `t_${randomUUID().slice(0, 8)}`): Promise<string> {
   const { rows } = await pool().query<{ id: string }>(
-    'insert into data_tables (tenant_id, name) values ($1, $2) returning id',
+    `insert into data_tables (tenant_id, name, project_id) values ($1, $2, (select id from projects where tenant_id = $1 and type = 'team' order by created_at, id limit 1)) returning id`,
     [tenantId, name],
   );
   return rows[0].id;
@@ -303,7 +303,8 @@ describe('0013_secret_connections', () => {
     const a = await signup(server.app);
     const id = randomUUID();
     await pool().query(
-      `insert into credentials (id, tenant_id, name, type, data_enc) values ($1, $2, 'c', 't', 'e')`,
+      `insert into credentials (id, tenant_id, name, type, data_enc, project_id)
+       values ($1, $2, 'c', 't', 'e', (select id from projects where tenant_id = $2 and type = 'team' order by created_at, id limit 1))`,
       [id, a.tenant.id],
     );
     const { rows } = await pool().query('select secret_keys from credentials where id = $1', [id]);
@@ -321,7 +322,8 @@ describe('0013_secret_connections', () => {
 describe('schema.ts names the lanes build on', () => {
   it('exports the 4 tables with camelCase fields', () => {
     expect(Object.keys(getTableColumns(dataTables)).sort()).toEqual(
-      ['createdAt', 'id', 'name', 'nextRowId', 'tenantId', 'updatedAt'].sort(),
+      // P6 S1 (0022): the owning project
+      ['createdAt', 'id', 'name', 'nextRowId', 'projectId', 'tenantId', 'updatedAt'].sort(),
     );
     expect(Object.keys(getTableColumns(dataTableColumns)).sort()).toEqual(
       ['createdAt', 'id', 'name', 'position', 'tableId', 'tenantId', 'type', 'updatedAt'].sort(),
@@ -336,6 +338,8 @@ describe('schema.ts names the lanes build on', () => {
         'id',
         'isEnabled',
         'lastError',
+        // P6 S1 (0023): null = a workspace vault, else the project's
+        'projectId',
         'providerKey',
         'settingsEnc',
         'state',

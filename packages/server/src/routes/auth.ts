@@ -1,7 +1,9 @@
 /** /rest/auth/* and invitation acceptance */
+import type { Scope } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
+import type { Role } from '../db/schema';
 import { clearSessionCookie, requireAuth, setSessionCookie } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { type AuthResult, tenantDTO, userDTO } from '../services/auth';
@@ -30,7 +32,7 @@ export function authResponse(result: Pick<AuthResult, 'user' | 'tenant' | 'role'
 }
 
 export function registerAuthRoutes(app: FastifyInstance, ctx: ServerContext): void {
-  const { config, auth, repos } = ctx;
+  const { config, auth, repos, access } = ctx;
 
   app.post(
     '/auth/signup',
@@ -85,6 +87,10 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: ServerContext): vo
     return { data: { ok: true } };
   });
 
+  /** P6-03: the scopes of the workspace role (sorted), which the editor's `can()` reads */
+  const globalScopes = async (tenantId: string, role: Role): Promise<Scope[]> =>
+    [...(await access.globalScopes(tenantId, role))].sort();
+
   app.get('/auth/me', async (request) => {
     const current = requireAuth(request);
     const tenants = await repos.memberships.listForUser(current.user.id);
@@ -92,6 +98,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: ServerContext): vo
       data: {
         ...authResponse(current).data,
         tenants: tenants.map((t) => ({ id: t.id, name: t.name, slug: t.slug, role: t.role })),
+        globalScopes: await globalScopes(current.tenant.id, current.role),
       },
     };
   });
@@ -101,7 +108,8 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: ServerContext): vo
     const { tenantId } = parse(z.object({ tenantId: z.uuid() }), request.body);
     if (!current.sessionId) throw ApiError.unauthorized();
     const { tenant, role } = await auth.switchTenant(current.sessionId, current.user.id, tenantId);
-    return authResponse({ user: current.user, tenant, role });
+    const response = authResponse({ user: current.user, tenant, role });
+    return { data: { ...response.data, globalScopes: await globalScopes(tenant.id, role) } };
   });
 
   app.post('/invitations/:token/accept', { logLevel: 'warn' }, async (request, reply) => {

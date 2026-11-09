@@ -204,7 +204,15 @@ describe('MCP Server Trigger workspace sign-in', () => {
     const viewer = await signup('Viewer');
     const editor = await signup('Editor');
     await server.ctx.repos.memberships.add(owner.tenant.id, viewer.user.id, 'viewer');
+    await server.ctx.repos.projects.ensurePersonal(
+      owner.tenant.id,
+      (await server.ctx.repos.users.get(viewer.user.id))!,
+    );
     await server.ctx.repos.memberships.add(owner.tenant.id, editor.user.id, 'editor');
+    await server.ctx.repos.projects.ensurePersonal(
+      owner.tenant.id,
+      (await server.ctx.repos.users.get(editor.user.id))!,
+    );
     const strict = await signedInTrigger(owner);
     const open = await signedInTrigger(owner, { requireExecuteAccess: false });
 

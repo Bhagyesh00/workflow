@@ -11,6 +11,7 @@ import {
   createWorkflow,
   executionsOf,
   flushRedis,
+  memberAs,
   node,
   outputOf,
   resetDatabase,
@@ -44,12 +45,8 @@ async function member(
   role: 'admin' | 'editor' | 'viewer',
   name = 'Vera Lynn Vance',
 ) {
-  const email = `${role}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await admin.client.data(admin.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app);
-  await client.data(client.post(`/rest/invitations/${invite.token}/accept`, { name, password: 'Passw0rd!' }));
-  const me = await client.data(client.get('/rest/auth/me'));
-  return { client, id: (me.user as { id: string }).id, email };
+  const { client, user, email } = await memberAs(admin, role, { name });
+  return { client, id: user.id, email };
 }
 
 const form = (parameters: DataObject = {}, path = 'who') =>
@@ -194,15 +191,9 @@ describe('POST /rest/form-auth/code', () => {
     const first = await owner();
     const second = await owner();
     const email = `both-${Math.random().toString(36).slice(2, 8)}@example.com`;
-    const both = new TestClient(server.app);
-    const firstInvite = await first.client.data(
-      first.client.post('/rest/members/invite', { email, role: 'viewer' }),
-    );
-    await both.data(
-      both.post(`/rest/invitations/${firstInvite.token}/accept`, { name: 'Both', password: 'Passw0rd!' }),
-    );
-    const me = await both.data(both.get('/rest/auth/me'));
-    await server.ctx.repos.memberships.add(second.tenant.id, (me.user as { id: string }).id, 'viewer');
+    const { client: both, user } = await memberAs(first, 'viewer', { email, name: 'Both' });
+    await server.ctx.repos.memberships.add(second.tenant.id, user.id, 'viewer');
+    await server.ctx.repos.projects.ensurePersonal(second.tenant.id, user);
     await active(second.client, [form()]);
     const url = `/form/${second.tenant.slug}/who`;
     const { cookie } = await signedInCookie(both, url);

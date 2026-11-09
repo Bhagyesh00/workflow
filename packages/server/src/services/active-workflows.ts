@@ -41,6 +41,7 @@ import type { PinoLogger } from '../logger';
 import { effectiveLimits, type TenantSettings } from '../plans';
 import { createRepositories, isUniqueViolation, type Repositories } from '../repositories';
 import type { MessageBus } from './bus';
+import { assertCredentialsUsable } from './credential-usable';
 import { binaryDirOf, type ExecutionObserver, type ExecutionService } from './executions';
 import { loadPublishedDefinition, publishedDefinition } from './published-workflow';
 import type { Leadership } from './queue';
@@ -492,6 +493,8 @@ export class ActiveWorkflowManager {
     const issues = await this.validate(tenantId, definition, workflowId);
     if (issues.length)
       throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', issues);
+    // P6 S1: every credential the version uses must be usable in the workflow's project (L4 fills the check)
+    await assertCredentialsUsable(this.deps, tenantId, row.projectId, definition);
 
     if (!row.active) {
       const limits = effectiveLimits(tenant.plan, tenant.settings as TenantSettings);
@@ -1044,6 +1047,8 @@ export class ActiveWorkflowManager {
     const services = await this.deps.executions.buildServices({
       tenant,
       executionId,
+      // P6 S1: a trigger runs in its workflow row's project
+      projectId: await this.deps.executions.projectFor(tenant.id, workflow.id),
       mode,
       workflowId: workflow.id,
     });

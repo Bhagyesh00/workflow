@@ -539,6 +539,9 @@ export const verifyWorkflowTool: AssistantToolDefinition<VerifyInput> = {
       {
         workflow: definition,
         ...(stored.workflowId ? { workflowId: stored.workflowId } : {}),
+        // P6 S1: a saved draft runs in its row's project (read at run time); an unsaved one in the
+        // workspace's default project until L16 runs it in the caller's
+        projectId: await ctx.repos.projects.defaultProjectFor(run.tenant.id),
         ...(start ? { startNode: start.name } : {}),
         ...(triggerItems ? { triggerItems } : {}),
         pinData,

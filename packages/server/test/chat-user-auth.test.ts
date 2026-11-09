@@ -7,12 +7,13 @@ import {
   createWorkflow,
   executionsOf,
   flushRedis,
+  memberAs,
   node,
   outputOf,
   resetDatabase,
   signup,
   TEST_REDIS,
-  TestClient,
+  type TestClient,
   type TestServer,
   waitFor,
   waitForExecution,
@@ -40,12 +41,8 @@ async function member(
   role: 'admin' | 'editor' | 'viewer',
   name = 'Vera Lynn Vance',
 ) {
-  const email = `${role}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await admin.client.data(admin.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app);
-  await client.data(client.post(`/rest/invitations/${invite.token}/accept`, { name, password: 'Passw0rd!' }));
-  const me = await client.data(client.get('/rest/auth/me'));
-  return { client, id: (me.user as { id: string }).id, email };
+  const { client, user, email } = await memberAs(admin, role, { name });
+  return { client, id: user.id, email };
 }
 
 const chat = (parameters: DataObject = {}, webhookId = 'chat-id') =>

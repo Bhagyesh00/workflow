@@ -449,6 +449,7 @@ export function createBaseContext(deps: ContextDeps): BaseContext {
     getMode: () => services.mode,
     getExecutionId: () => services.executionId,
     getTenantId: () => services.tenantId,
+    getProjectId: () => services.projectId,
     getTimezone: () => workflow.settings.timezone ?? services.timezone,
     getCredentials,
     getNodeParameter,

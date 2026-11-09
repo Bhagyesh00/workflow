@@ -28,12 +28,17 @@ import { mcpOAuthPlugin } from './routes/mcp-oauth';
 import { registerMcpOAuthClientRoutes } from './routes/mcp-oauth-clients';
 import { registerMcpServerRoutes } from './routes/mcp-server';
 import { registerMcpSettingsRoutes } from './routes/mcp-settings';
+import { registerProjectRoutes } from './routes/projects';
 import { publicApiPlugin } from './routes/public-api';
 import { registerPushRoutes } from './routes/push';
 import { registerResourceRoutes } from './routes/resources';
+import { registerRoleRoutes } from './routes/roles';
 import { registerSecretConnectionRoutes } from './routes/secret-connections';
+import { registerSecuritySettingsRoutes } from './routes/security-settings';
 import { registerSettingsRoutes } from './routes/settings';
+import { registerSharingRoutes } from './routes/sharing';
 import { registerEditor, registerHealthRoutes } from './routes/system';
+import { registerTransferRoutes } from './routes/transfer';
 import { webhookPlugin } from './routes/webhooks';
 import { registerWorkflowReviewRoutes } from './routes/workflow-reviews';
 import { registerWorkflowRoutes } from './routes/workflows';
@@ -65,6 +70,8 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
 
   app.setErrorHandler(handleError);
   app.decorateRequest('auth', null);
+  // P6-03: `requireScope` reads `request.server.access`; decorated on the root, so every plugin sees it
+  app.decorate('access', ctx.access);
   app.removeContentTypeParser('application/json');
   app.addContentTypeParser(
     'application/json',
@@ -171,6 +178,12 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerAssistantDraftRoutes(rest, ctx);
       registerAssistantSettingsRoutes(rest, ctx);
       registerAssistantMcpRoutes(rest, ctx);
+      // Phase 6 S1: projects (P6-03), sharing and transfers (P6-29, P6-30), roles (P6-32), security settings (P6-33)
+      registerProjectRoutes(rest, ctx);
+      registerSharingRoutes(rest, ctx);
+      registerTransferRoutes(rest, ctx);
+      registerRoleRoutes(rest, ctx);
+      registerSecuritySettingsRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );

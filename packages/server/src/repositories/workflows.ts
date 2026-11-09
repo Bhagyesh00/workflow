@@ -11,6 +11,7 @@ import {
   workflowVersions,
 } from '../db/schema';
 import type { Cursor } from '../http/pagination';
+import { type AccessListOptions, sharedRowConditions } from './shares';
 import { isUuid, now } from './util';
 
 export interface TagRef {
@@ -41,7 +42,8 @@ export interface WorkflowContent {
   nodeGroups?: unknown[];
 }
 
-export interface WorkflowListFilter {
+/** with `AccessListOptions` (P6-22): `filter`, `projectId`, `onlySharedWithMe` */
+export interface WorkflowListFilter extends AccessListOptions {
   /** name ILIKE; with `nodeTypes` / `matchTags` also a node type or a tag name (command bar, P3-01) */
   search?: string;
   /** node type ids whose display name matches `search` (at most 20 are used) */
@@ -62,7 +64,15 @@ export class WorkflowRepository {
   constructor(private readonly db: DbOrTx) {}
 
   async list(tenantId: string, filter: WorkflowListFilter): Promise<WorkflowSummaryRow[]> {
-    const conditions = [eq(workflows.tenantId, tenantId)];
+    const access = sharedRowConditions({
+      tenantId,
+      kind: 'workflow',
+      id: workflows.id,
+      project: workflows.projectId,
+      options: filter,
+    });
+    if (!access) return [];
+    const conditions = [eq(workflows.tenantId, tenantId), ...access];
     if (filter.search) {
       const pattern = `%${escapeLike(filter.search)}%`;
       const alternatives = [sql`${workflows.name} ilike ${pattern}`];
@@ -135,7 +145,14 @@ export class WorkflowRepository {
 
   async create(
     tenantId: string,
-    input: WorkflowContent & { id?: string; versionId: string; createdBy?: string; folderId?: string | null },
+    input: WorkflowContent & {
+      id?: string;
+      versionId: string;
+      createdBy?: string;
+      folderId?: string | null;
+      /** the owning project (P6-22) */
+      projectId: string;
+    },
   ): Promise<WorkflowRow> {
     const [row] = await this.db
       .insert(workflows)

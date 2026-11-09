@@ -32,6 +32,7 @@ import {
   setNode,
   signup,
   type TestServer,
+  teamProjectOf,
   testConfig,
   waitFor,
 } from './helpers';
@@ -170,14 +171,21 @@ describe('config', () => {
     const row = (await server.ctx.repos.tenants.get(tenant.id))!;
     const config = server.ctx.config;
     expect(
-      (await server.ctx.executions.buildServices({ tenant: row, executionId: '', mode: 'manual' }))
-        .disablePublicChatTrigger,
+      (
+        await server.ctx.executions.buildServices({
+          tenant: row,
+          executionId: '',
+          projectId: await teamProjectOf(server, tenant.id),
+          mode: 'manual',
+        })
+      ).disablePublicChatTrigger,
     ).toBe(false);
     config.disablePublicChatTrigger = true;
     try {
       const services = await server.ctx.executions.buildServices({
         tenant: row,
         executionId: '',
+        projectId: await teamProjectOf(server, tenant.id),
         mode: 'manual',
       });
       expect(services.disablePublicChatTrigger).toBe(true);
@@ -401,7 +409,7 @@ describe('data tables', () => {
       name: 'cases',
       columns: [{ name: 'question', type: 'string' }],
     });
-    const access = server.ctx.dataTables.forTenant(a.tenant.id);
+    const access = server.ctx.dataTables.forProject(a.tenant.id, await teamProjectOf(server, a.tenant.id));
     const added = await access.addColumn(table.id, { name: 'score', type: 'number' });
     expect(added).toMatchObject({ name: 'score', type: 'number' });
     expect((await access.listColumns(table.id)).map((c) => c.name)).toEqual(['question', 'score']);
@@ -409,7 +417,9 @@ describe('data tables', () => {
       statusCode: 409,
     });
     await expect(
-      server.ctx.dataTables.forTenant(b.tenant.id).addColumn(table.id, { name: 'other', type: 'string' }),
+      server.ctx.dataTables
+        .forProject(b.tenant.id, await teamProjectOf(server, b.tenant.id))
+        .addColumn(table.id, { name: 'other', type: 'string' }),
     ).rejects.toMatchObject({ statusCode: 404 });
     expect((await access.listColumns(table.id)).map((c) => c.name)).toEqual(['question', 'score']);
   });

@@ -132,7 +132,7 @@ describe('drag to folder', () => {
     signedIn();
     await foldersApi.create({ name: 'Alpha' });
     seed('Plain');
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     await openList('/workflows', 'Plain');
     expect(rowOf('Plain').getAttribute('draggable')).toBeNull();
     expect(rowOf('Alpha').getAttribute('draggable')).toBeNull();

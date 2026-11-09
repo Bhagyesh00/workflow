@@ -27,7 +27,13 @@ import type { ExecutionOutcome, StartExecutionInput } from '../executions';
 import type { AssistantRunScope } from './types';
 
 /** what a tool may pass: everything but the mode (always `manual`), `wait`, the tenant and the user */
-export type RunAndCollectInput = Omit<StartExecutionInput, 'tenantId' | 'mode' | 'wait' | 'userId'>;
+export type RunAndCollectInput = Omit<
+  StartExecutionInput,
+  'tenantId' | 'mode' | 'wait' | 'userId' | 'projectId'
+> & {
+  /** P6 S1: the run's project (a saved workflow's row wins at run time); required so no caller misses it */
+  projectId: string;
+};
 
 /** the part of a run scope `runAndCollect` needs */
 export type RunAndCollectScope = Pick<AssistantRunScope, 'tenant' | 'user' | 'signal'>;

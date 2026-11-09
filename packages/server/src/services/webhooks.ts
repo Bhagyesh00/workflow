@@ -72,7 +72,13 @@ import { mcpCorsHeaders } from '../http/mcp-http';
 import type { PinoLogger } from '../logger';
 import type { Repositories } from '../repositories';
 import type { PushService } from './bus';
-import type { ExecutionObserver, ExecutionOutcome, ExecutionService, StartedExecution } from './executions';
+import type {
+  ExecutionObserver,
+  ExecutionOutcome,
+  ExecutionService,
+  StartedExecution,
+  StoredRunOptions,
+} from './executions';
 import type { McpTriggerService } from './mcp-trigger';
 import type { Metrics } from './metrics';
 import { loadPublishedDefinition } from './published-workflow';
@@ -343,6 +349,8 @@ interface CorsSource {
   tenant: TenantRow;
   mode: ExecutionMode;
   workflowId?: string;
+  /** P6 S1: the stored project of a run with no workflow row (a resume page) */
+  projectId?: string;
   workflow: Workflow;
   node: WorkflowNode;
   /** a chat test registration's id: its `x-chat-test-token` must name it */
@@ -620,7 +628,12 @@ export class WebhookService {
         userId: registration.userId,
         claim,
         onStarted: (executionId) =>
-          push.send(tenant.id, 'testWebhookReceived', { workflowId: registration.workflowId, executionId }),
+          push.send(
+            tenant.id,
+            'testWebhookReceived',
+            { workflowId: registration.workflowId, executionId },
+            { workflowId: registration.workflowId },
+          ),
       });
     }
     // a body that cannot be read (too large, malformed) leaves the registration in place
@@ -645,7 +658,12 @@ export class WebhookService {
       destinationNode: registration.destinationNode,
       listenId: registration.listenId,
       onStarted: (executionId) =>
-        push.send(tenant.id, 'testWebhookReceived', { workflowId: registration.workflowId, executionId }),
+        push.send(
+          tenant.id,
+          'testWebhookReceived',
+          { workflowId: registration.workflowId, executionId },
+          { workflowId: registration.workflowId },
+        ),
     });
   }
 
@@ -717,8 +735,16 @@ export class WebhookService {
       own.find((h) => h.method === incoming.method && h.path === path) ??
       own.find((h) => h.method === incoming.method) ??
       own[0];
+    const storedProjectId = (data.runOptions as StoredRunOptions | null)?.projectId;
     const source: CorsSource | undefined = node
-      ? { tenant, mode: row.mode as ExecutionMode, workflowId: row.workflowId ?? undefined, workflow, node }
+      ? {
+          tenant,
+          mode: row.mode as ExecutionMode,
+          workflowId: row.workflowId ?? undefined,
+          projectId: storedProjectId,
+          workflow,
+          node,
+        }
       : undefined;
     const cors = async (reply: WebhookReply) =>
       source ? this.decorate(reply, source, incoming.headers) : reply;
@@ -753,6 +779,8 @@ export class WebhookService {
       const services = await this.contextServices({
         tenant,
         executionId,
+        // P6 S1: the workflow row's project, else the one the run was started in
+        projectId: await this.deps.executions.projectFor(tenant.id, row.workflowId, storedProjectId),
         mode: row.mode as never,
         workflowId: row.workflowId ?? undefined,
       });
@@ -933,6 +961,7 @@ export class WebhookService {
       const services = await this.contextServices({
         tenant,
         executionId,
+        projectId: await executions.projectFor(tenant.id, input.workflowId),
         mode: input.mode,
         workflowId: input.workflowId,
       });
@@ -1404,13 +1433,14 @@ export class WebhookService {
    * is evaluated without item data, like the node's own check. One that fails allows no origin (`false`).
    */
   private async allowedOrigins(source: CorsSource): Promise<unknown> {
-    const { tenant, mode, workflowId, workflow, node } = source;
+    const { tenant, mode, workflowId, projectId, workflow, node } = source;
     const value = nodeOptions(workflow, node).allowedOrigins;
     if (!isExpression(value)) return value;
     try {
       const services = await this.deps.executions.buildServices({
         tenant,
         executionId: '',
+        projectId: await this.deps.executions.projectFor(tenant.id, workflowId, projectId),
         mode,
         workflowId,
       });

@@ -447,6 +447,7 @@ export function services(
   const { creds = {}, http, tenantId, nodeTypes: customNodeTypes, ...overrides } = options;
   return {
     tenantId: tenantId ?? 't1',
+    projectId: 'p1',
     executionId: 'e1',
     mode: 'manual',
     timezone: 'UTC',

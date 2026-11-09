@@ -148,6 +148,34 @@
       "when": 1794134780577,
       "tag": "0020_assistant_mcp_connections",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1794198409314,
+      "tag": "0021_projects",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1794198475588,
+      "tag": "0022_project_ownership",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1794198533244,
+      "tag": "0023_shares",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1794198593244,
+      "tag": "0024_roles_cutover",
+      "breakpoints": true
     }
   ]
 }

@@ -51,6 +51,7 @@ import { toWorkflowLogger } from '../logger';
 import { currentPeriod, effectiveLimits, executionTimeoutMs, type TenantSettings } from '../plans';
 import type { Repositories } from '../repositories';
 import type { MessageBus, PushService } from './bus';
+import { assertCredentialsUsable } from './credential-usable';
 import type { CredentialService } from './credentials';
 import type { DataTableService } from './data-tables';
 import type { Metrics } from './metrics';
@@ -94,6 +95,11 @@ export interface StoredRunOptions {
   customData?: Record<string, string>;
   /** P5-02: the start node runs `customOperations[forceOperation]` of its type in place of `execute` */
   forceOperation?: string;
+  /**
+   * P6 S1: the project a run with no workflow row runs in (`StartExecutionInput.projectId`). A run with a
+   * row reads the row's project first, so a move while queued wins; a run with neither fails.
+   */
+  projectId?: string;
 }
 
 export interface ExecutionOutcome {
@@ -136,6 +142,11 @@ export interface StartExecutionInput {
   customData?: Record<string, string>;
   /** P5-02: the start node runs `customOperations[forceOperation]` of its type in place of `execute` */
   forceOperation?: string;
+  /**
+   * P6 S1: the project the run belongs to when it has no workflow row (an unsaved draft, a node test, an
+   * inline sub-workflow: the parent's). Stored in `StoredRunOptions.projectId`; the row's project wins.
+   */
+  projectId?: string;
   executionId?: string;
   retryOf?: string;
   /** retry only: the state of the failed execution; the run continues at its `failedExecuteData` */
@@ -308,6 +319,9 @@ export class ExecutionService {
     // bounds them and they are not billable, so a plan's concurrent limit never blocks a test run (P5-02)
     if (input.mode !== 'integrated' && input.mode !== 'evaluation')
       await this.checkLimits(tenant, input.mode);
+    // P6 S1: the credentials must be usable in the run's project (the row's, else the given one); L4 fills the check
+    const runProject = await this.runProjectOf(tenant.id, input.workflowId, input.projectId);
+    if (runProject) await assertCredentialsUsable(this.deps, tenant.id, runProject, input.workflow);
 
     const executionId = input.executionId ?? randomUUID();
     const workflowData = cloneDefinition(input.workflow);
@@ -326,6 +340,7 @@ export class ExecutionService {
       retryFromFailure: input.retryState ? true : undefined,
       customData: input.customData,
       forceOperation: input.forceOperation,
+      projectId: input.projectId,
     };
     const workflowId = input.workflowId ?? input.workflow.id ?? null;
     try {
@@ -352,7 +367,12 @@ export class ExecutionService {
       await this.removeBinaryData(tenant.id, executionId);
       throw error;
     }
-    this.deps.push.send(tenant.id, 'executionStarted', { executionId, workflowId, mode: input.mode });
+    this.deps.push.send(
+      tenant.id,
+      'executionStarted',
+      { executionId, workflowId, mode: input.mode },
+      { workflowId: workflowId ?? undefined },
+    );
 
     // start() rejects only while the execution cannot run, so callers may clean up after a rejection
     const finished = input.wait || input.observer ? this.addWaiter(executionId, input.observer) : undefined;
@@ -377,6 +397,36 @@ export class ExecutionService {
     return { executionId, finished };
   }
 
+  /**
+   * P6 S1: the project a context outside a run belongs to (a trigger, a webhook, a resume page): the workflow
+   * row's, else `fallbackProjectId` (a run's stored project); 404 `Workflow` when there is neither.
+   */
+  async projectFor(
+    tenantId: string,
+    workflowId: string | null | undefined,
+    fallbackProjectId?: string,
+  ): Promise<string> {
+    const projectId = await this.runProjectOf(tenantId, workflowId, fallbackProjectId);
+    if (!projectId) throw ApiError.notFound('Workflow');
+    return projectId;
+  }
+
+  /**
+   * P6 S1: the project a run belongs to: its workflow row's (read at run time, so a move while queued wins),
+   * else the stored one (`StoredRunOptions.projectId`); undefined when there is neither.
+   */
+  private async runProjectOf(
+    tenantId: string,
+    workflowId: string | null | undefined,
+    storedProjectId: string | undefined,
+  ): Promise<string | undefined> {
+    if (workflowId) {
+      const row = await this.deps.repos.workflows.get(tenantId, workflowId);
+      if (row) return row.projectId;
+    }
+    return storedProjectId;
+  }
+
   /** an execution row exists but the run could not be scheduled: close it so it holds no concurrency slot */
   private async abandon(tenantId: string, executionId: string, workflowId: string | null): Promise<void> {
     const message = 'The execution could not be scheduled';
@@ -387,12 +437,12 @@ export class ExecutionService {
         this.deps.logger.warn({ err: e, tenantId, executionId }, 'Execution could not be closed'),
       );
     await this.removeBinaryData(tenantId, executionId);
-    this.deps.push.send(tenantId, 'executionFinished', {
-      executionId,
-      workflowId,
-      status: 'crashed',
-      error: { message },
-    });
+    this.deps.push.send(
+      tenantId,
+      'executionFinished',
+      { executionId, workflowId, status: 'crashed', error: { message } },
+      { workflowId: workflowId ?? undefined },
+    );
   }
 
   private async checkLimits(tenant: TenantRow, mode: ExecutionMode): Promise<void> {
@@ -540,9 +590,12 @@ export class ExecutionService {
     let engine: WorkflowExecute;
     try {
       workflow = new Workflow(definition, nodeTypes);
+      const projectId = await this.runProjectOf(tenant.id, row.workflowId, options.projectId);
+      if (!projectId) throw new WorkflowOperationError('The project of this execution could not be found');
       const services = await this.buildServices({
         tenant,
         executionId,
+        projectId,
         mode: row.mode as ExecutionMode,
         workflowId: row.workflowId ?? undefined,
         depth: options.depth ?? 0,
@@ -664,12 +717,12 @@ export class ExecutionService {
     opts: { durationMs?: number; state?: ExecutionState } = {},
   ): Promise<void> {
     const { repos, push, metrics, logger } = this.deps;
-    push.send(tenantId, 'executionFinished', {
-      executionId: row.id,
-      workflowId: row.workflowId,
-      status: 'crashed',
-      error: { message },
-    });
+    push.send(
+      tenantId,
+      'executionFinished',
+      { executionId: row.id, workflowId: row.workflowId, status: 'crashed', error: { message } },
+      { workflowId: row.workflowId ?? undefined },
+    );
     if (opts.durationMs !== undefined) {
       const durationMs = Math.max(0, opts.durationMs);
       await repos.usage.increment(tenantId, currentPeriod(), 0, durationMs);
@@ -718,11 +771,13 @@ export class ExecutionService {
     const { push, repos } = this.deps;
     const manual = row.mode === 'manual';
     const executionId = row.id;
+    // P6 S1: the push envelope names the workflow, so the stream can leave it out for users who cannot read it
+    const about = { workflowId: row.workflowId ?? definition.id ?? undefined };
     // node runs that sent a chunk, by `<node>:<run>`, with the meta of their last chunk: their end is announced
     const chunked = new Map<string, ChatChunkMeta>();
     return {
       nodeExecuteBefore: (nodeName) => {
-        if (manual) push.send(tenantId, 'nodeExecuteBefore', { executionId, nodeName });
+        if (manual) push.send(tenantId, 'nodeExecuteBefore', { executionId, nodeName }, about);
       },
       nodeExecuteAfter: async (nodeName, runIndex, taskData, state) => {
         const ended = chunked.get(`${nodeName}:${runIndex}`);
@@ -735,7 +790,8 @@ export class ExecutionService {
               .catch(() => {});
           }
         }
-        if (manual) push.send(tenantId, 'nodeExecuteAfter', { executionId, nodeName, runIndex, taskData });
+        if (manual)
+          push.send(tenantId, 'nodeExecuteAfter', { executionId, nodeName, runIndex, taskData }, about);
         if (definition.settings?.saveExecutionProgress) {
           // progress is best effort: a failed write must not fail the node that just ran
           await repos.executions.saveState(tenantId, executionId, state).catch((e) => {
@@ -761,7 +817,7 @@ export class ExecutionService {
         }
       },
       sendMessageToUI: (nodeName, args) => {
-        push.send(tenantId, 'consoleMessage', { executionId, nodeName, args });
+        push.send(tenantId, 'consoleMessage', { executionId, nodeName, args }, about);
       },
     };
   }
@@ -837,12 +893,17 @@ export class ExecutionService {
       await this.removeBinaryData(tenant.id, row.id);
     }
 
-    push.send(tenant.id, 'executionFinished', {
-      executionId: row.id,
-      workflowId: row.workflowId,
-      status,
-      ...(error ? { error: { message: error.message, node: error.node } } : {}),
-    });
+    push.send(
+      tenant.id,
+      'executionFinished',
+      {
+        executionId: row.id,
+        workflowId: row.workflowId,
+        status,
+        ...(error ? { error: { message: error.message, node: error.node } } : {}),
+      },
+      { workflowId: row.workflowId ?? undefined },
+    );
 
     if (status === 'error' || status === 'crashed') {
       await this.startErrorWorkflow(tenant.id, row, definition, state, errorChain).catch((e) =>
@@ -915,6 +976,10 @@ export class ExecutionService {
   async buildServices(input: {
     tenant: TenantRow;
     executionId: string;
+    /** P6 S1: the project the run belongs to (its workflow row's); variables, credentials and data tables come from it */
+    projectId: string;
+    /** P6 S1: credential ids a server path allows beyond the project's own (`options.allow`, never from a node or a body) */
+    allowCredentials?: string[];
     mode: ExecutionMode;
     workflowId?: string;
     depth?: number;
@@ -932,21 +997,22 @@ export class ExecutionService {
     const depth = input.depth ?? 0;
     return {
       tenantId: tenant.id,
+      projectId: input.projectId,
       executionId,
       mode: input.mode,
       timezone: settings.timezone ?? config.defaultTimezone,
-      variables: await repos.variables.map(tenant.id),
+      variables: await repos.variables.map(tenant.id, input.projectId),
       instanceBaseUrl: config.baseUrl,
       resumeUrl: executionId ? this.resumeUrl(executionId) : undefined,
       resumeFormUrl: executionId ? this.resumeFormUrl(executionId) : undefined,
       signReviewKey: executionId ? (key) => this.signReviewKey(executionId, key) : undefined,
       nodeTypes,
       credentialTypes: credentials.types,
-      credentials: credentials.provider(tenant.id),
+      credentials: credentials.provider(tenant.id, input.projectId, { allow: input.allowCredentials }),
       binaryData: this.binaryStore(tenant.id),
       codeRunner,
       pythonRunner,
-      dataTables: dataTables.forTenant(tenant.id, { workflowId: input.workflowId }),
+      dataTables: dataTables.forProject(tenant.id, input.projectId, { workflowId: input.workflowId }),
       formTokens,
       formAuth,
       http,
@@ -964,6 +1030,7 @@ export class ExecutionService {
       executeSubWorkflow: (request) =>
         this.executeSubWorkflow(
           request,
+          input.projectId,
           depth,
           input.errorChain === true,
           input.signal,
@@ -991,9 +1058,13 @@ export class ExecutionService {
     const limits = effectiveLimits(tenant.plan, tenant.settings as TenantSettings);
     const timeoutMs = executionTimeoutMs(this.deps.config, limits, definition.settings?.executionTimeout);
     const workflow = new Workflow(cloneDefinition(definition), nodeTypes);
+    // P6 S1: the operation runs in the project of the workflow row the definition was loaded from
+    const projectId = await this.runProjectOf(tenant.id, definition.id, undefined);
+    if (!projectId) throw ApiError.notFound('Workflow');
     const services = await this.buildServices({
       tenant,
       executionId: '',
+      projectId,
       mode: 'manual',
       workflowId: definition.id ?? undefined,
       signal,
@@ -1019,6 +1090,8 @@ export class ExecutionService {
 
   private async executeSubWorkflow(
     request: SubWorkflowRequest,
+    /** P6 S1: the parent's project; an inline (parameter) sub-workflow has no row and runs in it */
+    parentProjectId: string,
     depth: number,
     errorChain: boolean,
     signal?: AbortSignal,
@@ -1031,6 +1104,8 @@ export class ExecutionService {
     const tenantId = request.parent.tenantId;
     let definition: WorkflowDefinition;
     let workflowId: string | undefined;
+    // a database callee runs in its own row's project (read again at run time); an inline one in the parent's
+    let projectId: string | undefined;
     if (request.source.source === 'database') {
       const row = await repos.workflows.get(tenantId, request.source.workflowId ?? '');
       if (!row) throw new Error(`Workflow "${request.source.workflowId ?? ''}" was not found`);
@@ -1046,6 +1121,7 @@ export class ExecutionService {
     } else {
       if (!request.source.workflow) throw new Error('No workflow definition was given');
       definition = { ...cloneDefinition(request.source.workflow), id: undefined };
+      projectId = parentProjectId;
     }
     const workflow = new Workflow(definition, nodeTypes);
     const start = findStartNode(workflow, EXECUTE_WORKFLOW_TRIGGER);
@@ -1061,6 +1137,7 @@ export class ExecutionService {
       startNode: start.name,
       triggerItems: JSON.parse(JSON.stringify(items)),
       parentExecutionId: request.parent.executionId || undefined,
+      projectId,
       rootMode,
       depth: depth + 1,
       errorChain,
@@ -1239,11 +1316,12 @@ export class ExecutionService {
         waitTill: null,
       });
       if (done) {
-        this.deps.push.send(tenantId, 'executionFinished', {
-          executionId,
-          workflowId: row.workflowId,
-          status: 'canceled',
-        });
+        this.deps.push.send(
+          tenantId,
+          'executionFinished',
+          { executionId, workflowId: row.workflowId, status: 'canceled' },
+          { workflowId: row.workflowId ?? undefined },
+        );
         return 'canceled';
       }
     }
@@ -1310,6 +1388,8 @@ export class ExecutionService {
           executionId: retryId,
           retryOf: row.id,
           userId: options.userId,
+          // P6 S1: a run with no workflow row keeps the project it was started in
+          projectId: runOptions.projectId,
           ...input,
         });
       } catch (error) {

@@ -33,7 +33,7 @@ async function setUp(role: Role = 'owner') {
     type: 'braveSearchApi',
     data: { apiKey: 'b' },
   });
-  mock.memberships[0].role = role;
+  mock.setDemoRole(role);
   return { model, brave };
 }
 

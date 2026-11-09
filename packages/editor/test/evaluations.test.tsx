@@ -497,7 +497,7 @@ describe('run page', () => {
 
 describe('viewer', () => {
   beforeEach(() => {
-    for (const m of backend().memberships) m.role = 'viewer';
+    backend().setDemoRole('viewer');
   });
 
   it('reads the list and cannot run, stop or delete', async () => {

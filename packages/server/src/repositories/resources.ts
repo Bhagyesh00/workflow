@@ -1,9 +1,10 @@
 /** Credentials, variables, webhooks, audit log, usage counters and webhook idempotency keys. */
-import { and, asc, desc, eq, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lt, or, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import {
   auditLog,
   type CredentialRow,
+  credentialShares,
   credentials,
   usageCounters,
   variables,
@@ -12,19 +13,50 @@ import {
   webhooks,
 } from '../db/schema';
 import type { Cursor } from '../http/pagination';
+import { type AccessListOptions, inUuids, sharedRowConditions } from './shares';
 import { isUuid, now } from './util';
+
+/** credential list options (P6-24): the access filter shape plus the type */
+export interface CredentialListOptions extends AccessListOptions {
+  type?: string;
+}
+
+/**
+ * variable list options (P6-31). `projectId`: a project's variables; null: only workspace (global)
+ * variables; absent: both. `filter` narrows the project variables to `filter.projectIds` (global ones stay,
+ * `variable:list` is a workspace scope). Variables are never shared, so `onlySharedWithMe` matches nothing.
+ */
+export interface VariableListOptions extends Omit<AccessListOptions, 'projectId'> {
+  projectId?: string | null;
+}
 
 export class CredentialRepository {
   constructor(private readonly db: DbOrTx) {}
 
-  async list(tenantId: string, type?: string) {
-    const conditions = [eq(credentials.tenantId, tenantId)];
-    if (type) conditions.push(eq(credentials.type, type));
+  /**
+   * `options` as a string is the type alone (the callers from before P6-24). With an access filter a
+   * credential is listed when its project or a share reaches it, or it is global and `filter.credentialIds`
+   * holds it (`AccessService.listFilter` puts global ids there for `credential:list` and `:read`).
+   */
+  async list(tenantId: string, options?: CredentialListOptions | string) {
+    const opts: CredentialListOptions = typeof options === 'string' ? { type: options } : (options ?? {});
+    const access = sharedRowConditions({
+      tenantId,
+      kind: 'credential',
+      id: credentials.id,
+      project: credentials.projectId,
+      options: opts,
+    });
+    if (!access) return [];
+    const conditions = [eq(credentials.tenantId, tenantId), ...access];
+    if (opts.type) conditions.push(eq(credentials.type, opts.type));
     return this.db
       .select({
         id: credentials.id,
         name: credentials.name,
         type: credentials.type,
+        projectId: credentials.projectId,
+        isGlobal: credentials.isGlobal,
         createdAt: credentials.createdAt,
         updatedAt: credentials.updatedAt,
       })
@@ -42,21 +74,67 @@ export class CredentialRepository {
     return row;
   }
 
-  async findByName(tenantId: string, name: string, types: string[]): Promise<CredentialRow | undefined> {
+  /** the owner and global flag of each credential in `ids` that exists in the tenant (no data) */
+  async listByIds(
+    tenantId: string,
+    ids: string[],
+  ): Promise<Array<{ id: string; projectId: string; isGlobal: boolean }>> {
+    const valid = [...new Set(ids.filter(isUuid))];
+    if (!valid.length) return [];
+    return this.db
+      .select({ id: credentials.id, projectId: credentials.projectId, isGlobal: credentials.isGlobal })
+      .from(credentials)
+      .where(and(eq(credentials.tenantId, tenantId), inArray(credentials.id, valid)));
+  }
+
+  /**
+   * A credential by exact name among `types`. With a `projectId` only what that project can use: owned by
+   * it, shared with it, or global (P6-24), the project's own first. `null` searches the whole workspace,
+   * the behaviour before P6-24 (L4 passes the project).
+   */
+  async findByName(
+    tenantId: string,
+    projectId: string | null,
+    name: string,
+    types: string[],
+  ): Promise<CredentialRow | undefined> {
     if (!types.length) return undefined;
+    const conditions: SQL[] = [
+      eq(credentials.tenantId, tenantId),
+      eq(credentials.name, name),
+      inArray(credentials.type, types),
+    ];
+    const order: SQL[] = [];
+    if (projectId !== null) {
+      if (!isUuid(projectId)) return undefined;
+      const owned = eq(credentials.projectId, projectId);
+      conditions.push(
+        sql`(${owned} or ${credentials.isGlobal} = true or ${credentials.id} in (select ${credentialShares.credentialId} from ${credentialShares} where ${credentialShares.tenantId} = ${tenantId}::uuid and ${inUuids(credentialShares.projectId, [projectId])}))`,
+      );
+      order.push(sql`(${owned}) desc`);
+    }
     const [row] = await this.db
       .select()
       .from(credentials)
-      .where(
-        and(eq(credentials.tenantId, tenantId), eq(credentials.name, name), inArray(credentials.type, types)),
-      )
+      .where(and(...conditions))
+      .orderBy(...order, asc(credentials.createdAt), asc(credentials.id))
       .limit(1);
     return row;
   }
 
   async create(
     tenantId: string,
-    input: { id: string; name: string; type: string; dataEnc: string; createdBy?: string },
+    input: {
+      id: string;
+      name: string;
+      type: string;
+      dataEnc: string;
+      createdBy?: string;
+      /** the owning project (P6-24) */
+      projectId: string;
+      /** usable by every project of the workspace (`credential:shareGlobally`) */
+      isGlobal?: boolean;
+    },
   ) {
     const [row] = await this.db
       .insert(credentials)
@@ -65,7 +143,12 @@ export class CredentialRepository {
     return row;
   }
 
-  async update(tenantId: string, id: string, patch: { name?: string; dataEnc?: string }) {
+  /** `projectId` moves the credential (P6-30; its shares are the caller's); `isGlobal` (P6-29) */
+  async update(
+    tenantId: string,
+    id: string,
+    patch: { name?: string; dataEnc?: string; isGlobal?: boolean; projectId?: string },
+  ) {
     if (!isUuid(id)) return undefined;
     const [row] = await this.db
       .update(credentials)
@@ -88,20 +171,46 @@ export class CredentialRepository {
 export class VariableRepository {
   constructor(private readonly db: DbOrTx) {}
 
-  async list(tenantId: string) {
+  async list(tenantId: string, options: VariableListOptions = {}) {
+    if (options.onlySharedWithMe) return [];
+    const conditions: SQL[] = [eq(variables.tenantId, tenantId)];
+    if (options.projectId === null) conditions.push(isNull(variables.projectId));
+    else if (options.projectId !== undefined) {
+      if (!isUuid(options.projectId)) return [];
+      conditions.push(eq(variables.projectId, options.projectId));
+    }
+    const { filter } = options;
+    if (filter && !filter.all) {
+      const projectIds = [...new Set(filter.projectIds.filter(isUuid))];
+      const global = isNull(variables.projectId);
+      conditions.push(
+        projectIds.length ? sql`(${global} or ${inUuids(variables.projectId, projectIds)})` : global,
+      );
+    }
     return this.db
       .select()
       .from(variables)
-      .where(eq(variables.tenantId, tenantId))
-      .orderBy(asc(variables.key));
+      .where(and(...conditions))
+      .orderBy(asc(variables.key), sql`${variables.projectId} nulls first`, asc(variables.id));
   }
 
-  async map(tenantId: string): Promise<Record<string, string>> {
+  /**
+   * `$vars` for a run: the workspace (global) variables, with the project's own value winning for a key
+   * both have (P6-31). Without a project, only the workspace variables.
+   */
+  async map(tenantId: string, projectId?: string): Promise<Record<string, string>> {
+    const scope =
+      projectId !== undefined && isUuid(projectId)
+        ? or(isNull(variables.projectId), eq(variables.projectId, projectId))
+        : isNull(variables.projectId);
     const rows = await this.db
-      .select({ key: variables.key, value: variables.value })
+      .select({ key: variables.key, value: variables.value, projectId: variables.projectId })
       .from(variables)
-      .where(eq(variables.tenantId, tenantId));
-    return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+      .where(and(eq(variables.tenantId, tenantId), scope));
+    const out: Record<string, string> = {};
+    for (const row of rows) if (row.projectId === null) out[row.key] = row.value;
+    for (const row of rows) if (row.projectId !== null) out[row.key] = row.value;
+    return out;
   }
 
   async get(tenantId: string, id: string) {
@@ -113,10 +222,18 @@ export class VariableRepository {
     return row;
   }
 
-  async create(tenantId: string, key: string, value: string) {
+  /** `projectId` absent or null: a workspace (global) variable; keys are unique per project and globally */
+  async create(tenantId: string, input: { key: string; value: string; projectId?: string | null }) {
     const [row] = await this.db
       .insert(variables)
-      .values({ tenantId, key, value, createdAt: now(), updatedAt: now() })
+      .values({
+        tenantId,
+        key: input.key,
+        value: input.value,
+        projectId: input.projectId ?? null,
+        createdAt: now(),
+        updatedAt: now(),
+      })
       .returning();
     return row;
   }

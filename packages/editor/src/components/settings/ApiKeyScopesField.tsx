@@ -28,7 +28,14 @@ const GROUPS: Array<{ resource: string; label: string; scopes: string[] }> = [
   { resource: 'tag', label: 'Tags', scopes: ['list', 'read', 'create', 'update', 'delete'] },
   { resource: 'variable', label: 'Variables', scopes: ['list', 'create', 'update', 'delete'] },
   { resource: 'folder', label: 'Folders', scopes: ['list', 'read', 'create', 'update', 'delete'] },
-  { resource: 'project', label: 'Projects', scopes: ['list', 'create', 'update', 'delete'] },
+  {
+    resource: 'project',
+    label: 'Projects',
+    scopes: ['list', 'create', 'update', 'delete', 'manageMembers'],
+  },
+  // P6-32, P6-33
+  { resource: 'role', label: 'Roles', scopes: ['list', 'read', 'manage', 'manageProject'] },
+  { resource: 'securitySettings', label: 'Security settings', scopes: ['manage'] },
   { resource: 'user', label: 'Users', scopes: ['list', 'read', 'create', 'changeRole', 'delete'] },
   { resource: 'dataTable', label: 'Data tables', scopes: ['list', 'read', 'create', 'update', 'delete'] },
   {

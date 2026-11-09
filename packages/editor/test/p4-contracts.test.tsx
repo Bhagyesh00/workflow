@@ -111,7 +111,7 @@ describe('routes and navigation', () => {
     ['editor', false],
     ['viewer', false],
   ] as const)('settings link "External secrets" for a %s: %s', async (role, shown) => {
-    backend().memberships[0].role = role;
+    backend().setDemoRole(role);
     renderApp('/settings/account');
     await screen.findByRole('link', { name: 'API keys' });
     if (shown) {

@@ -8,7 +8,7 @@ import { setAssistantStreamConnector } from '../api/assistant-stream';
 import { setChatFetch } from '../api/chat-transport';
 import { setTransport } from '../api/client';
 import { setPushConnector } from '../api/push';
-import { demoGroupedWorkflow } from './fixtures';
+import { demoGroupedWorkflow, demoProjects } from './fixtures';
 import { demoBuildChunks } from './mock-ai';
 import { demoAssistantStream } from './mock-assistant';
 import { MockBackend } from './mock-backend';
@@ -55,6 +55,15 @@ export function seedDemo(backend: MockBackend): void {
   const labs = backend.tenants.find((t) => t.name === 'Acme Labs')!;
   backend.memberships.push({ tenantId: labs.id, userId: backend.session!.userId, role: 'admin' });
 
+  // P6-03: one team project (the workspace's) and a personal project per member; the old editor is a project
+  // editor of the team project (as migration 0024), owners and admins reach it through their role
+  const team = backend.defaultProjectFor(tenantId);
+  team.icon = { ...demoProjects.team.icon };
+  team.description = demoProjects.team.description;
+  backend.personalProject(tenantId, ops.id);
+  backend.personalProject(labs.id, backend.session!.userId);
+  backend.projectRelations.push({ tenantId, projectId: team.id, userId: ops.id, role: 'project:editor' });
+
   backend.tags.push({ id: 'tag-orders', name: 'orders', tenantId }, { id: 'tag-ai', name: 'ai', tenantId });
   backend.variables.push({ id: 'var-1', key: 'region', value: 'eu-central', tenantId });
   backend.credentials.push({
@@ -65,6 +74,8 @@ export function seedDemo(backend: MockBackend): void {
     data: { apiKey: 'demo-secret', region: 'eu' },
     createdAt: new Date(Date.now() - 86_400_000 * 3).toISOString(),
     updatedAt: new Date(Date.now() - 86_400_000).toISOString(),
+    projectId: team.id,
+    isGlobal: false,
   });
 
   backend.seedWorkflow({

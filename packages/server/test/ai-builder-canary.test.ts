@@ -15,10 +15,11 @@ import {
   createTestServer,
   createWorkflow,
   executionsOf,
+  memberAs,
   node,
   resetDatabase,
   signup,
-  TestClient,
+  type TestClient,
   type TestServer,
   waitForExecution,
 } from './helpers';
@@ -287,13 +288,7 @@ describe('gates', () => {
   it('viewer 403, a prompt over 5000 characters 400 with n8n text, no AI package model refused', async () => {
     const owner = await withModel([]);
     const workflow = await createWorkflow(owner.client, { nodes: [] });
-    const invite = await owner.client.data(
-      owner.client.post('/rest/members/invite', { email: `v-${Date.now()}@example.com`, role: 'viewer' }),
-    );
-    const viewer = new TestClient(server.app);
-    await viewer.data(
-      viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'V', password: 'Passw0rd!' }),
-    );
+    const { client: viewer } = await memberAs(owner, 'viewer', { name: 'V' });
     expect((await viewer.post('/rest/ai/build', { workflowId: workflow.id, text: 'Hi' })).statusCode).toBe(
       403,
     );

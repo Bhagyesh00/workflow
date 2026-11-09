@@ -1,6 +1,6 @@
 /** Public API folders (P3-15): /api/v1/folders list, create, get, update, delete. */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createTestServer, resetDatabase, signup, TestClient, type TestServer } from './helpers';
+import { createTestServer, memberAs, resetDatabase, signup, type TestServer } from './helpers';
 
 let server: TestServer;
 
@@ -20,13 +20,7 @@ async function setup(role: 'owner' | 'viewer' = 'owner') {
     const key = await owner.client.data(owner.client.post('/rest/api-keys', { name: 'k' }));
     return { ...owner, key: key.key as string };
   }
-  const invite = await owner.client.data(
-    owner.client.post('/rest/members/invite', { email: 'v@example.com', role }),
-  );
-  const viewer = new TestClient(server.app);
-  await viewer.data(
-    viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'V', password: 'Passw0rd!' }),
-  );
+  const { client: viewer } = await memberAs(owner, role, { email: 'v@example.com', name: 'V' });
   const key = await viewer.data(viewer.post('/rest/api-keys', { name: 'v' }));
   return { ...owner, key: key.key as string };
 }

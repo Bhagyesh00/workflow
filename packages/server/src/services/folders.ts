@@ -146,10 +146,18 @@ export class FolderService {
     return { ...base, path, ...counts };
   }
 
-  async create(tenantId: string, input: FolderCreateInput, actor: Actor): Promise<FolderDTO> {
+  async create(
+    tenantId: string,
+    input: FolderCreateInput & { projectId?: string },
+    actor: Actor,
+  ): Promise<FolderDTO> {
     const parentFolderId = input.parentFolderId ?? null;
     await assertFolderInTenant(this.repos, tenantId, parentFolderId);
-    const row = await this.repos.folders.create(tenantId, { name: input.name, parentFolderId });
+    // P6 S1: the project the route resolved, else the parent's, else the workspace's default (L24 makes it required)
+    const parent = parentFolderId ? await this.repos.folders.get(tenantId, parentFolderId) : undefined;
+    const projectId =
+      input.projectId ?? parent?.projectId ?? (await this.repos.projects.defaultProjectFor(tenantId));
+    const row = await this.repos.folders.create(tenantId, { name: input.name, parentFolderId, projectId });
     await this.repos.audit.add(tenantId, {
       userId: actor.userId,
       action: 'folder.created',

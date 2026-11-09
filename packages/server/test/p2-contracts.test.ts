@@ -21,6 +21,7 @@ import {
   resetDatabase,
   signup,
   type TestServer,
+  teamProjectOf,
   testConfig,
   testPackage,
   waitFor,
@@ -182,6 +183,7 @@ describe('Phase 2 shared server logic', () => {
     const services = await server.ctx.executions.buildServices({
       tenant: row,
       executionId: '',
+      projectId: await teamProjectOf(server, tenant.id),
       mode: 'manual',
     });
     expect(services.nodeLimits).toEqual(server.ctx.config.nodeLimits);

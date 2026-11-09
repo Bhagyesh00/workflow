@@ -70,7 +70,7 @@ const EXPECTED: Record<string, { scope: McpScope; minRole: Role }> = {
 };
 
 const ROLES: Role[] = ['viewer', 'editor', 'admin', 'owner'];
-const RANK: Record<Role, number> = { viewer: 1, editor: 2, admin: 3, owner: 4 };
+const RANK: Record<Role, number> = { member: 0, viewer: 1, editor: 2, admin: 3, owner: 4 };
 
 /** the tenant server's own tools: the table minus the build tools (P5-13, tested by L9) */
 const ownTools = () => {
@@ -99,6 +99,10 @@ async function signup() {
 async function member(owner: Awaited<ReturnType<typeof signup>>, role: Role) {
   const other = await signup();
   await server.ctx.repos.memberships.add(owner.tenant.id, other.user.id, role);
+  await server.ctx.repos.projects.ensurePersonal(
+    owner.tenant.id,
+    (await server.ctx.repos.users.get(other.user.id))!,
+  );
   const key = (
     await server.ctx.auth.createApiKey(owner.tenant.id, other.user.id, MCP_KEY_LABEL, [], MCP_KEY_AUDIENCE)
   ).key;

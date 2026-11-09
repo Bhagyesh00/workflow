@@ -495,7 +495,13 @@ const runWorkflowTool: AssistantToolDefinition<RunWorkflowInput> = {
     const outcome = await runAndCollect(
       ctx,
       run,
-      { workflow: definition, workflowId: row.id, startNode: trigger.name, pinData },
+      {
+        workflow: definition,
+        workflowId: row.id,
+        startNode: trigger.name,
+        pinData,
+        projectId: row.projectId,
+      },
       input.timeout,
     );
     const head =

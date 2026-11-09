@@ -10,6 +10,8 @@ import {
   foldersApi,
   inboxApi,
   nodeTypesApi,
+  projectsApi,
+  rolesApi,
   settingsApi,
   tagsApi,
   variablesApi,
@@ -34,10 +36,35 @@ export const queryKeys = {
   webhookUrls: (id: string) => ['workflow', id, 'webhook-urls'] as const,
   executions: (query: object = {}) => ['executions', query] as const,
   execution: (id: string) => ['execution', id] as const,
-  credentials: (type?: string) => ['credentials', type ?? 'all'] as const,
+  /** P6-24: per type and project; invalidating `['credentials']` refreshes every one (prefix match) */
+  credentials: (type?: string, projectId?: string) =>
+    ['credentials', type ?? 'all', projectId ?? 'all'] as const,
   credential: (id: string) => ['credential', id] as const,
   tags: ['tags'] as const,
   variables: ['variables'] as const,
+  /** P6-31: a project's variables; invalidating `variables` refreshes them too (prefix match) */
+  projectVariables: (projectId: string) => ['variables', projectId] as const,
+  /** P6-03: invalidating `projects` refreshes every project query (prefix match) */
+  projects: ['projects'] as const,
+  myProjects: ['projects', 'mine'] as const,
+  projectList: (query: object = {}) => ['projects', 'list', query] as const,
+  projectsCount: ['projects', 'count'] as const,
+  personalProject: ['projects', 'personal'] as const,
+  sharingCandidates: ['projects', 'sharing-candidates'] as const,
+  project: (id: string) => ['projects', 'detail', id] as const,
+  /** P6-32: invalidating `roles` refreshes every role query (prefix match) */
+  roles: ['roles'] as const,
+  role: (slug: string) => ['roles', slug] as const,
+  roleAssignments: (slug: string) => ['roles', slug, 'assignments'] as const,
+  roleMembers: (slug: string) => ['roles', slug, 'members'] as const,
+  /** P6-33 */
+  securitySettings: ['security-settings'] as const,
+  /** P6-30: a move's preview to one destination */
+  transferPreview: (
+    resource: 'workflow' | 'credential' | 'folder',
+    id: string,
+    destinationProjectId: string,
+  ) => ['transfer-preview', resource, id, destinationProjectId] as const,
   members: ['members'] as const,
   apiKeys: ['api-keys'] as const,
   folders: (query: object = {}) => ['folders', query] as const,
@@ -58,6 +85,11 @@ export const queryKeys = {
   secretConnections: ['secret-providers', 'connections'] as const,
   secretConnection: (providerKey: string) => ['secret-providers', 'connections', providerKey] as const,
   secretCompletions: ['secret-providers', 'completions'] as const,
+  /** P6-28 */
+  projectSecretConnections: (projectId: string) =>
+    ['secret-providers', 'project', projectId, 'connections'] as const,
+  projectSecretCompletions: (projectId: string) =>
+    ['secret-providers', 'project', projectId, 'completions'] as const,
   /** P5-11: invalidating `testRuns` also refreshes every run and its cases (prefix match) */
   testRuns: (workflowId: string) => ['workflow', workflowId, 'test-runs'] as const,
   testRun: (workflowId: string, id: string) => ['workflow', workflowId, 'test-runs', id] as const,
@@ -217,8 +249,37 @@ export function useCredentialTypes(): CredentialTypeIndex & { isLoading: boolean
   return { ...index, isLoading };
 }
 
-export function useCredentials(type?: string) {
-  return useQuery({ queryKey: queryKeys.credentials(type), queryFn: () => credentialsApi.list(type) });
+/** P6-24: with `projectId`, the credentials usable in that project (its own, shared to it, global) */
+export function useCredentials(type?: string, projectId?: string) {
+  return useQuery({
+    queryKey: queryKeys.credentials(type, projectId),
+    queryFn: () => credentialsApi.list(type, projectId ? { projectId } : {}),
+  });
+}
+
+/** P6-03: the caller's projects (sidebar, pickers), each with the caller's `role` and `scopes` */
+export function useProjects(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.myProjects,
+    queryFn: projectsApi.myProjects,
+    enabled,
+    staleTime: 60_000,
+  });
+}
+
+/** P6-03: one project with its members and the caller's `scopes`; off while `id` is missing */
+export function useProject(id: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.project(id ?? 'none'),
+    queryFn: () => projectsApi.get(id!),
+    enabled: Boolean(id),
+    retry: false,
+  });
+}
+
+/** P6-32: every role by type (system and custom) */
+export function useRoles(enabled = true) {
+  return useQuery({ queryKey: queryKeys.roles, queryFn: rolesApi.list, enabled, staleTime: 60_000 });
 }
 
 export function useTags() {

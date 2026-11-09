@@ -34,6 +34,7 @@ import { InboxNavBadge } from '../../features/reviews/InboxNavBadge';
 import { assistantLinkVisible } from '../../lib/assistant-access';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { DataTableStorageBanner } from '../data-tables/StorageBanner';
+import { ProjectNav } from '../projects/ProjectNav';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { Menu } from '../ui/Menu';
@@ -226,7 +227,7 @@ export function AppShell() {
   const collapsed = collapsedPref || inEditor || narrow;
   const settings = useSettings();
   const reviewsEnabled = settings.workflowReviews?.enabled === true;
-  const assistantVisible = assistantLinkVisible(assistantFeatureOf(settings), me.data?.role);
+  const assistantVisible = assistantLinkVisible(assistantFeatureOf(settings), me.data);
 
   useEffect(
     () =>
@@ -306,6 +307,7 @@ export function AppShell() {
             </button>
           )}
         </div>
+        <ProjectNav collapsed={collapsed} />
         <TenantSwitcher me={data} collapsed={collapsed} />
         <ul className="flex flex-col gap-0.5">
           {NAV.filter(

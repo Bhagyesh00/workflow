@@ -138,6 +138,8 @@ export interface BaseContext {
   getMode(): ExecutionMode;
   getExecutionId(): string;
   getTenantId(): string;
+  /** the project the running workflow belongs to (its home project) */
+  getProjectId(): string;
   getTimezone(): string;
   /** decrypted credential data for the credential of `type` attached to this node */
   getCredentials<T extends DataObject = DataObject>(type: string, itemIndex?: number): Promise<T>;

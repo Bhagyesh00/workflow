@@ -91,6 +91,8 @@ export const exploreNodeResourcesTool: McpToolDefinition<z.output<typeof explore
     const services = await ctx.executions.buildServices({
       tenant: caller.tenant,
       executionId: '',
+      // P6 S1: no workflow row: the workspace's default project until L14 resolves the caller's
+      projectId: await ctx.repos.projects.defaultProjectFor(tenantId),
       mode: 'manual',
     });
     const base = createBaseContext({

@@ -17,10 +17,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   signup as signupFrom,
-  TestClient,
+  type TestClient,
   type TestServer,
   waitFor,
 } from './helpers';
@@ -149,13 +150,7 @@ function connect(links: Array<ReturnType<typeof link>>) {
 }
 
 async function member(owner: Owner, role: 'editor' | 'viewer') {
-  const email = `${role}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await owner.client.data(owner.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app);
-  await client.data(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: role, password: 'Passw0rd!' }),
-  );
-  return client;
+  return (await memberAs(owner, role)).client;
 }
 
 async function makeDataset(owner: Owner, rows: DataObject[]) {

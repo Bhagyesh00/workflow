@@ -296,9 +296,25 @@ export class SecretsManager {
     );
   }
 
-  /** the `$secrets` object of a tenant, only for reading credential data (resolver.ts) */
-  secretsFor(tenantId: string): SecretsObject {
+  /**
+   * the `$secrets` object of a tenant, only for reading credential data (resolver.ts). P6 S1: `projectId` is
+   * the credential's project; until L8 every connection of the tenant stays readable.
+   */
+  secretsFor(tenantId: string, projectId?: string | null): SecretsObject {
+    // stub (L8): every connection of the tenant stays readable
+    void projectId;
     return createSecretsProxy(this.cache.view(tenantId));
+  }
+
+  /**
+   * P6 S1: whether a credential of `projectId` may read the vaults `providerKeys` (its `secret_keys`), on save
+   * and on test; throws when one is not open to the project. Passes until L8 fills it.
+   */
+  async assertProjectAccess(tenantId: string, projectId: string, providerKeys: string[]): Promise<void> {
+    // stub (L8): passes everything until L8 reads project_secret_access (P6-35)
+    void tenantId;
+    void projectId;
+    void providerKeys;
   }
 
   // -----------------------------------------------------------------------------------------

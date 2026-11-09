@@ -548,7 +548,13 @@ const executeNodeTool: AssistantToolDefinition<ExecuteNodeInput> = {
     const outcome = await runAndCollect(
       ctx,
       run,
-      { workflow: prepared.definition, startNode: prepared.node.name, triggerItems: items },
+      {
+        workflow: prepared.definition,
+        startNode: prepared.node.name,
+        triggerItems: items,
+        // P6 S1: no workflow row: the workspace's default project until L16 runs it in the caller's
+        projectId: await ctx.repos.projects.defaultProjectFor(run.tenant.id),
+      },
       timeoutMs,
     );
     if (outcome.status === 'waiting') {

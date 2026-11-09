@@ -15,6 +15,8 @@ export interface PlanLimits {
   pruneDays: number | null;
   /** data table storage per workspace; unlike the others, null = DATA_TABLES_MAX_SIZE_BYTES applies */
   dataTableBytes: number | null;
+  /** P6-03: team projects per workspace (null = unlimited, on every plan); POST /projects checks it (L1) */
+  maxTeamProjects: number | null;
 }
 
 export const PLANS: Record<string, PlanLimits> = {
@@ -25,6 +27,7 @@ export const PLANS: Record<string, PlanLimits> = {
     maxExecutionTimeout: 300,
     pruneDays: 7,
     dataTableBytes: null,
+    maxTeamProjects: null,
   },
   pro: {
     executionsPerMonth: 50_000,
@@ -33,6 +36,7 @@ export const PLANS: Record<string, PlanLimits> = {
     maxExecutionTimeout: 1_800,
     pruneDays: 30,
     dataTableBytes: null,
+    maxTeamProjects: null,
   },
   unlimited: {
     executionsPerMonth: null,
@@ -41,6 +45,7 @@ export const PLANS: Record<string, PlanLimits> = {
     maxExecutionTimeout: null,
     pruneDays: null,
     dataTableBytes: null,
+    maxTeamProjects: null,
   },
 };
 
@@ -73,6 +78,11 @@ export interface TenantSettings {
     permissions?: Partial<AssistantPermissions>;
     allowSendingParameterValues?: boolean;
   };
+  /**
+   * P6-33: the personal space policy (`securitySettings:manage`); an absent flag is on. The access
+   * service reads it for `project:personalOwner` (`personalOwnerScopes`), GET /settings returns it.
+   */
+  securityPolicy?: { personalSpacePublishing?: boolean; personalSpaceSharing?: boolean };
 }
 
 export function effectiveLimits(plan: string, settings: TenantSettings | null | undefined): PlanLimits {

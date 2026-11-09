@@ -985,7 +985,7 @@ describe('demo backend', () => {
       error: { message: 'The data in the file does not seem to be a workflow JSON file!' },
     });
     expect((await call('POST', '/workflows/from-url', { url: 'ftp://x' })).status).toBe(400);
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     expect((await call('POST', '/workflows/from-url', { url })).status).toBe(403);
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();

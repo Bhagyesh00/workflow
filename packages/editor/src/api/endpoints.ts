@@ -4,7 +4,6 @@ import type {
   DataTableChange,
   DataTableColumn,
   DataTableFilter,
-  DataTableInfo,
   DataTableInsertResult,
   DataTableInsertReturnType,
   DataTableListQuery,
@@ -44,16 +43,23 @@ import type {
   AssistantThreadsQuery,
   AuthResult,
   CreatedApiKey,
+  CredentialCreateBody,
   CredentialDetail,
+  CredentialListQuery,
+  CredentialPatchBody,
   CredentialSummary,
+  CredentialTestBody,
   CredentialTestResult,
+  CredentialTransferBody,
   CredentialTypeDescription,
+  CustomRole,
   DataTableColumnCreateBody,
   DataTableCreateBody,
   DataTableCsvDownload,
   DataTableCsvImportResult,
   DataTableCsvPreview,
   DataTableDependency,
+  DataTableInfo,
   DataTableLimits,
   DataTableWriteOptions,
   ExecutionAnnotation,
@@ -65,6 +71,7 @@ import type {
   FolderCreateBody,
   FolderDetail,
   FolderListQuery,
+  FolderTransferBody,
   FolderUpdateBody,
   FormAuthCode,
   InboxQuery,
@@ -87,8 +94,20 @@ import type {
   McpWorkflowsQuery,
   Me,
   Member,
+  MemberRemovalChoice,
   MoveWorkflowsBody,
   NodeTypeDescription,
+  Project,
+  ProjectAddUsersResult,
+  ProjectCount,
+  ProjectCreateBody,
+  ProjectDetail,
+  ProjectListFilter,
+  ProjectListQuery,
+  ProjectPage,
+  ProjectPatchBody,
+  ProjectRef,
+  ProjectRelationInput,
   PublishBody,
   PublishTimelineEntry,
   ReviewActivity,
@@ -99,6 +118,11 @@ import type {
   ReviewUpdateVersionBody,
   ReviewUser,
   Role,
+  RoleAssignmentsPage,
+  RoleCreateBody,
+  RoleMembersPage,
+  RolePatchBody,
+  RolesMap,
   RunWorkflowBody,
   SecretCompletions,
   SecretConnection,
@@ -106,6 +130,8 @@ import type {
   SecretConnectionPatchBody,
   SecretConnectionTestResult,
   SecretProviderTypeInfo,
+  SecurityPolicy,
+  SecurityPolicyPatch,
   Settings,
   SettingsPatchBody,
   Tag,
@@ -115,7 +141,9 @@ import type {
   TestRunListQuery,
   TestRunStartBody,
   TestRunStartResult,
+  TransferPreview,
   Variable,
+  VariableBody,
   VersionDiff,
   VersionPatchBody,
   VersionSnapshot,
@@ -127,6 +155,7 @@ import type {
   WorkflowPatchBody,
   WorkflowReviewDTO,
   WorkflowSummary,
+  WorkflowTransferBody,
 } from './types';
 
 const enc = encodeURIComponent;
@@ -157,6 +186,8 @@ export interface LoadOptionsBody {
   paginationToken?: string;
   /** the saved workflow open in the editor, so pickers can leave it out */
   workflowId?: string;
+  /** P6-27: with no saved workflow, the project whose credentials the call may use */
+  projectId?: string;
 }
 
 export const nodeTypesApi = {
@@ -171,7 +202,7 @@ export const nodeTypesApi = {
     api.post<ResourceMapperFields>('/node-types/options', body),
 };
 
-export interface WorkflowListQuery {
+export interface WorkflowListQuery extends ProjectListFilter {
   search?: string;
   tagId?: string;
   active?: boolean;
@@ -210,7 +241,8 @@ export const workflowsApi = {
   unarchive: (id: string) => api.post<WorkflowDTO>(`/workflows/${enc(id)}/unarchive`),
   move: (body: MoveWorkflowsBody) => api.post<{ moved: string[] }>('/workflows/move', body),
   /** P3-13: the server fetches the URL; it travels in the body, never in the query string */
-  importFromUrl: (url: string) => api.post<WorkflowImportData>('/workflows/from-url', { url }),
+  importFromUrl: (url: string, projectId?: string) =>
+    api.post<WorkflowImportData>('/workflows/from-url', projectId ? { url, projectId } : { url }),
   /** P3-16: newest first; take 1..100 (server default 20) */
   publishTimeline: (id: string, page: { skip?: number; take?: number } = {}) =>
     api.get<PublishTimelineEntry[]>(`/workflows/${enc(id)}/publish-timeline`, { ...page }),
@@ -249,6 +281,8 @@ export const workflowsApi = {
 
 export interface ExecutionListQuery {
   workflowId?: string;
+  /** P6-25: executions of this project's workflows */
+  projectId?: string;
   status?: string;
   limit?: number;
   cursor?: string;
@@ -405,15 +439,16 @@ export const inboxApi = {
 };
 
 export const credentialsApi = {
-  list: (type?: string) => api.get<CredentialSummary[]>('/credentials', { type }),
+  /** P6-24: `query` filters by project (`projectId`, `onlySharedWithMe`) and adds the caller's `scopes` */
+  list: (type?: string, query: Omit<CredentialListQuery, 'type'> = {}) =>
+    api.get<CredentialSummary[]>('/credentials', { type, ...query }),
   get: (id: string) => api.get<CredentialDetail>(`/credentials/${enc(id)}`),
-  create: (body: { name: string; type: string; data: Record<string, unknown> }) =>
+  create: (body: CredentialCreateBody) =>
     api.post<{ id: string; name: string; type: string }>('/credentials', body),
-  update: (id: string, body: { name?: string; data?: Record<string, unknown> }) =>
+  update: (id: string, body: CredentialPatchBody) =>
     api.patch<{ id: string; name: string; type: string }>(`/credentials/${enc(id)}`, body),
   remove: (id: string) => api.delete<{ ok: true }>(`/credentials/${enc(id)}`),
-  test: (body: { type: string; data: Record<string, unknown>; id?: string }) =>
-    api.post<CredentialTestResult>('/credentials/test', body),
+  test: (body: CredentialTestBody) => api.post<CredentialTestResult>('/credentials/test', body),
   oauth1Authorize: (credentialId: string) => api.get<{ url: string }>('/oauth1/authorize', { credentialId }),
   oauth2Authorize: (credentialId: string) => api.get<{ url: string }>('/oauth2/authorize', { credentialId }),
 };
@@ -426,10 +461,13 @@ export const tagsApi = {
 };
 
 export const variablesApi = {
+  /** P6-31: the globals plus the variables of the projects the caller can read */
   list: () => api.get<Variable[]>('/variables'),
-  create: (body: { key: string; value: string }) => api.post<Variable>('/variables', body),
-  update: (id: string, body: { key: string; value: string }) =>
-    api.patch<Variable>(`/variables/${enc(id)}`, body),
+  /** P6-31: one project's variables */
+  forProject: (projectId: string) => api.get<Variable[]>('/variables', { projectId }),
+  /** with `projectId` a project variable */
+  create: (body: VariableBody) => api.post<Variable>('/variables', body),
+  update: (id: string, body: VariableBody) => api.patch<Variable>(`/variables/${enc(id)}`, body),
   remove: (id: string) => api.delete<{ ok: true }>(`/variables/${enc(id)}`),
 };
 
@@ -438,7 +476,9 @@ export const membersApi = {
   invite: (body: { email: string; role: Role }) =>
     api.post<Record<string, unknown> | null>('/members/invite', body),
   updateRole: (userId: string, role: Role) => api.patch<Member>(`/members/${enc(userId)}`, { role }),
-  remove: (userId: string) => api.delete<{ ok: true }>(`/members/${enc(userId)}`),
+  /** P6-31: the server needs `choice`: move the member's personal work to a project, or delete it */
+  remove: (userId: string, choice?: MemberRemovalChoice) =>
+    request<{ ok: true }>({ method: 'DELETE', path: `/members/${enc(userId)}`, body: choice ?? {} }),
 };
 
 export const apiKeysApi = {
@@ -454,12 +494,16 @@ const sortParam = (sort?: { column: string; direction: DataTableSortDirection })
 
 /** P4-03: offset paging, because the grid shows page numbers */
 export const dataTablesApi = {
-  list: (query: DataTableListQuery = {}) =>
+  /** P6-23: `projectId`, `onlySharedWithMe` and `includeScopes` travel as their own query params */
+  list: (query: DataTableListQuery & ProjectListFilter = {}) =>
     api.get<DataTablePage<DataTableInfo>>('/data-tables', {
       skip: query.skip,
       take: query.take,
       filter: query.name ? JSON.stringify({ name: query.name }) : undefined,
       sortBy: sortParam(query.sortBy),
+      projectId: query.projectId,
+      onlySharedWithMe: query.onlySharedWithMe,
+      includeScopes: query.includeScopes,
     }),
   limits: () => api.get<DataTableLimits>('/data-tables/limits'),
   get: (id: string) => api.get<DataTableInfo>(`/data-tables/${enc(id)}`),
@@ -500,11 +544,16 @@ export const dataTablesApi = {
   downloadCsv: (id: string, includeSystemColumns = true) =>
     api.get<DataTableCsvDownload>(`/data-tables/${enc(id)}/download-csv`, { includeSystemColumns }),
   /** the CSV travels as text in the body; the server keeps no temp file */
-  csvPreview: (csv: string, hasHeaders: boolean) =>
-    api.post<DataTableCsvPreview>('/data-tables/csv/preview', { csv, hasHeaders }),
+  csvPreview: (csv: string, hasHeaders: boolean, projectId?: string) =>
+    api.post<DataTableCsvPreview>(
+      '/data-tables/csv/preview',
+      projectId ? { csv, hasHeaders, projectId } : { csv, hasHeaders },
+    ),
   importCsv: (id: string, csv: string) =>
     api.post<DataTableCsvImportResult>(`/data-tables/${enc(id)}/import-csv`, { csv }),
 };
+
+const projectVaultPath = (projectId: string) => `/secret-providers/projects/${enc(projectId)}/connections`;
 
 /** P4-07: admin and owner manage connections; an editor reads secret names through `completions` */
 export const secretsApi = {
@@ -524,6 +573,106 @@ export const secretsApi = {
     api.post<SecretConnectionTestResult>(`/secret-providers/connections/${enc(providerKey)}/test`),
   reloadConnection: (providerKey: string) =>
     api.post<{ success: boolean }>(`/secret-providers/connections/${enc(providerKey)}/reload`),
+  /** P6-28: a project's own vaults (`externalSecretsProvider:*` in that project) */
+  projectConnections: (projectId: string) => api.get<SecretConnection[]>(projectVaultPath(projectId)),
+  projectConnection: (projectId: string, providerKey: string) =>
+    api.get<SecretConnection>(`${projectVaultPath(projectId)}/${enc(providerKey)}`),
+  createProjectConnection: (projectId: string, body: SecretConnectionCreateBody) =>
+    api.post<SecretConnection>(projectVaultPath(projectId), body),
+  updateProjectConnection: (projectId: string, providerKey: string, body: SecretConnectionPatchBody) =>
+    api.patch<SecretConnection>(`${projectVaultPath(projectId)}/${enc(providerKey)}`, body),
+  removeProjectConnection: (projectId: string, providerKey: string) =>
+    api.delete<{ ok: true }>(`${projectVaultPath(projectId)}/${enc(providerKey)}`),
+  testProjectConnection: (projectId: string, providerKey: string) =>
+    api.post<SecretConnectionTestResult>(`${projectVaultPath(projectId)}/${enc(providerKey)}/test`),
+  /** P6-28: the secret names a project may read (its own vaults and the shared ones), for `$secrets` */
+  projectCompletions: (projectId: string) =>
+    api.get<SecretCompletions>(`/secret-providers/completions/secrets/project/${enc(projectId)}`),
+};
+
+/**
+ * P6-03: projects. GET `/projects` answers a bare array, or `{ count, data }` when `take` or `skip` is given
+ * (`page`). Members: `addUsers` answers 201 with `conflicts` when some were already in, 409 when none was added.
+ */
+export const projectsApi = {
+  list: () => api.get<Project[]>('/projects'),
+  page: (query: ProjectListQuery) => api.get<ProjectPage>('/projects', { ...query }),
+  count: () => api.get<ProjectCount>('/projects/count'),
+  /** `user:list`: the projects a resource can be shared with, peers' personal projects included */
+  sharingCandidates: () => api.get<ProjectRef[]>('/projects/sharing-candidates'),
+  /** the caller's projects, each with the caller's `role` and `scopes` */
+  myProjects: () => api.get<Project[]>('/projects/my-projects'),
+  personal: () => api.get<ProjectDetail>('/projects/personal'),
+  get: (id: string) => api.get<ProjectDetail>(`/projects/${enc(id)}`),
+  /** `project:create`; the caller becomes `project:admin` */
+  create: (body: ProjectCreateBody) => api.post<ProjectDetail>('/projects', body),
+  update: (id: string, body: ProjectPatchBody) => api.patch<ProjectDetail>(`/projects/${enc(id)}`, body),
+  addUsers: (id: string, relations: ProjectRelationInput[]) =>
+    api.post<ProjectAddUsersResult | null>(`/projects/${enc(id)}/users`, { relations }),
+  changeUserRole: (id: string, userId: string, role: string) =>
+    api.patch<{ ok: true } | null>(`/projects/${enc(id)}/users/${enc(userId)}`, { role }),
+  removeUser: (id: string, userId: string) =>
+    api.delete<{ ok: true } | null>(`/projects/${enc(id)}/users/${enc(userId)}`),
+  /** a team project only; with `transferId` its workflows, credentials, data tables and folders move there, else they are deleted */
+  remove: (id: string, transferId?: string) =>
+    request<{ ok: true } | null>({ method: 'DELETE', path: `/projects/${enc(id)}`, query: { transferId } }),
+};
+
+/** P6-32: roles. System roles live in code; custom ones per workspace (`role:manage`, `role:manageProject`) */
+export const rolesApi = {
+  list: () => api.get<RolesMap>('/roles', { withUsageCount: true }),
+  get: (slug: string) => api.get<CustomRole>(`/roles/${enc(slug)}`, { withUsageCount: true }),
+  create: (body: RoleCreateBody) => api.post<CustomRole>('/roles', body),
+  update: (slug: string, body: RolePatchBody) => api.patch<CustomRole>(`/roles/${enc(slug)}`, body),
+  /** a role in use is refused unless `reassignRoleSlug` (global roles only) */
+  remove: (slug: string, reassignRoleSlug?: string) =>
+    request<CustomRole | null>({
+      method: 'DELETE',
+      path: `/roles/${enc(slug)}`,
+      query: { reassignRoleSlug },
+    }),
+  assignments: (slug: string) => api.get<RoleAssignmentsPage>(`/roles/${enc(slug)}/assignments`),
+  projectMembers: (slug: string, projectId: string) =>
+    api.get<RoleMembersPage>(`/roles/${enc(slug)}/assignments/${enc(projectId)}/members`),
+  members: (slug: string) => api.get<RoleMembersPage>(`/roles/${enc(slug)}/members`),
+};
+
+/** P6-29: `shareWithIds` is the full list of project ids; `:share` adds, `:unshare` removes */
+export const sharingApi = {
+  shareWorkflow: (id: string, shareWithIds: string[]) =>
+    request<{ ok: true } | null>({
+      method: 'PUT',
+      path: `/workflows/${enc(id)}/share`,
+      body: { shareWithIds },
+    }),
+  shareCredential: (id: string, shareWithIds: string[]) =>
+    request<{ ok: true } | null>({
+      method: 'PUT',
+      path: `/credentials/${enc(id)}/share`,
+      body: { shareWithIds },
+    }),
+};
+
+/** P6-30: move a workflow, credential or folder (its whole tree) to another project; previews are advisory */
+export const transferApi = {
+  previewWorkflow: (id: string, destinationProjectId: string) =>
+    api.get<TransferPreview>(`/workflows/${enc(id)}/transfer-preview`, { destinationProjectId }),
+  previewCredential: (id: string, destinationProjectId: string) =>
+    api.get<TransferPreview>(`/credentials/${enc(id)}/transfer-preview`, { destinationProjectId }),
+  previewFolder: (id: string, destinationProjectId: string) =>
+    api.get<TransferPreview>(`/folders/${enc(id)}/transfer-preview`, { destinationProjectId }),
+  transferWorkflow: (id: string, body: WorkflowTransferBody) =>
+    request<{ ok: true } | null>({ method: 'PUT', path: `/workflows/${enc(id)}/transfer`, body }),
+  transferCredential: (id: string, body: CredentialTransferBody) =>
+    request<{ ok: true } | null>({ method: 'PUT', path: `/credentials/${enc(id)}/transfer`, body }),
+  transferFolder: (id: string, body: FolderTransferBody) =>
+    request<{ ok: true } | null>({ method: 'PUT', path: `/folders/${enc(id)}/transfer`, body }),
+};
+
+/** P6-33: the personal space policy (`securitySettings:manage`); turning a flag off undoes nothing */
+export const securityApi = {
+  get: () => api.get<SecurityPolicy>('/settings/security'),
+  update: (body: SecurityPolicyPatch) => api.post<SecurityPolicy>('/settings/security', body),
 };
 
 export const formAuthApi = {

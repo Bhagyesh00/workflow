@@ -30,6 +30,7 @@ export function testServices(
 ): ExecutionServices {
   return {
     tenantId: 't1',
+    projectId: 'p1',
     executionId: 'e1',
     mode: 'manual',
     timezone: 'UTC',

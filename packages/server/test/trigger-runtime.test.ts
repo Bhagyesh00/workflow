@@ -25,6 +25,7 @@ import {
   chain,
   createTestServer,
   createWorkflow,
+  memberAs,
   node,
   resetDatabase,
   signup as signupAs,
@@ -413,13 +414,10 @@ describe('GET /active-workflows/error/:id', () => {
     remote.drop();
     await waitFor(async () => manager().activationErrorOf(wf.id));
 
-    const invite = await client.data<{ token: string }>(
-      client.post('/rest/members/invite', { email: 'viewer-p4-error@example.com', role: 'viewer' }),
-    );
-    const viewer = new TestClient(server.app);
-    await viewer.data(
-      viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'Viewer', password: 'Passw0rd!' }),
-    );
+    const { client: viewer } = await memberAs({ client }, 'viewer', {
+      email: 'viewer-p4-error@example.com',
+      name: 'Viewer',
+    });
     expect(await viewer.data(viewer.get(url(wf.id)))).toContain('Connection lost');
 
     const other = await signup(server.app, { workspaceName: 'Other' });

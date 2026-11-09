@@ -247,6 +247,8 @@ export class McpTriggerService {
     const services = await ctx.executions.buildServices({
       tenant: input.tenant,
       executionId: randomUUID(),
+      // P6 S1: the trigger's workflow row's project
+      projectId: await ctx.executions.projectFor(input.tenant.id, input.workflowId),
       mode: input.mode,
       workflowId: input.workflowId,
     });

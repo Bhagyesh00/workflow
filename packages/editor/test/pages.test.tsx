@@ -196,7 +196,7 @@ describe('roles', () => {
   it('opens workflows read-only for viewers', async () => {
     signedIn();
     const wf = backend().seedWorkflow({ name: 'Look only', nodes: [trigger], connections: {} });
-    backend().memberships[0].role = 'viewer';
+    backend().setDemoRole('viewer');
     renderApp(`/workflow/${wf.id}`);
     const name = await screen.findByRole('textbox', { name: 'Workflow name' }, { timeout: 5000 });
     await waitFor(() => expect(useWorkflowStore.getState().readOnly).toBe(true));

@@ -9,12 +9,12 @@ import {
   createTestServer,
   createWorkflow,
   executionsOf,
+  memberAs,
   node,
   outputOf,
   resetDatabase,
   setNode,
   signup,
-  TestClient,
   type TestServer,
   waitFor,
   waitForExecution,
@@ -51,13 +51,7 @@ const answering = (path: string, value: string) => ({
 });
 
 async function member(owner: Awaited<ReturnType<typeof signup>>, role: 'editor' | 'viewer') {
-  const email = `${role}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  const invite = await owner.client.data(owner.client.post('/rest/members/invite', { email, role }));
-  const client = new TestClient(server.app);
-  await client.data(
-    client.post(`/rest/invitations/${invite.token}/accept`, { name: role, password: 'Passw0rd!' }),
-  );
-  return client;
+  return (await memberAs(owner, role)).client;
 }
 
 async function save(client: Client, id: string, patch: Record<string, unknown>) {

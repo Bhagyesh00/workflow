@@ -15,6 +15,7 @@ import {
   resetDatabase,
   signup,
   type TestServer,
+  teamProjectOf,
   waitForExecution,
 } from './helpers';
 
@@ -60,10 +61,10 @@ describe('CredentialsProvider', () => {
     const b = await signup(server.app);
     const cred = await createCredential(a.tenant.id, { type: 'testApi', data: { apiKey: 'a-secret' } });
     const own = await server.ctx.credentials
-      .provider(a.tenant.id)
+      .provider(a.tenant.id, await teamProjectOf(server, a.tenant.id))
       .get({ id: cred.id, name: 'Cred' }, 'testApi');
     expect(own.apiKey).toBe('a-secret');
-    const other = server.ctx.credentials.provider(b.tenant.id);
+    const other = server.ctx.credentials.provider(b.tenant.id, await teamProjectOf(server, b.tenant.id));
     await expect(other.get({ id: cred.id, name: 'Cred' }, 'testApi')).rejects.toThrow(/was not found/);
     await expect(other.update({ id: cred.id, name: 'Cred' }, 'testApi', { apiKey: 'x' })).rejects.toThrow(
       /was not found/,
@@ -77,7 +78,7 @@ describe('CredentialsProvider', () => {
   it('rejects a credential of the wrong type and accepts a type that extends the requested one', async () => {
     const { tenant } = await signup(server.app);
     const api = await createCredential(tenant.id, { type: 'testApi', data: { apiKey: 'k' } });
-    const provider = server.ctx.credentials.provider(tenant.id);
+    const provider = server.ctx.credentials.provider(tenant.id, await teamProjectOf(server, tenant.id));
     await expect(provider.get({ id: api.id, name: 'Cred' }, 'oAuth2Api')).rejects.toThrow(
       /is of type "testApi", expected "oAuth2Api"/,
     );
@@ -102,7 +103,7 @@ describe('CredentialsProvider', () => {
   it('does not resolve an unresolved expression id and falls back to the name only without an id', async () => {
     const { tenant } = await signup(server.app);
     await createCredential(tenant.id, { name: 'Named', type: 'testApi', data: { apiKey: 'named' } });
-    const provider = server.ctx.credentials.provider(tenant.id);
+    const provider = server.ctx.credentials.provider(tenant.id, await teamProjectOf(server, tenant.id));
     await expect(provider.get({ id: '={{ $json.id }}', name: 'Named' }, 'testApi')).rejects.toThrow(
       /was not found/,
     );
@@ -150,7 +151,7 @@ describe('credential type defaults', () => {
       data: { clientId: 'id', clientSecret: 's' },
     });
     const data = await server.ctx.credentials
-      .provider(tenant.id)
+      .provider(tenant.id, await teamProjectOf(server, tenant.id))
       .get({ id: cred.id, name: 'Mail' }, 'gmailOAuth2');
     expect(data).toMatchObject({
       authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
