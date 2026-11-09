@@ -90,6 +90,38 @@ async function publishable(
 const transferWorkflow = (owner: Awaited<ReturnType<typeof setup>>['owner'], id: string, body: object) =>
   owner.client.put(`/rest/workflows/${id}/transfer`, body);
 
+/** a true member: project:admin on `from` (move, share) and project:editor on each project of `into` (create, publish) */
+async function mover(
+  owner: Awaited<ReturnType<typeof setup>>['owner'],
+  tenantId: string,
+  from: { id: string },
+  into: Array<{ id: string }>,
+) {
+  const member = await realMember(owner);
+  await addToProject(server, tenantId, from.id, member.user.id, 'project:admin');
+  for (const project of into)
+    await addToProject(server, tenantId, project.id, member.user.id, 'project:editor');
+  return member;
+}
+
+const previewOf = (
+  client: Awaited<ReturnType<typeof setup>>['owner']['client'],
+  kind: 'workflows' | 'credentials' | 'folders',
+  id: string,
+  destination: string,
+) => client.get(`/rest/${kind}/${id}/transfer-preview?destinationProjectId=${destination}`);
+
+/** the workspace policy "publishing in personal spaces" */
+async function setPersonalPublishing(tenantId: string, on: boolean) {
+  const tenant = await repos().tenants.get(tenantId);
+  const settings = (tenant?.settings ?? {}) as Record<string, unknown>;
+  const policy = (settings.securityPolicy ?? {}) as Record<string, unknown>;
+  await repos().tenants.updateSettings(tenantId, {
+    ...settings,
+    securityPolicy: { ...policy, personalSpacePublishing: on },
+  });
+}
+
 describe('workflow transfer', () => {
   it('moves the workflow, drops every share and sets the folder in the destination', async () => {
     const { owner, tenantId, home, away, third } = await setup();
@@ -143,32 +175,141 @@ describe('workflow transfer', () => {
     expect((await transferWorkflow(back, wf.id, { destinationProjectId: home.id })).statusCode).toBe(403);
   });
 
-  it('republishes when allowed, as previewed', async () => {
+  it('republishes when allowed, as previewed (a member: admin on the source, editor on the destination)', async () => {
     const { owner, tenantId, home, away } = await setup();
+    const member = await mover(owner, tenantId, home, [away]);
     const wf = await publishable(tenantId, home.id);
     expect(wf.active).toBe(true);
 
-    const preview = await owner.client.data(
-      owner.client.get(`/rest/workflows/${wf.id}/transfer-preview?destinationProjectId=${away.id}`),
-    );
+    const preview = await member.client.data(previewOf(member.client, 'workflows', wf.id, away.id));
     expect(preview).toMatchObject({ restricted: [], checkFailed: false, unpublishReasons: [] });
-    expect((await transferWorkflow(owner, wf.id, { destinationProjectId: away.id })).statusCode).toBe(200);
+    expect((await transferWorkflow(member, wf.id, { destinationProjectId: away.id })).statusCode).toBe(200);
     const row = await repos().workflows.get(tenantId, wf.id);
     expect(row?.projectId).toBe(away.id);
     expect(row?.active).toBe(true);
+    expect(row?.publishedVersionId).toBe(wf.publishedVersionId);
+    // the timeline shows the unpublish and the publish of the move
+    const timeline = await repos().publishHistory.list(tenantId, wf.id, { skip: 0, take: 20 });
+    expect(timeline.map((e) => e.event)).toEqual(expect.arrayContaining(['deactivated', 'activated']));
+  });
+
+  it('republishes the version that was published, not the draft (P6-30)', async () => {
+    const { owner, tenantId, home, away } = await setup();
+    const member = await mover(owner, tenantId, home, [away]);
+    const credential = await credentialIn(server, tenantId, home.id);
+    const wf = await publishable(tenantId, home.id);
+    // a draft that uses a credential the destination cannot use; the published version does not
+    const draft = await server.ctx.workflows.update(
+      tenantId,
+      wf.id,
+      {
+        versionId: wf.versionId,
+        nodes: [
+          ...(wf.nodes as never[]),
+          node('Use', 'test.useCredential', {}, [200, 0], {
+            credentials: { testApi: { id: credential.id, name: credential.name } },
+          }),
+        ],
+        connections: chain('Hook', 'Use'),
+      } as never,
+      { userId: member.user.id },
+    );
+    expect(draft.versionId).not.toBe(wf.publishedVersionId);
+
+    const preview = await member.client.data<{ unpublishReasons: unknown[] }>(
+      previewOf(member.client, 'workflows', wf.id, away.id),
+    );
+    expect(preview.unpublishReasons).toEqual([]);
+    expect((await transferWorkflow(member, wf.id, { destinationProjectId: away.id })).statusCode).toBe(200);
+    const row = await repos().workflows.get(tenantId, wf.id);
+    expect(row?.active).toBe(true);
+    expect(row?.publishedVersionId).toBe(wf.publishedVersionId);
+    expect(row?.versionId).toBe(draft.versionId);
+  });
+
+  it('does not publish a draft after a move when the published version is blocked (P6-30)', async () => {
+    const { owner, tenantId, home, away } = await setup();
+    const member = await mover(owner, tenantId, home, [away]);
+    const credential = await credentialIn(server, tenantId, home.id);
+    const wf = await publishable(tenantId, home.id, credential);
+    // the draft drops the credential, so the draft alone could be published in the destination
+    await server.ctx.workflows.update(
+      tenantId,
+      wf.id,
+      { versionId: wf.versionId, nodes: [hook()], connections: {} } as never,
+      { userId: member.user.id },
+    );
+    const preview = await member.client.data<{ unpublishReasons: Array<{ kind: string }> }>(
+      previewOf(member.client, 'workflows', wf.id, away.id),
+    );
+    expect(preview.unpublishReasons.map((r) => r.kind)).toEqual(['credentialAccess']);
+    expect((await transferWorkflow(member, wf.id, { destinationProjectId: away.id })).statusCode).toBe(200);
+    expect((await repos().workflows.get(tenantId, wf.id))?.active).toBe(false);
+  });
+
+  it('a move into a personal space with publishing off stays unpublished, as previewed', async () => {
+    const { owner, tenantId, home } = await setup();
+    const member = await realMember(owner);
+    await addToProject(server, tenantId, home.id, member.user.id, 'project:admin');
+    const space = await repos().projects.ensurePersonal(tenantId, member.user);
+    await setPersonalPublishing(tenantId, false);
+    const wf = await publishable(tenantId, home.id);
+
+    const preview = await member.client.data<{ unpublishReasons: Array<{ kind: string; scope?: string }> }>(
+      previewOf(member.client, 'workflows', wf.id, space.id),
+    );
+    expect(preview.unpublishReasons).toMatchObject([{ kind: 'publishing', scope: 'workflow:publish' }]);
+    expect((await transferWorkflow(member, wf.id, { destinationProjectId: space.id })).statusCode).toBe(200);
+    const row = await repos().workflows.get(tenantId, wf.id);
+    expect(row?.projectId).toBe(space.id);
+    expect(row?.active).toBe(false);
+  });
+
+  it('a project viewer on the destination gets 403 on the preview and the move, and the workflow stays', async () => {
+    const { owner, tenantId, home, away } = await setup();
+    const member = await realMember(owner);
+    await addToProject(server, tenantId, home.id, member.user.id, 'project:admin');
+    await addToProject(server, tenantId, away.id, member.user.id, 'project:viewer');
+    const wf = await publishable(tenantId, home.id);
+    const preview = await previewOf(member.client, 'workflows', wf.id, away.id);
+    expect(preview.statusCode).toBe(403);
+    expect(preview.body).toContain(MISSING_SCOPE_MESSAGE);
+    expect((await transferWorkflow(member, wf.id, { destinationProjectId: away.id })).statusCode).toBe(403);
+    const row = await repos().workflows.get(tenantId, wf.id);
+    expect(row?.projectId).toBe(home.id);
+    expect(row?.active).toBe(true);
+  });
+
+  it('the previews of a workflow, a credential and a folder need :create on the destination (P6-30)', async () => {
+    const { owner, tenantId, home, away } = await setup();
+    const member = await realMember(owner);
+    // admin on the source, no relation on the destination
+    await addToProject(server, tenantId, home.id, member.user.id, 'project:admin');
+    const wf = await publishable(tenantId, home.id);
+    const credential = await credentialIn(server, tenantId, home.id);
+    const folder = await folderIn(server, tenantId, home.id);
+    for (const [kind, id] of [
+      ['workflows', wf.id],
+      ['credentials', credential.id],
+      ['folders', folder.id],
+    ] as const) {
+      const res = await previewOf(member.client, kind, id, away.id);
+      expect(res.statusCode, kind).toBe(403);
+      expect(res.body, kind).toContain(MISSING_SCOPE_MESSAGE);
+    }
   });
 
   it('a credential the destination cannot use leaves it unpublished, as previewed; sharing it keeps it published', async () => {
     const { owner, tenantId, home, away, third } = await setup();
+    const member = await mover(owner, tenantId, home, [away, third]);
     const credential = await credentialIn(server, tenantId, home.id);
     const wf = await publishable(tenantId, home.id, credential);
-    const query = (dest: string) => `/rest/workflows/${wf.id}/transfer-preview?destinationProjectId=${dest}`;
 
-    const preview = await owner.client.data<{ unpublishReasons: Array<{ kind: string }> }>(
-      owner.client.get(query(away.id)),
+    const preview = await member.client.data<{ unpublishReasons: Array<{ kind: string }> }>(
+      previewOf(member.client, 'workflows', wf.id, away.id),
     );
     expect(preview.unpublishReasons.map((r) => r.kind)).toEqual(['credentialAccess']);
-    expect((await transferWorkflow(owner, wf.id, { destinationProjectId: away.id })).statusCode).toBe(200);
+    expect((await transferWorkflow(member, wf.id, { destinationProjectId: away.id })).statusCode).toBe(200);
     const stopped = await repos().workflows.get(tenantId, wf.id);
     expect(stopped?.projectId).toBe(away.id);
     expect(stopped?.active).toBe(false);
@@ -176,7 +317,7 @@ describe('workflow transfer', () => {
 
     // the same move with the credential shared in
     const again = await publishable(tenantId, home.id, credential);
-    const ok = await transferWorkflow(owner, again.id, {
+    const ok = await transferWorkflow(member, again.id, {
       destinationProjectId: third.id,
       shareCredentials: [credential.id],
     });
@@ -185,24 +326,63 @@ describe('workflow transfer', () => {
     const shares = await repos().shares.listForCredential(tenantId, credential.id);
     expect(shares.map((s) => [s.projectId, s.role])).toEqual([[third.id, 'credential:user']]);
   });
+
+  it('shareCredentials names a credential the member cannot share: 403, and nothing moves', async () => {
+    const { owner, tenantId, home, away, third } = await setup();
+    const member = await mover(owner, tenantId, home, [away]);
+    // a project editor of `third` holds no credential:share there
+    await addToProject(server, tenantId, third.id, member.user.id, 'project:editor');
+    const foreign = await credentialIn(server, tenantId, third.id);
+    const wf = await publishable(tenantId, home.id);
+    const res = await transferWorkflow(member, wf.id, {
+      destinationProjectId: away.id,
+      shareCredentials: [foreign.id],
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain(MISSING_SCOPE_MESSAGE);
+    const row = await repos().workflows.get(tenantId, wf.id);
+    expect(row?.projectId).toBe(home.id);
+    expect(row?.active).toBe(true);
+    expect(await repos().shares.listForCredential(tenantId, foreign.id)).toEqual([]);
+  });
 });
 
 describe('credential transfer', () => {
   it('moves the credential and drops its shares', async () => {
     const { owner, tenantId, home, away, third } = await setup();
+    const member = await mover(owner, tenantId, home, [away]);
     const credential = await credentialIn(server, tenantId, home.id);
     await repos().shares.set(tenantId, 'credential', credential.id, [third.id]);
 
-    const res = await owner.client.put(`/rest/credentials/${credential.id}/transfer`, {
+    const res = await member.client.put(`/rest/credentials/${credential.id}/transfer`, {
       destinationProjectId: away.id,
     });
     expect(res.statusCode).toBe(200);
     expect((await repos().credentials.get(tenantId, credential.id))?.projectId).toBe(away.id);
     expect(await repos().shares.listForCredential(tenantId, credential.id)).toEqual([]);
-    const preview = await owner.client.data(
-      owner.client.get(`/rest/credentials/${credential.id}/transfer-preview?destinationProjectId=${home.id}`),
-    );
+    // the new owner project moves it back (admin there)
+    await addToProject(server, tenantId, away.id, member.user.id, 'project:admin');
+    await addToProject(server, tenantId, home.id, member.user.id, 'project:editor');
+    const preview = await member.client.data(previewOf(member.client, 'credentials', credential.id, home.id));
     expect(preview).toMatchObject({ restricted: [], checkFailed: false });
+  });
+
+  it('the preview shows the vault refusal the move then gives (P6-30)', async () => {
+    const { owner, tenantId, home, away } = await setup();
+    const credential = await credentialIn(server, tenantId, home.id, {
+      data: { apiKey: '={{ $secrets.vaultX.token }}' },
+    });
+    const preview = await owner.client.data<{ restricted: Array<Record<string, unknown>> }>(
+      previewOf(owner.client, 'credentials', credential.id, away.id),
+    );
+    expect(preview.restricted).toMatchObject([
+      {
+        kind: 'secretAccess',
+        message: 'The secret provider "vaultX" does not exist in this project',
+        subject: credential.id,
+        projectId: away.id,
+      },
+    ]);
   });
 
   it('refuses the owning project with n8n text, and needs credential:create in the destination', async () => {
@@ -242,6 +422,7 @@ describe('credential transfer', () => {
 describe('folder transfer', () => {
   it('moves the whole tree with its workflows, drops shares and republishes what is allowed', async () => {
     const { owner, tenantId, home, away, third } = await setup();
+    const member = await mover(owner, tenantId, home, [away]);
     const top = await folderIn(server, tenantId, home.id, 'Top');
     const child = await folderIn(server, tenantId, home.id, 'Child', top.id);
     const plain = await workflowIn(server, tenantId, home.id, { folderId: child.id });
@@ -252,12 +433,12 @@ describe('folder transfer', () => {
     await repos().shares.set(tenantId, 'workflow', plain.id, [third.id]);
     const parent = await folderIn(server, tenantId, away.id, 'Parent');
 
-    const preview = await owner.client.data<{ workflowsToUnpublish: Array<{ id: string }> }>(
-      owner.client.get(`/rest/folders/${top.id}/transfer-preview?destinationProjectId=${away.id}`),
+    const preview = await member.client.data<{ workflowsToUnpublish: Array<{ id: string }> }>(
+      previewOf(member.client, 'folders', top.id, away.id),
     );
     expect(preview.workflowsToUnpublish.map((w) => w.id)).toEqual([blocked.id]);
 
-    const res = await owner.client.put(`/rest/folders/${top.id}/transfer`, {
+    const res = await member.client.put(`/rest/folders/${top.id}/transfer`, {
       destinationProjectId: away.id,
       destinationParentFolderId: parent.id,
     });

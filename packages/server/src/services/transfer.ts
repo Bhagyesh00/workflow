@@ -16,6 +16,7 @@ import { ApiError } from '../http/errors';
 import { createRepositories } from '../repositories';
 import { MISSING_SCOPE_MESSAGE } from './access';
 import { assertCredentialsUsable } from './credential-usable';
+import { loadPublishedDefinition, publishedDefinition } from './published-workflow';
 
 /** one reason a move leaves something restricted (the editor's `PolicyViolation`) */
 export interface PolicyViolation {
@@ -77,9 +78,8 @@ export class TransferService {
     const row = await this.deps.repos.workflows.get(auth.tenant.id, workflowId);
     if (!row) throw ApiError.notFound('Workflow');
     await this.requireProject(auth, destinationProjectId);
-    const unpublishReasons = row.active
-      ? await this.republishBlockers(auth, row, destinationProjectId, [])
-      : [];
+    await this.requireCreate(auth, 'workflow', destinationProjectId);
+    const unpublishReasons = row.active ? await this.previewBlockers(auth, row, destinationProjectId) : [];
     return { restricted: [], checkFailed: false, unpublishReasons };
   }
 
@@ -91,7 +91,24 @@ export class TransferService {
     const row = await this.deps.repos.credentials.get(auth.tenant.id, credentialId);
     if (!row) throw ApiError.notFound('Credential');
     await this.requireProject(auth, destinationProjectId);
-    return { restricted: [], checkFailed: false };
+    await this.requireCreate(auth, 'credential', destinationProjectId);
+    const restricted: PolicyViolation[] = [];
+    try {
+      await this.deps
+        .context()
+        .secrets.assertProjectAccess(auth.tenant.id, destinationProjectId, row.secretKeys ?? []);
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      restricted.push({
+        kind: 'secretAccess',
+        checkId: 'secretAccess',
+        message: error.message,
+        subject: row.id,
+        subjectType: 'credential',
+        projectId: destinationProjectId,
+      });
+    }
+    return { restricted, checkFailed: false };
   }
 
   async previewFolder(
@@ -102,10 +119,11 @@ export class TransferService {
     const folder = await this.deps.repos.folders.get(auth.tenant.id, folderId);
     if (!folder) throw ApiError.notFound('Folder');
     await this.requireProject(auth, destinationProjectId);
+    await this.requireCreate(auth, 'folder', destinationProjectId);
     const active = (await this.workflowsInTree(auth.tenant.id, folderId)).filter((w) => w.active);
     const stay: Array<{ id: string; name: string }> = [];
     for (const workflow of active) {
-      if ((await this.republishBlockers(auth, workflow, destinationProjectId, [])).length) {
+      if ((await this.previewBlockers(auth, workflow, destinationProjectId)).length) {
         stay.push({ id: workflow.id, name: workflow.name });
       }
     }
@@ -123,7 +141,9 @@ export class TransferService {
     await this.requireFolder(tenantId, destination, input.destinationParentFolderId);
     const shareIds = await this.checkShareCredentials(auth, input.shareCredentials);
 
-    await this.deps.context().activeWorkflows.deactivate(tenantId, workflowId);
+    // the version that runs now is the one that runs again (never the draft)
+    const publishedVersionId = row.active ? row.publishedVersionId : null;
+    await this.unpublish(auth, workflowId, publishedVersionId);
     await this.deps.database.db.transaction(async (tx) => {
       await tx
         .delete(workflowShares)
@@ -145,7 +165,8 @@ export class TransferService {
         metadata: { from: row.projectId, to: destination },
       });
     });
-    if (row.active) await this.tryRepublish(auth, workflowId, destination, shareIds);
+    if (publishedVersionId)
+      await this.tryRepublish(auth, workflowId, publishedVersionId, destination, shareIds);
   }
 
   async transferCredential(
@@ -192,8 +213,10 @@ export class TransferService {
 
     const treeIds = await repos.folders.subtreeIds(tenantId, folderId);
     const inTree = await this.workflowsInTree(tenantId, folderId);
-    const wasActive = inTree.filter((w) => w.active).map((w) => w.id);
-    for (const id of wasActive) await this.deps.context().activeWorkflows.deactivate(tenantId, id);
+    const wasActive = inTree.flatMap((w) =>
+      w.active && w.publishedVersionId ? [{ id: w.id, versionId: w.publishedVersionId }] : [],
+    );
+    for (const w of wasActive) await this.unpublish(auth, w.id, w.versionId);
     await this.deps.database.db.transaction(async (tx) => {
       const ids = inTree.map((w) => w.id);
       if (ids.length) {
@@ -222,7 +245,7 @@ export class TransferService {
         metadata: { from: folder.projectId, to: destination, workflows: ids.length },
       });
     });
-    for (const id of wasActive) await this.tryRepublish(auth, id, destination, shareIds);
+    for (const w of wasActive) await this.tryRepublish(auth, w.id, w.versionId, destination, shareIds);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -280,10 +303,33 @@ export class TransferService {
       .where(and(eq(workflows.tenantId, tenantId), inArray(workflows.folderId, treeIds)));
   }
 
-  /** why `row` could not be published again in `projectId` once the `allow` credentials are shared there */
-  private async republishBlockers(
+  /** the blockers of a preview: the published version of `row` is what would run again */
+  private async previewBlockers(
     auth: AuthContext,
     row: WorkflowRow,
+    projectId: string,
+  ): Promise<PolicyViolation[]> {
+    const definition = await loadPublishedDefinition(this.deps.repos, auth.tenant.id, row).catch(() => null);
+    if (!definition) {
+      return [
+        {
+          kind: 'publishing',
+          checkId: 'publishedVersion',
+          message: 'The published version could not be loaded',
+          subject: row.id,
+          subjectType: 'workflow',
+          projectId,
+        },
+      ];
+    }
+    return this.republishBlockers(auth, row.id, definition, projectId, []);
+  }
+
+  /** why the published `definition` could not be published again in `projectId` once `allow` credentials are shared there */
+  private async republishBlockers(
+    auth: AuthContext,
+    workflowId: string,
+    definition: WorkflowDefinition,
     projectId: string,
     allow: string[],
   ): Promise<PolicyViolation[]> {
@@ -294,27 +340,23 @@ export class TransferService {
         kind: 'publishing',
         checkId: 'workflowPublish',
         message: 'Publishing workflows is not allowed in the destination project',
-        subject: row.id,
+        subject: workflowId,
         subjectType: 'workflow',
         scope: 'workflow:publish',
         projectId,
       });
     }
     try {
-      await assertCredentialsUsable(
-        { repos: this.deps.repos },
-        auth.tenant.id,
-        projectId,
-        { nodes: row.nodes } as unknown as WorkflowDefinition,
-        { allow },
-      );
+      await assertCredentialsUsable({ repos: this.deps.repos }, auth.tenant.id, projectId, definition, {
+        allow,
+      });
     } catch (error) {
       if (!(error instanceof ApiError)) throw error;
       out.push({
         kind: 'credentialAccess',
         checkId: 'credentialUsable',
         message: error.message,
-        subject: row.id,
+        subject: workflowId,
         subjectType: 'workflow',
         projectId,
       });
@@ -322,23 +364,57 @@ export class TransferService {
     return out;
   }
 
-  /** publishes again after a move; a refusal leaves the workflow unpublished */
+  /** unpublishes before a move; the timeline gets the 'deactivated' event as a publish would */
+  private async unpublish(auth: AuthContext, workflowId: string, versionId: string | null): Promise<void> {
+    const context = this.deps.context();
+    await context.activeWorkflows.deactivate(auth.tenant.id, workflowId);
+    if (!versionId) return;
+    await context.publishHistory.record('deactivated', {
+      tenantId: auth.tenant.id,
+      workflowId,
+      versionId,
+      userId: auth.user.id,
+    });
+  }
+
+  /**
+   * Publishes `versionId` (the version that was published before the move, not the draft) again after a
+   * move; a refusal leaves the workflow unpublished. A success goes on the timeline and the audit log.
+   */
   private async tryRepublish(
     auth: AuthContext,
     workflowId: string,
+    versionId: string,
     projectId: string,
     allow: string[],
   ): Promise<void> {
+    const tenantId = auth.tenant.id;
     const { repos, logger } = this.deps;
-    const row = await repos.workflows.get(auth.tenant.id, workflowId);
-    if (!row) return;
-    if ((await this.republishBlockers(auth, row, projectId, allow)).length) return;
-    const manager = this.deps.context().activeWorkflows;
+    const row = await repos.workflows.get(tenantId, workflowId);
+    const version = row ? await repos.versions.get(tenantId, workflowId, versionId) : null;
+    if (!row || !version) return;
+    const definition = publishedDefinition(row, version);
+    if ((await this.republishBlockers(auth, workflowId, definition, projectId, allow)).length) return;
+    const context = this.deps.context();
     try {
-      await manager.activate(auth.tenant.id, workflowId);
+      await context.activeWorkflows.activate(tenantId, workflowId, { versionId });
     } catch (error) {
       logger.info({ err: error, workflowId }, 'The workflow stays unpublished after the move');
-      await manager.deactivate(auth.tenant.id, workflowId).catch(() => undefined);
+      await context.activeWorkflows.deactivate(tenantId, workflowId).catch(() => undefined);
+      return;
     }
+    await context.publishHistory.record('activated', {
+      tenantId,
+      workflowId,
+      versionId,
+      userId: auth.user.id,
+    });
+    await repos.audit.add(tenantId, {
+      userId: auth.user.id,
+      action: 'workflow.activated',
+      resourceType: 'workflow',
+      resourceId: workflowId,
+      metadata: { versionId, reason: 'transfer' },
+    });
   }
 }
