@@ -6,6 +6,8 @@
  * wide), and a second project's workflow, data table and credential never reach the model (canary on the
  * fake LLM's request log).
  */
+
+import { randomUUID } from 'node:crypto';
 import { nodesAiPackage } from '@workflow/nodes-ai';
 import type { BuilderChunk } from '@workflow/workflow';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -213,5 +215,26 @@ describe('POST /ai/usage-settings', () => {
     expect(denied.json().error.message).toBe(FORBIDDEN);
     const ok = await owner.client.post('/rest/ai/usage-settings', { allowSendingParameterValues: false });
     expect(ok.statusCode).toBe(200);
+  });
+
+  it('is aiAssistant:manage alone: instanceAi:manage and instanceAi:message do not open it', async () => {
+    const { owner } = await setup('project:admin');
+    const tenantId = owner.tenant.id;
+    const body = { allowSendingParameterValues: false };
+    const status = async (scopes: string[]) => {
+      const slug = `usage-${randomUUID().slice(0, 6)}`;
+      await server.ctx.repos.roles.create(tenantId, {
+        slug,
+        displayName: slug,
+        roleType: 'global',
+        scopes: scopes as never,
+      });
+      const user = await realMember(owner);
+      await server.ctx.repos.memberships.updateRole(tenantId, user.user.id, slug);
+      return (await user.client.post('/rest/ai/usage-settings', body)).statusCode;
+    };
+    expect(await status(['instanceAi:manage'])).toBe(403);
+    expect(await status(['instanceAi:message'])).toBe(403);
+    expect(await status(['aiAssistant:manage'])).toBe(200);
   });
 });
