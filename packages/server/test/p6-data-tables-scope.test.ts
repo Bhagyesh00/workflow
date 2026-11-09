@@ -168,6 +168,17 @@ describe('create, names and CSV preview', () => {
     );
   });
 
+  it('a true member with no projectId creates in its personal project (Overview), and previews a CSV', async () => {
+    const { member } = await setup();
+    const made = await member.client.post('/rest/data-tables', { name: 'Mine', columns: [] });
+    expect(made.statusCode).toBe(200);
+    const personal = await server.ctx.repos.projects.getPersonal(member.tenant.id, member.user.id);
+    expect(made.json().data.projectId).toBe(personal!.id);
+    const preview = await member.client.post('/rest/data-tables/csv/preview', { csv: 'a,b\n1,2' });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json().data.rowCount).toBe(1);
+  });
+
   it('csv/preview takes a body projectId and checks create there', async () => {
     const { member, alpha, beta } = await setup();
     const ok = await member.client.post('/rest/data-tables/csv/preview', {
@@ -199,7 +210,7 @@ describe('limits and dependencies', () => {
     expect(asMember.totalBytes).toBe(asOwner.totalBytes);
   });
 
-  it('dependencies names only the workflows the caller can list', async () => {
+  it('dependencies names only workflows of the table project the caller can list', async () => {
     const { member, owner, alpha, beta, inAlpha } = await setup();
     const node = (id: string) => [
       {
@@ -212,13 +223,39 @@ describe('limits and dependencies', () => {
       },
     ];
     await workflowIn(server, owner.tenant.id, alpha.id, { name: 'Visible', nodes: node(inAlpha.id) });
-    await workflowIn(server, owner.tenant.id, beta.id, { name: 'Hidden', nodes: node(inAlpha.id) });
+    // a node of another project never reaches the table, so it is no dependent (the owner sees all projects)
+    await workflowIn(server, owner.tenant.id, beta.id, { name: 'Other project', nodes: node(inAlpha.id) });
     const names = async (client: typeof member.client) =>
       (await client.data<Array<{ name: string }>>(client.get(`/rest/data-tables/${inAlpha.id}/dependencies`)))
         .map((row) => row.name)
         .sort();
-    expect(await names(owner.client)).toEqual(['Hidden', 'Visible']);
+    expect(await names(owner.client)).toEqual(['Visible']);
     expect(await names(member.client)).toEqual(['Visible']);
+  });
+
+  it('a name reference counts only in its own project, where names are unique', async () => {
+    const { owner, alpha, beta } = await setup();
+    const inA = await dataTableIn(server, owner.tenant.id, alpha.id, 'orders');
+    const inB = await dataTableIn(server, owner.tenant.id, beta.id, 'orders');
+    const byName = [
+      {
+        id: 'n1',
+        name: 'Table',
+        type: 'core.dataTable',
+        typeVersion: 1,
+        position: [0, 0] as [number, number],
+        parameters: { dataTableId: { mode: 'name', value: 'orders' } },
+      },
+    ];
+    await workflowIn(server, owner.tenant.id, beta.id, { name: 'Reads B', nodes: byName });
+    const names = async (id: string) =>
+      (
+        await owner.client.data<Array<{ name: string }>>(
+          owner.client.get(`/rest/data-tables/${id}/dependencies`),
+        )
+      ).map((row) => row.name);
+    expect(await names(inA.id)).toEqual([]);
+    expect(await names(inB.id)).toEqual(['Reads B']);
   });
 });
 

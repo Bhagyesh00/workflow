@@ -411,10 +411,13 @@ export class DataTableRepository {
     return rows.map((row) => ({ ...row, sizeBytes: Number(row.sizeBytes) }));
   }
 
-  /** workflows with a Data Table node that names this table by id (list and id modes) or by name */
+  /**
+   * workflows with a Data Table node that names this table by id (list and id modes) or by name; only the
+   * workflows of the table's project, since a node reaches only its own project's tables (P6-23)
+   */
   async dependentWorkflows(
     tenantId: string,
-    table: { id: string; name: string },
+    table: { id: string; name: string; projectId: string },
   ): Promise<Array<{ id: string; name: string; projectId: string }>> {
     const types = sql.join(
       DATA_TABLE_NODE_TYPES.map((type) => sql`${type}`),
@@ -426,6 +429,7 @@ export class DataTableRepository {
       .where(
         and(
           eq(workflows.tenantId, tenantId),
+          eq(workflows.projectId, table.projectId),
           sql`exists (
             select 1 from jsonb_array_elements(${workflows.nodes}) n
             where n->>'type' in (${types})

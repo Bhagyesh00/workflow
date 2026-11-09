@@ -214,13 +214,17 @@ export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables
   };
 
   /**
-   * `dataTable:create` on the project the body names; without one the workspace scope decides, and the
-   * service then resolves the default project for the caller and checks the scope there too
+   * `dataTable:create` on the project a create goes to (`targetProject`: the body's, else the caller's
+   * personal project), as workflows and folders; the service resolves and checks it again
    */
   const onCreate = async (request: FastifyRequest) => {
+    const signedIn = requireAuth(request);
+    const access = request.server?.access;
+    // fail closed: without the access service `requireScope` refuses
+    if (!access) return requireScope(request, 'dataTable:create');
     const peek = projectPeek.safeParse(request.body ?? {});
-    const projectId = peek.success ? peek.data.projectId : undefined;
-    return requireScope(request, 'dataTable:create', projectId ? { projectId } : undefined);
+    const projectId = await access.targetProject(signedIn, peek.success ? peek.data.projectId : undefined);
+    return requireScope(request, 'dataTable:create', { projectId });
   };
 
   app.get('/data-tables', async (request) => {
