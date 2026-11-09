@@ -1329,7 +1329,7 @@ export class WebhookService {
         const binary = items[0]?.binary?.[property];
         if (!binary)
           return json(500, errorBody('no_binary_data', `No binary data property "${property}" was found`));
-        const data = await this.deps.executions.binaryStore(tenant.id).getBuffer(binary);
+        const data = await this.deps.executions.runBinaryBuffer(tenant.id, outcome.executionId, binary);
         return {
           statusCode,
           headers: {},
