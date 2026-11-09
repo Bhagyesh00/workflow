@@ -1,11 +1,11 @@
 /** /rest/credentials/* and /rest/oauth2/* */
 import { randomBytes } from 'node:crypto';
-import type { DataObject } from '@workflow/workflow';
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { DataObject, Scope } from '@workflow/workflow';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import type { CredentialRow } from '../db/schema';
-import { requireRole } from '../http/auth';
+import type { CredentialRow, ProjectRow } from '../db/schema';
+import { type AuthContext, requireAuth, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import {
   credentialCreateSchema,
@@ -17,6 +17,23 @@ import { toWorkflowLogger } from '../logger';
 import { testCredential } from '../services/credential-test';
 import { oauthCallbackPage } from '../services/oauth2';
 import { credentialReadErrorText, resolvedValues, scrubValues } from '../services/secrets/resolver';
+
+/** P6-24: the body fields the editor sends beyond the Phase 5 schemas (editor api/types.ts) */
+const createBody = credentialCreateSchema.extend({ projectId: z.uuid().optional() });
+const updateBody = credentialUpdateSchema.extend({ isGlobal: z.boolean().optional() });
+const testBody = credentialTestSchema.extend({ projectId: z.uuid().optional() });
+const queryFlag = z
+  .union([z.boolean(), z.enum(['true', 'false'])])
+  .optional()
+  .transform((value) => value === true || value === 'true');
+const listQuery = z.object({
+  type: z.string().max(128).optional(),
+  projectId: z.uuid().optional(),
+  onlySharedWithMe: queryFlag,
+  includeScopes: queryFlag,
+});
+
+type ProjectRef = Pick<ProjectRow, 'id' | 'name' | 'type' | 'icon'>;
 
 export function credentialSummary(
   row: Pick<CredentialRow, 'id' | 'name' | 'type' | 'createdAt' | 'updatedAt'>,
@@ -30,14 +47,48 @@ export function credentialSummary(
   };
 }
 
+function projectRef(row: ProjectRef): ProjectRef {
+  return { id: row.id, name: row.name, type: row.type, icon: row.icon ?? null };
+}
+
+/** the caller's scopes on one credential, `credential:*` only (n8n's resource scopes), sorted */
+async function credentialScopes(
+  ctx: ServerContext,
+  auth: AuthContext,
+  credentialId: string,
+): Promise<Scope[]> {
+  const scopes = await ctx.access.scopesForAuth(auth, { credentialId });
+  return [...scopes].filter((scope) => scope.startsWith('credential:')).sort();
+}
+
+/** the access fields of one credential: owning project, the projects it is shared with, the global flag */
+async function accessFields(
+  ctx: ServerContext,
+  tenantId: string,
+  row: Pick<CredentialRow, 'id' | 'projectId' | 'isGlobal'>,
+) {
+  const home = await ctx.repos.projects.get(tenantId, row.projectId);
+  const shares = await ctx.repos.shares.listForCredential(tenantId, row.id);
+  return {
+    projectId: row.projectId,
+    homeProject: home ? projectRef(home) : null,
+    sharedWithProjects: shares.map((share) => projectRef(share.project)),
+    isGlobal: row.isGlobal,
+  };
+}
+
 export async function createCredential(
   ctx: ServerContext,
   tenantId: string,
-  body: z.output<typeof credentialCreateSchema>,
+  body: z.output<typeof credentialCreateSchema> & { projectId?: string },
   userId: string,
   ip: string,
 ) {
-  const row = await ctx.credentials.create(tenantId, { ...body, data: body.data as DataObject }, userId);
+  const row = await ctx.credentials.create(
+    tenantId,
+    { name: body.name, type: body.type, data: body.data as DataObject, projectId: body.projectId },
+    userId,
+  );
   await ctx.repos.audit.add(tenantId, {
     userId,
     action: 'credential.created',
@@ -66,28 +117,86 @@ export async function deleteCredential(
   });
 }
 
+/** a string field of the raw body, read before validation so the scope gate answers first */
+function rawField(request: FastifyRequest, key: string): string | undefined {
+  const body = request.body;
+  if (body === null || typeof body !== 'object') return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * The gate of the OAuth authorize routes: `credential:update` on the credential of the query (a token
+ * write-back); with no id in the query, the global scope, so a caller who holds none is refused first.
+ */
+async function requireCredentialUpdate(request: FastifyRequest): Promise<AuthContext> {
+  const query = request.query as Record<string, unknown> | undefined;
+  const credentialId = typeof query?.credentialId === 'string' ? query.credentialId : undefined;
+  return credentialId
+    ? requireScope(request, 'credential:update', { credentialId })
+    : requireScope(request, 'credential:update');
+}
+
 export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContext): void {
   const { repos, credentials, config } = ctx;
   // a process that serves routes reads `$secrets` even before startMain
   credentials.useSecrets(ctx.secrets);
 
-  // viewers may list names/types (the editor shows which credential a node uses), never data
+  // names and types only (the editor shows which credential a node uses), never data. P6-24: the list
+  // passes the access filter (owned by or shared with the caller's projects, or global)
   app.get('/credentials', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    const { type } = parse(z.object({ type: z.string().max(128).optional() }), request.query);
-    const rows = await repos.credentials.list(auth.tenant.id, type);
-    return { data: rows.map(credentialSummary), nextCursor: null };
+    const auth = requireAuth(request);
+    const tenantId = auth.tenant.id;
+    const query = parse(listQuery, request.query);
+    const filter = await ctx.access.listFilter(auth, 'credential:list');
+    let projectId = query.projectId;
+    if (query.onlySharedWithMe) {
+      // n8n: the rows shared into the caller's personal project
+      const personal = await repos.projects.getPersonal(tenantId, auth.user.id);
+      if (!personal) return { data: [], nextCursor: null };
+      projectId = personal.id;
+    }
+    const rows = await repos.credentials.list(tenantId, {
+      type: query.type,
+      filter,
+      projectId,
+      onlySharedWithMe: query.onlySharedWithMe,
+    });
+    const projects = new Map((await repos.projects.listAll(tenantId)).map((p) => [p.id, projectRef(p)]));
+    const shared = new Map<string, ProjectRef[]>();
+    for (const share of await repos.shares.sharesInto(tenantId, 'credential', [...projects.keys()])) {
+      const project = projects.get(share.projectId);
+      if (project) shared.set(share.resourceId, [...(shared.get(share.resourceId) ?? []), project]);
+    }
+    const data = [];
+    for (const row of rows) {
+      data.push({
+        ...credentialSummary(row),
+        projectId: row.projectId,
+        homeProject: projects.get(row.projectId) ?? null,
+        sharedWithProjects: shared.get(row.id) ?? [],
+        isGlobal: row.isGlobal,
+        ...(query.includeScopes ? { scopes: await credentialScopes(ctx, auth, row.id) } : {}),
+      });
+    }
+    return { data, nextCursor: null };
   });
 
+  // P6-24: into the body's project (else the workspace default) with `credential:create` there
   app.post('/credentials', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const body = parse(credentialCreateSchema, request.body);
-    return { data: await createCredential(ctx, auth.tenant.id, body, auth.user.id, request.ip) };
+    const auth = requireAuth(request);
+    const projectId = await ctx.access.targetProject(auth, rawField(request, 'projectId'));
+    await requireScope(request, 'credential:create', { projectId });
+    const body = parse(createBody, request.body);
+    return {
+      data: await createCredential(ctx, auth.tenant.id, { ...body, projectId }, auth.user.id, request.ip),
+    };
   });
 
+  // a project viewer reads it too (n8n); secret fields stay redacted
   app.get('/credentials/:id', async (request) => {
-    const auth = requireRole(request, 'editor');
     const { id } = parse(idParams, request.params);
+    const auth = await requireScope(request, 'credential:read', { credentialId: id });
     const row = await repos.credentials.get(auth.tenant.id, id);
     if (!row) throw ApiError.notFound('Credential');
     await repos.audit.add(auth.tenant.id, {
@@ -97,48 +206,80 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
       resourceId: id,
       ip: request.ip,
     });
-    return { data: { ...credentialSummary(row), data: credentials.redacted(row) } };
+    return {
+      data: {
+        ...credentialSummary(row),
+        data: credentials.redacted(row),
+        ...(await accessFields(ctx, auth.tenant.id, row)),
+        scopes: await credentialScopes(ctx, auth, id),
+      },
+    };
   });
 
   app.patch('/credentials/:id', async (request) => {
-    const auth = requireRole(request, 'editor');
     const { id } = parse(idParams, request.params);
-    const body = parse(credentialUpdateSchema, request.body);
+    const auth = await requireScope(request, 'credential:update', { credentialId: id });
+    const body = parse(updateBody, request.body);
+    // usable by every member: a workspace scope (owner and admin), as n8n
+    if (body.isGlobal !== undefined) await requireScope(request, 'credential:shareGlobally');
     const row = await credentials.update(auth.tenant.id, id, {
       name: body.name,
       data: body.data as DataObject,
+      isGlobal: body.isGlobal,
     });
     await repos.audit.add(auth.tenant.id, {
       userId: auth.user.id,
       action: 'credential.updated',
       resourceType: 'credential',
       resourceId: id,
+      ...(body.isGlobal !== undefined ? { metadata: { isGlobal: body.isGlobal } } : {}),
       ip: request.ip,
     });
-    return { data: { id: row.id, name: row.name, type: row.type } };
+    return {
+      data: {
+        id: row.id,
+        name: row.name,
+        type: row.type,
+        projectId: row.projectId,
+        isGlobal: row.isGlobal,
+        scopes: await credentialScopes(ctx, auth, id),
+      },
+    };
   });
 
   app.delete('/credentials/:id', async (request) => {
-    const auth = requireRole(request, 'editor');
     const { id } = parse(idParams, request.params);
+    const auth = await requireScope(request, 'credential:delete', { credentialId: id });
     await deleteCredential(ctx, auth.tenant.id, id, auth.user.id, request.ip);
     return { data: { ok: true } };
   });
 
+  // P6-24: the data resolves `$secrets` and `$vars` under one project: a stored credential's own (with
+  // `credential:read` on it), else the body's project (else the default) with `credential:create` there
   app.post('/credentials/test', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const body = parse(credentialTestSchema, request.body);
-    let data = body.data as DataObject;
-    if (body.id) {
-      const row = await repos.credentials.get(auth.tenant.id, body.id);
+    const auth = requireAuth(request);
+    const storedId = rawField(request, 'id');
+    let projectId: string;
+    let row: CredentialRow | undefined;
+    if (storedId !== undefined) {
+      await requireScope(request, 'credential:read', { credentialId: storedId });
+      row = await repos.credentials.get(auth.tenant.id, storedId);
       if (!row) throw ApiError.notFound('Credential');
+      projectId = row.projectId;
+    } else {
+      projectId = await ctx.access.targetProject(auth, rawField(request, 'projectId'));
+      await requireScope(request, 'credential:create', { projectId });
+    }
+    const body = parse(testBody, request.body);
+    let data = body.data as DataObject;
+    if (row) {
       if (row.type !== body.type) throw ApiError.badRequest('The credential type does not match');
       data = credentials.merge(credentials.decrypt(row), data);
     }
     credentials.resolvedType(body.type);
     let resolved: DataObject;
     try {
-      resolved = await credentials.resolveData(auth.tenant.id, null, data);
+      resolved = await credentials.resolveData(auth.tenant.id, projectId, data);
     } catch (error) {
       return { data: { status: 'Error', message: credentialReadErrorText(error) } };
     }
@@ -152,7 +293,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
   });
 
   app.get('/oauth1/authorize', async (request) => {
-    const auth = requireRole(request, 'editor');
+    const auth = await requireCredentialUpdate(request);
     const { credentialId } = parse(z.object({ credentialId: z.uuid() }), request.query);
     return { data: { url: await ctx.oauth1.authorizeUrl(auth.tenant.id, auth.user.id, credentialId) } };
   });
@@ -212,7 +353,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
   );
 
   app.get('/oauth2/authorize', async (request) => {
-    const auth = requireRole(request, 'editor');
+    const auth = await requireCredentialUpdate(request);
     const { credentialId } = parse(z.object({ credentialId: z.uuid() }), request.query);
     return { data: { url: await ctx.oauth2.authorizeUrl(auth.tenant.id, auth.user.id, credentialId) } };
   });

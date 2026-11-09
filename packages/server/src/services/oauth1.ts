@@ -14,7 +14,6 @@ import type { Redis } from 'ioredis';
 import type { Config } from '../config';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
-import { hasRole } from './auth';
 import type { CredentialService } from './credentials';
 import { credentialReadErrorText } from './secrets/resolver';
 
@@ -198,8 +197,9 @@ export class OAuth1Service {
     state: string,
   ): Promise<{ tenantId: string; credentialId: string }> {
     const payload = this.verifyState(state);
-    const membership = await this.repos.memberships.get(payload.t, payload.u);
-    if (!membership || !hasRole(membership.role, 'editor')) {
+    // P6-24: the user of the state must still hold `credential:update` on this credential (a lost project, a
+    // removed member or a narrowed role refuses the write-back before any token call)
+    if (!(await this.credentials.userMayUpdate(payload.t, payload.u, payload.c))) {
       throw ApiError.forbidden('You can no longer edit credentials in this workspace');
     }
     if (query.denied || !query.oauth_verifier || !query.oauth_token) {

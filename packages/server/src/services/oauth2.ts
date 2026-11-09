@@ -16,7 +16,6 @@ import type { Config } from '../config';
 import type { CredentialRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
-import { hasRole } from './auth';
 import type { CredentialService } from './credentials';
 import { MCP_OAUTH2_TYPE, McpDiscoveryError, McpOAuthDiscovery, mcpClientMetadata } from './oauth2-discovery';
 import { credentialReadErrorText } from './secrets/resolver';
@@ -235,8 +234,9 @@ export class OAuth2Service {
   /** exchange the code and store the tokens; returns the credential id */
   async callback(code: string, state: string): Promise<{ tenantId: string; credentialId: string }> {
     const payload = this.verifyState(state);
-    const membership = await this.repos.memberships.get(payload.t, payload.u);
-    if (!membership || !hasRole(membership.role, 'editor')) {
+    // P6-24: the user of the state must still hold `credential:update` on this credential (a lost project, a
+    // removed member or a narrowed role refuses the write-back before any token call)
+    if (!(await this.credentials.userMayUpdate(payload.t, payload.u, payload.c))) {
       throw ApiError.forbidden('You can no longer edit credentials in this workspace');
     }
     const { row, data } = await this.loadOAuth2(payload.t, payload.c);

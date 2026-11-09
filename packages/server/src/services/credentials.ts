@@ -16,6 +16,7 @@ import type { CredentialType, DataObject, NodeCredentialRef, NodeProperty } from
 import type { CredentialRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
+import { AccessService } from './access';
 import type { SecretsManager } from './secrets/manager';
 import { collectSecretKeys, hasCredentialExpressions, resolveCredentialData } from './secrets/resolver';
 
@@ -30,8 +31,14 @@ function collectSecretFields(properties: NodeProperty[], out = new Set<string>()
   return out;
 }
 
+/** the failure a run sees for a credential it may not use: the same text as a missing one (no oracle) */
+function notFound(ref: NodeCredentialRef): Error {
+  return new Error(`Credential "${ref.name || ref.id}" was not found`);
+}
+
 export class CredentialService {
   private secrets?: Pick<SecretsManager, 'secretsFor'>;
+  private accessService?: AccessService;
 
   constructor(
     private readonly repos: Repositories,
@@ -42,6 +49,21 @@ export class CredentialService {
   /** where `$secrets` comes from: until this is called a read that names it fails closed */
   useSecrets(secrets: Pick<SecretsManager, 'secretsFor'>): void {
     this.secrets = secrets;
+  }
+
+  /** the scope rules (P6-03), read from the repositories this service holds */
+  private get access(): AccessService {
+    this.accessService ??= new AccessService(this.repos);
+    return this.accessService;
+  }
+
+  /**
+   * P6-24: whether `userId` may still write the credential (`credential:update` on it), as the OAuth
+   * callbacks check for the user of their signed state. A credential that is gone is the 404 of the lookup.
+   */
+  async userMayUpdate(tenantId: string, userId: string, credentialId: string): Promise<boolean> {
+    const scopes = await this.access.scopesFor(tenantId, userId, { credentialId });
+    return scopes.has('credential:update');
   }
 
   /**
@@ -149,11 +171,17 @@ export class CredentialService {
     return this.saveSecretKeys(row, clean);
   }
 
-  async update(tenantId: string, id: string, patch: { name?: string; data?: DataObject }) {
+  /** `isGlobal` (P6-24): the route checks `credential:shareGlobally` before it passes the flag */
+  async update(
+    tenantId: string,
+    id: string,
+    patch: { name?: string; data?: DataObject; isGlobal?: boolean },
+  ) {
     const row = await this.repos.credentials.get(tenantId, id);
     if (!row) throw ApiError.notFound('Credential');
-    const update: { name?: string; dataEnc?: string } = {};
+    const update: { name?: string; dataEnc?: string; isGlobal?: boolean } = {};
     if (patch.name !== undefined) update.name = patch.name;
+    if (patch.isGlobal !== undefined) update.isGlobal = patch.isGlobal;
     const merged = patch.data ? this.merge(this.decrypt(row), patch.data) : undefined;
     if (merged) update.dataEnc = this.encrypt(tenantId, id, merged);
     const updated = (await this.repos.credentials.update(tenantId, id, update)) ?? row;
@@ -178,13 +206,14 @@ export class CredentialService {
   }
 
   /**
-   * CredentialsProvider for executions of one tenant. P6 S1: the run's `projectId` and the ids a server path
-   * allows (`options.allow`, never from a node or a body); until L4 the lookup stays tenant wide.
+   * CredentialsProvider for the runs of one project (P6-24, the worst case of the phase). A row is used only
+   * when it is owned by `projectId`, shared with it, global, or in `options.allow` (ids a server path passes
+   * for workspace-level settings, never a node's or a body's); a name is looked up only among what the project
+   * can use, its own rows first. Anything else fails as a missing credential would. The OAuth2 write-back
+   * goes through the same lookup.
    */
   provider(tenantId: string, projectId: string, options: { allow?: string[] } = {}): CredentialsProvider {
-    // stub (L4): the project and the allow list do not narrow the lookup yet
-    void projectId;
-    void options;
+    const allow = [...(options.allow ?? [])];
     const find = async (ref: NodeCredentialRef, type: string): Promise<CredentialRow> => {
       let row = ref.id ? await this.repos.credentials.get(tenantId, ref.id) : undefined;
       if (!row && !ref.id && ref.name) {
@@ -192,10 +221,9 @@ export class CredentialService {
           .list()
           .map((t) => t.name)
           .filter((name) => this.types.isA(name, type));
-        // null keeps the workspace-wide name lookup until L4 passes the run's project
-        row = await this.repos.credentials.findByName(tenantId, null, ref.name, candidates);
+        row = await this.repos.credentials.findByName(tenantId, projectId, ref.name, candidates);
       }
-      if (!row) throw new Error(`Credential "${ref.name || ref.id}" was not found`);
+      if (!row || !(await this.access.credentialUsable(tenantId, projectId, row, allow))) throw notFound(ref);
       if (row.type !== type && !this.types.isA(row.type, type)) {
         throw new Error(`Credential "${row.name}" is of type "${row.type}", expected "${type}"`);
       }
