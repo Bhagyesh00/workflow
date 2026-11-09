@@ -200,7 +200,9 @@ describe('credential at run', () => {
     const wf = await workflowIn(server, w.tenantId, w.a.id, flow(useNode({ id: null, name: 'Shared name' })));
     const refused = await runAs(w.ann, w.tenantId, wf.id);
     expect(refused.status).toBe(400);
-    expect(refused.text).toContain(NO_ACCESS);
+    // a name no usable row of the project holds is the invalid-credential answer, whether or not B holds it
+    expect(refused.text).toContain('uses invalid credential');
+    expect(refused.text).not.toContain(NO_ACCESS);
 
     await credentialIn(server, w.tenantId, w.a.id, { name: 'Shared name', data: { apiKey: 'a' } });
     const ran = await runAs(w.ann, w.tenantId, wf.id);

@@ -83,16 +83,20 @@ describe('workflows', () => {
     expect(all.data.map((w: { id: string }) => w.id).sort()).toEqual([inAlpha.id, inBeta.id].sort());
   });
 
-  it('filters by projectId, and a project without a relation is 403', async () => {
+  it('filters by projectId, and a project without a relation lists nothing (200, as n8n)', async () => {
     const { memberKey, ownerKey, alpha, beta, inBeta } = await setup();
     const own = (await api(memberKey, 'GET', `/workflows?projectId=${alpha.id}`)).json();
     expect(own.data).toHaveLength(1);
-    const refused = await api(memberKey, 'GET', `/workflows?projectId=${beta.id}`);
-    expect(refused.statusCode).toBe(403);
-    expect(refused.json().error.message).toBe(FORBIDDEN);
+    const foreign = await api(memberKey, 'GET', `/workflows?projectId=${beta.id}`);
+    expect(foreign.statusCode).toBe(200);
+    expect(foreign.json().data).toEqual([]);
+    expect(foreign.body).not.toContain(inBeta.id);
     const owner = (await api(ownerKey, 'GET', `/workflows?projectId=${beta.id}`)).json();
     expect(owner.data.map((w: { id: string }) => w.id)).toEqual([inBeta.id]);
-    expect((await api(memberKey, 'GET', `/workflows?projectId=${randomUUID()}`)).statusCode).toBe(404);
+    // a project that does not exist is the same: 200 and empty (as n8n), not 404
+    const missing = await api(memberKey, 'GET', `/workflows?projectId=${randomUUID()}`);
+    expect(missing.statusCode).toBe(200);
+    expect(missing.json().data).toEqual([]);
   });
 
   it('reads and changes only the workflows of its projects, with n8n’s text on the others', async () => {

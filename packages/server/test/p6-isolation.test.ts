@@ -5,8 +5,10 @@
  * create in the other project is refused, and the project's own call passes. Also the paths that are not a
  * plain route: binary data, live events (SSE), node options, the credential test, vault routes, OAuth
  * callback, MCP (key, trigger session, OAuth grants), the builder, the public API, reviews, publish check,
- * evaluations, form and chat sign-in, and the Assistant (threads, confirmations, MCP connections, tools).
- * Nothing crosses. Another workspace's id is 404 throughout.
+ * evaluations (route gate and dataset read), form and chat sign-in, and the Assistant (threads, confirmations,
+ * drafts, MCP connections, tools). The two-project writes are covered too: project verbs and members, the three
+ * transfers (destination), shares, favorites, test webhooks, the MCP access toggle and the public per-id routes.
+ * Nothing crosses. Another workspace's id is 404 on the route families, the transfer destination and the public API.
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -14,7 +16,13 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { nodesAiPackage } from '@workflow/nodes-ai';
-import type { DataObject, NodePackage, NodeType } from '@workflow/workflow';
+import {
+  type DataObject,
+  EVALUATION_NODE_TYPE,
+  EVALUATION_TRIGGER_TYPE,
+  type NodePackage,
+  type NodeType,
+} from '@workflow/workflow';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createMcpAuthHelper } from '../src/services/mcp/oauth/tokens';
 import { MCP_KEY_AUDIENCE, MCP_KEY_LABEL } from '../src/services/mcp/types';
@@ -231,7 +239,7 @@ describe('route families, two members, two projects', () => {
 
   // -------------------------------------------------------------------------------------------
   describe('workflows, runs, tables, credentials, folders, variables', () => {
-    it('workflows: B is hidden from ann on every verb and in the list; ann creates only in A; A passes', async () => {
+    it('workflows: B is hidden from ann on every verb; its project filter lists nothing; ann creates only in A; A passes', async () => {
       const w = await world();
       const { client } = w.ann;
       expectHidden(
@@ -242,11 +250,21 @@ describe('route families, two members, two projects', () => {
           await client.post(`/rest/workflows/${w.wfB.id}/run`, {}),
           await client.post(`/rest/workflows/${w.wfB.id}/activate`, {}),
           await client.post(`/rest/workflows/${w.wfB.id}/archive`, {}),
-          await client.get(`/rest/workflows?projectId=${w.b.id}`),
-          await client.post('/rest/workflows', { name: 'Into B', projectId: w.b.id, nodes: [], connections: {} }),
+          await client.post('/rest/workflows', {
+            name: 'Into B',
+            projectId: w.b.id,
+            nodes: [],
+            connections: {},
+          }),
         ],
         'workflows',
       );
+      // the list has no scope on the route (as n8n): a project filter the caller holds nothing in is 200 and empty
+      const foreign = await client.get(`/rest/workflows?projectId=${w.b.id}`);
+      expect(foreign.statusCode).toBe(200);
+      expect(idsOf(foreign.json())).toEqual([]);
+      expect(foreign.body).not.toContain(w.wfB.id);
+      expect(idsOf((await client.get(`/rest/workflows?projectId=${w.a.id}`)).json())).toEqual([w.wfA.id]);
       expect(idsOf((await client.get('/rest/workflows')).json())).toEqual([w.wfA.id]);
       expect((await client.get(`/rest/workflows/${w.wfA.id}`)).statusCode).toBe(200);
       const made = await client.post('/rest/workflows', { name: 'Into A', projectId: w.a.id, nodes: [], connections: {} });
@@ -325,6 +343,18 @@ describe('route families, two members, two projects', () => {
       await repos().variables.create(w.tenantId, { key: 'p6iso', value: 'a-value', projectId: w.a.id });
       await repos().variables.create(w.tenantId, { key: 'p6iso', value: 'b-value', projectId: w.b.id });
       const data = (apiKey: string) => ({ baseUrl: remoteUrl, apiKey });
+
+      // control: the project that owns the connection resolves it (a connection that never loads would fail here)
+      received.length = 0;
+      const resolved = await w.ben.client.data(
+        w.ben.client.post('/rest/credentials/test', {
+          type: 'testApi',
+          projectId: w.b.id,
+          data: data('={{ $secrets.vaultB.key }}'),
+        }),
+      );
+      expect(resolved.status).toBe('OK');
+      expect(received.at(-1)?.headers['x-api-key']).toBe('vault-of-b');
 
       received.length = 0;
       const refused = await w.ann.client.data(
@@ -410,9 +440,13 @@ describe('route families, two members, two projects', () => {
         'folders',
       );
       expect(idsOf((await client.get('/rest/folders')).json())).toEqual([w.folderA.id]);
-      expect((await client.post('/rest/folders', { name: 'Into A', projectId: w.a.id })).statusCode).toBe(200);
-      const crossParent = await client.patch(`/rest/folders/${w.folderA.id}`, { parentFolderId: w.folderB.id });
-      expect(crossParent.statusCode).toBeGreaterThanOrEqual(400);
+      expect((await client.post('/rest/folders', { name: 'Into A', projectId: w.a.id })).statusCode).toBe(
+        200,
+      );
+      const crossParent = await client.patch(`/rest/folders/${w.folderA.id}`, {
+        parentFolderId: w.folderB.id,
+      });
+      expect(crossParent.statusCode).toBe(400);
       expect((await repos().folders.get(w.tenantId, w.folderA.id))?.parentFolderId ?? null).toBeNull();
     });
 
@@ -457,6 +491,284 @@ describe('route families, two members, two projects', () => {
         expect(res.statusCode).toBe(403);
         expect(res.body).not.toContain('vault-value-b');
       }
+    });
+  });
+
+  // -------------------------------------------------------------------------------------------
+  describe('projects, transfers, shares, favorites, test webhooks, MCP toggle, public per-id routes, another workspace', () => {
+    /** ann is also admin of A and of a project C of her own: she holds the `:move` and `:share` scopes at home */
+    async function adminWorld() {
+      const w = await world();
+      const c = await projectIn(server, w.tenantId, 'C');
+      await addToProject(server, w.tenantId, w.a.id, w.ann.user.id, 'project:admin');
+      await addToProject(server, w.tenantId, c.id, w.ann.user.id, 'project:admin');
+      return { ...w, c };
+    }
+
+    it('projects: ann has no verb on project B, cannot add herself or change its members; A passes', async () => {
+      const w = await world();
+      const { client } = w.ann;
+      const url = `/rest/projects/${w.b.id}`;
+      expectHidden(
+        [
+          await client.get(url),
+          await client.patch(url, { name: 'Hijacked' }),
+          await client.delete(url),
+          await client.post(`${url}/users`, {
+            relations: [{ userId: w.ann.user.id, role: 'project:admin' }],
+          }),
+          await client.patch(`${url}/users/${w.ben.user.id}`, { role: 'project:viewer' }),
+          await client.delete(`${url}/users/${w.ben.user.id}`),
+        ],
+        'projects',
+      );
+      expect(await repos().projects.relations.get(w.tenantId, w.b.id, w.ann.user.id)).toBeUndefined();
+      expect((await repos().projects.relations.get(w.tenantId, w.b.id, w.ben.user.id))?.role).toBe(
+        'project:editor',
+      );
+      expect((await repos().projects.get(w.tenantId, w.b.id))?.name).toBe('B');
+      expect(JSON.stringify((await client.get('/rest/projects')).json())).not.toContain(w.b.id);
+      expect((await client.get(`/rest/projects/${w.a.id}`)).statusCode).toBe(200);
+    });
+
+    it('transfers: ann cannot move A or B rows into B, nothing moves, and a move inside her own projects passes', async () => {
+      const w = await adminWorld();
+      const { client } = w.ann;
+      const into = (id: string, kind: 'workflows' | 'credentials' | 'folders', destination: string) =>
+        client.put(`/rest/${kind}/${id}/transfer`, { destinationProjectId: destination });
+      // only the destination check stands between A and B here: ann holds `:move` on A's rows
+      expectHidden(
+        [
+          await into(w.wfA.id, 'workflows', w.b.id),
+          await into(w.credA.id, 'credentials', w.b.id),
+          await into(w.folderA.id, 'folders', w.b.id),
+          await client.get(`/rest/workflows/${w.wfA.id}/transfer-preview?destinationProjectId=${w.b.id}`),
+          await client.get(`/rest/credentials/${w.credA.id}/transfer-preview?destinationProjectId=${w.b.id}`),
+          await client.get(`/rest/folders/${w.folderA.id}/transfer-preview?destinationProjectId=${w.b.id}`),
+          // and the rows of B, even into A
+          await into(w.wfB.id, 'workflows', w.a.id),
+          await into(w.credB.id, 'credentials', w.a.id),
+          await into(w.folderB.id, 'folders', w.a.id),
+          await client.get(`/rest/workflows/${w.wfB.id}/transfer-preview?destinationProjectId=${w.a.id}`),
+        ],
+        'transfers',
+      );
+      expect((await repos().workflows.get(w.tenantId, w.wfA.id))?.projectId).toBe(w.a.id);
+      expect((await repos().credentials.get(w.tenantId, w.credA.id))?.projectId).toBe(w.a.id);
+      expect((await repos().folders.get(w.tenantId, w.folderA.id))?.projectId).toBe(w.a.id);
+      expect((await repos().workflows.get(w.tenantId, w.wfB.id))?.projectId).toBe(w.b.id);
+      expect((await repos().credentials.get(w.tenantId, w.credB.id))?.projectId).toBe(w.b.id);
+      expect((await repos().folders.get(w.tenantId, w.folderB.id))?.projectId).toBe(w.b.id);
+      // control: into C, where she is admin, the same calls pass
+      expect((await into(w.wfA.id, 'workflows', w.c.id)).statusCode).toBe(200);
+      expect((await into(w.credA.id, 'credentials', w.c.id)).statusCode).toBe(200);
+      expect((await into(w.folderA.id, 'folders', w.c.id)).statusCode).toBe(200);
+      expect((await repos().workflows.get(w.tenantId, w.wfA.id))?.projectId).toBe(w.c.id);
+      expect((await repos().credentials.get(w.tenantId, w.credA.id))?.projectId).toBe(w.c.id);
+      expect((await repos().folders.get(w.tenantId, w.folderA.id))?.projectId).toBe(w.c.id);
+    });
+
+    it('shares: ann cannot share a row of B into A; the owner and the project admin share what they hold', async () => {
+      const w = await adminWorld();
+      const { client } = w.ann;
+      expectHidden(
+        [
+          await client.put(`/rest/workflows/${w.wfB.id}/share`, { shareWithIds: [w.a.id] }),
+          await client.put(`/rest/credentials/${w.credB.id}/share`, { shareWithIds: [w.a.id] }),
+          // the project admin holds no `workflow:share` even on A's own workflow (the workspace owner does)
+          await client.put(`/rest/workflows/${w.wfA.id}/share`, { shareWithIds: [w.c.id] }),
+        ],
+        'shares',
+      );
+      expect(await repos().shares.listForWorkflow(w.tenantId, w.wfB.id)).toEqual([]);
+      expect(await repos().shares.listForCredential(w.tenantId, w.credB.id)).toEqual([]);
+      expect(await repos().shares.listForWorkflow(w.tenantId, w.wfA.id)).toEqual([]);
+      expect(idsOf((await client.get('/rest/workflows')).json())).toEqual([w.wfA.id]);
+      expect(idsOf((await client.get('/rest/credentials')).json())).toEqual([w.credA.id]);
+      // controls: ann shares her credential with C (`credential:share` as project admin), the owner a workflow
+      const credShare = await client.put(`/rest/credentials/${w.credA.id}/share`, { shareWithIds: [w.c.id] });
+      expect(credShare.statusCode, credShare.body).toBe(200);
+      expect((await repos().shares.listForCredential(w.tenantId, w.credA.id)).length).toBe(1);
+      const wfShare = await w.owner.client.put(`/rest/workflows/${w.wfA.id}/share`, {
+        shareWithIds: [w.c.id],
+      });
+      expect(wfShare.statusCode, wfShare.body).toBe(200);
+      expect((await repos().shares.listForWorkflow(w.tenantId, w.wfA.id)).length).toBe(1);
+    });
+
+    it('favorites: ann cannot bookmark a row or the project of B; her own A rows are listed', async () => {
+      const w = await world();
+      const { client } = w.ann;
+      const add = (resourceType: string, resourceId: string) =>
+        client.post('/rest/favorites', { resourceType, resourceId });
+      expectHidden(
+        [
+          await add('workflow', w.wfB.id),
+          await add('project', w.b.id),
+          await add('folder', w.folderB.id),
+          await add('dataTable', w.tableB.id),
+        ],
+        'favorites',
+      );
+      expect((await add('workflow', w.wfA.id)).statusCode).toBe(200);
+      expect((await add('project', w.a.id)).statusCode).toBe(200);
+      const listed = JSON.stringify((await client.get('/rest/favorites')).json());
+      expect(listed).toContain(w.wfA.id);
+      expect(listed).not.toContain(w.wfB.id);
+      expect(listed).not.toContain(w.b.id);
+    });
+
+    it('test webhooks: ann cannot listen on the webhook of B, and none is registered; A listens', async () => {
+      const w = await world();
+      const hook = async (projectId: string) => {
+        const path = `p6iso-${randomUUID().slice(0, 8)}`;
+        const wf = await workflowIn(server, w.tenantId, projectId, {
+          nodes: [
+            node('Hook', 'core.webhook', { path, httpMethod: 'GET' }, [0, 0], { webhookId: randomUUID() }),
+          ],
+        });
+        return { id: wf.id, url: `/webhook-test/${w.owner.tenant.slug}/${path}` };
+      };
+      const inA = await hook(w.a.id);
+      const inB = await hook(w.b.id);
+      expectHidden(
+        [await w.ann.client.post(`/rest/workflows/${inB.id}/listen-test-webhook`, { nodeName: 'Hook' })],
+        'test webhook',
+      );
+      expect((await server.app.inject({ method: 'GET', url: inB.url })).statusCode).toBe(404);
+      const own = await w.ann.client.post(`/rest/workflows/${inA.id}/listen-test-webhook`, {
+        nodeName: 'Hook',
+      });
+      expect(own.statusCode, own.body).toBe(200);
+      await w.ann.client.request('DELETE', `/rest/workflows/${inA.id}/listen-test-webhook`, {
+        nodeName: 'Hook',
+      });
+    });
+
+    it('MCP access toggle: ann cannot switch a workflow of B, one of B stops the whole change, A passes', async () => {
+      const w = await world();
+      const flag = async (id: string) =>
+        ((await repos().workflows.get(w.tenantId, id))?.settings as { availableInMCP?: boolean } | undefined)
+          ?.availableInMCP === true;
+      const toggle = (body: Record<string, unknown>) =>
+        w.ann.client.patch('/rest/mcp/workflows/toggle-access', body);
+      expectHidden(
+        [
+          await toggle({ availableInMCP: true, workflowIds: [w.wfB.id] }),
+          await toggle({ availableInMCP: true, workflowIds: [w.wfA.id, w.wfB.id] }),
+          await toggle({ availableInMCP: true, projectId: w.b.id }),
+        ],
+        'toggle-access',
+      );
+      expect(await flag(w.wfB.id)).toBe(false);
+      expect(await flag(w.wfA.id)).toBe(false);
+      const own = await toggle({ availableInMCP: true, workflowIds: [w.wfA.id] });
+      expect(own.statusCode, own.body).toBe(200);
+      expect(own.json().data.updatedCount).toBe(1);
+      expect(await flag(w.wfA.id)).toBe(true);
+      expect(await flag(w.wfB.id)).toBe(false);
+    });
+
+    it('public API: the per-id routes of project B, its users, folders, tables and rows are 403 for ann; lists hold A only', async () => {
+      const w = await world();
+      const annKey = (await w.ann.client.data(w.ann.client.post('/rest/api-keys', { name: 'k' })))
+        .key as string;
+      const api = (method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', url: string, payload?: unknown) =>
+        server.app.inject({
+          method,
+          url: `/api/v1${url}`,
+          headers: { 'x-api-key': annKey },
+          payload: payload as object,
+        });
+      const runB = randomUUID();
+      await repos().executions.create(
+        w.tenantId,
+        {
+          id: runB,
+          workflowId: w.wfB.id,
+          workflowName: 'Run',
+          mode: 'manual',
+          status: 'error',
+          startedAt: new Date(),
+          stoppedAt: new Date(),
+        },
+        { workflowData: { name: 'Run', nodes: [], connections: {} }, runOptions: {} },
+      );
+      await repos().variables.create(w.tenantId, { key: 'P6ISOB', value: 'b', projectId: w.b.id });
+      expectHidden(
+        [
+          await api('PUT', `/projects/${w.b.id}`, { name: 'Hijacked' }),
+          await api('DELETE', `/projects/${w.b.id}`),
+          await api('GET', `/projects/${w.b.id}/users`),
+          await api('POST', `/projects/${w.b.id}/users`, {
+            relations: [{ userId: w.ann.user.id, role: 'project:admin' }],
+          }),
+          await api('PATCH', `/projects/${w.b.id}/users/${w.ben.user.id}`, { role: 'project:viewer' }),
+          await api('DELETE', `/projects/${w.b.id}/users/${w.ben.user.id}`),
+          await api('GET', `/projects/${w.b.id}/folders`),
+          await api('POST', `/projects/${w.b.id}/folders`, { name: 'Into B' }),
+          await api('GET', `/projects/${w.b.id}/folders/${w.folderB.id}`),
+          await api('DELETE', `/projects/${w.b.id}/folders/${w.folderB.id}`),
+          await api('GET', `/data-tables/${w.tableB.id}`),
+          await api('DELETE', `/data-tables/${w.tableB.id}`),
+          await api('GET', `/executions/${runB}`),
+          await api('DELETE', `/credentials/${w.credB.id}`),
+        ],
+        'public per-id',
+      );
+      expect(await repos().projects.get(w.tenantId, w.b.id)).toBeDefined();
+      expect(await repos().folders.get(w.tenantId, w.folderB.id)).toBeDefined();
+      expect(await repos().credentials.get(w.tenantId, w.credB.id)).toBeDefined();
+      expect(await repos().executions.get(w.tenantId, runB)).toBeDefined();
+      for (const list of ['/executions', '/variables', '/data-tables']) {
+        const res = await api('GET', list);
+        expect(res.statusCode, list).toBe(200);
+        const text = JSON.stringify(res.json());
+        for (const hidden of [w.credB.id, w.tableB.id, runB, 'P6ISOB'])
+          expect(text, list).not.toContain(hidden);
+      }
+      // controls: A's own rows
+      expect((await api('GET', `/projects/${w.a.id}/folders`)).statusCode).toBe(200);
+      expect((await api('GET', `/data-tables/${w.tableA.id}`)).statusCode).toBe(200);
+    });
+
+    it("another workspace's ids are 404 on the route families, the transfer destination and the public API", async () => {
+      const w = await adminWorld();
+      const other = await signup();
+      const p2 = await projectIn(server, other.tenant.id, 'Other');
+      const wf2 = await workflowIn(server, other.tenant.id, p2.id, { name: 'Other flow' });
+      const cred2 = await credentialIn(server, other.tenant.id, p2.id, {
+        name: 'Other key',
+        data: { apiKey: 'other-secret' },
+      });
+      const table2 = await dataTableIn(server, other.tenant.id, p2.id, 'other_table');
+      const folder2 = await folderIn(server, other.tenant.id, p2.id, 'Other folder');
+      const gone = (responses: Array<{ statusCode: number; body: string }>, label: string) =>
+        responses.forEach((res, i) => {
+          expect(res.statusCode, `${label} #${i}: ${res.body.slice(0, 120)}`).toBe(404);
+          expect(res.body).not.toContain('other-secret');
+        });
+      const { client } = w.ann;
+      const annKey = (await client.data(client.post('/rest/api-keys', { name: 'k' }))).key as string;
+      const api = (url: string) =>
+        server.app.inject({ method: 'GET', url: `/api/v1${url}`, headers: { 'x-api-key': annKey } });
+      gone(
+        [
+          await client.get(`/rest/workflows/${wf2.id}`),
+          await client.get(`/rest/credentials/${cred2.id}`),
+          await client.get(`/rest/data-tables/${table2.id}`),
+          await client.get(`/rest/folders/${folder2.id}`),
+          await client.get(`/rest/projects/${p2.id}`),
+          await client.post('/rest/favorites', { resourceType: 'workflow', resourceId: wf2.id }),
+          await client.put(`/rest/workflows/${w.wfA.id}/transfer`, { destinationProjectId: p2.id }),
+          await client.get(`/rest/workflows/${wf2.id}/test-runs`),
+          await api(`/workflows/${wf2.id}`),
+          await api(`/data-tables/${table2.id}`),
+          await api(`/projects/${p2.id}/folders`),
+        ],
+        'another workspace',
+      );
+      expect((await repos().workflows.get(w.tenantId, w.wfA.id))?.projectId).toBe(w.a.id);
     });
   });
 
@@ -621,31 +933,111 @@ describe('route families, two members, two projects', () => {
       expect(opened.statusCode).toBe(200);
       const id = opened.json().data.id as string;
       const read = await w.ben.client.get(`/rest/workflow-reviews/${id}`);
-      expect([403, 404]).toContain(read.statusCode);
+      // a review of another project is not there for ben (a participant-only answer)
+      expect(read.statusCode).toBe(404);
       const list = await w.ben.client.get('/rest/workflow-reviews');
       expect(JSON.stringify(list.json())).not.toContain(id);
-      expect((await w.ben.client.post(`/rest/workflow-reviews/${id}/approve`, {})).statusCode).toBeGreaterThanOrEqual(403);
+      // the real decision route: ben gets the same 404 and the review stays open
+      const decided = await w.ben.client.post(`/rest/workflow-reviews/${id}/decision`, {
+        decision: 'approved',
+      });
+      expect(decided.statusCode).toBe(404);
+      expect((await repos().reviews.get(w.tenantId, id))?.state).toBe('open');
+      // control: the route exists, and the author is refused by its own rule (403), not by the router
+      const own = await w.ann.client.post(`/rest/workflow-reviews/${id}/decision`, { decision: 'approved' });
+      expect(own.statusCode).toBe(403);
+      expect((await repos().reviews.get(w.tenantId, id))?.state).toBe('open');
     });
 
     it('evaluations: ben has no test-run route of A (read, run, cancel, delete); ann reads her own', async () => {
       const w = await world();
       const run = await repos().testRuns.create(w.tenantId, { workflowId: w.wfA.id, status: 'completed' });
       const url = `/rest/workflows/${w.wfA.id}/test-runs`;
-      expectHidden(
-        [
-          await w.ben.client.get(url),
-          await w.ben.client.get(`${url}/${run.id}`),
-          await w.ben.client.get(`${url}/${run.id}/test-cases`),
-          await w.ben.client.post(`${url}/new`, {}),
-          await w.ben.client.post(`${url}/${run.id}/cancel`),
-          await w.ben.client.delete(`${url}/${run.id}`),
-        ],
-        'evaluations',
-      );
+      // a caller who cannot read the workflow gets its 404 (as n8n's test-runs controller), on every verb
+      for (const [i, res] of [
+        await w.ben.client.get(url),
+        await w.ben.client.get(`${url}/${run.id}`),
+        await w.ben.client.get(`${url}/${run.id}/test-cases`),
+        await w.ben.client.post(`${url}/new`, {}),
+        await w.ben.client.post(`${url}/${run.id}/cancel`),
+        await w.ben.client.delete(`${url}/${run.id}`),
+      ].entries()) {
+        expect(res.statusCode, `evaluations #${i}: ${res.body.slice(0, 120)}`).toBe(404);
+        expect(res.json().error.message, `evaluations #${i}`).toBe('Workflow not found');
+      }
       expect((await w.ann.client.get(`${url}/${run.id}`)).statusCode).toBe(200);
       expect(await repos().testRuns.get(w.tenantId, w.wfA.id, run.id)).toBeTruthy();
-      // the dataset read of a run of another project is the same check
-      expect((await w.ann.client.get(`/rest/workflows/${w.wfB.id}/test-runs`)).statusCode).toBe(403);
+      // the route gate of the other project's workflow is the same for ann
+      expect((await w.ann.client.get(`/rest/workflows/${w.wfB.id}/test-runs`)).statusCode).toBe(404);
+    });
+
+    it("evaluations: a run of A's workflow reads the dataset of A's own project, never a table of B", async () => {
+      const w = await world();
+      const table = async (projectId: string, tag: string) => {
+        const created = await w.owner.client.data<{ id: string }>(
+          w.owner.client.post('/rest/data-tables', {
+            name: `eval_${tag}_${randomUUID().slice(0, 6)}`,
+            columns: [{ name: 'question', type: 'string' }],
+            projectId,
+          }),
+        );
+        await w.owner.client.data(
+          w.owner.client.post(`/rest/data-tables/${created.id}/insert`, {
+            data: [{ question: `${tag}-one` }, { question: `${tag}-two` }],
+          }),
+        );
+        return created.id;
+      };
+      const tableOfA = await table(w.a.id, 'alpha');
+      const tableOfB = await table(w.b.id, 'beta');
+      const locator = (value: string) => ({ __rl: true, mode: 'id', value });
+      const evalWorkflow = (tableId: string) =>
+        workflowIn(server, w.tenantId, w.a.id, {
+          name: `Evaluated ${randomUUID().slice(0, 6)}`,
+          nodes: [
+            node(
+              'Dataset',
+              EVALUATION_TRIGGER_TYPE,
+              { source: 'dataTable', dataTableId: locator(tableId) },
+              [0, 0],
+            ),
+            node('Metrics', EVALUATION_NODE_TYPE, {
+              operation: 'setMetrics',
+              metric: 'customMetrics',
+              metrics: {
+                assignments: [{ id: randomUUID(), name: 'score', value: '={{ 1 }}', type: 'number' }],
+              },
+            }),
+          ],
+          connections: chain('Dataset', 'Metrics'),
+        });
+      const runOf = async (workflowId: string) => {
+        const started = await w.ann.client.post(`/rest/workflows/${workflowId}/test-runs/new`, {});
+        expect(started.statusCode, started.body).toBe(202);
+        const runId = started.json().data.testRunId as string;
+        return waitFor(
+          async () => {
+            const run = await w.ann.client.data<{
+              status: string;
+              errorCode: string | null;
+              caseCounts: { total: number };
+            }>(w.ann.client.get(`/rest/workflows/${workflowId}/test-runs/${runId}`));
+            return run.status === 'new' || run.status === 'running' ? undefined : run;
+          },
+          { timeout: 30_000, interval: 50, message: 'the test run to finish' },
+        );
+      };
+      // the trigger names the table of B: the dataset read is bound to the workflow's own project, so it finds none
+      const foreign = await evalWorkflow(tableOfB);
+      const refused = await runOf(foreign.id);
+      expect(refused.status).toBe('error');
+      expect(refused.errorCode).toBe('CANT_FETCH_TEST_CASES');
+      expect(refused.caseCounts.total).toBe(0);
+      // control: the same workflow shape on the table of A reads A's rows
+      const own = await evalWorkflow(tableOfA);
+      const ok = await runOf(own.id);
+      expect(ok.status).toBe('completed');
+      expect(ok.caseCounts.total).toBe(2);
     });
 
     it('form sign-in: canExecute is workflow:execute through the projects of the user, per workflow', async () => {
@@ -773,8 +1165,10 @@ describe('route families, two members, two projects', () => {
       const list = await w.ben.client.get('/rest/mcp/oauth-clients');
       if (list.statusCode === 200) expect(JSON.stringify(list.json())).not.toContain(clientId);
       const del = await w.ben.client.delete(`/rest/mcp/oauth-clients/${clientId}`);
-      expect(del.statusCode).toBeGreaterThanOrEqual(403);
-      expect((await mcpOAuth.listClientsByUser(w.tenantId, w.ann.user.id)).map((c) => c.id)).toEqual([clientId]);
+      expect(del.statusCode).toBe(404);
+      expect((await mcpOAuth.listClientsByUser(w.tenantId, w.ann.user.id)).map((c) => c.id)).toEqual([
+        clientId,
+      ]);
       expect(await mcpOAuth.revokeForUser(w.tenantId, w.ann.user.id, clientId)).toBe(true);
     });
 
@@ -893,10 +1287,14 @@ describe('route families, two members, two projects', () => {
           await api(annKey, 'PUT', `/workflows/${w.wfB.id}`, { name: 'x', nodes: [], connections: {} }),
           await api(annKey, 'DELETE', `/workflows/${w.wfB.id}`),
           await api(annKey, 'POST', `/workflows/${w.wfB.id}/activate`, {}),
-          await api(annKey, 'GET', `/workflows?projectId=${w.b.id}`),
         ],
         'public api',
       );
+      // a project filter the key's user holds nothing in is 200 and empty (as n8n), never B's workflow
+      const foreign = await api(annKey, 'GET', `/workflows?projectId=${w.b.id}`);
+      expect(foreign.statusCode).toBe(200);
+      expect(foreign.json().data).toEqual([]);
+      expect(foreign.body).not.toContain(w.wfB.id);
       expect((await api(annKey, 'GET', `/workflows/${w.wfA.id}`)).statusCode).toBe(200);
       const projects = (await api(annKey, 'GET', '/projects')).json();
       expect(JSON.stringify(projects)).not.toContain(w.b.id);
@@ -998,13 +1396,13 @@ describe('Assistant, two members, two projects', () => {
     const own = await workflowIn(h.server, h.tenantId, a, { name: `Archive me ${suffix()}` });
     const threadId = await h.createThread(ann);
     expect(JSON.stringify((await ben.client.get('/rest/assistant/threads')).json())).not.toContain(threadId);
-    expect((await ben.client.get(`/rest/assistant/threads/${threadId}/status`)).statusCode).toBeGreaterThanOrEqual(403);
+    expect((await ben.client.get(`/rest/assistant/threads/${threadId}/status`)).statusCode).toBe(404);
 
     const turn = await h.callTool(ann, 'archive_workflow', { workflowId: own.id });
     const status = await h.waitForStatus(ann, turn.threadId, (s) => s.pending.length > 0);
     const card = status.pending[0] as { requestId: string };
     const stolen = await h.confirm(ben, card.requestId, { kind: 'approval', approved: true });
-    expect(stolen.statusCode).toBeGreaterThanOrEqual(403);
+    expect(stolen.statusCode).toBe(404);
     expect((await h.ctx.repos.workflows.get(h.tenantId, own.id))?.isArchived).toBe(false);
     const mine = await h.confirm(ann, card.requestId, { kind: 'approval', approved: true });
     expect(mine.statusCode).toBe(200);
@@ -1012,25 +1410,83 @@ describe('Assistant, two members, two projects', () => {
     expect((await h.ctx.repos.workflows.get(h.tenantId, own.id))?.isArchived).toBe(true);
   });
 
-  it("MCP connections: a member's list holds the workspace's connections only through its own scope, and a credential of B cannot be pinned by ann", async () => {
+  it("drafts: a draft built for B is refused to ann on accept and stays open, ben never reads ann's draft, A's draft lands in A", async () => {
+    const putDraft = async (projectId: string) => {
+      const threadId = await h.createThread(ann);
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      await h.ctx.assistantDrafts.put(h.tenantId, threadId, {
+        id,
+        name: `Draft ${suffix()}`,
+        workflowId: null,
+        baseVersionId: null,
+        projectId,
+        definition: { name: 'Draft', nodes: [], connections: {}, settings: {} },
+        createdAt: now,
+        updatedAt: now,
+        status: 'open',
+        nodeCount: 0,
+        issues: [],
+      });
+      return { url: `/rest/assistant/threads/${threadId}/drafts/${id}`, updatedAt: now };
+    };
+    const forB = await putDraft(b);
+    const refused = await ann.client.post(`${forB.url}/accept`, { updatedAt: forB.updatedAt });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json().error.message).toBe(FORBIDDEN);
+    const view = await ann.client.data<{ draft: { status: string } }>(ann.client.get(forB.url));
+    expect(view.draft.status).toBe('open');
+    const forA = await putDraft(a);
+    // ben has neither the thread nor the draft of ann
+    expect((await ben.client.get(forA.url)).statusCode).toBe(404);
+    expect((await ben.client.post(`${forA.url}/accept`, { updatedAt: forA.updatedAt })).statusCode).toBe(404);
+    expect((await ben.client.post(`${forA.url}/discard`, {})).statusCode).toBe(404);
+    const accepted = await ann.client.post(`${forA.url}/accept`, { updatedAt: forA.updatedAt });
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    expect((await h.ctx.repos.workflows.get(h.tenantId, accepted.json().data.workflowId))?.projectId).toBe(a);
+  });
+
+  it('MCP connections: a member never writes one; an admin cannot pin a credential of B, and can pin one the workspace shares', async () => {
     await h.setSettings({ mcpAccessEnabled: true });
-    const theirs = await credentialIn(h.server, h.tenantId, b, { name: `Mcp ${suffix()}`, type: 'httpHeaderAuth', data: { name: 'X', value: 'v-iso-3' } });
-    const created = await ann.client.post('/rest/assistant/mcp-connections', {
-      name: 'Docs',
-      url: 'https://mcp.example.com/mcp',
-      credentialId: theirs.id,
+    const theirs = await credentialIn(h.server, h.tenantId, b, {
+      name: `Mcp ${suffix()}`,
+      type: 'httpHeaderAuth',
+      data: { name: 'X', value: 'v-iso-3' },
     });
-    // a member never writes connections; and the row of B's credential is never accepted
-    expect(created.statusCode).toBeGreaterThanOrEqual(400);
+    const shared = await credentialIn(h.server, h.tenantId, b, {
+      name: `Mcp shared ${suffix()}`,
+      type: 'httpHeaderAuth',
+      data: { name: 'X', value: 'v-iso-4' },
+      isGlobal: true,
+    });
+    const body = (credentialId: string, name: string) => ({
+      name,
+      url: 'https://mcp.example.com/mcp',
+      authentication: 'headerAuth',
+      credentialId,
+    });
+    // a member never writes connections (the workspace scope), with a credential of its own project or not
+    const created = await ann.client.post('/rest/assistant/mcp-connections', body(theirs.id, 'Docs'));
+    expect(created.statusCode).toBe(403);
+    expect(created.json().error.message).toBe(FORBIDDEN);
     const list = await ben.client.get('/rest/assistant/mcp-connections');
     expect(JSON.stringify(list.json())).not.toContain(theirs.id);
-    const asAdmin = await h.admin.client.post('/rest/assistant/mcp-connections', {
-      name: 'Docs',
-      url: 'https://mcp.example.com/mcp',
-      credentialId: theirs.id,
-    });
-    expect(asAdmin.statusCode).toBeGreaterThanOrEqual(400);
+    // the admin reaches the credential check (a sign-in method is chosen) and is refused: B's credential is not
+    // usable from the admin's project
+    const asAdmin = await h.admin.client.post('/rest/assistant/mcp-connections', body(theirs.id, 'Docs'));
+    expect(asAdmin.statusCode).toBe(400);
+    expect(asAdmin.body).toContain(NO_ACCESS);
     expect(asAdmin.body).not.toContain('v-iso-3');
+    expect(
+      JSON.stringify((await h.admin.client.get('/rest/assistant/mcp-connections')).json()),
+    ).not.toContain(theirs.id);
+    // control: the same body with a credential the workspace shares is saved
+    const control = await h.admin.client.post(
+      '/rest/assistant/mcp-connections',
+      body(shared.id, 'Docs shared'),
+    );
+    expect(control.statusCode, control.body).toBe(200);
+    expect(control.body).not.toContain('v-iso-4');
   });
 });
 

@@ -88,7 +88,7 @@ export interface ApiRoute {
 
 const publicWorkflowListQuery = z.object({
   active: z.stringbool().optional(),
-  /** only the workflows of this project (needs `workflow:list` in it) */
+  /** only the workflows of this project; a project the key's user holds nothing in, or a missing one, lists nothing */
   projectId: z.uuid().optional(),
   tagId: z.string().max(64).optional(),
   name: z.string().max(128).optional(),
@@ -136,14 +136,19 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     list: true,
     // the rows are the caller's: `listFor` narrows them to the `workflow:list` access filter
     handler: (ctx, { auth, query }) =>
-      ctx.workflows.listFor(auth, {
-        search: query.name,
-        tagId: query.tagId,
-        active: query.active,
-        projectId: query.projectId,
-        limit: query.limit,
-        cursor: query.cursor,
-      }),
+      ctx.workflows.listFor(
+        auth,
+        {
+          search: query.name,
+          tagId: query.tagId,
+          active: query.active,
+          projectId: query.projectId,
+          limit: query.limit,
+          cursor: query.cursor,
+        },
+        // a project the key's user holds nothing in answers an empty list, as n8n (not 403)
+        { unheldProject: 'narrow' },
+      ),
   },
   {
     method: 'POST',
@@ -189,18 +194,43 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     query: publicWorkflowUpdateQuery,
     body: publicWorkflowUpdate,
     response: 'Workflow',
-    handler: async (ctx, input) => ({
-      data: await ctx.workflows.update(
+    handler: async (ctx, input) => {
+      // P6-34: putting a new version live is a publish: the key needs workflow:activate and the user
+      // workflow:publish on the workflow (personal space publishing off and custom roles apply). Without
+      // either the draft is saved and a published workflow answers 403 with the draft's versionId (as n8n)
+      let reason: 'insufficient_api_key_scope' | 'insufficient_permissions' | undefined;
+      if (input.query.publishIfActive !== 'false') {
+        const keyScopes = input.auth.apiKeyScopes;
+        if (keyScopes && keyScopes.length > 0 && !keyScopes.includes('workflow:activate')) {
+          reason = 'insufficient_api_key_scope';
+        } else if (
+          !(await ctx.access.scopesForAuth(input.auth, { workflowId: input.params.id })).has(
+            'workflow:publish',
+          )
+        ) {
+          reason = 'insufficient_permissions';
+        }
+      }
+      const saved = await ctx.workflows.update(
         input.auth.tenant.id,
         input.params.id,
         input.body,
         actor(input),
         undefined,
-        {
-          publishIfActive: input.query.publishIfActive !== 'false',
-        },
-      ),
-    }),
+        { publishIfActive: input.query.publishIfActive !== 'false' && !reason },
+      );
+      if (reason && saved.active) {
+        throw new ApiError(
+          403,
+          'forbidden',
+          reason === 'insufficient_api_key_scope'
+            ? "Couldn't publish the workflow: the API key lacks the workflow:activate scope. The changes were saved as a draft."
+            : "Couldn't publish the workflow: you lack the workflow:publish scope on it. The changes were saved as a draft.",
+          { reason, versionId: saved.versionId },
+        );
+      }
+      return { data: saved };
+    },
   },
   {
     method: 'DELETE',
