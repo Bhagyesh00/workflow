@@ -15,14 +15,16 @@ import {
 } from '@workflow/workflow';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  addToProject,
   createTestServer,
   createWorkflow,
-  memberAs,
   node,
+  realMember,
   resetDatabase,
   signup as signupFrom,
   type TestClient,
   type TestServer,
+  teamProjectOf,
   waitFor,
 } from './helpers';
 
@@ -149,8 +151,11 @@ function connect(links: Array<ReturnType<typeof link>>) {
   return connections;
 }
 
-async function member(owner: Owner, role: 'editor' | 'viewer') {
-  return (await memberAs(owner, role)).client;
+/** a real member of the workspace with the given role in the team project, where the test workflows live */
+async function member(owner: Owner, role: 'project:editor' | 'project:viewer') {
+  const m = await realMember(owner);
+  await addToProject(server, owner.tenant.id, await teamProjectOf(server, owner.tenant.id), m.user.id, role);
+  return m.client;
 }
 
 async function makeDataset(owner: Owner, rows: DataObject[]) {
@@ -642,16 +647,24 @@ describe('access', () => {
     await finished(owner.client, wf.id, runId);
     const [first] = await casesOf(owner.client, wf.id, runId);
 
-    const viewer = await member(owner, 'viewer');
-    expect((await viewer.get(runs(wf.id))).statusCode).toBe(200);
-    expect((await viewer.get(`${runs(wf.id)}/${runId}`)).statusCode).toBe(200);
-    expect((await viewer.get(`${runs(wf.id)}/${runId}/test-cases`)).statusCode).toBe(200);
-    expect((await viewer.post(`${runs(wf.id)}/new`, {})).statusCode).toBe(403);
-    expect((await viewer.post(`${runs(wf.id)}/${runId}/cancel`)).statusCode).toBe(403);
-    expect((await viewer.post(`${runs(wf.id)}/${runId}/test-cases/${first.id}/cancel`)).statusCode).toBe(403);
-    expect((await viewer.delete(`${runs(wf.id)}/${runId}`)).statusCode).toBe(403);
+    // a project viewer holds workflow:read only: 3 reads pass, 4 writes are refused
+    const viewer = await member(owner, 'project:viewer');
+    const viewerReads = await Promise.all([
+      viewer.get(runs(wf.id)),
+      viewer.get(`${runs(wf.id)}/${runId}`),
+      viewer.get(`${runs(wf.id)}/${runId}/test-cases`),
+    ]);
+    expect(viewerReads.map((r) => r.statusCode)).toEqual([200, 200, 200]);
+    const viewerWrites = await Promise.all([
+      viewer.post(`${runs(wf.id)}/new`, {}),
+      viewer.post(`${runs(wf.id)}/${runId}/cancel`),
+      viewer.post(`${runs(wf.id)}/${runId}/test-cases/${first.id}/cancel`),
+      viewer.delete(`${runs(wf.id)}/${runId}`),
+    ]);
+    expect(viewerWrites.map((r) => r.statusCode)).toEqual([403, 403, 403, 403]);
 
-    const editor = await member(owner, 'editor');
+    // a project editor holds workflow:execute: the 4 writes pass the gate (409 is the run's own state)
+    const editor = await member(owner, 'project:editor');
     const editorRun = await startRun(editor, wf.id);
     await finished(editor, wf.id, editorRun);
     // finished runs cannot be cancelled; a finished case cannot be cancelled
