@@ -56,11 +56,21 @@ export function registerReviewRoutes(backend: MockBackend): void {
     const u = backend.users.find((x) => x.id === id);
     return { id, name: u?.name ?? 'Unknown', email: u?.email ?? '' };
   };
-  const roleOf = (tenantId: string, userId: string) =>
-    backend.memberships.find((m) => m.tenantId === tenantId && m.userId === userId)?.role;
+  /** a member whose workspace role holds `workflow:publish` (P6-43: scopes, not the old words) */
   const publisher = (tenantId: string, userId: string) => {
-    const role = roleOf(tenantId, userId);
-    return role !== undefined && RANK[role] >= RANK.editor;
+    const m = backend.memberships.find((x) => x.tenantId === tenantId && x.userId === userId);
+    return (
+      m !== undefined && backend.globalScopesOf(m.globalRole ?? m.role, tenantId).includes('workflow:publish')
+    );
+  };
+  /** the signed-in user may publish in the workspace or in one of its projects */
+  const mayPublish = () => {
+    try {
+      backend.requireScopeAnywhere('workflow:publish');
+      return true;
+    } catch {
+      return false;
+    }
   };
   const isAdmin = (role: keyof typeof RANK) => RANK[role] >= RANK.admin;
 
@@ -105,9 +115,7 @@ export function registerReviewRoutes(backend: MockBackend): void {
   };
   const canDecide = (r: StoredReview, meId: string, role: keyof typeof RANK) =>
     isAdmin(role) ||
-    (r.reviewers.some((x) => x.id === meId) &&
-      !r.authors.some((x) => x.id === meId) &&
-      RANK[role] >= RANK.editor);
+    (r.reviewers.some((x) => x.id === meId) && !r.authors.some((x) => x.id === meId) && mayPublish());
 
   const visibleTo = (tab: 'to_review' | 'mine' | undefined) => {
     const { user: me, tenant, role } = backend.auth();
@@ -137,16 +145,16 @@ export function registerReviewRoutes(backend: MockBackend): void {
   });
 
   backend.on('GET', '/workflow-reviews/eligible-reviewers', ({ query }) => {
-    const { user: me, tenant } = backend.requireRole('editor');
+    const { user: me, tenant } = backend.requireScopeAnywhere('workflow:update');
     if (query.workflowId) backend.workflow(query.workflowId);
     return backend.memberships
-      .filter((m) => m.tenantId === tenant.id && m.userId !== me.id && RANK[m.role] >= RANK.editor)
+      .filter((m) => m.tenantId === tenant.id && m.userId !== me.id && publisher(tenant.id, m.userId))
       .map((m) => user(m.userId));
   });
 
   backend.on('POST', '/workflow-reviews', ({ body }) => {
-    const { user: me, tenant } = backend.requireRole('editor');
     const wf = backend.workflow(String(body.workflowId ?? ''));
+    const { user: me, tenant } = backend.requireScope('workflow:update', { scopes: backend.rowScopes(wf) });
     const title = typeof body.title === 'string' ? body.title.trim() : '';
     const versionName = typeof body.versionName === 'string' ? body.versionName.trim() : '';
     const description = typeof body.description === 'string' ? body.description : null;
@@ -203,7 +211,7 @@ export function registerReviewRoutes(backend: MockBackend): void {
   backend.on('POST', '/workflow-reviews/:id/update-version', ({ params, body }) => {
     const { user: me, tenant, role } = backend.auth();
     // any member who can publish may move it (n8n); others get 404 (non-participant) or 403
-    if (RANK[role] < RANK.editor) {
+    if (!mayPublish()) {
       readable(params[0]);
       throw new HttpError(
         403,

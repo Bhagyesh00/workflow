@@ -15,9 +15,11 @@ import { useHref, useMatch, useNavigate } from 'react-router';
 import { errorMessage } from '../../api/client';
 import { executionsApi, workflowsApi } from '../../api/endpoints';
 import { queryKeys, useMe, useNodeTypes } from '../../api/queries';
+import { useProjectListScope } from '../../components/projects/ProjectFilter';
 import { cx } from '../../components/ui/cx';
 import { Spinner } from '../../components/ui/misc';
 import { buildCatalog } from '../../lib/node-catalog';
+import { canWith } from '../../lib/permissions';
 import { toast, useUiStore } from '../../stores/ui-store';
 import {
   debugExecution,
@@ -54,7 +56,9 @@ const enc = encodeURIComponent;
 function useShellCommands(): void {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const viewer = useMe().data?.role === 'viewer';
+  const me = useMe().data;
+  const { canCreate } = useProjectListScope('workflows');
+  const viewer = !canCreate('workflow:create');
   const inEditor = Boolean(useMatch('/workflow/:id'));
   const executionId = useMatch('/executions/:id')?.params.id;
   const execution = useQuery({
@@ -65,6 +69,9 @@ function useShellCommands(): void {
   });
   const status = execution.data?.status;
   const workflowId = execution.data?.workflowId;
+  // the execution's own scopes (its workflow's project), else the workspace role's
+  const canRun = canWith(me, 'workflow:execute', execution.data);
+  const canDelete = canWith(me, 'execution:delete', execution.data);
 
   const commands = useMemo<Command[]>(() => {
     const list: Command[] = [
@@ -95,15 +102,15 @@ function useShellCommands(): void {
           keywords: ['upload', 'json'],
           run: () => {
             useUiStore.getState().setImportOpen(true);
-            navigate('/workflows');
+            navigate('/home/workflows');
           },
         });
     }
     for (const [id, title, path] of [
-      ['go-workflows', 'Go to Workflows', '/workflows'],
-      ['go-executions', 'Go to Executions', '/executions'],
-      ['go-credentials', 'Go to Credentials', '/credentials'],
-      ['go-data-tables', 'Go to Data tables', '/data-tables'],
+      ['go-workflows', 'Go to Workflows', '/home/workflows'],
+      ['go-executions', 'Go to Executions', '/home/executions'],
+      ['go-credentials', 'Go to Credentials', '/home/credentials'],
+      ['go-data-tables', 'Go to Data tables', '/home/data-tables'],
       ['go-settings', 'Go to Settings', '/settings'],
     ] as const) {
       list.push({ id, title, description: 'Navigate', path, run: () => navigate(path) });
@@ -126,7 +133,7 @@ function useShellCommands(): void {
         keywords: ['replay', 'pin'],
         run: () => debugExecution(workflowId, executionId, deps),
       });
-    if (!viewer) {
+    if (canRun) {
       const vote = (value: 'up' | 'down') => async () => {
         try {
           await executionsApi.annotate(executionId, { vote: value });
@@ -182,6 +189,8 @@ function useShellCommands(): void {
             await stopExecution(executionId, deps);
           },
         });
+    }
+    if (canDelete)
       list.push({
         id: 'delete-execution',
         title: 'Delete execution',
@@ -191,9 +200,8 @@ function useShellCommands(): void {
           await deleteExecution(executionId, deps);
         },
       });
-    }
     return list;
-  }, [executionId, status, workflowId, viewer, navigate, queryClient]);
+  }, [executionId, status, workflowId, canRun, canDelete, navigate, queryClient]);
   useEffect(() => registerCommands('execution', executionCommands), [executionCommands]);
 }
 

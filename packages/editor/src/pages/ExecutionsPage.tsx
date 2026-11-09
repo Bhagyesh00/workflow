@@ -11,6 +11,7 @@ import { AnnotationBadges } from '../components/executions/AnnotationBadges';
 import { AnnotationFilters, type AnnotationFilterValue } from '../components/executions/AnnotationFilters';
 import { VersionFilter } from '../components/executions/VersionFilter';
 import { VersionLabel } from '../components/executions/VersionLabel';
+import { useProjectListScope } from '../components/projects/ProjectFilter';
 import { Button } from '../components/ui/Button';
 import { Select, Switch, TextInput } from '../components/ui/Field';
 import { Callout, EmptyState, PageLoader, StatusBadge } from '../components/ui/misc';
@@ -40,6 +41,8 @@ const MODE_LABELS: Record<string, string> = {
 };
 
 export function ExecutionsPage() {
+  // a project's page lists that project's executions; Overview lists every project's
+  const { projectId } = useProjectListScope('executions');
   const [params, setParams] = useSearchParams();
   const workflowId = params.get('workflowId') ?? '';
   const status = params.get('status') ?? '';
@@ -54,13 +57,14 @@ export function ExecutionsPage() {
   const customDataExact = params.get('customDataExact') === 'true';
   const [autoRefresh, setAutoRefresh] = useState(true);
   const workflows = useQuery({
-    queryKey: ['workflows', 'filter-options'],
-    queryFn: () => workflowsApi.list({ limit: 200 }),
+    queryKey: ['workflows', 'filter-options', projectId],
+    queryFn: () => workflowsApi.list({ limit: 200, projectId: projectId ?? undefined }),
   });
   const query = useInfiniteQuery({
     queryKey: [
       'executions',
       {
+        projectId,
         workflowId,
         status,
         annotationTags,
@@ -74,6 +78,7 @@ export function ExecutionsPage() {
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       executionsApi.list({
+        projectId: projectId ?? undefined,
         workflowId: workflowId || undefined,
         status: status || undefined,
         annotationTags: annotationTags.length ? annotationTags : undefined,

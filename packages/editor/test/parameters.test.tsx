@@ -3,8 +3,16 @@ import userEvent from '@testing-library/user-event';
 import type { NodeTypeDescription } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { demoNodeTypes, kitchenSink } from '../src/demo/fixtures';
+import { useProjectStore } from '../src/stores/project-store';
 import { signedIn } from './backend';
 import { renderParameters, runDataFor } from './utils';
+
+/** P6-43: option calls name the saved workflow, else a project: the setup works in the default project */
+function signedInInProject() {
+  const demo = signedIn();
+  useProjectStore.getState().setCurrentProject(demo.defaultProjectFor(demo.auth().tenant.id).id);
+  return demo;
+}
 
 const crm = demoNodeTypes.find((d) => d.name === 'app.crm')!;
 
@@ -18,7 +26,7 @@ const isShown = (name: string) => Boolean(document.querySelector(`[data-paramete
 
 describe('parameter form renders every property type', () => {
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
   });
 
   it('renders an input for each type', async () => {
@@ -105,7 +113,7 @@ describe('parameter form renders every property type', () => {
 
 describe('display options', () => {
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
   });
 
   it('shows and hides parameters by sibling values', async () => {
@@ -167,7 +175,7 @@ describe('display options', () => {
 
 describe('collections', () => {
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
   });
 
   it('adds and removes collection options', async () => {
@@ -203,7 +211,7 @@ describe('collections', () => {
 
 describe('expressions', () => {
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
   });
 
   it('toggles between fixed and expression and keeps the value', async () => {
@@ -259,7 +267,7 @@ describe('expressions', () => {
 
 describe('filter editor', () => {
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
   });
 
   it('edits conditions, hides the right value for single-value operators and toggles the combinator', async () => {
@@ -301,7 +309,7 @@ describe('filter editor', () => {
 
 describe('assignment editor', () => {
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
   });
 
   it('adds rows with name, type and value', async () => {
@@ -335,7 +343,7 @@ describe('assignment editor', () => {
 
 describe('dynamic options', () => {
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
   });
 
   it('reloads options when a loadOptionsDependsOn value changes', async () => {

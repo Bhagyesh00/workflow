@@ -43,6 +43,8 @@ export type FolderDialogProps =
       open: boolean;
       onClose: () => void;
       parentFolderId: string | null;
+      /** P6-43: the project a top-level folder goes to (a subfolder follows its parent) */
+      projectId?: string;
       onDone?: (f: Folder) => void;
     }
   | { mode: 'rename'; open: boolean; onClose: () => void; folder: Folder; onDone?: (f: Folder) => void };
@@ -65,7 +67,11 @@ export function FolderDialog(props: FolderDialogProps) {
   const save = useMutation({
     mutationFn: () =>
       props.mode === 'create'
-        ? foldersApi.create({ name: name.trim(), parentFolderId: props.parentFolderId })
+        ? foldersApi.create({
+            name: name.trim(),
+            parentFolderId: props.parentFolderId,
+            ...(props.parentFolderId || !props.projectId ? {} : { projectId: props.projectId }),
+          })
         : foldersApi.update(props.folder.id, { name: name.trim() }),
     onSuccess: async (folder) => {
       await refreshFolders(queryClient);

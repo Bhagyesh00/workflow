@@ -12,6 +12,7 @@ import { errorMessage } from '../../api/client';
 import { nodeTypesApi } from '../../api/endpoints';
 import { useCredentialTypes } from '../../api/queries';
 import { REDACTED } from '../../api/types';
+import { useOptionsScope } from '../../features/editor/open-resources';
 import { getIn } from '../../lib/workflow-ops';
 import { CodeEditor } from '../code/CodeEditor';
 import { Button } from '../ui/Button';
@@ -180,20 +181,26 @@ export function useOptions(prop: NodeProperty): {
   const ctx = useParameterContext();
   const method = prop.typeOptions?.loadOptionsMethod;
   const dependsOn = useDependsOnValues(prop);
+  // the saved workflow, else the working project (the personal project on `/home/*`)
+  const { workflowId, projectId, ready } = useOptionsScope();
   const query = useQuery({
     queryKey: [
       'load-options',
+      workflowId,
+      projectId,
       ctx.node.type,
       method,
       ctx.node.name,
       JSON.stringify(dependsOn),
       JSON.stringify(ctx.node.credentials ?? {}),
     ],
-    enabled: Boolean(method && ctx.description),
+    enabled: Boolean(method && ctx.description) && ready,
     staleTime: 60_000,
     retry: false,
     queryFn: () =>
       nodeTypesApi.loadOptions({
+        workflowId,
+        projectId,
         nodeType: ctx.node.type,
         method: method!,
         kind: 'loadOptions',

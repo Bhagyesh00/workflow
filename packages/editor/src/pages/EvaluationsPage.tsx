@@ -18,6 +18,7 @@ import { SetupGuide, setupSteps } from '../components/evaluations/SetupGuide';
 import { confirmDialog } from '../components/ui/Dialog';
 import { Callout, PageLoader } from '../components/ui/misc';
 import { formatDateTime } from '../lib/format';
+import { canWith } from '../lib/permissions';
 import { toast } from '../stores/ui-store';
 
 const LIST_LIMIT = 100;
@@ -25,7 +26,7 @@ const LIST_LIMIT = 100;
 export function EvaluationsPage() {
   const { id = '' } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
-  const canWrite = useMe().data?.role !== 'viewer';
+  const me = useMe().data;
   const concurrencyLimit = useSettings().evaluationConcurrencyLimit;
 
   const workflow = useQuery({
@@ -34,6 +35,8 @@ export function EvaluationsPage() {
     enabled: Boolean(id),
     retry: false,
   });
+  // starting, stopping and deleting a test run is `workflow:execute` on this workflow
+  const canWrite = canWith(me, 'workflow:execute', workflow.data);
   const runs = useQuery({
     queryKey: queryKeys.testRuns(id),
     queryFn: () => evaluationsApi.list(id, { limit: LIST_LIMIT }),

@@ -2,20 +2,21 @@
  * Folder picker for moving a workflow or a folder (P3-07). It is also the keyboard path for
  * drag and drop: browse into folders, then "Move here".
  */
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronRight, Folder as FolderIcon, Home } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { foldersApi, workflowsApi } from '../../api/endpoints';
-import { useFolder, useFolders } from '../../api/queries';
+import { queryKeys, useFolder } from '../../api/queries';
 import { toast } from '../../stores/ui-store';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { Callout, PageLoader } from '../ui/misc';
 
+/** `projectId`: the project the item is in, so only that project's folders are offered (P6-43) */
 export type MoveTarget =
-  | { kind: 'workflow'; ids: string[]; name: string; folderId: string | null }
-  | { kind: 'folder'; id: string; name: string; parentFolderId: string | null };
+  | { kind: 'workflow'; ids: string[]; name: string; folderId: string | null; projectId?: string }
+  | { kind: 'folder'; id: string; name: string; parentFolderId: string | null; projectId?: string };
 
 export function MoveToFolderDialog({
   open,
@@ -35,7 +36,12 @@ export function MoveToFolderDialog({
     if (open) setBrowsing(origin);
   }, [open, origin]);
   const here = useFolder(open ? (browsing ?? undefined) : undefined);
-  const children = useFolders(browsing ?? 'root', open);
+  const projectId = target?.projectId;
+  const children = useQuery({
+    queryKey: queryKeys.folders({ parentFolderId: browsing ?? 'root', projectId }),
+    queryFn: () => foldersApi.list({ parentFolderId: browsing ?? 'root', limit: 250, projectId }),
+    enabled: open,
+  });
   const move = useMutation({
     mutationFn: async () => {
       if (!target) return;

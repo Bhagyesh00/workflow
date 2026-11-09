@@ -13,7 +13,7 @@ import { ChevronDown, ExternalLink, Plus, Search } from 'lucide-react';
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { nodeTypesApi } from '../../api/endpoints';
-import { useWorkflowStore } from '../../stores/workflow-store';
+import { useOptionsScope } from '../../features/editor/open-resources';
 import { cx } from '../ui/cx';
 import { Select } from '../ui/Field';
 import { Spinner } from '../ui/misc';
@@ -67,7 +67,9 @@ function ListMode({
   const method = mode.typeOptions?.searchListMethod;
   const newResource = mode.typeOptions?.allowNewResource;
 
-  const workflowId = useWorkflowStore((s) => s.meta.id);
+  // the saved workflow, else the working project (the personal project on `/home/*`), tell the server whose
+  // credentials the search may use
+  const { workflowId, projectId, ready } = useOptionsScope();
   // the list can depend on any other parameter (spreadsheet of a sheet list, schema of a table list)
   const parameters = useMemo(
     () =>
@@ -86,6 +88,7 @@ function ListMode({
     queryKey: [
       'list-search',
       workflowId,
+      projectId,
       ctx.node.type,
       method,
       ctx.node.name,
@@ -93,7 +96,7 @@ function ListMode({
       JSON.stringify(ctx.node.credentials ?? {}),
       dependencies,
     ],
-    enabled: open && Boolean(method),
+    enabled: open && Boolean(method) && ready,
     initialPageParam: undefined as string | undefined,
     retry: false,
     queryFn: ({ pageParam }) =>
@@ -105,6 +108,7 @@ function ListMode({
         filter: deferredFilter || undefined,
         paginationToken: pageParam,
         workflowId,
+        projectId,
       }),
     getNextPageParam: (last) => last?.paginationToken || undefined,
   });

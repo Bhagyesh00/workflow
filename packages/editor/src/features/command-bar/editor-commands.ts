@@ -9,7 +9,6 @@
 import { useQueryClient } from '@tanstack/react-query';
 import type { ReactFlowInstance } from '@xyflow/react';
 import { useEffect, useMemo } from 'react';
-import { useMe } from '../../api/queries';
 import { useBuilderStore } from '../../stores/builder-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
@@ -20,6 +19,7 @@ import {
   openCredential,
   openSubWorkflow,
   subWorkflowTargets,
+  useCanEditWorkflow,
 } from '../editor/open-resources';
 import { publishWorkflow, unpublishWorkflow } from '../editor/publish-actions';
 import { tidyUp } from '../editor/tidy-up';
@@ -45,7 +45,7 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
   const published = useWorkflowStore((s) => s.meta.active);
   const archived = useWorkflowStore((s) => s.meta.isArchived);
   const nodes = useWorkflowStore((s) => s.nodes);
-  const viewer = useMe().data?.role === 'viewer';
+  const viewer = !useCanEditWorkflow();
   const queryClient = useQueryClient();
 
   // nodes can be added while the workflow is editable; the picked node is selected, not opened

@@ -10,6 +10,7 @@ import { ArrowUp, CheckCircle2, Eraser, Sparkles, Square, X, XCircle } from 'luc
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { useMe } from '../../api/queries';
 import { clearBuilderSession } from '../../features/builder/session-actions';
+import { useCanEditWorkflow } from '../../features/editor/open-resources';
 import { type BuilderProgress, useBuilderStore } from '../../stores/builder-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { Button, IconButton } from '../ui/Button';
@@ -49,7 +50,8 @@ export function BuilderPanel({ onClose }: BuilderPanelProps) {
   const workflowId = useWorkflowStore((s) => s.meta.id);
   const hasNodes = useWorkflowStore((s) => s.nodes.length > 0);
   const readOnly = useWorkflowStore((s) => s.readOnly);
-  const role = useMe().data?.role;
+  const me = useMe().data;
+  const canEdit = useCanEditWorkflow();
   const messages = useBuilderStore((s) => s.messages);
   const progress = useBuilderStore((s) => s.progress);
   const streaming = useBuilderStore((s) => s.streaming);
@@ -59,7 +61,7 @@ export function BuilderPanel({ onClose }: BuilderPanelProps) {
   const error = useBuilderStore((s) => s.error);
   const [text, setText] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
-  const canWrite = role !== 'viewer';
+  const canWrite = Boolean(me) && canEdit;
 
   // this workflow's chat, once per workflow (`reset` empties the messages when another one opens)
   useEffect(() => {

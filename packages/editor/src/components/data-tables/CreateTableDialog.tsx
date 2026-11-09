@@ -12,6 +12,7 @@ import { errorMessage } from '../../api/client';
 import { dataTablesApi } from '../../api/endpoints';
 import { queryKeys } from '../../api/queries';
 import type { DataTableCsvPreview } from '../../api/types';
+import { workingProjectId } from '../../features/editor/open-resources';
 import { toast } from '../../stores/ui-store';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
@@ -71,7 +72,7 @@ export function CreateTableDialog({
     setPreview(undefined);
     setColumns([]);
     try {
-      const answer = await dataTablesApi.csvPreview(picked.text, headers);
+      const answer = await dataTablesApi.csvPreview(picked.text, headers, workingProjectId());
       setFile(picked);
       setPreview(answer);
       setColumns(
@@ -92,6 +93,7 @@ export function CreateTableDialog({
     try {
       const table = await dataTablesApi.create({
         name: trimmed,
+        projectId: workingProjectId(),
         columns: fromCsv
           ? included.map(({ name: column, type, source: header }) => ({
               name: column,

@@ -5,9 +5,120 @@
  * - a credential per distinct credential the nodes use, opened in the editor's credential modal
  *   (ui.openCredentialId, rendered by OpenCredentialHost).
  */
-import type { WorkflowNode } from '@workflow/workflow';
+import { useQuery } from '@tanstack/react-query';
+import type { Scope, WorkflowNode } from '@workflow/workflow';
+import { useCallback } from 'react';
+import { create } from 'zustand';
+import { projectsApi } from '../../api/endpoints';
+import { queryKeys, useMe, useProject } from '../../api/queries';
+import type { Me, WorkflowDTO } from '../../api/types';
+import { canWith } from '../../lib/permissions';
+import { useProjectStore } from '../../stores/project-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
+
+/**
+ * P6-43: the project and the caller's scopes of the workflow open in the editor (the store keeps neither):
+ * the workflow's gates read `scopes`, pickers and loaders read `projectId`. Set when the page loads it.
+ */
+interface OpenWorkflowState {
+  id: string | undefined;
+  projectId: string | null;
+  scopes: Scope[] | undefined;
+  set(dto: Pick<WorkflowDTO, 'id' | 'projectId' | 'scopes'>): void;
+  clear(): void;
+}
+
+export const useOpenWorkflowStore = create<OpenWorkflowState>()((set) => ({
+  id: undefined,
+  projectId: null,
+  scopes: undefined,
+  set: (dto) => set({ id: dto.id, projectId: dto.projectId ?? null, scopes: dto.scopes }),
+  clear: () => set({ id: undefined, projectId: null, scopes: undefined }),
+}));
+
+/** the open workflow as a scoped row (nothing while another workflow's scopes are held) */
+export function openWorkflowResource(): { scopes?: Scope[] } {
+  const open = useOpenWorkflowStore.getState();
+  const id = useWorkflowStore.getState().meta.id;
+  return open.id && open.id === id ? { scopes: open.scopes } : {};
+}
+
+/** `can(scope)` for the open workflow: the workspace role's scopes, or the workflow's own */
+export function useOpenWorkflowCan(): (scope: Scope) => boolean {
+  const me = useMe().data;
+  const scopes = useOpenWorkflowStore((s) => s.scopes);
+  const openId = useOpenWorkflowStore((s) => s.id);
+  const id = useWorkflowStore((s) => s.meta.id);
+  const own = openId && openId === id ? scopes : undefined;
+  return useCallback((scope: Scope) => canWith(me, scope, { scopes: own }), [me, own]);
+}
+
+/** the same check outside React (archive actions), over a `me` read from the cache */
+export function canOnOpenWorkflow(me: Pick<Me, 'globalScopes'> | null | undefined, scope: Scope): boolean {
+  return canWith(me, scope, openWorkflowResource());
+}
+
+/** the project the user works in: the open workflow's, else the project page's (null on Overview) */
+export function useWorkingProjectId(): string | null {
+  const openId = useOpenWorkflowStore((s) => s.id);
+  const openProject = useOpenWorkflowStore((s) => s.projectId);
+  const id = useWorkflowStore((s) => s.meta.id);
+  const current = useProjectStore((s) => s.currentProjectId);
+  return (openId && openId === id ? openProject : null) ?? current;
+}
+
+/** the same, read outside React (a mutation's body) */
+export function workingProjectId(): string | undefined {
+  const open = useOpenWorkflowStore.getState();
+  const id = useWorkflowStore.getState().meta.id;
+  return (
+    ((open.id && open.id === id ? open.projectId : null) ?? useProjectStore.getState().currentProjectId) ||
+    undefined
+  );
+}
+
+/**
+ * May the caller change the workflow in the editor: `workflow:update` on a saved one, `workflow:create` in
+ * the working project (else the personal project) on a new one. False until `me` loads.
+ */
+export function useCanEditWorkflow(): boolean {
+  const me = useMe().data;
+  const id = useWorkflowStore((s) => s.meta.id);
+  const openId = useOpenWorkflowStore((s) => s.id);
+  const scopes = useOpenWorkflowStore((s) => s.scopes);
+  const working = useWorkingProjectId();
+  const project = useProject(id ? null : working);
+  const personal = useQuery({
+    queryKey: queryKeys.personalProject,
+    queryFn: projectsApi.personal,
+    enabled: !id && !working,
+    staleTime: 60_000,
+    retry: false,
+  });
+  if (id) return canWith(me, 'workflow:update', { scopes: openId === id ? scopes : undefined });
+  return canWith(me, 'workflow:create', working ? project.data : personal.data);
+}
+
+/**
+ * What a node option, list or mapper call names so the server knows whose credentials it may use: the saved
+ * workflow, else the working project (the personal project on `/home/*`). `ready` is false while the personal
+ * project is still loading.
+ */
+export function useOptionsScope(): { workflowId?: string; projectId?: string; ready: boolean } {
+  const workflowId = useWorkflowStore((s) => s.meta.id);
+  const working = useWorkingProjectId();
+  const personal = useQuery({
+    queryKey: queryKeys.personalProject,
+    queryFn: projectsApi.personal,
+    enabled: !workflowId && !working,
+    staleTime: 60_000,
+    retry: false,
+  });
+  if (workflowId) return { workflowId, ready: true };
+  const projectId = working ?? personal.data?.id;
+  return { projectId, ready: Boolean(projectId) || personal.isError };
+}
 
 export interface SubWorkflowTarget {
   nodeName: string;

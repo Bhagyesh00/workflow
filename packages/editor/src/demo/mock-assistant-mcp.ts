@@ -98,7 +98,7 @@ export function registerAssistantMcpRoutes(backend: MockBackend): void {
   });
 
   backend.on('POST', '/assistant/mcp-connections', ({ body }) => {
-    const { tenant } = backend.requireRole('admin');
+    const { tenant } = backend.requireScope('instanceAi:manage');
     const list = listOf(backend, tenant.id);
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     if (!name || name.length > 64) throw new HttpError(400, 'bad_request', 'Give the connection a name');
@@ -131,7 +131,7 @@ export function registerAssistantMcpRoutes(backend: MockBackend): void {
   });
 
   backend.on('PATCH', '/assistant/mcp-connections/:id', ({ params, body }) => {
-    const { tenant } = backend.requireRole('admin');
+    const { tenant } = backend.requireScope('instanceAi:manage');
     const list = listOf(backend, tenant.id);
     const row = list.find((c) => c.id === params[0]);
     if (!row) throw new HttpError(404, 'not_found', 'Connection not found');
@@ -168,7 +168,7 @@ export function registerAssistantMcpRoutes(backend: MockBackend): void {
   });
 
   backend.on('DELETE', '/assistant/mcp-connections/:id', ({ params }) => {
-    const { tenant } = backend.requireRole('admin');
+    const { tenant } = backend.requireScope('instanceAi:manage');
     const list = listOf(backend, tenant.id);
     const index = list.findIndex((c) => c.id === params[0]);
     if (index < 0) throw new HttpError(404, 'not_found', 'Connection not found');

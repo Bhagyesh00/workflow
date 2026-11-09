@@ -53,12 +53,12 @@ function isString(value: unknown): value is string {
 /** P5-71: registers the demo Assistant settings routes (L8). */
 export function registerAssistantSettingsRoutes(backend: MockBackend): void {
   backend.on('GET', '/assistant/settings', () => {
-    const { tenant } = backend.requireRole('admin');
+    const { tenant } = backend.requireScope('instanceAi:manage');
     return structuredClone(stateOf(backend, tenant.id));
   });
 
   backend.on('PATCH', '/assistant/settings', ({ body }) => {
-    const { tenant } = backend.requireRole('admin');
+    const { tenant } = backend.requireScope('instanceAi:manage');
     const state = stateOf(backend, tenant.id);
     const next = structuredClone(state);
     const credentialOf = (id: string) =>

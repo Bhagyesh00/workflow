@@ -4,24 +4,32 @@ import userEvent from '@testing-library/user-event';
 import type { NodeParameters, NodeTypeDescription, WorkflowNode } from '@workflow/workflow';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { nodeTypesApi, workflowsApi } from '../src/api/endpoints';
 import { AppProviders } from '../src/App';
+import { nodeTypesApi, workflowsApi } from '../src/api/endpoints';
 import { ParameterContext, type ParameterContextValue } from '../src/components/parameters/context';
 import { ParameterList } from '../src/components/parameters/ParameterForm';
 import { demoNodeTypes } from '../src/demo/fixtures';
 import { listenForTestEvent, runWorkflow, stopListening } from '../src/features/editor/editor-actions';
 import { buildCatalog, filterCatalog, nodeActions } from '../src/lib/node-catalog';
 import { setIn } from '../src/lib/workflow-ops';
+import { useProjectStore } from '../src/stores/project-store';
 import { useRunStore } from '../src/stores/run-store';
 import { useToastStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
 import { backend, signedIn } from './backend';
 
+/** P6-43: option calls name the saved workflow, else a project: the setup works in the default project */
+function signedInInProject() {
+  const demo = signedIn();
+  useProjectStore.getState().setCurrentProject(demo.defaultProjectFor(demo.auth().tenant.id).id);
+  return demo;
+}
+
 const crm = demoNodeTypes.find((d) => d.name === 'app.crm')!;
 
 describe('R52: list search results depend on the other parameters of the node', () => {
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
   });
 
   it('asks again when a parameter the list depends on changed within the stale time', async () => {
@@ -109,7 +117,7 @@ describe('R53: stopping the listener also stops it on the server', () => {
   }
 
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
     useRunStore.getState().reset();
     useToastStore.setState({ toasts: [] });
   });
@@ -277,12 +285,17 @@ describe('R35: a partial run sends the last run data of the workflow', () => {
   async function openWithPreviousRun() {
     const wf = backend().seedWorkflow({ name: 'Looped', nodes, connections: {} });
     useWorkflowStore.getState().load(await workflowsApi.get(wf.id));
-    useRunStore.setState({ workflowId: wf.id, executionId: 'prev', status: 'success', runData: previousRunData });
+    useRunStore.setState({
+      workflowId: wf.id,
+      executionId: 'prev',
+      status: 'success',
+      runData: previousRunData,
+    });
     return wf;
   }
 
   beforeEach(() => {
-    signedIn();
+    signedInInProject();
     useRunStore.getState().reset();
     useToastStore.setState({ toasts: [] });
   });

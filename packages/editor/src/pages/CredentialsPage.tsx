@@ -1,22 +1,67 @@
 /** Credentials: list, create (type picker), edit, delete. Secrets are never shown. */
-import { useQueryClient } from '@tanstack/react-query';
-import { KeyRound, MoreHorizontal, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { FolderInput, KeyRound, MoreHorizontal, Pencil, Plus, Search, Share2, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { errorMessage } from '../api/client';
 import { credentialsApi } from '../api/endpoints';
-import { useCredentials, useCredentialTypes } from '../api/queries';
+import { useCredentialTypes } from '../api/queries';
+import type { CredentialSummary } from '../api/types';
 import { CredentialModal } from '../components/credentials/CredentialModal';
 import { CredentialTypePicker } from '../components/credentials/CredentialTypePicker';
 import { NodeIcon } from '../components/NodeIcon';
+import { ProjectBadge } from '../components/projects/ProjectBadge';
+import { ProjectFilter, useProjectListScope } from '../components/projects/ProjectFilter';
 import { Button, IconButton } from '../components/ui/Button';
 import { confirmDialog } from '../components/ui/Dialog';
-import { Menu } from '../components/ui/Menu';
+import { Menu, type MenuItem } from '../components/ui/Menu';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
 import { formatRelative } from '../lib/format';
+import { usePermissions } from '../lib/permissions';
+import { openProjectDialog } from '../stores/project-dialog-store';
 import { toast } from '../stores/ui-store';
 
+/** the actions of one credential, each by that credential's own scopes */
+function credentialMenu(
+  c: CredentialSummary,
+  can: ReturnType<typeof usePermissions>['can'],
+  actions: { edit(): void; remove(): void },
+) {
+  const items: MenuItem[] = [];
+  if (can('credential:update', c))
+    items.push({ key: 'edit', label: 'Edit', icon: <Pencil size={14} />, onSelect: actions.edit });
+  if (can('credential:share', c))
+    items.push({
+      key: 'share',
+      label: 'Share',
+      icon: <Share2 size={14} />,
+      onSelect: () => openProjectDialog({ kind: 'share', resource: 'credential', id: c.id }),
+    });
+  if (can('credential:move', c))
+    items.push({
+      key: 'move-project',
+      label: 'Move to project',
+      icon: <FolderInput size={14} />,
+      onSelect: () => openProjectDialog({ kind: 'move', resource: 'credential', id: c.id }),
+    });
+  if (can('credential:delete', c))
+    items.push({
+      key: 'delete',
+      label: 'Delete',
+      icon: <Trash2 size={14} />,
+      danger: true,
+      onSelect: actions.remove,
+    });
+  return items;
+}
+
 export function CredentialsPage() {
-  const credentials = useCredentials();
+  const scope = useProjectListScope('credentials');
+  const { can } = usePermissions();
+  const { listFilter } = scope;
+  const credentials = useQuery({
+    queryKey: ['credentials', 'list', listFilter],
+    queryFn: () => credentialsApi.list(undefined, listFilter),
+  });
   const types = useCredentialTypes();
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
@@ -58,22 +103,27 @@ export function CredentialsPage() {
             Accounts and keys your workflows connect with. Secrets are encrypted and never shown again.
           </p>
         </div>
-        <Button variant="primary" icon={<Plus size={15} />} onClick={() => setPicker(true)}>
-          Add credential
-        </Button>
+        {scope.canCreate('credential:create') && (
+          <Button variant="primary" icon={<Plus size={15} />} onClick={() => setPicker(true)}>
+            Add credential
+          </Button>
+        )}
       </header>
-      <div className="relative max-w-md">
-        <Search
-          size={14}
-          className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-ink-3"
-        />
-        <input
-          className="wf-field pl-9"
-          placeholder="Search credentials"
-          aria-label="Search credentials"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative max-w-md min-w-60 flex-1">
+          <Search
+            size={14}
+            className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-ink-3"
+          />
+          <input
+            className="wf-field pl-9"
+            placeholder="Search credentials"
+            aria-label="Search credentials"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        {scope.kind === 'home' && <ProjectFilter value={scope.filterValue} onChange={scope.setFilterValue} />}
       </div>
       <section
         className="overflow-hidden rounded-2xl border border-line bg-surface shadow-card"
@@ -93,7 +143,8 @@ export function CredentialsPage() {
               search ? undefined : 'Add the accounts your workflows need, then pick them in each node.'
             }
             action={
-              !search && (
+              !search &&
+              scope.canCreate('credential:create') && (
                 <Button variant="primary" icon={<Plus size={15} />} onClick={() => setPicker(true)}>
                   Add credential
                 </Button>
@@ -104,6 +155,10 @@ export function CredentialsPage() {
           <ul>
             {list.map((c) => {
               const type = types.get(c.type);
+              const menu = credentialMenu(c, can, {
+                edit: () => setModal({ id: c.id }),
+                remove: () => void remove(c.id, c.name),
+              });
               return (
                 <li
                   key={c.id}
@@ -129,34 +184,29 @@ export function CredentialsPage() {
                       {type?.displayName ?? c.type}, updated {formatRelative(c.updatedAt)}
                     </span>
                   </button>
-                  <Menu
-                    trigger={(t) => (
-                      <IconButton
-                        label={`Actions for ${c.name}`}
-                        size="sm"
-                        onClick={t.toggle}
-                        aria-expanded={t['aria-expanded']}
-                        aria-haspopup="menu"
-                      >
-                        <MoreHorizontal size={15} />
-                      </IconButton>
-                    )}
-                    items={[
-                      {
-                        key: 'edit',
-                        label: 'Edit',
-                        icon: <Pencil size={14} />,
-                        onSelect: () => setModal({ id: c.id }),
-                      },
-                      {
-                        key: 'delete',
-                        label: 'Delete',
-                        icon: <Trash2 size={14} />,
-                        danger: true,
-                        onSelect: () => void remove(c.id, c.name),
-                      },
-                    ]}
-                  />
+                  {scope.kind !== 'project' && (
+                    <ProjectBadge
+                      homeProject={c.homeProject}
+                      sharedWithProjects={c.sharedWithProjects}
+                      resourceType="credential"
+                    />
+                  )}
+                  {menu.length > 0 && (
+                    <Menu
+                      trigger={(t) => (
+                        <IconButton
+                          label={`Actions for ${c.name}`}
+                          size="sm"
+                          onClick={t.toggle}
+                          aria-expanded={t['aria-expanded']}
+                          aria-haspopup="menu"
+                        >
+                          <MoreHorizontal size={15} />
+                        </IconButton>
+                      )}
+                      items={menu}
+                    />
+                  )}
                 </li>
               );
             })}

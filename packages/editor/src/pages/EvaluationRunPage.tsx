@@ -8,7 +8,7 @@ import { ArrowLeft } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { Link, useParams } from 'react-router';
 import { errorMessage } from '../api/client';
-import { evaluationsApi } from '../api/endpoints';
+import { evaluationsApi, workflowsApi } from '../api/endpoints';
 import { queryKeys, useMe } from '../api/queries';
 import { CasesTable } from '../components/evaluations/CasesTable';
 import { formatMetric, metricNames } from '../components/evaluations/MetricsChart';
@@ -18,6 +18,7 @@ import { runDurationMs, runErrorText } from '../components/evaluations/RunsTable
 import { Button } from '../components/ui/Button';
 import { Callout, PageLoader } from '../components/ui/misc';
 import { formatDateTime, formatDuration, plural } from '../lib/format';
+import { canWith } from '../lib/permissions';
 import { toast } from '../stores/ui-store';
 
 const PAGE = 250;
@@ -25,7 +26,15 @@ const PAGE = 250;
 export function EvaluationRunPage() {
   const { id = '', runId = '' } = useParams<{ id: string; runId: string }>();
   const queryClient = useQueryClient();
-  const canWrite = useMe().data?.role !== 'viewer';
+  const me = useMe().data;
+  const workflow = useQuery({
+    queryKey: queryKeys.workflow(id),
+    queryFn: () => workflowsApi.get(id),
+    enabled: Boolean(id),
+    retry: false,
+  });
+  // stopping a test case is `workflow:execute` on this workflow
+  const canWrite = canWith(me, 'workflow:execute', workflow.data);
 
   const run = useQuery({
     queryKey: queryKeys.testRun(id, runId),

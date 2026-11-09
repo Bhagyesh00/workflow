@@ -151,7 +151,7 @@ export function registerMcpRoutes(backend: MockBackend): void {
   });
 
   backend.on('PATCH', '/mcp/settings', ({ body }) => {
-    const { tenant } = backend.requireRole('admin');
+    const { tenant } = backend.requireScope('mcp:manage');
     const settings = settingsOf(state(), tenant);
     if (settings.managedByEnv) {
       throw new HttpError(409, 'conflict', 'MCP access is set by the server environment');
@@ -180,7 +180,7 @@ export function registerMcpRoutes(backend: MockBackend): void {
   });
 
   backend.on('GET', '/mcp/workflows', ({ query }) => {
-    const { tenant } = backend.requireRole('editor');
+    const { tenant } = backend.requireScopeAnywhere('workflow:update');
     const search = (query.search ?? '').toLowerCase();
     return backend.workflows
       .filter((w) => w.tenantId === tenant.id && !w.isArchived)
@@ -198,7 +198,7 @@ export function registerMcpRoutes(backend: MockBackend): void {
   });
 
   backend.on('PATCH', '/mcp/workflows/toggle-access', ({ body }) => {
-    const { tenant } = backend.requireRole('admin');
+    const { tenant } = backend.requireScope('mcp:manage');
     const value = body.availableInMCP === true;
     const ids = Array.isArray(body.workflowIds) ? (body.workflowIds as string[]) : undefined;
     if (ids && ids.length > 100)
@@ -218,12 +218,12 @@ export function registerMcpRoutes(backend: MockBackend): void {
   });
 
   backend.on('GET', '/mcp/oauth/allowed-redirect-uris', () => {
-    backend.requireRole('admin');
+    backend.requireScope('mcp:manage');
     return { allowedRedirectUris: [...state().allowedRedirectUris] };
   });
 
   backend.on('PATCH', '/mcp/oauth/allowed-redirect-uris', ({ body }) => {
-    backend.requireRole('admin');
+    backend.requireScope('mcp:manage');
     const uris = Array.isArray(body.allowedRedirectUris) ? (body.allowedRedirectUris as unknown[]) : null;
     if (!uris) throw new HttpError(400, 'bad_request', 'allowedRedirectUris must be a list');
     for (const uri of uris) {
@@ -235,12 +235,12 @@ export function registerMcpRoutes(backend: MockBackend): void {
   });
 
   backend.on('GET', '/mcp/oauth-clients', () => {
-    backend.requireRole('admin');
+    backend.requireScope('mcp:manage');
     return state().clients.map((c) => ({ ...c, redirectUris: [...c.redirectUris] }));
   });
 
   backend.on('DELETE', '/mcp/oauth-clients/:id', ({ params }) => {
-    backend.requireRole('admin');
+    backend.requireScope('mcp:manage');
     const s = state();
     if (!s.clients.some((c) => c.id === params[0])) throw new HttpError(404, 'not_found', 'Client not found');
     s.clients = s.clients.filter((c) => c.id !== params[0]);
@@ -248,7 +248,7 @@ export function registerMcpRoutes(backend: MockBackend): void {
   });
 
   backend.on('GET', '/mcp/instance-stats', () => {
-    backend.requireRole('admin');
+    backend.requireScope('mcp:manage');
     const s = state();
     return { registeredClients: s.clients.length, maxRegisteredClients: s.maxRegisteredClients };
   });

@@ -18,6 +18,8 @@ interface StoredFolder {
   tenantId: string;
   name: string;
   parentFolderId: string | null;
+  /** P6-43: the folder's project (a folder a test builds without one is in none) */
+  projectId?: string;
   tagIds: string[];
   createdAt: string;
   updatedAt: string;
@@ -74,6 +76,9 @@ export function registerFolderRoutes(backend: MockBackend): void {
     tags: backend.tags.filter((t) => f.tagIds.includes(t.id)).map(({ id, name }) => ({ id, name })),
     createdAt: f.createdAt,
     updatedAt: f.updatedAt,
+    ...backend.projectFields(f),
+    scopes: backend.rowScopes(f),
+    sharedWithProjects: [],
   });
   const checkParent = (value: unknown): string | null => {
     if (value === null || value === undefined) return null;
@@ -107,6 +112,10 @@ export function registerFolderRoutes(backend: MockBackend): void {
           : f.parentFolderId === query.parentFolderId;
       })
       .filter((f) => !search || f.name.toLowerCase().includes(search))
+      .filter((f) => !query.projectId || f.projectId === query.projectId)
+      .filter((f) => backend.rowVisible(f))
+      // folders are not shared with other projects: Shared with you has none
+      .filter(() => query.onlySharedWithMe !== 'true')
       .filter((f) => {
         const names = dto(f).tags.map((t) => t.name);
         return tagNames.every((n) => names.includes(n));
@@ -141,14 +150,19 @@ export function registerFolderRoutes(backend: MockBackend): void {
   });
 
   backend.on('POST', '/folders', ({ body }) => {
-    const { tenant } = backend.requireRole('editor');
     const name = parseName(body.name);
     const parentFolderId = checkParent(body.parentFolderId);
+    // a subfolder stays in its parent's project; a top-level folder goes to the body's project, else the default
+    const projectId = parentFolderId
+      ? folderOf(parentFolderId).projectId
+      : backend.targetProject(body.projectId).id;
+    const { tenant } = backend.requireScope('folder:create', { scopes: backend.rowScopes({ projectId }) });
     const folder: StoredFolder = {
       id: newId(),
       tenantId: tenant.id,
       name,
       parentFolderId,
+      projectId,
       tagIds: [],
       createdAt: now(),
       updatedAt: now(),
@@ -158,8 +172,8 @@ export function registerFolderRoutes(backend: MockBackend): void {
   });
 
   backend.on('PATCH', '/folders/:id', ({ params, body }) => {
-    backend.requireRole('editor');
     const folder = folderOf(params[0]);
+    backend.requireScope('folder:update', { scopes: backend.rowScopes(folder) });
     if (body.name === undefined && body.parentFolderId === undefined && body.tagIds === undefined)
       throw new HttpError(400, 'validation_error', 'Nothing to update');
     const name = body.name === undefined ? undefined : parseName(body.name);
@@ -178,8 +192,8 @@ export function registerFolderRoutes(backend: MockBackend): void {
   });
 
   backend.on('DELETE', '/folders/:id', ({ params, body }) => {
-    const { tenant } = backend.requireRole('editor');
     const folder = folderOf(params[0]);
+    const { tenant } = backend.requireScope('folder:delete', { scopes: backend.rowScopes(folder) });
     const state = folderState(backend);
     const ids = subtree(folder.id);
     const transfer = body.transferToFolderId;
@@ -223,7 +237,9 @@ export function registerFolderRoutes(backend: MockBackend): void {
             )?.name
           : fav.resourceType === 'dataTable'
             ? dataTableName(fav.resourceId)
-            : state.folders.find((f) => f.id === fav.resourceId && f.tenantId === tenant.id)?.name;
+            : fav.resourceType === 'project'
+              ? backend.projectRef(fav.resourceId)?.name
+              : state.folders.find((f) => f.id === fav.resourceId && f.tenantId === tenant.id)?.name;
       if (name !== undefined)
         list.push({
           resourceType: fav.resourceType,
@@ -237,12 +253,15 @@ export function registerFolderRoutes(backend: MockBackend): void {
   backend.on('POST', '/favorites', ({ body }) => {
     const { tenant, user } = backend.auth();
     const type = body.resourceType;
-    if (type !== 'workflow' && type !== 'folder' && type !== 'dataTable')
+    if (type !== 'workflow' && type !== 'folder' && type !== 'dataTable' && type !== 'project')
       throw new HttpError(400, 'validation_error', 'Bad type');
     const id = String(body.resourceId ?? '');
     const tableName = type === 'dataTable' ? dataTableName(id) : undefined;
     if (type === 'dataTable' && tableName === undefined) throw notFound('Data table');
-    const name = tableName ?? (type === 'workflow' ? backend.workflow(id).name : folderOf(id).name);
+    const projectName = type === 'project' ? backend.projectRef(id)?.name : undefined;
+    if (type === 'project' && projectName === undefined) throw notFound('Project');
+    const name =
+      tableName ?? projectName ?? (type === 'workflow' ? backend.workflow(id).name : folderOf(id).name);
     const state = folderState(backend);
     let existing = state.favorites.find(
       (f) => f.userId === user.id && f.resourceType === type && f.resourceId === id,
@@ -270,10 +289,14 @@ export function registerFolderRoutes(backend: MockBackend): void {
 
   // workflows: move and archive -------------------------------------------------------------------
   backend.on('POST', '/workflows/move', ({ body }) => {
-    backend.requireRole('editor');
     const ids = Array.isArray(body.workflowIds) ? (body.workflowIds as string[]) : [];
     const folderId = checkParent(body.folderId);
     const list = ids.map((id) => backend.workflow(id));
+    for (const wf of list) backend.requireScope('workflow:update', { scopes: backend.rowScopes(wf) });
+    // a workflow moves between folders of its own project
+    const target = folderId ? folderOf(folderId) : undefined;
+    if (target?.projectId && list.some((wf) => wf.projectId !== target.projectId))
+      throw badRequest('The folder is in another project.');
     if (list.some((wf) => wf.isArchived)) {
       throw badRequest('The workflow is archived and cannot be changed. Restore it first.');
     }
@@ -284,14 +307,14 @@ export function registerFolderRoutes(backend: MockBackend): void {
     return { moved: list.map((w) => w.id) };
   });
   backend.on('POST', '/workflows/:id/archive', ({ params }) => {
-    backend.requireRole('editor');
     const wf = backend.workflow(params[0]);
+    backend.requireScope('workflow:delete', { scopes: backend.rowScopes(wf) });
     archive(wf);
     return backend.toDto(wf);
   });
   backend.on('POST', '/workflows/:id/unarchive', ({ params }) => {
-    backend.requireRole('editor');
     const wf = backend.workflow(params[0]);
+    backend.requireScope('workflow:delete', { scopes: backend.rowScopes(wf) });
     if (!wf.isArchived) throw badRequest('The workflow is not archived.');
     wf.isArchived = false;
     wf.updatedAt = now();
@@ -304,17 +327,29 @@ export function registerFolderRoutes(backend: MockBackend): void {
  * default hides archived, 'true' only archived, 'all'), applied before search and paging.
  */
 export function filterWorkflowList(
-  _backend: MockBackend,
+  backend: MockBackend,
   workflows: StoredWorkflow[],
   query: Record<string, string>,
 ): StoredWorkflow[] {
   const archived = query.archived ?? 'false';
-  return workflows
-    .filter((w) => archived === 'all' || w.isArchived === (archived === 'true'))
-    .filter((w) => {
-      if (query.folderId === undefined) return true;
-      return query.folderId === 'root' ? w.folderId === null : w.folderId === query.folderId;
-    });
+  const visible = query.onlySharedWithMe === 'true' ? backend.visibleProjectIds() : undefined;
+  return (
+    workflows
+      .filter((w) => !query.projectId || w.projectId === query.projectId)
+      .filter((w) => backend.rowVisible(w, backend.sharedWith('workflow', w.id)))
+      // Shared with you: shared to a project of the caller, owned by none of them
+      .filter(
+        (w) =>
+          !visible ||
+          (!visible.has(w.projectId ?? '') &&
+            backend.sharedWith('workflow', w.id).some((p) => visible.has(p.id))),
+      )
+      .filter((w) => archived === 'all' || w.isArchived === (archived === 'true'))
+      .filter((w) => {
+        if (query.folderId === undefined) return true;
+        return query.folderId === 'root' ? w.folderId === null : w.folderId === query.folderId;
+      })
+  );
 }
 
 /** a deep copy of the demo folders of the signed-in workspace (tests) */

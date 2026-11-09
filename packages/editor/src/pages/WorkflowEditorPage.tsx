@@ -43,6 +43,7 @@ import {
 } from '../features/editor/editor-actions';
 import { ImportUrlDialog } from '../features/editor/ImportUrlDialog';
 import { OpenCredentialHost } from '../features/editor/OpenCredentialHost';
+import { useCanEditWorkflow, useOpenWorkflowStore } from '../features/editor/open-resources';
 import { publishWorkflow, unpublishWorkflow } from '../features/editor/publish-actions';
 import { RenameNodeDialog } from '../features/editor/RenameNodeDialog';
 import { tidyUp } from '../features/editor/tidy-up';
@@ -57,6 +58,7 @@ import {
   unarchiveWorkflow,
 } from '../features/workflows/archive-actions';
 import { issuesByNode, lintWorkflow } from '../lib/doctor';
+import { canWith } from '../lib/permissions';
 import { isTriggerDescription } from '../lib/ports';
 import { getMainParents, getNode } from '../lib/workflow-ops';
 import { useBuilderStore } from '../stores/builder-store';
@@ -90,7 +92,7 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
   const dirtyNodes = useDirtyNodes();
   // P5-09, P5-62: the builder's entry (editors and above) and its canvas lock while a turn streams
   const aiBuilder = useAiBuilderFeature();
-  const canWrite = useMe().data?.role !== 'viewer';
+  const canWrite = useCanEditWorkflow();
   const builderStreaming = useBuilderStore((s) => s.streaming);
   // every canvas edit path (and a run of the half-built draft) waits while a builder turn streams
   const locked = readOnly || builderStreaming;
@@ -548,8 +550,10 @@ export function WorkflowEditorPage() {
   const queryClient = useQueryClient();
   const isNew = id === 'new';
   const alreadyOpen = useWorkflowStore.getState().meta.id === id;
-  // viewers can open and inspect workflows but not change them
-  const viewer = useMe().data?.role === 'viewer';
+  // viewers can open and inspect workflows but not change them: `workflow:update` on a saved one (the row's
+  // `scopes` or the workspace role's), `workflow:create` in the working project on a new one
+  const me = useMe().data;
+  const openId = useOpenWorkflowStore((st) => st.id);
 
   const query = useQuery({
     queryKey: queryKeys.workflow(id),
@@ -560,14 +564,30 @@ export function WorkflowEditorPage() {
     retry: false,
   });
 
+  // the workflow is open already (a new one just saved): read its project and scopes without reloading it
+  useQuery({
+    queryKey: ['workflow-scopes', id],
+    queryFn: async () => {
+      const dto = await workflowsApi.get(id);
+      useOpenWorkflowStore.getState().set(dto);
+      return dto.id;
+    },
+    enabled: !isNew && alreadyOpen && openId !== id,
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  });
+
   useEffect(() => {
     if (!query.data) return;
+    const viewer = Boolean(me) && !canWith(me, 'workflow:update', query.data);
+    useOpenWorkflowStore.getState().set(query.data);
     useWorkflowStore.getState().load(query.data, { readOnly: viewer });
     useRunStore.getState().reset();
     useChatStore.getState().newSession();
     const debug = search.get('debug');
     if (debug && !viewer) void loadExecutionAsPinnedData(debug);
-  }, [query.data, search, viewer]);
+  }, [query.data, search, me]);
 
   useEffect(() => {
     if (!isNew) return;
@@ -585,6 +605,7 @@ export function WorkflowEditorPage() {
   useEffect(
     () => () => {
       useWorkflowStore.getState().reset();
+      useOpenWorkflowStore.getState().clear();
       useRunStore.getState().reset();
       useChatStore.getState().newSession();
       useBuilderStore.getState().reset();
@@ -632,7 +653,7 @@ export function WorkflowEditorPage() {
             ? 'It may have been deleted, or it belongs to another workspace.'
             : errorMessage(query.error)
         }
-        action={<Button onClick={() => navigate('/workflows')}>Back to workflows</Button>}
+        action={<Button onClick={() => navigate('/home/workflows')}>Back to workflows</Button>}
         className="h-full"
       />
     );

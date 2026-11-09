@@ -4,25 +4,27 @@ import { MoreHorizontal, Star, Table2 } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { ApiError, errorMessage } from '../api/client';
 import { dataTablesApi } from '../api/endpoints';
-import { queryKeys, useMe } from '../api/queries';
+import { queryKeys } from '../api/queries';
 import type { DataTableInfo } from '../api/types';
 import { DataTableGrid } from '../components/data-tables/DataTableGrid';
 import { IconButton } from '../components/ui/Button';
 import { Menu } from '../components/ui/Menu';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
+import { usePermissions } from '../lib/permissions';
 import { DependencyPill, useTableActions } from './DataTablesPage';
 
 function TablePage({ table }: { table: DataTableInfo }) {
   const navigate = useNavigate();
-  const canWrite = useMe().data?.role !== 'viewer';
-  const { items, dialogs, starred, toggleFavorite } = useTableActions(table, canWrite, () =>
-    navigate('/data-tables'),
+  // the grid edits rows and columns by this table's own `dataTable:writeRow`
+  const canWrite = usePermissions().can('dataTable:writeRow', table);
+  const { items, dialogs, starred, toggleFavorite } = useTableActions(table, () =>
+    navigate('/home/data-tables'),
   );
   return (
     <div className="flex flex-col gap-4 px-6 py-6">
       <header className="flex flex-wrap items-center gap-2">
         <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-sm">
-          <Link to="/data-tables" className="text-ink-2 hover:text-ink">
+          <Link to="/home/data-tables" className="text-ink-2 hover:text-ink">
             Data tables
           </Link>
           <span aria-hidden="true" className="text-ink-3">
@@ -76,7 +78,7 @@ export function DataTableDetailPage() {
         title="Data table not found"
         description="It may have been deleted."
         action={
-          <Link to="/data-tables" className="text-sm font-semibold text-brand hover:underline">
+          <Link to="/home/data-tables" className="text-sm font-semibold text-brand hover:underline">
             Back to data tables
           </Link>
         }

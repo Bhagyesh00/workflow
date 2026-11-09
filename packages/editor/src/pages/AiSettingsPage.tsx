@@ -22,6 +22,7 @@ import type { TenantAiSettings } from '../api/types';
 import { Button } from '../components/ui/Button';
 import { FormField, Select, Switch, TextInput } from '../components/ui/Field';
 import { Callout, PageLoader } from '../components/ui/misc';
+import { canWith } from '../lib/permissions';
 import { toast } from '../stores/ui-store';
 
 const MODEL_PREFIX = 'ai.lmChat';
@@ -65,7 +66,7 @@ export function AiSettingsPage() {
   const credentialTypes = useCredentialTypes();
   const credentials = useCredentials();
   const queryClient = useQueryClient();
-  const isAdmin = me.data?.role === 'owner' || me.data?.role === 'admin';
+  const isAdmin = canWith(me.data, 'aiAssistant:manage');
   const feature = aiBuilderFeatureOf(settings);
   const [draft, setDraft] = useState<Draft>(() => draftOf(settings.ai));
   const [touched, setTouched] = useState(false);

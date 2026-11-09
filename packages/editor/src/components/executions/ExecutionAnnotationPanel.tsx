@@ -6,15 +6,17 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ThumbsDown, ThumbsUp } from 'lucide-react';
 import { errorMessage } from '../../api/client';
 import { executionsApi } from '../../api/endpoints';
-import { queryKeys, useMe } from '../../api/queries';
+import { queryKeys } from '../../api/queries';
 import type { AnnotationPatchBody, AnnotationVote, ExecutionDetail, Tag } from '../../api/types';
+import { usePermissions } from '../../lib/permissions';
 import { toast } from '../../stores/ui-store';
 import { cx } from '../ui/cx';
 import { AnnotationTagsEditor } from './AnnotationTagsEditor';
 
 export function ExecutionAnnotationPanel({ execution }: { execution: ExecutionDetail }) {
   const queryClient = useQueryClient();
-  const canWrite = useMe().data?.role !== 'viewer';
+  // rating and tagging a run is part of running it: `workflow:execute` by the execution's own scopes
+  const canWrite = usePermissions().can('workflow:execute', execution);
   const vote = execution.annotation?.vote ?? null;
   const tags: Tag[] = execution.annotation?.tags ?? [];
 

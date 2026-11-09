@@ -22,6 +22,7 @@ import { ReviewDecisionPopover } from '../features/reviews/ReviewDecisionPopover
 import { decisionLabel, decisionTone } from '../features/reviews/review-publish';
 import { UpdateReviewDialog } from '../features/reviews/UpdateReviewDialog';
 import { formatDateTime } from '../lib/format';
+import { canWith } from '../lib/permissions';
 
 /** the server diffs the pinned version against another one; the page shows what the request changes */
 function invertDiff(diff: WorkflowDiff): WorkflowDiff {
@@ -114,8 +115,10 @@ export function ReviewDetailPage() {
   const review = query.data;
   const open = review.state === 'open';
   const userId = me?.user.id;
-  const isAdmin = me?.role === 'owner' || me?.role === 'admin';
-  const canPublish = isAdmin || me?.role === 'editor';
+  // whoever manages the reviews switch decides any request (`securitySettings:manage`: owner and admin);
+  // a reviewer needs `workflow:publish`. The server checks the reviewer's scopes on the workflow again.
+  const isAdmin = canWith(me, 'securitySettings:manage');
+  const canPublish = isAdmin || canWith(me, 'workflow:publish');
   const isAuthor = Boolean(userId && review.authors.some((a) => a.id === userId));
   const isReviewer = Boolean(userId && review.reviewers.some((r) => r.id === userId));
   const canDecide = open && (isAdmin || (isReviewer && !isAuthor && canPublish));

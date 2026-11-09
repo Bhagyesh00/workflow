@@ -41,8 +41,8 @@ function sessions(backend: MockBackend): DemoAiSession[] {
 function sessionOf(backend: MockBackend, workflowId: unknown): DemoAiSession {
   if (typeof workflowId !== 'string' || !workflowId)
     throw new HttpError(400, 'bad_request', 'workflowId is required');
-  const { user, tenant } = backend.requireRole('editor');
-  backend.workflow(workflowId);
+  const wf = backend.workflow(workflowId);
+  const { user, tenant } = backend.requireScope('workflow:update', { scopes: backend.rowScopes(wf) });
   const list = sessions(backend);
   let session = list.find(
     (s) => s.tenantId === tenant.id && s.userId === user.id && s.workflowId === workflowId,
@@ -108,7 +108,7 @@ export function registerAiRoutes(backend: MockBackend): void {
     return { ok: true };
   });
   backend.on('POST', '/ai/usage-settings', ({ body }): AiUsageSettingsBody => {
-    const { tenant } = backend.requireRole('admin');
+    const { tenant } = backend.requireScope('aiAssistant:manage');
     if (typeof body.allowSendingParameterValues !== 'boolean') {
       throw new HttpError(400, 'bad_request', 'allowSendingParameterValues must be true or false');
     }

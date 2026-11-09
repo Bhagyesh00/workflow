@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { useAiBuilderFeature, useMe } from '../../api/queries';
+import { useAiBuilderFeature } from '../../api/queries';
 import type { PublishBody } from '../../api/types';
 import { Button, IconButton } from '../../components/ui/Button';
 import { cx } from '../../components/ui/cx';
@@ -35,6 +35,7 @@ import { useBuilderStore } from '../../stores/builder-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { AutosaveStatus } from './AutosaveStatus';
+import { useCanEditWorkflow } from './open-resources';
 import { PublishDialog } from './PublishDialog';
 import { PUBLISH_STATE_LABEL, publishStateOf, requestPublish } from './publish-actions';
 import { SHORTCUTS } from './useEditorShortcuts';
@@ -77,7 +78,7 @@ export function EditorTopBar({
   const renameRequested = useUiStore((s) => s.workflowRenameRequested);
   const tagsRequested = useUiStore((s) => s.tagsEditRequested);
   // archive / restore / delete follow the role, not the archived read-only state
-  const canWrite = useMe().data?.role !== 'viewer';
+  const canWrite = useCanEditWorkflow();
   const aiBuilder = useAiBuilderFeature();
   const [name, setDraftName] = useState(meta.name);
   const nameRef = useRef<HTMLInputElement>(null);

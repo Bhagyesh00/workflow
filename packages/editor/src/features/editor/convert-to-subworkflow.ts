@@ -19,6 +19,7 @@ import { refuseWhileReviewing } from '../../stores/builder-store';
 import { toast } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import type { EditorDeps } from './editor-actions';
+import { workingProjectId } from './open-resources';
 
 export interface ConvertToSubWorkflowInput {
   nodeNames: string[];
@@ -116,6 +117,8 @@ export async function convertToSubWorkflow(
       connections: draft.subWorkflow.connections,
       settings: draft.subWorkflow.settings,
       folderId: store.meta.folderId ?? null,
+      // the sub-workflow lives in the project of the workflow it was cut from
+      projectId: workingProjectId(),
     });
   } catch (error) {
     toast.error('Could not create the sub-workflow', errorMessage(error));

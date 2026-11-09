@@ -31,6 +31,7 @@ import { acceptBuilderDraft } from '../features/builder/accept-draft';
 import { applyBuilderChunk, setBuilderCredentials } from '../features/builder/apply-chunk';
 import { notifyBuilderDone } from '../features/builder/notify';
 import { type EditorDeps, runWorkflow, saveWorkflow } from '../features/editor/editor-actions';
+import { workingProjectId } from '../features/editor/open-resources';
 import { newId } from '../lib/ids';
 import type { WorkflowGraph } from '../lib/workflow-ops';
 import { toast, useUiStore } from './ui-store';
@@ -169,7 +170,9 @@ const isAbort = (error: unknown): boolean => (error as { name?: unknown } | null
 /** the user's credentials for the client-side assignment; none when they cannot be read */
 async function loadCredentials(): Promise<CredentialSummary[]> {
   try {
-    return await credentialsApi.list();
+    // the credentials of the project the workflow is in, not the whole workspace's
+    const projectId = workingProjectId();
+    return await credentialsApi.list(undefined, projectId ? { projectId } : {});
   } catch {
     return [];
   }

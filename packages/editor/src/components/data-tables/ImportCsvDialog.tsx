@@ -107,7 +107,7 @@ export function ImportCsvDialog({ table, onClose }: { table: DataTableInfo; onCl
     setFile(undefined);
     setPreview(undefined);
     try {
-      const answer = await dataTablesApi.csvPreview(picked.text, true);
+      const answer = await dataTablesApi.csvPreview(picked.text, true, table.projectId);
       setFile(picked);
       setPreview(answer);
     } catch (cause) {

@@ -16,9 +16,10 @@ import { Workflow } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { errorMessage } from '../../api/client';
-import { useMe, useNodeTypes } from '../../api/queries';
+import { useMe, useNodeTypes, useProjects } from '../../api/queries';
 import type { AssistantDraftArtifact, AssistantDraftView } from '../../api/types';
 import { acceptDraft, discardDraft, loadDraft } from '../../features/assistant/draft-actions';
+import { canWith } from '../../lib/permissions';
 import { useAssistantStore } from '../../stores/assistant-store';
 import { Button } from '../ui/Button';
 import { Badge, Callout, Spinner } from '../ui/misc';
@@ -29,7 +30,6 @@ export interface DraftCardProps {
 }
 
 /** what Accept and Discard need beyond a viewer */
-const EDIT_ROLES = new Set(['owner', 'admin', 'editor']);
 export const DRAFT_VIEWER_REASON = 'Only editors and above can save or discard a draft';
 
 const plural = (count: number, one: string) => `${count} ${one}${count === 1 ? '' : 's'}`;
@@ -93,6 +93,7 @@ export function DraftCard({ draft }: DraftCardProps) {
   const threadId = useAssistantStore((s) => s.activeThreadId);
   const view = useAssistantStore((s) => s.drafts[draft.draftId]) as AssistantDraftView | undefined;
   const me = useMe();
+  const projects = useProjects();
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<{ kind: 'accept' | 'discard'; message: string } | null>(
     null,
@@ -150,8 +151,14 @@ export function DraftCard({ draft }: DraftCardProps) {
   }
 
   const { status, workflowId, nodeCount, issues } = view.draft;
-  const role = me.data?.role;
-  const canEdit = role ? EDIT_ROLES.has(role) : false;
+  // saving a draft creates or updates a workflow: `workflow:create` in one of the user's projects (the
+  // workspace role's scopes count), else the draft's workflow `workflow:update`
+  const signedIn = Boolean(me.data);
+  const canEdit =
+    signedIn &&
+    (canWith(me.data, 'workflow:create') ||
+      canWith(me.data, 'workflow:update') ||
+      (projects.data ?? []).some((p) => canWith(me.data, 'workflow:create', p)));
   const open = status === 'open';
   const errors = issues.filter((i) => i.severity === 'error').length;
   const warnings = issues.length - errors;
@@ -254,7 +261,7 @@ export function DraftCard({ draft }: DraftCardProps) {
           >
             Discard
           </Button>
-          {!canEdit && role && <span className="text-xs text-ink-2">{DRAFT_VIEWER_REASON}</span>}
+          {!canEdit && signedIn && <span className="text-xs text-ink-2">{DRAFT_VIEWER_REASON}</span>}
         </div>
       ) : status === 'accepted' && workflowId ? (
         <p className="m-0 text-sm text-ink-2">

@@ -19,6 +19,7 @@ import { AssistantThreadList } from '../components/assistant/AssistantThreadList
 import { ASSISTANT_EMPTY_TEXT, AssistantThreadView } from '../components/assistant/AssistantThreadView';
 import { AssistantWizard } from '../components/assistant/AssistantWizard';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
+import { canWith } from '../lib/permissions';
 import {
   createAssistantThread,
   deleteAssistantThread,
@@ -198,8 +199,7 @@ export function AssistantPage() {
       </div>
     );
   }
-  const role = me.data?.role;
-  const canManage = role === 'owner' || role === 'admin';
+  const canManage = canWith(me.data, 'instanceAi:manage');
   const feature = assistantFeatureOf(settings.data);
   if (!feature.enabled) return <AssistantOff canManage={canManage} />;
   if (!feature.modelSet) {

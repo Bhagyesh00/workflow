@@ -2,7 +2,7 @@
  * Workflows: folders (?folder=<id>), search, tag/status filters, activation toggle, create, import,
  * duplicate, export, move, favorites, archive and restore.
  */
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Archive,
   ArchiveRestore,
@@ -18,6 +18,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Share2,
   Star,
   Trash2,
   Workflow,
@@ -25,10 +26,12 @@ import {
 import { useDeferredValue, useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { errorMessage } from '../api/client';
-import { favoritesApi, workflowsApi } from '../api/endpoints';
-import { queryKeys, useFavorites, useFolder, useFolders, useMe, useNodeTypes, useTags } from '../api/queries';
+import { favoritesApi, foldersApi, workflowsApi } from '../api/endpoints';
+import { queryKeys, useFavorites, useFolder, useNodeTypes, useTags } from '../api/queries';
 import type { Folder, WorkflowSummary } from '../api/types';
 import { NodeIcon } from '../components/NodeIcon';
+import { ProjectBadge } from '../components/projects/ProjectBadge';
+import { ProjectFilter, useProjectListScope } from '../components/projects/ProjectFilter';
 import { Button, IconButton } from '../components/ui/Button';
 import { Dialog } from '../components/ui/Dialog';
 import { Checkbox, Select, Switch, TextArea } from '../components/ui/Field';
@@ -52,7 +55,9 @@ import {
   useDropTarget,
 } from '../features/workflows/folder-dnd';
 import { downloadJson, formatRelative, safeFileName } from '../lib/format';
+import { usePermissions } from '../lib/permissions';
 import { parseClipboard, withFreshWebhookIds } from '../lib/workflow-ops';
+import { openProjectDialog } from '../stores/project-dialog-store';
 import { toast, useUiStore } from '../stores/ui-store';
 
 export interface ImportedWorkflow {
@@ -90,7 +95,15 @@ export function parseWorkflowImport(
   };
 }
 
-function ImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+function ImportDialog({
+  open,
+  onClose,
+  projectId,
+}: {
+  open: boolean;
+  onClose: () => void;
+  projectId?: string;
+}) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<'file' | 'paste'>('file');
@@ -98,7 +111,7 @@ function ImportDialog({ open, onClose }: { open: boolean; onClose: () => void })
   const [fileName, setFileName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const importMutation = useMutation({
-    mutationFn: (parsed: ImportedWorkflow) => workflowsApi.create(parsed),
+    mutationFn: (parsed: ImportedWorkflow) => workflowsApi.create({ ...parsed, projectId }),
     onSuccess: async (dto) => {
       await queryClient.invalidateQueries({ queryKey: ['workflows'] });
       toast.success('Workflow imported', dto.name);
@@ -223,7 +236,8 @@ type MenuEntry = MenuItem | 'separator';
 function FolderRow({
   folder,
   path,
-  canWrite,
+  base,
+  showProject,
   onOpen,
   onRename,
   onMove,
@@ -233,21 +247,28 @@ function FolderRow({
   folder: Folder;
   /** ids from the top level down to this folder */
   path: string[];
-  canWrite: boolean;
+  /** the list route the folder link stays inside */
+  base: string;
+  showProject: boolean;
   onOpen: () => void;
   onRename: () => void;
   onMove: () => void;
   onDelete: () => void;
   onDropped: (item: DragItem, target: DropTarget, name: string) => void;
 }) {
+  const { can } = usePermissions();
+  const canWrite = can('folder:update', folder);
+  const canDelete = can('folder:delete', folder);
+  const canMoveProject = can('folder:move', folder);
   const { starred, toggle } = useFavoriteToggle('folder', folder.id);
-  const target: DropTarget = { folderId: folder.id, path };
+  const target: DropTarget = { folderId: folder.id, path, projectId: folder.projectId };
   const drop = useDropTarget(target, (item) => onDropped(item, target, folder.name), canWrite);
   const item: DragItem = {
     type: 'folder',
     id: folder.id,
     name: folder.name,
     parentFolderId: folder.parentFolderId,
+    projectId: folder.projectId,
   };
   const items: MenuEntry[] = [
     { key: 'open', label: 'Open', icon: <FolderIcon size={14} />, onSelect: onOpen },
@@ -257,12 +278,25 @@ function FolderRow({
       icon: <Star size={14} />,
       onSelect: toggle,
     },
+    ...(canWrite || canDelete || canMoveProject ? (['separator'] as MenuEntry[]) : []),
     ...(canWrite
       ? ([
-          'separator',
           { key: 'rename', label: 'Rename', icon: <Pencil size={14} />, onSelect: onRename },
           { key: 'move', label: 'Move to folder', icon: <FolderInput size={14} />, onSelect: onMove },
-          'separator',
+        ] as MenuEntry[])
+      : []),
+    ...(canMoveProject
+      ? ([
+          {
+            key: 'move-project',
+            label: 'Move to project',
+            icon: <FolderInput size={14} />,
+            onSelect: () => openProjectDialog({ kind: 'move', resource: 'folder', id: folder.id }),
+          },
+        ] as MenuEntry[])
+      : []),
+    ...(canDelete
+      ? ([
           { key: 'delete', label: 'Delete', icon: <Trash2 size={14} />, danger: true, onSelect: onDelete },
         ] as MenuEntry[])
       : []),
@@ -287,7 +321,7 @@ function FolderRow({
         )}
         <FolderIcon size={18} className="shrink-0 text-ink-3" aria-hidden="true" />
         <Link
-          to={`/workflows?folder=${encodeURIComponent(folder.id)}`}
+          to={`${base}?folder=${encodeURIComponent(folder.id)}`}
           className="block truncate text-base font-semibold text-ink hover:text-brand"
         >
           {folder.name}
@@ -295,6 +329,13 @@ function FolderRow({
         {folder.tags.map((t) => (
           <TagChip key={t.id} tag={t} />
         ))}
+        {showProject && (
+          <ProjectBadge
+            homeProject={folder.homeProject}
+            sharedWithProjects={folder.sharedWithProjects}
+            resourceType="folder"
+          />
+        )}
       </div>
       <span className="hidden text-xs text-ink-3 md:block">Edited {formatRelative(folder.updatedAt)}</span>
       <span className="flex items-center gap-2">
@@ -327,13 +368,18 @@ function FolderRow({
 
 function WorkflowRow({
   workflow,
-  canWrite,
+  showProject,
   onMove,
 }: {
   workflow: WorkflowSummary;
-  canWrite: boolean;
+  showProject: boolean;
   onMove: () => void;
 }) {
+  const { can } = usePermissions();
+  // every gate reads this workflow's own scopes (its project's role, a share), else the workspace role's
+  const canWrite = can('workflow:update', workflow);
+  const canArchive = can('workflow:delete', workflow);
+  const canToggle = can(workflow.active ? 'workflow:unpublish' : 'workflow:publish', workflow);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['workflows'] });
@@ -367,6 +413,8 @@ function WorkflowRow({
         stickyNotes: full.stickyNotes,
         tagIds: full.tags.map((t) => t.id),
         folderId: full.folderId,
+        // a copy stays in the source's project
+        projectId: full.projectId,
       });
       await refresh();
       toast.success('Workflow duplicated', copy.name);
@@ -395,6 +443,7 @@ function WorkflowRow({
     id: workflow.id,
     name: workflow.name,
     folderId: workflow.folderId,
+    projectId: workflow.projectId,
   };
   const writeItems: MenuEntry[] = workflow.isArchived
     ? [
@@ -444,13 +493,33 @@ function WorkflowRow({
           },
         ] as MenuEntry[])
       : []),
+    ...(!workflow.isArchived && can('workflow:share', workflow)
+      ? ([
+          {
+            key: 'share',
+            label: 'Share',
+            icon: <Share2 size={14} />,
+            onSelect: () => openProjectDialog({ kind: 'share', resource: 'workflow', id: workflow.id }),
+          },
+        ] as MenuEntry[])
+      : []),
+    ...(!workflow.isArchived && can('workflow:move', workflow)
+      ? ([
+          {
+            key: 'move-project',
+            label: 'Move to project',
+            icon: <FolderInput size={14} />,
+            onSelect: () => openProjectDialog({ kind: 'move', resource: 'workflow', id: workflow.id }),
+          },
+        ] as MenuEntry[])
+      : []),
     {
       key: 'export',
       label: 'Download as JSON',
       icon: <Download size={14} />,
       onSelect: () => void exportJson(),
     },
-    ...(canWrite ? (['separator', ...writeItems] as MenuEntry[]) : []),
+    ...(canArchive ? (['separator', ...writeItems] as MenuEntry[]) : []),
   ];
   return (
     <li
@@ -473,6 +542,13 @@ function WorkflowRow({
             {workflow.name}
           </Link>
           {workflow.isArchived && <Badge tone="warn">Archived</Badge>}
+          {showProject && (
+            <ProjectBadge
+              homeProject={workflow.homeProject}
+              sharedWithProjects={workflow.sharedWithProjects}
+              resourceType="workflow"
+            />
+          )}
         </div>
         <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-ink-3">
           <span>Edited {formatRelative(workflow.updatedAt)}</span>
@@ -497,7 +573,7 @@ function WorkflowRow({
         <Switch
           label={`${workflow.active ? 'Deactivate' : 'Activate'} ${workflow.name}`}
           checked={workflow.active}
-          disabled={toggle.isPending || workflow.isArchived || !canWrite}
+          disabled={toggle.isPending || workflow.isArchived || !canToggle}
           onChange={(v) => toggle.mutate(v)}
         />
         <Menu
@@ -549,11 +625,13 @@ function Crumb({
 function Breadcrumb({
   path,
   current,
+  base,
   canWrite,
   onDropped,
 }: {
   path: Array<{ id: string; name: string }>;
   current: { id: string; name: string };
+  base: string;
   canWrite: boolean;
   onDropped: (item: DragItem, target: DropTarget, name: string) => void;
 }) {
@@ -562,7 +640,7 @@ function Breadcrumb({
     <nav aria-label="Folder path" className="flex flex-wrap items-center gap-1 text-sm">
       <Crumb
         label="Workflows"
-        to="/workflows"
+        to={base}
         target={{ folderId: null, path: [] }}
         canWrite={canWrite}
         onDropped={(item, target) => onDropped(item, target, 'the top level')}
@@ -572,7 +650,7 @@ function Breadcrumb({
           <ChevronRight size={13} className="text-ink-3" aria-hidden="true" />
           <Crumb
             label={c.name}
-            to={i === crumbs.length - 1 ? undefined : `/workflows?folder=${encodeURIComponent(c.id)}`}
+            to={i === crumbs.length - 1 ? undefined : `${base}?folder=${encodeURIComponent(c.id)}`}
             target={{ folderId: c.id, path: crumbs.slice(0, i + 1).map((x) => x.id) }}
             canWrite={canWrite}
             onDropped={(item, target) => onDropped(item, target, c.name)}
@@ -589,7 +667,8 @@ export function WorkflowsPage() {
   const tags = useTags();
   const [params] = useSearchParams();
   const folderId = params.get('folder') ?? undefined;
-  const canWrite = useMe().data?.role !== 'viewer';
+  const scope = useProjectListScope('workflows');
+  const { can } = usePermissions();
   const [search, setSearch] = useState('');
   const [tagId, setTagId] = useState('');
   const [status, setStatus] = useState<'all' | 'active' | 'inactive'>('all');
@@ -607,20 +686,33 @@ export function WorkflowsPage() {
   const filtering = Boolean(deferredSearch || tagId || status !== 'all');
   const folder = useFolder(folderId);
   // a search looks through every folder; browsing lists one folder
-  const scope = filtering ? undefined : (folderId ?? 'root');
-  const folders = useFolders(scope, !filtering);
+  const parentScope = filtering ? undefined : (folderId ?? 'root');
+  const { listFilter } = scope;
+  const folders = useQuery({
+    queryKey: queryKeys.folders({ parentFolderId: parentScope, ...listFilter }),
+    queryFn: () => foldersApi.list({ parentFolderId: parentScope, limit: 250, ...listFilter }),
+    enabled: !filtering,
+  });
+  const projectTarget = scope.kind === 'project' ? (scope.projectId ?? undefined) : undefined;
+  // in a folder the folder's own scopes decide; at the top the project's (or the workspace role's)
+  const canWrite = folder.data ? can('folder:update', folder.data) : scope.canCreate('folder:update');
+  const canCreateWorkflow = scope.canCreate('workflow:create');
   const query = useInfiniteQuery({
-    queryKey: ['workflows', { search: deferredSearch, tagId, status, scope, showArchived }],
+    queryKey: [
+      'workflows',
+      { search: deferredSearch, tagId, status, scope: parentScope, showArchived, ...listFilter },
+    ],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       workflowsApi.list({
         search: deferredSearch || undefined,
         tagId: tagId || undefined,
         active: status === 'all' ? undefined : status === 'active',
-        folderId: scope,
+        folderId: parentScope,
         archived: showArchived ? 'all' : undefined,
         limit: 50,
         cursor: pageParam,
+        ...listFilter,
       }),
     getNextPageParam: (last) => last.nextCursor ?? undefined,
   });
@@ -633,9 +725,15 @@ export function WorkflowsPage() {
     void dropItem(item, target, { queryClient, targetName });
   };
   const createHere = async () => {
-    if (!folderId) return navigate('/workflow/new');
+    if (!folderId && !projectTarget) return navigate('/workflow/new');
     try {
-      const dto = await workflowsApi.create({ name: 'My workflow', nodes: [], connections: {}, folderId });
+      const dto = await workflowsApi.create({
+        name: 'My workflow',
+        nodes: [],
+        connections: {},
+        folderId,
+        projectId: projectTarget,
+      });
       await queryClient.invalidateQueries({ queryKey: ['workflows'] });
       navigate(`/workflow/${encodeURIComponent(dto.id)}`);
     } catch (error) {
@@ -653,6 +751,7 @@ export function WorkflowsPage() {
               <Breadcrumb
                 path={folder.data.path}
                 current={{ id: folder.data.id, name: folder.data.name }}
+                base={scope.base}
                 canWrite={canWrite}
                 onDropped={onDropped}
               />
@@ -661,17 +760,21 @@ export function WorkflowsPage() {
             <p className="mt-1 text-sm text-ink-2">Everything that runs in this workspace.</p>
           )}
         </div>
-        {canWrite && (
+        {scope.canCreate('folder:create') && (
           <Button icon={<FolderPlus size={15} />} onClick={() => setFolderDialog({ mode: 'create' })}>
             New folder
           </Button>
         )}
-        <Button icon={<FileUp size={15} />} onClick={() => setImportOpen(true)}>
-          Import
-        </Button>
-        <Button variant="primary" icon={<Plus size={15} />} onClick={() => void createHere()}>
-          Create workflow
-        </Button>
+        {canCreateWorkflow && (
+          <Button icon={<FileUp size={15} />} onClick={() => setImportOpen(true)}>
+            Import
+          </Button>
+        )}
+        {canCreateWorkflow && (
+          <Button variant="primary" icon={<Plus size={15} />} onClick={() => void createHere()}>
+            Create workflow
+          </Button>
+        )}
       </header>
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-60 flex-1">
@@ -687,6 +790,7 @@ export function WorkflowsPage() {
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
+        {scope.kind === 'home' && <ProjectFilter value={scope.filterValue} onChange={scope.setFilterValue} />}
         <Select
           aria-label="Filter by tag"
           className="w-44"
@@ -727,7 +831,7 @@ export function WorkflowsPage() {
             icon={<FolderIcon size={20} />}
             title="This folder does not exist"
             description="It may have been deleted."
-            action={<Button onClick={() => navigate('/workflows')}>Back to workflows</Button>}
+            action={<Button onClick={() => navigate(scope.base)}>Back to workflows</Button>}
           />
         ) : query.error ? (
           <Callout tone="err" className="m-4" title="Could not load workflows">
@@ -746,9 +850,11 @@ export function WorkflowsPage() {
               title="This folder is empty"
               description="Create a workflow here, or drag workflows and folders onto it."
               action={
-                <Button variant="primary" icon={<Plus size={15} />} onClick={() => void createHere()}>
-                  Create workflow
-                </Button>
+                canCreateWorkflow && (
+                  <Button variant="primary" icon={<Plus size={15} />} onClick={() => void createHere()}>
+                    Create workflow
+                  </Button>
+                )
               }
             />
           ) : (
@@ -757,9 +863,11 @@ export function WorkflowsPage() {
               title="Build your first workflow"
               description="Start from a trigger, add the steps that should follow, and run it right away."
               action={
-                <Button variant="primary" icon={<Plus size={15} />} onClick={() => navigate('/workflow/new')}>
-                  Create workflow
-                </Button>
+                canCreateWorkflow && (
+                  <Button variant="primary" icon={<Plus size={15} />} onClick={() => void createHere()}>
+                    Create workflow
+                  </Button>
+                )
               }
             />
           )
@@ -770,11 +878,18 @@ export function WorkflowsPage() {
                 key={f.id}
                 folder={f}
                 path={[...here, f.id]}
-                canWrite={canWrite}
-                onOpen={() => navigate(`/workflows?folder=${encodeURIComponent(f.id)}`)}
+                base={scope.base}
+                showProject={scope.kind !== 'project'}
+                onOpen={() => navigate(`${scope.base}?folder=${encodeURIComponent(f.id)}`)}
                 onRename={() => setFolderDialog({ mode: 'rename', folder: f })}
                 onMove={() =>
-                  setMoving({ kind: 'folder', id: f.id, name: f.name, parentFolderId: f.parentFolderId })
+                  setMoving({
+                    kind: 'folder',
+                    id: f.id,
+                    name: f.name,
+                    parentFolderId: f.parentFolderId,
+                    projectId: f.projectId,
+                  })
                 }
                 onDelete={() => setDeleting(f)}
                 onDropped={onDropped}
@@ -784,9 +899,15 @@ export function WorkflowsPage() {
               <WorkflowRow
                 key={w.id}
                 workflow={w}
-                canWrite={canWrite}
+                showProject={scope.kind !== 'project'}
                 onMove={() =>
-                  setMoving({ kind: 'workflow', ids: [w.id], name: w.name, folderId: w.folderId })
+                  setMoving({
+                    kind: 'workflow',
+                    ids: [w.id],
+                    name: w.name,
+                    folderId: w.folderId,
+                    projectId: w.projectId,
+                  })
                 }
               />
             ))}
@@ -800,13 +921,14 @@ export function WorkflowsPage() {
           </div>
         )}
       </section>
-      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} />
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} projectId={projectTarget} />
       {folderDialog?.mode === 'create' && (
         <FolderDialog
           mode="create"
           open
           onClose={() => setFolderDialog(null)}
           parentFolderId={folderId ?? null}
+          projectId={projectTarget}
         />
       )}
       {folderDialog?.mode === 'rename' && (

@@ -72,7 +72,7 @@ import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
 import { registerFormAuthRoutes } from './mock-form-auth';
 import { copy, HttpError, now, page } from './mock-http';
 import { registerMcpRoutes } from './mock-mcp';
-import { registerProjectRoutes } from './mock-projects';
+import { registerProjectRoutes, visibleProjects } from './mock-projects';
 import { registerPublishRoutes } from './mock-publish';
 import { registerReviewRoutes } from './mock-reviews';
 import { findCustomRole, registerRoleRoutes } from './mock-roles';
@@ -538,7 +538,9 @@ export class MockBackend {
     const relation = this.projectRelations.find(
       (r) => r.projectId === project.id && r.userId === auth.user.id,
     );
-    if (relation) {
+    // the old words keep today's rights until the cutover: their personal project adds nothing (L24 removes this)
+    const legacyWord = auth.globalRole === 'viewer' || auth.globalRole === 'editor';
+    if (relation && !(legacyWord && relation.role === 'project:personalOwner')) {
       const slug = relation.role;
       const roleScopes =
         slug === 'project:personalOwner'
@@ -549,6 +551,56 @@ export class MockBackend {
       for (const s of roleScopes) scopes.add(s);
     }
     return [...scopes];
+  }
+
+  /**
+   * P6-43: the signed-in user's scopes on a row (`scopes` of the answers the lists and details send): the
+   * workspace role's plus the role in the row's project. A row with no project holds the workspace role's only.
+   */
+  rowScopes(row: { projectId?: string | null }): Scope[] {
+    const project = row.projectId ? this.projects.find((p) => p.id === row.projectId) : undefined;
+    if (project) return this.projectScopes(project);
+    const auth = this.auth();
+    return this.globalScopesOf(auth.globalRole, auth.tenant.id);
+  }
+
+  /** 403 unless the user holds `scope` globally or in at least one project of the workspace (a create with no target) */
+  requireScopeAnywhere(scope: Scope) {
+    const auth = this.auth();
+    if (this.globalScopesOf(auth.globalRole, auth.tenant.id).includes(scope)) return auth;
+    const some = this.projects.some(
+      (p) => p.tenantId === auth.tenant.id && this.projectScopes(p).includes(scope),
+    );
+    if (!some) throw new HttpError(403, 'forbidden', MISSING_SCOPE);
+    return auth;
+  }
+
+  /** the projects a workflow or credential is shared with (L21 fills the share store) */
+  sharedWith(resourceType: 'workflow' | 'credential', resourceId: string): ProjectRef[] {
+    const { tenant } = this.auth();
+    return demoShares(this)
+      .filter(
+        (s) => s.tenantId === tenant.id && s.resourceType === resourceType && s.resourceId === resourceId,
+      )
+      .map((s) => this.projectRef(s.projectId))
+      .filter((p): p is ProjectRef => p !== null);
+  }
+
+  /**
+   * Overview and Shared with you list the rows of the projects the caller can see, or shared into one. A
+   * workspace role with `project:list` (owner, admin and the old words) sees every row, as before.
+   */
+  rowVisible(row: { projectId?: string | null }, sharedWith: ProjectRef[] = []): boolean {
+    const auth = this.auth();
+    if (this.globalScopesOf(auth.globalRole, auth.tenant.id).includes('project:list')) return true;
+    if (!row.projectId) return true;
+    const visible = this.visibleProjectIds();
+    return visible.has(row.projectId) || sharedWith.some((p) => visible.has(p.id));
+  }
+
+  /** the ids of the projects the signed-in user can see (Overview, Shared with you) */
+  visibleProjectIds(): Set<string> {
+    return new Set(visibleProjects(this).map((p) => p.id));
   }
 
   signIn(email: string) {
@@ -678,7 +730,11 @@ export class MockBackend {
     };
   }
 
-  /** 403 unless the signed-in role is at least `role` (old words; `member` and custom slugs rank lowest) */
+  /**
+   * @deprecated P6: no handler of this file calls it; use `requireScope`. Kept only for the demo modules no lane of
+   * S1 moves yet (mock-annotations, mock-publish, mock-triggers; mock-secrets is L22's). 403 unless the signed-in
+   * role is at least `role` (old words; `member` and custom slugs rank lowest).
+   */
   requireRole(role: 'editor' | 'admin') {
     const auth = this.auth();
     const rank = { viewer: 0, editor: 1, admin: 2, owner: 3 } as const;
@@ -727,7 +783,12 @@ export class MockBackend {
   toDto(wf: StoredWorkflow): WorkflowDTO {
     const { tenantId, ...dto } = wf;
     void tenantId;
-    return { ...copy(dto), ...this.projectFields(wf) };
+    return {
+      ...copy(dto),
+      ...this.projectFields(wf),
+      scopes: this.rowScopes(wf),
+      sharedWithProjects: this.sharedWith('workflow', wf.id),
+    };
   }
 
   /** the workflow in the signed-in workspace (404 otherwise) */
@@ -809,6 +870,8 @@ export class MockBackend {
       folderId: w.folderId,
       publishedVersionId: w.publishedVersionId,
       ...this.projectFields(w),
+      scopes: this.rowScopes(w),
+      sharedWithProjects: this.sharedWith('workflow', w.id),
     };
   }
 
@@ -1225,7 +1288,7 @@ export class MockBackend {
       return this.securityPolicy(tenant.id);
     });
     this.on('PATCH', '/settings', ({ body }) => {
-      const { tenant } = this.requireRole('admin');
+      const { tenant } = this.requireScope('securitySettings:manage');
       const settings = this.settingsOf(tenant.id);
       const reviews = body.workflowReviews as { enabled?: unknown } | undefined;
       if (reviews && typeof reviews.enabled === 'boolean')
@@ -1248,6 +1311,11 @@ export class MockBackend {
     });
     this.on('POST', '/node-types/options', ({ body }) => {
       this.auth();
+      // P6-27: a call names the saved workflow or the project whose credentials it may use
+      const named = (value: unknown) => typeof value === 'string' && value !== '';
+      if (body.kind !== 'resourceMapping' && !named(body.workflowId) && !named(body.projectId))
+        throw new HttpError(400, 'bad_request', 'workflowId or projectId is required');
+      if (named(body.projectId)) this.targetProject(body.projectId);
       const node = body.node as WorkflowNode;
       if (body.kind === 'loadOptions') {
         const fn = demoLoadOptions[String(body.method)];
@@ -1256,7 +1324,7 @@ export class MockBackend {
       }
       if (body.kind === 'resourceMapping') {
         // P5-80, the role of the server's route
-        this.requireRole('editor');
+        this.requireScopeAnywhere('workflow:update');
         const fn = demoResourceMapping[String(body.method)];
         if (!fn) throw new HttpError(400, 'unknown_method', `Unknown method ${String(body.method)}`);
         return fn(node?.parameters ?? {});
@@ -1296,7 +1364,7 @@ export class MockBackend {
     });
     // P3-13: the server fetches the URL; the demo answers fixtures set with setUrlFixture
     this.on('POST', '/workflows/from-url', ({ body }) => {
-      this.requireRole('editor');
+      this.requireScopeAnywhere('workflow:create');
       const url = typeof body.url === 'string' ? body.url : '';
       if (!/^https?:\/\/.+/i.test(url) || url.length > 2048)
         throw new HttpError(400, 'invalid_url', 'Enter a URL that starts with http:// or https://');
@@ -1513,6 +1581,11 @@ export class MockBackend {
         query,
       )
         .filter((e) => !query.workflowId || e.workflowId === query.workflowId)
+        .filter(
+          (e) =>
+            !query.projectId ||
+            this.workflows.find((w) => w.id === e.workflowId)?.projectId === query.projectId,
+        )
         .filter((e) => !query.status || e.status === query.status)
         .filter((e) => !query.workflowVersionId || e.workflowVersionId === query.workflowVersionId)
         .filter((e) => matchesCustomData(e.customData, query))
@@ -1521,7 +1594,9 @@ export class MockBackend {
     });
     this.on('GET', '/executions/:id', ({ params }) => {
       const e = execution(params[0]);
-      return { ...summary(e), workflowData: copy(e.workflowData), state: copy(e.state) };
+      // the caller's scopes come from the execution's workflow (its project)
+      const scopes = this.rowScopes(this.workflows.find((w) => w.id === e.workflowId) ?? {});
+      return { ...summary(e), workflowData: copy(e.workflowData), state: copy(e.state), scopes };
     });
     this.on('POST', '/executions/:id/retry', ({ params, body }) => {
       const e = execution(params[0]);
@@ -1552,11 +1627,14 @@ export class MockBackend {
 
     // --- credentials ------------------------------------------------------------------------------
     const credential = (id: string) => {
-      const { tenant, role } = this.auth();
-      // old viewers, `member` and custom slugs (ranked as viewer) cannot read one, as the server's editor gate
-      if (role === 'viewer') throw new HttpError(403, 'forbidden', 'Viewers cannot read credentials');
+      const { tenant } = this.auth();
       const c = this.credentials.find((x) => x.id === id && x.tenantId === tenant.id);
-      if (!c) throw new HttpError(404, 'not_found', 'Credential not found');
+      // `credential:read` on the credential's project (old viewers hold none), as the server's gate
+      if (!c) {
+        this.requireScope('credential:read');
+        throw new HttpError(404, 'not_found', 'Credential not found');
+      }
+      this.requireScope('credential:read', { scopes: this.rowScopes(c) });
       return c;
     };
     const secretKeys = (type: string) =>
@@ -1568,18 +1646,41 @@ export class MockBackend {
       );
     this.on('GET', '/credentials', ({ query }) => {
       const { tenant } = this.auth();
-      return this.credentials
-        .filter((c) => c.tenantId === tenant.id && (!query.type || c.type === query.type))
-        .filter((c) => !query.projectId || c.projectId === query.projectId)
-        .map(({ id, name, type, createdAt, updatedAt, projectId, isGlobal }) => ({
-          id,
-          name,
-          type,
-          createdAt,
-          updatedAt,
-          ...this.projectFields({ projectId }),
-          ...(isGlobal ? { isGlobal } : {}),
-        }));
+      const visible = this.visibleProjectIds();
+      const sharedTo = (credentialId: string) =>
+        demoShares(this).filter(
+          (s) => s.tenantId === tenant.id && s.resourceType === 'credential' && s.resourceId === credentialId,
+        );
+      return (
+        this.credentials
+          .filter((c) => c.tenantId === tenant.id && (!query.type || c.type === query.type))
+          .filter((c) => this.rowVisible(c, this.sharedWith('credential', c.id)))
+          // a project's pickers: its own credentials, those shared to it, and the global ones
+          .filter(
+            (c) =>
+              !query.projectId ||
+              c.projectId === query.projectId ||
+              c.isGlobal === true ||
+              sharedTo(c.id).some((s) => s.projectId === query.projectId),
+          )
+          // Shared with you: shared to a project of the caller, owned by none of them
+          .filter(
+            (c) =>
+              query.onlySharedWithMe !== 'true' ||
+              (!visible.has(c.projectId ?? '') && sharedTo(c.id).some((s) => visible.has(s.projectId))),
+          )
+          .map((c) => ({
+            id: c.id,
+            name: c.name,
+            type: c.type,
+            createdAt: c.createdAt,
+            updatedAt: c.updatedAt,
+            ...this.projectFields(c),
+            ...(c.isGlobal ? { isGlobal: true } : {}),
+            scopes: this.rowScopes(c),
+            sharedWithProjects: this.sharedWith('credential', c.id),
+          }))
+      );
     });
     this.on('POST', '/credentials', ({ body }) => {
       const { tenant } = this.auth();
@@ -1616,6 +1717,8 @@ export class MockBackend {
         data,
         ...this.projectFields(c),
         ...(c.isGlobal ? { isGlobal: true } : {}),
+        scopes: this.rowScopes(c),
+        sharedWithProjects: this.sharedWith('credential', c.id),
       };
     });
     this.on('PATCH', '/credentials/:id', ({ params, body }) => {

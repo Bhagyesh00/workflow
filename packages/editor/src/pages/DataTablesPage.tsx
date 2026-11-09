@@ -22,19 +22,22 @@ import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { errorMessage } from '../api/client';
 import { dataTablesApi, favoritesApi } from '../api/endpoints';
-import { queryKeys, useFavorites, useMe } from '../api/queries';
-import type { DataTableInfo } from '../api/types';
+import { queryKeys, useFavorites } from '../api/queries';
+import type { DataTableInfo, ProjectListFilter } from '../api/types';
 import { CreateTableDialog } from '../components/data-tables/CreateTableDialog';
 import { useDebounced } from '../components/data-tables/DataTableGrid';
 import { DownloadCsvDialog } from '../components/data-tables/DownloadCsvDialog';
 import { ImportCsvDialog, plural } from '../components/data-tables/ImportCsvDialog';
 import { useDataTableLimits } from '../components/data-tables/StorageBanner';
+import { ProjectBadge } from '../components/projects/ProjectBadge';
+import { ProjectFilter, useProjectListScope } from '../components/projects/ProjectFilter';
 import { Button, IconButton } from '../components/ui/Button';
 import { confirmDialog, Dialog } from '../components/ui/Dialog';
 import { FormField, Select, TextInput } from '../components/ui/Field';
 import { Menu, type MenuItem } from '../components/ui/Menu';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
 import { formatRelative } from '../lib/format';
+import { usePermissions } from '../lib/permissions';
 import { toast } from '../stores/ui-store';
 
 const PAGE_SIZE = 10;
@@ -196,8 +199,13 @@ export function RenameTableDialog({ table, onClose }: { table: DataTableInfo; on
 type TableDialog = 'rename' | 'import' | 'download';
 
 /** the actions of a table, shared by its card and its page, and the dialogs they open */
-export function useTableActions(table: DataTableInfo, canWrite: boolean, onDeleted?: () => void) {
+export function useTableActions(table: DataTableInfo, onDeleted?: () => void) {
   const queryClient = useQueryClient();
+  // each action by this table's own scopes (its project's role), else the workspace role's
+  const { can } = usePermissions();
+  const canChange = can('dataTable:update', table);
+  const canDelete = can('dataTable:delete', table);
+  const canClear = can('dataTable:writeRow', table);
   const { starred, toggle } = useTableFavorite(table.id);
   const [dialog, setDialog] = useState<TableDialog>();
 
@@ -250,7 +258,7 @@ export function useTableActions(table: DataTableInfo, canWrite: boolean, onDelet
       icon: <Download size={14} />,
       onSelect: () => setDialog('download'),
     },
-    ...(canWrite
+    ...(canChange
       ? ([
           {
             key: 'import',
@@ -264,7 +272,11 @@ export function useTableActions(table: DataTableInfo, canWrite: boolean, onDelet
             icon: <Pencil size={14} />,
             onSelect: () => setDialog('rename'),
           },
-          'separator',
+        ] satisfies MenuItem[])
+      : []),
+    ...(canClear || canDelete ? (['separator'] as const) : []),
+    ...(canClear
+      ? ([
           {
             key: 'clear',
             label: 'Clear all rows',
@@ -272,6 +284,10 @@ export function useTableActions(table: DataTableInfo, canWrite: boolean, onDelet
             danger: true,
             onSelect: () => void clear(),
           },
+        ] satisfies MenuItem[])
+      : []),
+    ...(canDelete
+      ? ([
           {
             key: 'delete',
             label: 'Delete',
@@ -279,7 +295,7 @@ export function useTableActions(table: DataTableInfo, canWrite: boolean, onDelet
             danger: true,
             onSelect: () => void remove(),
           },
-        ] satisfies Array<MenuItem | 'separator'>)
+        ] satisfies MenuItem[])
       : []),
   ];
 
@@ -297,13 +313,13 @@ export function useTableActions(table: DataTableInfo, canWrite: boolean, onDelet
 function TableCard({
   table,
   sizeBytes,
-  canWrite,
+  showProject,
 }: {
   table: DataTableInfo;
   sizeBytes: number | undefined;
-  canWrite: boolean;
+  showProject: boolean;
 }) {
-  const { items, dialogs, starred, toggleFavorite } = useTableActions(table, canWrite);
+  const { items, dialogs, starred, toggleFavorite } = useTableActions(table);
   return (
     <li className="flex items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3">
       <Table2 size={16} aria-hidden="true" className="shrink-0 text-ink-3" />
@@ -320,6 +336,13 @@ function TableCard({
           {` · Updated ${formatRelative(table.updatedAt)}`}
         </p>
       </div>
+      {showProject && (
+        <ProjectBadge
+          homeProject={table.homeProject}
+          sharedWithProjects={table.sharedWithProjects}
+          resourceType="dataTable"
+        />
+      )}
       <DependencyPill tableId={table.id} />
       <IconButton
         size="sm"
@@ -349,7 +372,9 @@ function TableCard({
 }
 
 export function DataTablesPage() {
-  const canWrite = useMe().data?.role !== 'viewer';
+  const scope = useProjectListScope('data-tables');
+  // the Create button and the empty state's call to action: `dataTable:create` in the page's project
+  const canWrite = scope.canCreate('dataTable:create');
   const [params, setParams] = useSearchParams();
   const [searchText, setSearchText] = useState('');
   const search = useDebounced(searchText.trim());
@@ -362,11 +387,12 @@ export function DataTablesPage() {
     NonNullable<DataTableListQuery['sortBy']>['column'],
     NonNullable<DataTableListQuery['sortBy']>['direction'],
   ];
-  const query: DataTableListQuery = {
+  const query: DataTableListQuery & ProjectListFilter = {
     skip,
     take: PAGE_SIZE,
     name: search || undefined,
     sortBy: { column, direction },
+    ...scope.listFilter,
   };
   const list = useQuery({
     queryKey: queryKeys.dataTables(query),
@@ -422,6 +448,15 @@ export function DataTablesPage() {
             }}
           />
         </div>
+        {scope.kind === 'home' && (
+          <ProjectFilter
+            value={scope.filterValue}
+            onChange={(next) => {
+              scope.setFilterValue(next);
+              setSkip(0);
+            }}
+          />
+        )}
         <Select
           aria-label="Sort data tables"
           className="w-44"
@@ -471,7 +506,7 @@ export function DataTablesPage() {
                 key={table.id}
                 table={table}
                 sizeBytes={limits.data?.dataTables[table.id]?.sizeBytes}
-                canWrite={canWrite}
+                showProject={scope.kind !== 'project'}
               />
             ))}
           </ul>

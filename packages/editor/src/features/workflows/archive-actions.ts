@@ -11,6 +11,7 @@ import type { Me, WorkflowDTO } from '../../api/types';
 import { confirmDialog } from '../../components/ui/Dialog';
 import { toast } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
+import { canOnOpenWorkflow } from '../editor/open-resources';
 
 export interface WorkflowActionDeps {
   navigate?: (to: string) => void;
@@ -61,7 +62,7 @@ export async function unarchiveWorkflow(id: string, deps?: WorkflowActionDeps): 
     if (current.meta.id === id) {
       // back to the role's own read-only state; a viewer stays read-only
       const me = deps?.queryClient?.getQueryData<Me>(queryKeys.me);
-      current.setArchived(false, me?.role === 'viewer');
+      current.setArchived(false, !canOnOpenWorkflow(me, 'workflow:update'));
     }
     await refresh(deps);
     toast.success('Workflow restored', `${dto.name} stays unpublished`);
@@ -87,7 +88,7 @@ export async function deleteArchivedWorkflow(id: string, deps?: WorkflowActionDe
     await workflowsApi.remove(id);
     await refresh(deps);
     toast.success('Workflow deleted');
-    deps?.navigate?.('/workflows');
+    deps?.navigate?.('/home/workflows');
     return true;
   } catch (error) {
     toast.error('Could not delete the workflow', errorMessage(error));

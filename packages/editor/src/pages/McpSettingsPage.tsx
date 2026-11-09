@@ -18,6 +18,7 @@ import { McpWorkflowsTable } from '../components/settings/McpWorkflowsTable';
 import { Button } from '../components/ui/Button';
 import { Switch } from '../components/ui/Field';
 import { Callout, PageLoader } from '../components/ui/misc';
+import { canWith } from '../lib/permissions';
 import { toast } from '../stores/ui-store';
 
 const KEYS = {
@@ -41,14 +42,15 @@ function useDebounced<T>(value: T, ms: number): T {
 export function McpSettingsPage() {
   const me = useMe();
   const queryClient = useQueryClient();
-  const role = me.data?.role;
-  const isAdmin = role === 'owner' || role === 'admin';
-  const isEditor = isAdmin || role === 'editor';
+  // `mcp:manage` turns MCP on and sets clients; the workflow table needs `workflow:update` (it flips access)
+  const loaded = Boolean(me.data);
+  const isAdmin = canWith(me.data, 'mcp:manage');
+  const isEditor = isAdmin || canWith(me.data, 'workflow:update');
   const [connectOpen, setConnectOpen] = useState(false);
   const [search, setSearch] = useState('');
   const term = useDebounced(search.trim(), 250);
 
-  const settings = useQuery({ queryKey: KEYS.settings, queryFn: mcpApi.settings, enabled: Boolean(role) });
+  const settings = useQuery({ queryKey: KEYS.settings, queryFn: mcpApi.settings, enabled: loaded });
   const workflows = useQuery({
     queryKey: KEYS.workflows(term),
     queryFn: () => mcpApi.workflows({ search: term || undefined }),

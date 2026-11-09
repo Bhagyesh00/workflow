@@ -13,15 +13,18 @@ import { toast } from '../../stores/ui-store';
 
 export const DRAG_MIME = 'application/x-workflow-resource';
 
+/** `projectId`: the project the item is in; a drop into a folder of another project is refused (P6-43) */
 export type DragItem =
-  | { type: 'workflow'; id: string; name: string; folderId: string | null }
-  | { type: 'folder'; id: string; name: string; parentFolderId: string | null };
+  | { type: 'workflow'; id: string; name: string; folderId: string | null; projectId?: string }
+  | { type: 'folder'; id: string; name: string; parentFolderId: string | null; projectId?: string };
 
 /** where an item can be dropped: a folder (null = the top level) and the ids from the top level down to it */
 export interface DropTarget {
   folderId: string | null;
   /** the ids of the target's ancestors and the target itself (empty for the top level) */
   path: string[];
+  /** the project of the target folder (unset for the top level, which is every project's) */
+  projectId?: string;
 }
 
 let dragging: DragItem | null = null;
@@ -37,10 +40,11 @@ export function parentOf(item: DragItem): string | null {
 
 /**
  * Whether `item` may be dropped on `target`: not onto the folder it is already in, not a folder
- * onto itself or one of its subfolders.
+ * onto itself or one of its subfolders, not into a folder of another project (Move to project does that).
  */
 export function canDrop(item: DragItem, target: DropTarget): boolean {
   if (parentOf(item) === target.folderId) return false;
+  if (item.projectId && target.projectId && item.projectId !== target.projectId) return false;
   if (item.type === 'folder' && target.path.includes(item.id)) return false;
   return true;
 }

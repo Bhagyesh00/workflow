@@ -26,9 +26,15 @@ import {
   isExpression,
   isResourceLocatorValue,
   type ListSearchResult,
+  type Scope,
   type WorkflowNode,
 } from '@workflow/workflow';
-import type { DataTableCsvPreview, DataTableDependency, DataTableLimits } from '../api/types';
+import type {
+  DataTableInfo as ApiDataTableInfo,
+  DataTableCsvPreview,
+  DataTableDependency,
+  DataTableLimits,
+} from '../api/types';
 import { buildExpressionContext } from '../lib/expression-context';
 import { newId } from '../lib/ids';
 import type { MockBackend } from './mock-backend';
@@ -36,6 +42,8 @@ import { copy, HttpError, now } from './mock-http';
 
 interface StoredTable extends DataTableInfo {
   tenantId: string;
+  /** P6-43: the table's project */
+  projectId?: string;
   rows: DataTableRow[];
   nextRowId: number;
 }
@@ -87,9 +95,17 @@ function tableOf(tenantId: string | undefined, id: string): StoredTable {
   return table;
 }
 
-function toInfo(table: StoredTable): DataTableInfo {
+function toInfo(table: StoredTable): ApiDataTableInfo {
   const { id, name, columns, createdAt, updatedAt } = table;
-  return copy({ id, name, columns, createdAt, updatedAt });
+  const base = copy({ id, name, columns, createdAt, updatedAt });
+  // P6-43: the table's project and the caller's scopes in it (nothing for a table built without a project)
+  if (!currentBackend) return base;
+  return {
+    ...base,
+    ...currentBackend.projectFields(table),
+    scopes: currentBackend.rowScopes(table),
+    sharedWithProjects: [],
+  };
 }
 
 function parseTableName(value: unknown): string {
@@ -517,7 +533,12 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   currentBackend = backend;
   tables = [];
   const reader = () => backend.auth().tenant.id;
-  const writer = () => backend.requireRole('editor').tenant.id;
+  /** the table, after `scope` on its project (the workspace role's scopes count too) */
+  const writeTable = (id: string, scope: Scope): StoredTable => {
+    const table = tableOf(reader(), id);
+    backend.requireScope(scope, { scopes: backend.rowScopes(table) });
+    return table;
+  };
 
   backend.on('GET', '/data-tables', ({ query }) => {
     const tenantId = reader();
@@ -525,6 +546,10 @@ export function registerDataTableRoutes(backend: MockBackend): void {
     const sort = parseSort(query.sortBy);
     const sign = sort?.direction === 'asc' ? 1 : -1;
     const list = tablesOf(tenantId)
+      .filter((t) => !query.projectId || t.projectId === query.projectId)
+      .filter((t) => backend.rowVisible(t))
+      // data tables are not shared with other projects: Shared with you has none
+      .filter(() => query.onlySharedWithMe !== 'true')
       .filter((t) => !name || t.name.toLowerCase().includes(name.toLowerCase()))
       .sort((a, b) => {
         if (!sort) return b.updatedAt.localeCompare(a.updatedAt);
@@ -539,7 +564,10 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   backend.on('GET', '/data-tables/limits', () => limitsOf(reader()));
 
   backend.on('POST', '/data-tables', ({ body }) => {
-    const tenantId = writer();
+    const project = backend.targetProject(body.projectId);
+    const tenantId = backend.requireScope('dataTable:create', {
+      scopes: backend.rowScopes({ projectId: project.id }),
+    }).tenant.id;
     const name = parseTableName(body.name);
     assertUniqueName(tenantId, name);
     const input = (body.columns ?? []) as CreateColumn[];
@@ -559,6 +587,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
       id: newId(),
       tenantId,
       name,
+      projectId: project.id,
       columns: [],
       rows: [],
       nextRowId: 1,
@@ -580,7 +609,8 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   });
 
   backend.on('POST', '/data-tables/csv/preview', ({ body }) => {
-    const tenantId = writer();
+    const tenantId = backend.requireScopeAnywhere('dataTable:create').tenant.id;
+    if (typeof body.projectId === 'string' && body.projectId) backend.targetProject(body.projectId);
     const csv = String(body.csv ?? '');
     assertCsvFits(tenantId, csv);
     return previewCsv(csv, body.hasHeaders !== false);
@@ -589,8 +619,8 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   backend.on('GET', '/data-tables/:id', ({ params }) => toInfo(tableOf(reader(), params[0])));
 
   backend.on('PATCH', '/data-tables/:id', ({ params, body }) => {
-    const tenantId = writer();
-    const table = tableOf(tenantId, params[0]);
+    const tenantId = reader();
+    const table = writeTable(params[0], 'dataTable:update');
     const name = parseTableName(body.name);
     assertUniqueName(tenantId, name, table.id);
     table.name = name;
@@ -599,7 +629,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   });
 
   backend.on('DELETE', '/data-tables/:id', ({ params }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:delete');
     tables = tables.filter((t) => t !== table);
     return { ok: true };
   });
@@ -620,7 +650,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   backend.on('GET', '/data-tables/:id/columns', ({ params }) => copy(tableOf(reader(), params[0]).columns));
 
   backend.on('POST', '/data-tables/:id/columns', ({ params, body }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:writeColumn');
     assertColumnName(body.name);
     if (table.columns.some((c) => c.name === body.name)) {
       throw conflict(DATA_TABLE_ERRORS.columnNameExists(body.name, table.name));
@@ -631,7 +661,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   });
 
   backend.on('DELETE', '/data-tables/:id/columns/:columnId', ({ params }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:writeColumn');
     const column = columnOf(table, params[1]);
     table.columns = table.columns.filter((c) => c !== column);
     renumber(table);
@@ -641,7 +671,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   });
 
   backend.on('PATCH', '/data-tables/:id/columns/:columnId/move', ({ params, body }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:writeColumn');
     const column = columnOf(table, params[1]);
     const target = Math.min(Math.max(Number(body.targetIndex) || 0, 0), table.columns.length - 1);
     table.columns = table.columns.filter((c) => c !== column);
@@ -652,7 +682,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   });
 
   backend.on('PATCH', '/data-tables/:id/columns/:columnId/rename', ({ params, body }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:writeColumn');
     const column = columnOf(table, params[1]);
     assertColumnName(body.name);
     const name = body.name;
@@ -681,7 +711,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   });
 
   backend.on('POST', '/data-tables/:id/insert', ({ params, body }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:writeRow');
     const inserted = insert(table, (body.data ?? []) as Array<Record<string, unknown>>);
     if (body.returnType === 'all') return copy(inserted);
     if (body.returnType === 'id') return inserted.map((row) => ({ id: row.id }));
@@ -689,7 +719,7 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   });
 
   backend.on('POST', '/data-tables/:id/upsert', ({ params, body }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:writeRow');
     const { filter, data } = parseChange(body);
     const changed = matching(table, filter).length
       ? updateMatching(table, filter, data)
@@ -698,21 +728,21 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   });
 
   backend.on('PATCH', '/data-tables/:id/rows', ({ params, body }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:writeRow');
     const { filter, data } = parseChange(body);
     const changed = updateMatching(table, filter, data);
     return body.returnData ? copy(changed) : true;
   });
 
   backend.on('DELETE', '/data-tables/:id/rows/clear', ({ params }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:writeRow');
     const deletedCount = table.rows.length;
     table.rows = [];
     return { deletedCount };
   });
 
   backend.on('DELETE', '/data-tables/:id/rows', ({ params, query }) => {
-    const table = tableOf(writer(), params[0]);
+    const table = writeTable(params[0], 'dataTable:writeRow');
     const filter = parseFilter(query.filter);
     if (!filter?.filters.length) throw badRequest(DATA_TABLE_ERRORS.filterRequiredForDelete);
     const removed = deleteMatching(table, filter);
@@ -730,8 +760,8 @@ export function registerDataTableRoutes(backend: MockBackend): void {
   });
 
   backend.on('POST', '/data-tables/:id/import-csv', ({ params, body }) => {
-    const tenantId = writer();
-    const table = tableOf(tenantId, params[0]);
+    const tenantId = reader();
+    const table = writeTable(params[0], 'dataTable:writeRow');
     const text = String(body.csv ?? '');
     assertCsvFits(tenantId, text);
     const csv = parseCsv(text, true);

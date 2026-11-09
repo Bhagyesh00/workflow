@@ -328,8 +328,8 @@ export function registerEvaluationRoutes(backend: MockBackend): void {
 
   // start: body { concurrency?, rowIndices? }, answers { testRunId } (editor)
   backend.on('POST', '/workflows/:id/test-runs/new', ({ params, body }) => {
-    backend.requireRole('editor');
     const wf = backend.workflow(params[0]);
+    backend.requireScope('workflow:execute', { scopes: backend.rowScopes(wf) });
     const trigger = wf.nodes.find((n) => n.type === EVALUATION_TRIGGER_TYPE);
     if (!trigger) {
       throw conflict('Workflow has no evaluation trigger', { code: 'EVALUATION_TRIGGER_NOT_FOUND' });
@@ -412,7 +412,7 @@ export function registerEvaluationRoutes(backend: MockBackend): void {
 
   // stop a new or running run (editor)
   backend.on('POST', '/workflows/:id/test-runs/:runId/cancel', ({ params }) => {
-    backend.requireRole('editor');
+    backend.requireScope('workflow:execute', { scopes: backend.rowScopes(backend.workflow(params[0])) });
     const run = findRun(backend, params[0], params[1]);
     if (run.status !== 'new' && run.status !== 'running') {
       throw conflict(`The test run "${run.id}" cannot be cancelled`);
@@ -433,7 +433,7 @@ export function registerEvaluationRoutes(backend: MockBackend): void {
 
   // cancel one case that has not started (editor)
   backend.on('POST', '/workflows/:id/test-runs/:runId/test-cases/:caseId/cancel', ({ params }) => {
-    backend.requireRole('editor');
+    backend.requireScope('workflow:execute', { scopes: backend.rowScopes(backend.workflow(params[0])) });
     const run = findRun(backend, params[0], params[1]);
     const testCase = state().cases.find((c) => c.id === params[2] && c.testRunId === run.id);
     if (!testCase) throw notFound('Test case');
@@ -444,7 +444,7 @@ export function registerEvaluationRoutes(backend: MockBackend): void {
 
   // delete a run that is not running (editor)
   backend.on('DELETE', '/workflows/:id/test-runs/:runId', ({ params }) => {
-    backend.requireRole('editor');
+    backend.requireScope('workflow:execute', { scopes: backend.rowScopes(backend.workflow(params[0])) });
     const run = findRun(backend, params[0], params[1]);
     if (run.status === 'new' || run.status === 'running') {
       throw conflict(`The test run "${run.id}" is running. Stop it before deleting it.`);

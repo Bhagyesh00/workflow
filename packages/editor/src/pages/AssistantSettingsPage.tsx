@@ -15,6 +15,7 @@ import { AssistantModelForm, useSearchCredentials } from '../components/assistan
 import { AssistantMcpConnections } from '../components/settings/AssistantMcpConnections';
 import { FormField, Select, Switch } from '../components/ui/Field';
 import { Callout, PageLoader } from '../components/ui/misc';
+import { canWith } from '../lib/permissions';
 import { toast } from '../stores/ui-store';
 
 /** shown on the `mcpRead` row: a server's own read-only hint is not proof */
@@ -101,7 +102,7 @@ function SwitchRow({
 export function AssistantSettingsPage() {
   const me = useMe();
   const queryClient = useQueryClient();
-  const isAdmin = me.data?.role === 'owner' || me.data?.role === 'admin';
+  const isAdmin = canWith(me.data, 'instanceAi:manage');
   const settings = useQuery({
     queryKey: queryKeys.assistantSettings,
     queryFn: assistantApi.settings,

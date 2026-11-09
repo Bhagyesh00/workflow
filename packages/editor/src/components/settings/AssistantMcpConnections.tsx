@@ -15,6 +15,7 @@ import type {
   AssistantMcpConnectionDTO,
   AssistantMcpTransport,
 } from '../../api/types';
+import { canWith } from '../../lib/permissions';
 import { toast } from '../../stores/ui-store';
 import { Button } from '../ui/Button';
 import { confirmDialog, Dialog } from '../ui/Dialog';
@@ -332,7 +333,7 @@ function ConnectionDialog({
 export function AssistantMcpConnections() {
   const queryClient = useQueryClient();
   const me = useMe();
-  const isAdmin = me.data?.role === 'owner' || me.data?.role === 'admin';
+  const isAdmin = canWith(me.data, 'instanceAi:manage');
   const [editing, setEditing] = useState<AssistantMcpConnectionDTO | 'new' | null>(null);
   const list = useQuery({
     queryKey: queryKeys.assistantMcpConnections,

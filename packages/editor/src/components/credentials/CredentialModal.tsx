@@ -9,8 +9,10 @@ import { CheckCircle2, KeyRound, Link2, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { credentialsApi, secretsApi } from '../../api/endpoints';
-import { queryKeys, useCredentialTypes, useSettings } from '../../api/queries';
+import { queryKeys, useCredentialTypes, useMe, useSettings } from '../../api/queries';
 import type { CredentialTestResult, CredentialTypeDescription } from '../../api/types';
+import { workingProjectId } from '../../features/editor/open-resources';
+import { canWith } from '../../lib/permissions';
 import { setIn } from '../../lib/workflow-ops';
 import { toast } from '../../stores/ui-store';
 import type { CompletionData } from '../code/completions';
@@ -72,6 +74,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
   const queryClient = useQueryClient();
   const credentialTypes = useCredentialTypes();
   const settings = useSettings();
+  const me = useMe().data;
   const existing = useQuery({
     queryKey: queryKeys.credential(credentialId ?? 'new'),
     queryFn: () => credentialsApi.get(credentialId!),
@@ -86,6 +89,8 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
     staleTime: 30_000,
     retry: false,
   });
+  // an existing credential changes by its own `credential:update`; a new one needs nothing more here
+  const canChange = !existing.data || canWith(me, 'credential:update', existing.data);
   const typeName = existing.data?.type ?? type ?? '';
   const typeDescription = credentialTypes.get(typeName);
   const isOAuth = Boolean(typeDescription?.isOAuth2 || typeDescription?.isOAuth1);
@@ -130,7 +135,8 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
     mutationFn: async () => {
       const body = { name: name.trim() || 'Untitled credential', data: payloadData() };
       if (savedId) return credentialsApi.update(savedId, body);
-      return credentialsApi.create({ ...body, type: typeName });
+      // a new credential goes to the project the user works in (the open workflow's, or the project page's)
+      return credentialsApi.create({ ...body, type: typeName, projectId: workingProjectId() });
     },
     onSuccess: async (credential) => {
       setSavedId(credential.id);
@@ -144,7 +150,13 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
   });
 
   const test = useMutation({
-    mutationFn: () => credentialsApi.test({ type: typeName, data: payloadData(), id: savedId ?? undefined }),
+    mutationFn: () =>
+      credentialsApi.test({
+        type: typeName,
+        data: payloadData(),
+        id: savedId ?? undefined,
+        projectId: savedId ? undefined : workingProjectId(),
+      }),
     onSuccess: setTestResult,
     onError: (error) => setTestResult({ status: 'Error', message: errorMessage(error) }),
   });
@@ -233,7 +245,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
     () => ({
       node,
       rootValues: data,
-      readOnly: false,
+      readOnly: !canChange,
       allowExpressions: hasConnections || hasExpression,
       completions: (): CompletionData => ({
         inputFields: () => [],
@@ -248,7 +260,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
         setData((d) => setIn(d, path, value) as NodeParameters);
       },
     }),
-    [node, data, savedId, hasConnections, hasExpression, secrets],
+    [node, data, savedId, hasConnections, hasExpression, secrets, canChange],
   );
 
   // P5-18: with automatic registration (the default) the fixed client fields are found by the server on
@@ -322,7 +334,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
             variant="primary"
             onClick={() => save.mutate()}
             loading={save.isPending}
-            disabled={!typeName || loadFailed}
+            disabled={!typeName || loadFailed || !canChange}
           >
             Save
           </Button>

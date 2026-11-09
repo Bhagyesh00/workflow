@@ -11,6 +11,7 @@ import { refuseWhileReviewing } from '../../stores/builder-store';
 import { toast } from '../../stores/ui-store';
 import { toWorkflowBody, useWorkflowStore } from '../../stores/workflow-store';
 import type { EditorDeps } from './editor-actions';
+import { workingProjectId } from './open-resources';
 
 const STICKY_WIDTH = 260;
 const STICKY_HEIGHT = 160;
@@ -47,6 +48,8 @@ export async function duplicateWorkflow(deps: Pick<EditorDeps, 'navigate'>): Pro
       ...body,
       nodes: withFreshWebhookIds(body.nodes),
       name: `${s.meta.name} copy`,
+      // a copy stays in the project of the workflow it came from
+      projectId: workingProjectId(),
     });
     toast.success('Workflow duplicated', dto.name);
     deps.navigate(`/workflow/${encodeURIComponent(dto.id)}`);

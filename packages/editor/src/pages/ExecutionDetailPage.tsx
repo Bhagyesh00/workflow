@@ -22,6 +22,7 @@ import {
   stopExecution,
 } from '../features/executions/execution-commands';
 import { formatDateTime, formatDuration } from '../lib/format';
+import { usePermissions } from '../lib/permissions';
 import { useRunStore } from '../stores/run-store';
 import { useUiStore } from '../stores/ui-store';
 import { useWorkflowStore } from '../stores/workflow-store';
@@ -31,6 +32,7 @@ export function ExecutionDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const nodeTypes = useNodeTypes();
+  const { can } = usePermissions();
   const ndvNode = useUiStore((s) => s.ndvNode);
   const openNdv = useUiStore((s) => s.openNdv);
   const execution = useQuery({
@@ -100,12 +102,15 @@ export function ExecutionDetailPage() {
             ? 'It may have been deleted or pruned.'
             : errorMessage(execution.error)
         }
-        action={<Button onClick={() => navigate('/executions')}>Back to executions</Button>}
+        action={<Button onClick={() => navigate('/home/executions')}>Back to executions</Button>}
       />
     );
   }
   const data = execution.data;
   const finished = !['running', 'waiting', 'new'].includes(data.status);
+  // retry and stop need `workflow:execute` and delete `execution:delete`, by the execution's own scopes
+  const canRun = can('workflow:execute', data);
+  const canDelete = can('execution:delete', data);
   const retryable = ['error', 'crashed', 'canceled'].includes(data.status);
   const error = data.state?.resultData?.error;
   const canResume = Boolean(data.state?.executionData?.failedExecuteData);
@@ -114,7 +119,7 @@ export function ExecutionDetailPage() {
     <div className="flex h-full flex-col">
       <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
         <Link
-          to="/executions"
+          to="/home/executions"
           aria-label="Back to executions"
           className="grid size-8 place-items-center rounded-lg text-ink-2 hover:bg-surface-3 hover:text-ink"
         >
@@ -143,7 +148,7 @@ export function ExecutionDetailPage() {
         >
           Debug in editor
         </Button>
-        {retryable && (
+        {retryable && canRun && (
           <Menu
             trigger={(t) => (
               <Button
@@ -168,7 +173,7 @@ export function ExecutionDetailPage() {
             ]}
           />
         )}
-        {!finished && (
+        {!finished && canRun && (
           <Button
             size="sm"
             variant="danger"
@@ -179,15 +184,17 @@ export function ExecutionDetailPage() {
             Stop
           </Button>
         )}
-        <Button
-          size="sm"
-          variant="ghost"
-          icon={<Trash2 size={13} />}
-          onClick={() => void remove()}
-          aria-label="Delete execution"
-        >
-          Delete
-        </Button>
+        {canDelete && (
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<Trash2 size={13} />}
+            onClick={() => void remove()}
+            aria-label="Delete execution"
+          >
+            Delete
+          </Button>
+        )}
       </header>
       {error && (
         <Callout

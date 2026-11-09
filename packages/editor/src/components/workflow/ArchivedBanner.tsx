@@ -3,7 +3,7 @@
  */
 import { useQueryClient } from '@tanstack/react-query';
 import { Archive, ArchiveRestore } from 'lucide-react';
-import { useMe } from '../../api/queries';
+import { useCanEditWorkflow } from '../../features/editor/open-resources';
 import { unarchiveWorkflow } from '../../features/workflows/archive-actions';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { Button } from '../ui/Button';
@@ -11,7 +11,7 @@ import { Button } from '../ui/Button';
 export function ArchivedBanner() {
   const id = useWorkflowStore((s) => s.meta.id);
   const isArchived = useWorkflowStore((s) => s.meta.isArchived);
-  const canWrite = useMe().data?.role !== 'viewer';
+  const canWrite = useCanEditWorkflow();
   const queryClient = useQueryClient();
   if (!isArchived || !id) return null;
   return (

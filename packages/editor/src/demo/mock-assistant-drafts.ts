@@ -143,7 +143,7 @@ export function registerAssistantDraftRoutes(backend: MockBackend): void {
   );
 
   backend.on('POST', '/assistant/threads/:threadId/drafts/:draftId/accept', ({ params, body }) => {
-    backend.requireRole('editor');
+    backend.requireScopeAnywhere('workflow:create');
     const [threadId, draftId] = params;
     const draft = ownDraft(backend, threadId, draftId);
     if (draft.status !== 'open') throw new HttpError(409, 'conflict', NOT_OPEN);
@@ -164,7 +164,7 @@ export function registerAssistantDraftRoutes(backend: MockBackend): void {
   });
 
   backend.on('POST', '/assistant/threads/:threadId/drafts/:draftId/discard', ({ params }) => {
-    backend.requireRole('editor');
+    backend.requireScopeAnywhere('workflow:create');
     const draft = ownDraft(backend, params[0], params[1]);
     if (draft.status === 'accepted') throw new HttpError(409, 'conflict', NOT_OPEN);
     draft.status = 'discarded';

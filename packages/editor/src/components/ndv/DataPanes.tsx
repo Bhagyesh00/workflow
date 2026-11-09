@@ -22,6 +22,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { useAiBuilderFeature, useMe } from '../../api/queries';
 import { openBuilderForError } from '../../features/builder/error-entry';
+import { useCanEditWorkflow } from '../../features/editor/open-resources';
 import { compareItems } from '../../lib/data';
 import { getNodeOutput } from '../../lib/expression-context';
 import { formatDuration, plural } from '../../lib/format';
@@ -179,12 +180,12 @@ export function InputPane({
 export function ErrorPanel({ error }: { error: ExecutionErrorShape }) {
   const [showStack, setShowStack] = useState(false);
   const aiBuilder = useAiBuilderFeature();
-  const role = useMe().data?.role;
+  const me = useMe().data;
+  const canEdit = useCanEditWorkflow();
   const readOnly = useWorkflowStore((s) => s.readOnly);
   const fixTarget = error.node; // the engine and the demo run set it on every node error
   // P5-65: editors and above, when the builder is on
-  const canFixWithAi =
-    aiBuilder.enabled && role !== undefined && role !== 'viewer' && !readOnly && !!fixTarget;
+  const canFixWithAi = aiBuilder.enabled && me !== undefined && canEdit && !readOnly && !!fixTarget;
   const facts: Array<[string, string]> = [];
   if (error.itemIndex !== undefined) facts.push(['Item', String(error.itemIndex + 1)]);
   if (error.parameter) facts.push(['Parameter', error.parameter]);

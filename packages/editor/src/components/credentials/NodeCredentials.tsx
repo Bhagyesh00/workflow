@@ -10,8 +10,10 @@ import {
 } from '@workflow/workflow';
 import { Pencil, Plus } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
-import { useCredentials, useCredentialTypes } from '../../api/queries';
+import { useCredentials, useCredentialTypes, useMe, useProject } from '../../api/queries';
+import { useWorkingProjectId } from '../../features/editor/open-resources';
 import { nodeCredentialSlots } from '../../lib/doctor';
+import { canWith } from '../../lib/permissions';
 import { ExpressionInput } from '../parameters/ExpressionInput';
 import { IconButton } from '../ui/Button';
 import { Select } from '../ui/Field';
@@ -32,7 +34,11 @@ function CredentialSelect({
 }) {
   const id = useId();
   const types = useCredentialTypes();
-  const list = useCredentials(credential.name);
+  // the credentials this workflow's project may use (its own, shared to it, global), not the whole workspace's
+  const projectId = useWorkingProjectId();
+  const list = useCredentials(credential.name, projectId ?? undefined);
+  const project = useProject(projectId);
+  const canCreate = canWith(useMe().data, 'credential:create', project.data);
   const [modal, setModal] = useState<{ mode: 'create' } | { mode: 'edit'; id: string } | null>(null);
   const current = node.credentials?.[credential.name];
   const typeLabel = types.get(credential.name)?.displayName ?? credential.name;
@@ -105,7 +111,7 @@ function CredentialSelect({
                 {c.name}
               </option>
             ))}
-            {!readOnly && <option value={CREATE}>+ Create new credential</option>}
+            {!readOnly && canCreate && <option value={CREATE}>+ Create new credential</option>}
           </Select>
           {!readOnly && current?.id && !missing && (
             <IconButton
@@ -117,7 +123,7 @@ function CredentialSelect({
               <Pencil size={13} />
             </IconButton>
           )}
-          {!readOnly && !current?.id && (
+          {!readOnly && canCreate && !current?.id && (
             <IconButton
               label="Create credential"
               size="sm"
