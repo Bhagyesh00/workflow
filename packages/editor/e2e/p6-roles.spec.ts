@@ -5,7 +5,11 @@
  * table of system and custom roles, an admin building a project role from the Viewer preset, a role in use
  * refusing deletion, and the workspace editor's escalation warning and personal space block.
  *
- * Run: E2E_BASE_URL=<demo URL> npx playwright test e2e/p6-roles.spec.ts
+ * The demo router is in memory by default (the URL stays "/"), so start the demo dev server with
+ * VITE_DEMO_ROUTER=browser, or every toHaveURL check fails.
+ *
+ * Run: VITE_DEMO_ROUTER=browser pnpm dev:demo, then
+ *      E2E_BASE_URL=<demo URL> npx playwright test e2e/p6-roles.spec.ts
  */
 import { expect, test } from '@playwright/test';
 
