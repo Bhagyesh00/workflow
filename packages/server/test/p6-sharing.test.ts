@@ -6,6 +6,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createRepositories } from '../src/repositories';
 import { MISSING_SCOPE_MESSAGE } from '../src/services/access';
 import {
   addToProject,
@@ -145,6 +146,51 @@ describe('PUT /workflows/:id/share', () => {
     expect(await sharedWorkflowIds(tenantId, workflow.id)).toEqual([]);
   });
 
+  it('checks the scopes against the shares it then writes: a concurrent add is not removed without :unshare', async () => {
+    const { owner, tenantId, home, away, third } = await setup();
+    const fourth = await projectIn(server, tenantId, `Fourth ${suffix()}`);
+    // :share without :unshare
+    await repos().roles.create(tenantId, {
+      slug: 'project:sharer',
+      displayName: 'Sharer',
+      roleType: 'project',
+      scopes: ['project:read', 'workflow:read', 'workflow:list', 'workflow:share'],
+    });
+    const member = await realMember(owner);
+    await addToProject(server, tenantId, home.id, member.user.id, 'project:sharer');
+    const workflow = await flow(tenantId, home.id);
+    await repos().shares.set(tenantId, 'workflow', workflow.id, [away.id]);
+
+    // another request holds the row and adds `third` while the member's PUT [away, fourth] is in flight
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const other = server.ctx.database.db.transaction(async (tx) => {
+      const txRepos = createRepositories(tx);
+      await txRepos.shares.lockResource(tenantId, 'workflow', workflow.id);
+      locked();
+      await held;
+      await txRepos.shares.set(tenantId, 'workflow', workflow.id, [away.id, third.id]);
+    });
+    await isLocked;
+    const pending = member.client.put(`/rest/workflows/${workflow.id}/share`, {
+      shareWithIds: [away.id, fourth.id],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    release();
+    await other;
+    const res = await pending;
+    // the PUT would remove `third` (it is not in the list), which needs :unshare
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain(MISSING_SCOPE_MESSAGE);
+    expect(await sharedWorkflowIds(tenantId, workflow.id)).toEqual([away.id, third.id].sort());
+  });
+
   it('refuses a project viewer, a member outside the project, unknown and other workspace ids', async () => {
     const { owner, tenantId, home, away } = await setup();
     const workflow = await flow(tenantId, home.id);
@@ -225,9 +271,9 @@ describe('PUT /credentials/:id/share', () => {
     // the policy back on gives the personal owner :share again
     await setPersonalSharing(tenantId, true);
     expect((await put([away.id])).statusCode).toBe(200);
-    expect((await repos().shares.listForCredential(tenantId, credential.id)).map((s) => s.projectId)).toEqual([
-      away.id,
-    ]);
+    expect((await repos().shares.listForCredential(tenantId, credential.id)).map((s) => s.projectId)).toEqual(
+      [away.id],
+    );
   });
 
   it('refuses unknown, other workspace and malformed ids', async () => {

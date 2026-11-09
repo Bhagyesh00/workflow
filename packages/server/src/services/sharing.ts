@@ -10,6 +10,7 @@ import type { Scope } from '@workflow/workflow';
 import type { ServiceDeps } from '../context';
 import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
+import { createRepositories } from '../repositories';
 import type { ShareKind } from '../repositories/shares';
 import { type AccessTarget, MISSING_SCOPE_MESSAGE } from './access';
 
@@ -41,22 +42,31 @@ export class SharingService {
     for (const projectId of wanted) {
       if (!(await repos.projects.get(tenantId, projectId))) throw ApiError.notFound('Project');
     }
-    const current = (
-      kind === 'workflow'
-        ? await repos.shares.workflowSharesFor(tenantId, resourceId)
-        : await repos.shares.credentialSharesFor(tenantId, resourceId)
-    ).map((share) => share.projectId);
-    const adds = wanted.some((id) => !current.includes(id));
-    const removes = current.some((id) => !wanted.includes(id));
-    if (!adds && !removes) return;
+    const target: AccessTarget =
+      kind === 'workflow' ? { workflowId: resourceId } : { credentialId: resourceId };
+    // one transaction with the resource row locked: the shares the scopes are checked against are the
+    // shares the write changes
+    await this.deps.database.db.transaction(async (tx) => {
+      const txRepos = createRepositories(tx);
+      if (!(await txRepos.shares.lockResource(tenantId, kind, resourceId))) {
+        throw ApiError.notFound(kind === 'workflow' ? 'Workflow' : 'Credential');
+      }
+      const current = (
+        kind === 'workflow'
+          ? await txRepos.shares.workflowSharesFor(tenantId, resourceId)
+          : await txRepos.shares.credentialSharesFor(tenantId, resourceId)
+      ).map((share) => share.projectId);
+      const adds = wanted.some((id) => !current.includes(id));
+      const removes = current.some((id) => !wanted.includes(id));
+      if (!adds && !removes) return;
 
-    const target: AccessTarget = kind === 'workflow' ? { workflowId: resourceId } : { credentialId: resourceId };
-    const held = await this.deps.context().access.scopesForAuth(auth, target);
-    const needed: Scope[] = [];
-    if (adds) needed.push(`${kind}:share` as Scope);
-    if (removes) needed.push(`${kind}:unshare` as Scope);
-    if (!needed.every((scope) => held.has(scope))) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+      const held = await this.deps.context().access.scopesForAuth(auth, target);
+      const needed: Scope[] = [];
+      if (adds) needed.push(`${kind}:share` as Scope);
+      if (removes) needed.push(`${kind}:unshare` as Scope);
+      if (!needed.every((scope) => held.has(scope))) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
 
-    await repos.shares.set(tenantId, kind, resourceId, wanted);
+      await txRepos.shares.set(tenantId, kind, resourceId, wanted);
+    });
   }
 }

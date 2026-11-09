@@ -16,6 +16,7 @@ import {
   projects,
   type WorkflowShareRow,
   workflowShares,
+  workflows,
 } from '../db/schema';
 import type { AccessFilter } from '../services/access';
 import { isUuid } from './util';
@@ -96,6 +97,28 @@ export class ShareRepository {
       .where(and(eq(credentialShares.tenantId, tenantId), eq(credentialShares.credentialId, credentialId)))
       .orderBy(asc(credentialShares.createdAt), asc(credentialShares.projectId));
     return rows.map((row) => ({ ...row.share, project: row.project }));
+  }
+
+  /**
+   * Locks the resource row until the transaction ends, so two share changes of one resource run one
+   * after the other; the caller reads the shares, checks the scopes and writes in that transaction.
+   * Returns false when the row does not exist.
+   */
+  async lockResource(tenantId: string, kind: ShareKind, resourceId: string): Promise<boolean> {
+    if (!isUuid(resourceId)) return false;
+    const rows =
+      kind === 'workflow'
+        ? await this.db
+            .select({ id: workflows.id })
+            .from(workflows)
+            .where(and(eq(workflows.tenantId, tenantId), eq(workflows.id, resourceId)))
+            .for('update')
+        : await this.db
+            .select({ id: credentials.id })
+            .from(credentials)
+            .where(and(eq(credentials.tenantId, tenantId), eq(credentials.id, resourceId)))
+            .for('update');
+    return rows.length > 0;
   }
 
   /**
