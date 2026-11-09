@@ -1,7 +1,7 @@
 /**
  * /rest/settings/security (P6-33, L12): GET and POST the personal space policy, `securitySettings:manage`
- * (global), as n8n's security settings controller. C0 registers both with their final path and gate; the
- * handlers reach `ctx.securitySettings`, a stub that throws until L12.
+ * (global), as n8n's security settings controller. Both handlers check the scope, then reach
+ * `ctx.securitySettings` (SecuritySettingsService, L12), which reads and writes the policy.
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
