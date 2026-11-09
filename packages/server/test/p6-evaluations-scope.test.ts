@@ -1,6 +1,7 @@
 /**
  * P6-38 (L17): the test-run routes by project. Reads need `workflow:read`, runs, cancels and deletes
- * `workflow:execute`, both on the workflow in the path; a viewer of another project cannot read a run.
+ * `workflow:execute`, both on the workflow in the path. A caller who cannot read the workflow gets 404 (its
+ * existence stays hidden, as n8n); a reader without `workflow:execute` gets 403.
  */
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -43,7 +44,7 @@ async function setup() {
 }
 
 describe('test runs by project', () => {
-  it('refuses a member of no project and a viewer of another project on every route (403)', async () => {
+  it('answers 404 to a member of no project and to a viewer of another project on every route', async () => {
     const { member, tenantId, beta, run, url } = await setup();
     const caseId = randomUUID();
     const all = () =>
@@ -56,9 +57,9 @@ describe('test runs by project', () => {
         member.client.post(`${url}/${run.id}/test-cases/${caseId}/cancel`),
         member.client.delete(`${url}/${run.id}`),
       ]);
-    for (const res of await all()) expect(res.statusCode).toBe(403);
+    for (const res of await all()) expect(res.statusCode).toBe(404);
     await addToProject(server, tenantId, beta.id, member.user.id, 'project:viewer');
-    for (const res of await all()) expect(res.statusCode).toBe(403);
+    for (const res of await all()) expect(res.statusCode).toBe(404);
     expect(await server.ctx.repos.testRuns.get(tenantId, run.workflowId, run.id)).toBeTruthy();
   });
 
