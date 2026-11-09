@@ -145,7 +145,7 @@ describe('assertCredentialsUsable', () => {
     await expect(check(useNode({ id: foreign.id, name: 'Foreign' }))).resolves.toBeUndefined();
   });
 
-  it('refuses a malformed ref as invalid; an id or a name with no row is left to the provider', async () => {
+  it('refuses a malformed ref as invalid; an id with no row is left to the provider', async () => {
     const { tenantId, mine } = await setup();
     const elsewhere = await signup(server.app);
     const theirs = await credentialIn(
@@ -175,7 +175,6 @@ describe('assertCredentialsUsable', () => {
       { id: randomUUID(), name: 'Gone' },
       { id: 'not-a-uuid', name: 'Bad' },
       { id: theirs.id, name: 'Theirs' },
-      { id: null, name: 'Nowhere' },
     ]) {
       await expect(check({ testApi: ref }), JSON.stringify(ref)).resolves.toBeUndefined();
       // and the run refuses it when the node reads it
@@ -194,9 +193,14 @@ describe('assertCredentialsUsable', () => {
       assertCredentialsUsable(server.ctx, tenantId, mine.id, definitionWith(n));
 
     await expect(check(useNode({ id: null, name: 'Here' }))).resolves.toBeUndefined();
-    await expect(check(useNode({ id: null, name: 'Elsewhere' }))).rejects.toBeInstanceOf(
-      InaccessibleCredentialError,
-    );
+    // a name another project holds and a name no project holds get the same answer (no name oracle)
+    const elsewhere = await check(useNode({ id: null, name: 'Elsewhere' })).catch((e) => e);
+    const nowhere = await check(useNode({ id: null, name: 'Nowhere' })).catch((e) => e);
+    for (const error of [elsewhere, nowhere]) {
+      expect(error).toBeInstanceOf(InvalidCredentialError);
+      expect(error.message).toBe('Node "Use" uses invalid credential');
+    }
+    expect({ ...elsewhere, stack: '' }).toEqual({ ...nowhere, stack: '' });
     // an expression id is resolved and checked by the provider at run time
     await expect(check(useNode({ id: '={{ $json.id }}', name: 'x' }))).resolves.toBeUndefined();
     // a disabled node does not run (n8n skips it too)
@@ -291,7 +295,8 @@ describe('run, save and publish', () => {
     });
     const refused = await runStatus(owner, wf.id);
     expect(refused.status).toBe(400);
-    expect(JSON.stringify(refused.body)).toContain('does not have access to the credential');
+    // the same answer as a name no project holds (credentials-3: no name oracle)
+    expect(JSON.stringify(refused.body)).toContain('uses invalid credential');
 
     await credentialIn(server, tenantId, mine.id, { name: 'ByName', data: { apiKey: 'own' } });
     const ran = await runStatus(owner, wf.id);
@@ -538,6 +543,58 @@ describe('credential routes for a true member', () => {
     });
     expect(hidden.statusCode).toBe(403);
     expect(received.filter((r) => r.headers['x-api-key'] === 'other-value')).toHaveLength(0);
+  });
+
+  it('the test route by id ignores the body without credential:update, so no reader redirects the secret', async () => {
+    const { owner, tenantId, mine, other, member } = await memberIn('project:viewer');
+    await repos().variables.create(tenantId, { key: 'p6key', value: 'var-value', projectId: mine.id });
+    const stored = { baseUrl: remoteUrl, apiKey: 'stored-secret-xyz' };
+    const owned = await credentialIn(server, tenantId, mine.id, { data: stored });
+    const shared = await credentialIn(server, tenantId, mine.id, { data: stored });
+    await repos().shares.set(tenantId, 'credential', shared.id, [other.id]);
+    const global = await credentialIn(server, tenantId, mine.id, { data: stored, isGlobal: true });
+    const sharee = await realMember(owner);
+    await addToProject(server, tenantId, other.id, sharee.user.id, 'project:editor');
+    const outsider = await realMember(owner);
+    const evil = `${remoteUrl}/evil`;
+    const attempts = [
+      { apiKey: '__REDACTED__', baseUrl: evil },
+      { apiKey: '={{ $vars.p6key }}', baseUrl: evil },
+    ];
+    const cases = [
+      { who: 'a project viewer', caller: member, id: owned.id },
+      { who: 'a member of a sharee project', caller: sharee, id: shared.id },
+      { who: 'a member on a global credential', caller: outsider, id: global.id },
+    ];
+    for (const { who, caller, id } of cases) {
+      const read = await caller.client.data(caller.client.get(`/rest/credentials/${id}`));
+      expect(read.scopes, who).not.toContain('credential:update');
+      for (const data of attempts) {
+        received.length = 0;
+        const res = await caller.client.data(
+          caller.client.post('/rest/credentials/test', { id, type: 'testApi', data }),
+        );
+        expect(res.status, who).toBe('OK');
+        expect(JSON.stringify(res), who).not.toContain('stored-secret-xyz');
+        expect(
+          received.map((r) => r.url),
+          who,
+        ).toEqual(['/check']);
+        expect(received[0].headers['x-api-key'], who).toBe('stored-secret-xyz');
+      }
+    }
+
+    // a caller with credential:update still tests the data it sends
+    await addToProject(server, tenantId, mine.id, member.user.id, 'project:editor');
+    received.length = 0;
+    await member.client.data(
+      member.client.post('/rest/credentials/test', {
+        id: owned.id,
+        type: 'testApi',
+        data: { apiKey: '__REDACTED__', baseUrl: evil },
+      }),
+    );
+    expect(received.map((r) => r.url)).toEqual(['/evil/check']);
   });
 
   it('OAuth2: a member starts the flow in its project; the callback after lost access is refused', async () => {

@@ -255,7 +255,8 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
   });
 
   // P6-24: the data resolves `$secrets` and `$vars` under one project: a stored credential's own (with
-  // `credential:read` on it), else the body's project (else the default) with `credential:create` there
+  // `credential:read` on it; the body data counts only with `credential:update`), else the body's project
+  // (else the default) with `credential:create` there
   app.post('/credentials/test', async (request) => {
     const auth = requireAuth(request);
     const storedId = rawField(request, 'id');
@@ -274,7 +275,13 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     let data = body.data as DataObject;
     if (row) {
       if (row.type !== body.type) throw ApiError.badRequest('The credential type does not match');
-      data = credentials.merge(credentials.decrypt(row), data);
+      const stored = credentials.decrypt(row);
+      // as n8n: without credential:update (a viewer, a sharee, anyone on a global credential) the body is
+      // ignored and the stored data is tested as is, so no caller can redirect the stored secret
+      const canUpdate = (await ctx.access.scopesForAuth(auth, { credentialId: row.id })).has(
+        'credential:update',
+      );
+      data = canUpdate ? credentials.merge(stored, data) : stored;
     }
     credentials.resolvedType(body.type);
     let resolved: DataObject;

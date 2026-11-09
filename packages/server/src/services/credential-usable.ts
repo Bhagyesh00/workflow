@@ -92,9 +92,10 @@ function credentialUses(definition: WorkflowDefinition): CredentialUse[] {
  * Throws `InvalidCredentialError` or `InaccessibleCredentialError` for the first node whose credential the
  * project cannot use: a ref that is not an object, or has neither an id nor a name, is invalid; a row owned
  * by another project, not shared with this one, not global and not in `allow` is inaccessible. A name-only
- * ref is refused when rows of that name exist but none is usable in the project (the provider looks names
- * up only there). An id or a name with no row at all, and an expression id, are left to the provider, which
- * fails the node when it runs (a pinned or simulated node never reads a credential).
+ * ref (no id) passes only when a row of that name is usable in the project (the provider looks names up
+ * only there); otherwise it is invalid, whether or not the name exists in another project, so the answer
+ * never tells which names other projects hold. An id with no row at all, and an expression id, are left to
+ * the provider, which fails the node when it runs (a pinned or simulated node never reads a credential).
  */
 export async function assertCredentialsUsable(
   deps: CredentialUsableDeps,
@@ -132,7 +133,8 @@ export async function assertCredentialsUsable(
       if (row && !usable(row)) throw await inaccessible(use.nodeName);
       continue;
     }
-    const candidates = named.filter((row) => row.name === use.name);
-    if (candidates.length && !candidates.some(usable)) throw await inaccessible(use.nodeName);
+    if (!named.some((row) => row.name === use.name && usable(row))) {
+      throw new InvalidCredentialError(use.nodeName);
+    }
   }
 }
