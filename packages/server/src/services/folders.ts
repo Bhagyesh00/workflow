@@ -4,14 +4,18 @@
  * The editor routes (routes/folders.ts) and the public API (routes/public-folders.ts) both call
  * this service, so the rules and the tenant checks are the same for both.
  */
+import type { Scope } from '@workflow/workflow';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ServiceDeps } from '../context';
-import type { FolderRow } from '../db/schema';
+import type { FolderRow, ProjectRow } from '../db/schema';
+import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { decodeCursor, encodeCursor, page } from '../http/pagination';
 import type { TagRef } from '../repositories';
 import { createRepositories, isUuid } from '../repositories';
+import type { AccessListOptions } from '../repositories/shares';
+import { MISSING_SCOPE_MESSAGE } from './access';
 import { assertFolderInTenant } from './workflow-rules';
 import type { Actor } from './workflows';
 
@@ -94,6 +98,22 @@ export interface FolderDetailDTO extends FolderDTO {
   subFolderCount: number;
 }
 
+/** a project as a folder row names its home (the shape of the other project-owned rows) */
+export interface FolderProjectRef {
+  id: string;
+  name: string;
+  type: ProjectRow['type'];
+  icon: ProjectRow['icon'];
+}
+
+/** the access fields of a folder row (P6-26): the owner project and the caller's scopes there; a folder is never shared */
+export interface FolderAccessFields {
+  projectId: string;
+  homeProject: FolderProjectRef | null;
+  sharedWithProjects: FolderProjectRef[];
+  scopes?: Scope[];
+}
+
 const toDTO = (row: FolderRow, tags: TagRef[]): FolderDTO => ({
   id: row.id,
   name: row.name,
@@ -121,19 +141,89 @@ export class FolderService {
     return toDTO(row, tags.get(row.id) ?? []);
   }
 
-  async list(
-    tenantId: string,
-    query: FolderListQuery,
-  ): Promise<{ data: FolderDTO[]; nextCursor: string | null }> {
+  private async pageRows(tenantId: string, query: FolderListQuery, access: AccessListOptions = {}) {
     const cursor = decodeCursor(query.cursor);
     if (cursor && !isUuid(cursor.id)) throw ApiError.badRequest('Invalid cursor');
-    const rows = await this.repos.folders.list(tenantId, { ...query, cursor });
+    const rows = await this.repos.folders.list(tenantId, { ...query, ...access, cursor });
     const { data, nextCursor } = page(rows, query.limit, (r) => encodeCursor(r.name, r.id));
     const tags = await this.repos.folders.tagsFor(
       tenantId,
       data.map((r) => r.id),
     );
-    return { data: data.map((r) => toDTO(r, tags.get(r.id) ?? [])), nextCursor };
+    return { rows: data, tags, nextCursor };
+  }
+
+  async list(
+    tenantId: string,
+    query: FolderListQuery,
+  ): Promise<{ data: FolderDTO[]; nextCursor: string | null }> {
+    const { rows, tags, nextCursor } = await this.pageRows(tenantId, query);
+    return { data: rows.map((r) => toDTO(r, tags.get(r.id) ?? [])), nextCursor };
+  }
+
+  /**
+   * The list of GET /folders for a caller (P6-26): the access filter of `folder:list`, the project filter
+   * (`projectId` needs `folder:list` in that project; `onlySharedWithMe` matches nothing, a folder is never
+   * shared) and every row with its project and, with `includeScopes`, `scopes`.
+   */
+  async listFor(
+    auth: AuthContext,
+    query: FolderListQuery & { projectId?: string; onlySharedWithMe?: boolean; includeScopes?: boolean },
+  ) {
+    const { access } = this.deps.context();
+    const { includeScopes, projectId, onlySharedWithMe, ...rest } = query;
+    if (projectId) {
+      const held = await access.scopesForAuth(auth, { projectId });
+      if (!held.has('folder:list')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+    }
+    const filter = await access.listFilter(auth, 'folder:list');
+    const { rows, tags, nextCursor } = await this.pageRows(auth.tenant.id, rest, {
+      filter,
+      projectId,
+      onlySharedWithMe,
+    });
+    const fields = await this.accessFields(auth, rows, includeScopes === true);
+    return {
+      data: rows.map((r) => ({ ...toDTO(r, tags.get(r.id) ?? []), ...fields.get(r.id) })),
+      nextCursor,
+    };
+  }
+
+  /** `projectId`, `homeProject` and (with `includeScopes`) the caller's `scopes` of each row; a folder's scopes are its project's */
+  async accessFields(
+    auth: AuthContext,
+    rows: Array<{ id: string; projectId: string }>,
+    includeScopes: boolean,
+  ): Promise<Map<string, FolderAccessFields>> {
+    const { access } = this.deps.context();
+    const result = new Map<string, FolderAccessFields>();
+    if (!rows.length) return result;
+    const refs = new Map<string, FolderProjectRef>();
+    for (const p of await this.repos.projects.listAll(auth.tenant.id)) {
+      refs.set(p.id, { id: p.id, name: p.name, type: p.type, icon: p.icon ?? null });
+    }
+    const scopes = new Map<string, Scope[]>();
+    if (includeScopes) {
+      for (const projectId of new Set(rows.map((r) => r.projectId))) {
+        scopes.set(projectId, [...(await access.scopesForAuth(auth, { projectId }))].sort());
+      }
+    }
+    for (const row of rows) {
+      result.set(row.id, {
+        projectId: row.projectId,
+        homeProject: refs.get(row.projectId) ?? null,
+        sharedWithProjects: [],
+        ...(includeScopes ? { scopes: scopes.get(row.projectId) } : {}),
+      });
+    }
+    return result;
+  }
+
+  /** a folder as GET one, POST and PATCH answer it: the DTO plus its project and the caller's scopes */
+  async dtoFor<T extends FolderDTO>(auth: AuthContext, dto: T) {
+    const row = await this.require(auth.tenant.id, dto.id);
+    const fields = await this.accessFields(auth, [row], true);
+    return { ...dto, ...fields.get(dto.id)! };
   }
 
   async get(tenantId: string, id: string): Promise<FolderDetailDTO> {
@@ -155,6 +245,9 @@ export class FolderService {
     await assertFolderInTenant(this.repos, tenantId, parentFolderId);
     // P6 S1: the project the route resolved, else the parent's, else the workspace's default (L24 makes it required)
     const parent = parentFolderId ? await this.repos.folders.get(tenantId, parentFolderId) : undefined;
+    if (parent && input.projectId && parent.projectId !== input.projectId) {
+      throw ApiError.badRequest('The parent folder belongs to another project.');
+    }
     const projectId =
       input.projectId ?? parent?.projectId ?? (await this.repos.projects.defaultProjectFor(tenantId));
     const row = await this.repos.folders.create(tenantId, { name: input.name, parentFolderId, projectId });
@@ -184,6 +277,11 @@ export class FolderService {
         // moves at the same time cannot each pass and then close a loop together.
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`folders:${tenantId}`}))`);
         await assertFolderInTenant(repos, tenantId, parentId);
+        // P6-26: a folder moves only inside its project (moving across projects is the transfer route)
+        const parentRow = await repos.folders.get(tenantId, parentId);
+        if (parentRow && parentRow.projectId !== current.projectId) {
+          throw ApiError.badRequest('A folder can only be moved inside its own project.');
+        }
         const below = await repos.folders.subtreeIds(tenantId, id);
         if (below.includes(parentId)) {
           throw ApiError.badRequest('A folder cannot be moved into itself or one of its subfolders.');
@@ -219,12 +317,17 @@ export class FolderService {
    * transaction and the folder is deleted.
    */
   async delete(tenantId: string, id: string, input: FolderDeleteInput, actor: Actor): Promise<void> {
-    await this.require(tenantId, id);
+    const current = await this.require(tenantId, id);
     const subtree = await this.repos.folders.subtreeIds(tenantId, id);
     const transfer = input.transferToFolderId;
     const target = transfer === undefined ? undefined : transfer === 'root' ? null : transfer;
     if (target) {
       await assertFolderInTenant(this.repos, tenantId, target);
+      // P6-26: the workflows and subfolders move only inside the folder's project
+      const targetRow = await this.repos.folders.get(tenantId, target);
+      if (targetRow && targetRow.projectId !== current.projectId) {
+        throw ApiError.badRequest('The workflows can only be moved to a folder of the same project.');
+      }
       if (subtree.includes(target)) {
         throw ApiError.badRequest('The workflows cannot be moved into the folder that is being deleted.');
       }
