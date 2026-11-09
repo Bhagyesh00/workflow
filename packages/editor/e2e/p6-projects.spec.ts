@@ -6,7 +6,11 @@
  * entries living as tabs, the old paths redirecting to `/home/*`, Add project opening the new project, the
  * tabs moving between a project's lists, and the Create button making a workflow in the project.
  *
- * Run: E2E_BASE_URL=<demo URL> npx playwright test e2e/p6-projects.spec.ts
+ * The demo router is in memory by default (the URL stays "/"), so start the demo dev server with
+ * VITE_DEMO_ROUTER=browser, or every toHaveURL check fails.
+ *
+ * Run: VITE_DEMO_ROUTER=browser pnpm dev:demo, then
+ *      E2E_BASE_URL=<demo URL> npx playwright test e2e/p6-projects.spec.ts
  */
 import { expect, type Page, test } from '@playwright/test';
 

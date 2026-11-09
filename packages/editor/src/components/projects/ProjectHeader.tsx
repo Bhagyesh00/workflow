@@ -181,6 +181,7 @@ export function ProjectHeader({ kind, projectId }: ProjectHeaderProps) {
         open={dialog === 'folder'}
         onClose={() => setDialog(null)}
         parentFolderId={null}
+        projectId={target?.id}
       />
       {dialog === 'table' && <CreateTableDialog onClose={() => setDialog(null)} />}
     </>

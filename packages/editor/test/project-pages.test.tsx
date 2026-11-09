@@ -160,6 +160,23 @@ describe('Create button', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe(`/projects/${team.id}/variables`));
   });
 
+  it('Folder creates the folder in the project of the page, not the personal project', async () => {
+    const demo = signedIn();
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
+    renderApp(`/projects/${team.id}/workflows`);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Create' }, { timeout: 20_000 }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Folder' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New folder' });
+    await user.type(within(dialog).getByRole('textbox'), 'Team folder');
+    await user.click(within(dialog).getByRole('button', { name: 'Create folder' }));
+    await waitFor(() =>
+      expect(demo.requests.some((r) => r.method === 'POST' && r.path === '/folders')).toBe(true),
+    );
+    const sent = demo.requests.find((r) => r.method === 'POST' && r.path === '/folders');
+    expect(sent?.body).toMatchObject({ name: 'Team folder', projectId: team.id });
+  });
+
   it('a project viewer relation hides what the role cannot create', async () => {
     const demo = signedIn();
     const tenantId = demo.auth().tenant.id;
