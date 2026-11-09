@@ -132,6 +132,10 @@ export async function openSubNodes(
  * The tenant's builder model. Refusals (L1): no setting `Set an AI model in Settings first`, no AI
  * package `The AI nodes are not installed`, no tool calling or a completion model
  * `This model can't call tools`.
+ * P6-36: the model is a workspace setting (set under `instanceAi:manage`) and loads for a turn in any
+ * project: `loadModelFromSetting` runs it in the credential's own project with only that credential in
+ * `allow`, and the caller's project access is not checked on it. A node credential of the workflow being
+ * built never gets there (the context holds credential types only).
  */
 export async function loadBuilderModel(
   ctx: ServerContext,

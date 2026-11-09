@@ -1,9 +1,13 @@
 /**
- * /rest/ai (P5-09, L1): POST `/ai/build` (editor; NDJSON stream `application/x-ndjson` through
+ * /rest/ai (P5-09, L1; P6-36): POST `/ai/build` (`workflow:update` on the workflow; NDJSON stream `application/x-ndjson` through
  * `reply.hijack()` as routes/push.ts, one `BuilderChunk` per line, aborted on client close and at
- * `AI_TIMEOUT_MAX`) and POST `/ai/usage-settings` (admin; writes `allowSendingParameterValues`).
- * Gates and rate limit are final from C0: `AI_ENABLED` false gives 404, then the role; 100 per IP.
- * Nothing about the prompt or the body is logged.
+ * `AI_TIMEOUT_MAX`) and POST `/ai/usage-settings` (`aiAssistant:manage`;
+ * writes `allowSendingParameterValues`). `AI_ENABLED` false gives 404, then the scope; 100 per IP.
+ * Deviation on purpose: n8n puts no scope on the builder route (its ai.controller has none); here a
+ * caller needs the same right as saving the workflow, so a project viewer or a member of another
+ * project cannot start a turn on it (403), and another workspace's id is 404. The builder model is a
+ * workspace setting (set under `instanceAi:manage`) and loads for every project through its `allow`
+ * list (admin-set AI credentials are workspace wide). Nothing about the prompt or the body is logged.
  */
 import {
   BUILDER_PROMPT_LIMIT,
@@ -11,23 +15,40 @@ import {
   type BuilderChunk,
   type BuildRequest,
   redactSecrets,
+  type Scope,
 } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import type { Role } from '../db/schema';
-import { type AuthContext, requireRole } from '../http/auth';
+import { type AuthContext, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { workflowDataSchema } from '../http/schemas';
 import type { TenantSettings } from '../plans';
+import type { AccessTarget } from '../services/access';
 import { BUILDER_ERROR_TITLE } from '../services/ai-builder/builder';
 import { NO_MODEL_SET } from '../services/ai-builder/model';
 import { AI_ROUTE_RATE_LIMIT } from '../services/ai-builder/types';
 
-/** the gate of every `/rest/ai/*` route: 404 while `AI_ENABLED` is false, then `requireRole` */
-export function requireAiBuilder(request: FastifyRequest, ctx: ServerContext, minimum: Role): AuthContext {
+/**
+ * the gate of every `/rest/ai/*` route: 404 while `AI_ENABLED` is false, then `requireScope` on `target`
+ * (a workflow id: another workspace's id is 404, a workflow the caller cannot update is 403)
+ */
+export async function requireAiBuilder(
+  request: FastifyRequest,
+  ctx: ServerContext,
+  scope: Scope,
+  target?: AccessTarget,
+): Promise<AuthContext> {
   if (!ctx.config.ai.enabled) throw ApiError.notFound();
-  return requireRole(request, minimum);
+  return requireScope(request, scope, target);
+}
+
+const workflowPeek = z.object({ workflowId: z.string().min(1).max(64) });
+
+/** the workflow id a body names, for the gate that runs before the body is validated */
+export function peekWorkflowId(body: unknown): string | undefined {
+  const peek = workflowPeek.safeParse(body ?? {});
+  return peek.success ? peek.data.workflowId : undefined;
 }
 
 /** route options of every `/rest/ai/*` route (rate limit 100 per IP, as n8n's `ipRateLimit`) */
@@ -71,7 +92,8 @@ const usageSettingsSchema = z.object({ allowSendingParameterValues: z.boolean() 
 
 export function registerAiRoutes(rest: FastifyInstance, ctx: ServerContext): void {
   rest.post('/ai/build', aiRouteOptions('build'), async (request, reply) => {
-    const auth = requireAiBuilder(request, ctx, 'editor');
+    const peeked = peekWorkflowId(request.body);
+    const auth = await requireAiBuilder(request, ctx, 'workflow:update', peeked ? { workflowId: peeked } : undefined);
     const body = parse(buildSchema, request.body);
     if (body.text.length > BUILDER_PROMPT_LIMIT) throw ApiError.badRequest(BUILDER_PROMPT_TOO_LONG);
     if (!body.text.trim() && !body.resumeData) throw ApiError.badRequest('Write what the workflow should do');
@@ -122,7 +144,7 @@ export function registerAiRoutes(rest: FastifyInstance, ctx: ServerContext): voi
   });
 
   rest.post('/ai/usage-settings', aiRouteOptions('usage-settings'), async (request) => {
-    const auth = requireAiBuilder(request, ctx, 'admin');
+    const auth = await requireAiBuilder(request, ctx, 'aiAssistant:manage');
     const body = parse(usageSettingsSchema, request.body);
     const tenant = await ctx.repos.tenants.get(auth.tenant.id);
     const settings = ((tenant ?? auth.tenant).settings ?? {}) as TenantSettings;

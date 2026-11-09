@@ -289,9 +289,10 @@ describe('gates', () => {
     const owner = await withModel([]);
     const workflow = await createWorkflow(owner.client, { nodes: [] });
     const { client: viewer } = await memberAs(owner, 'viewer', { name: 'V' });
-    expect((await viewer.post('/rest/ai/build', { workflowId: workflow.id, text: 'Hi' })).statusCode).toBe(
-      403,
-    );
+    const denied = await viewer.post('/rest/ai/build', { workflowId: workflow.id, text: 'Hi' });
+    expect(denied.statusCode).toBe(403);
+    // P6-36: the refusal is the scope gate (workflow:update), n8n's text
+    expect(denied.json().error.message).toBe('User is missing a scope required to perform this action');
     expect(
       (await viewer.post('/rest/ai/usage-settings', { allowSendingParameterValues: false })).statusCode,
     ).toBe(403);

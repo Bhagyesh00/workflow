@@ -220,7 +220,7 @@ describe('POST /rest/ai/build: full flow', () => {
     ]);
   });
 
-  it('usage-settings writes allowSendingParameterValues (admin)', async () => {
+  it('usage-settings writes allowSendingParameterValues (aiAssistant:manage)', async () => {
     const { owner } = await setup([]);
     const res = await owner.client.data(
       owner.client.post('/rest/ai/usage-settings', { allowSendingParameterValues: false }),
