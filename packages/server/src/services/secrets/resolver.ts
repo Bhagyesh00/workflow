@@ -15,7 +15,10 @@ const LIMITS = { timeoutMs: 1000, maxSteps: 1_000_000 };
 
 export interface ResolveCredentialDataOptions {
   tenantId: string;
-  /** P6 S1: the credential's project (null or absent: none); `secretsFor` gets it */
+  /**
+   * P6-28: the credential's home project (null or absent: none). `secretsFor` reads the vaults that project
+   * owns, the ones shared with it and the tenant wide ones; with no project, the tenant wide ones only.
+   */
   projectId?: string | null;
   vars: Record<string, unknown>;
   /** where `$secrets` comes from */

@@ -3,15 +3,28 @@
  * the cache of live providers on every main and worker process. The cache is loaded before jobs start,
  * refreshed on a timer, and a change on one instance reaches the others on the bus. Secret values stay
  * inside the providers: logs, errors, audit rows and the bus carry names and fixed texts only.
+ *
+ * P6-28 project vaults: a connection is owned by a project (`project_id`), shared with projects
+ * (`project_secret_access`), or tenant wide (no owner and no share). `$secrets` of a credential reads only
+ * what its home project reaches; each process keeps that access list next to its cache, reloads it on
+ * the reload channel and rebuilds it on every timer tick.
  */
 import { randomUUID } from 'node:crypto';
 import { mergeRedacted, REDACTED } from '@workflow/core';
-import { BLOCKED_KEYS, type DataObject } from '@workflow/workflow';
+import {
+  BLOCKED_KEYS,
+  type DataObject,
+  EXTERNAL_SECRETS_SYSTEM_ROLE_SCOPES,
+  RESOURCE_ROLE_SCOPES,
+  type Scope,
+} from '@workflow/workflow';
 import type { ServiceDeps } from '../../context';
 import type { SecretConnectionRow } from '../../db/schema';
 import { ApiError } from '../../http/errors';
 import { toWorkflowLogger } from '../../logger';
-import { isUniqueViolation, pgErrorCode } from '../../repositories';
+import { createRepositories, isUniqueViolation, pgErrorCode, type Repositories } from '../../repositories';
+import type { SecretConnectionShare } from '../../repositories/secrets';
+import { isUuid } from '../../repositories/util';
 import { SecretsCache } from './cache';
 import { SECRET_PROVIDER_TYPES } from './providers';
 import { createSecretsProxy, type SecretsObject } from './proxy';
@@ -20,6 +33,8 @@ import type {
   SecretActor,
   SecretConnectionCreateInput,
   SecretConnectionDTO,
+  SecretConnectionProject,
+  SecretConnectionReach,
   SecretConnectionTestResult,
   SecretConnectionUpdateInput,
   SecretProvider,
@@ -41,6 +56,9 @@ const TEXT_TIMEOUT = 'The vault did not answer in time';
 const TEXT_CONNECT = "Couldn't connect to the vault";
 const TEXT_REFRESH = "Couldn't read the secrets from the vault";
 const TEXT_TEST = "Couldn't test the connection";
+/** n8n's texts (secret-provider-access-check.service.ee.ts) */
+const TEXT_LOW_ACCESS = 'Project does not have the required access level for this connection';
+const OWNER_ROLE = 'secretsProviderConnection:owner';
 
 /**
  * A provider's thrown error may quote a response, so its message is not used. A provider marks a fixed
@@ -70,6 +88,15 @@ interface LiveConnection {
 
 const liveId = (tenantId: string, providerKey: string) => `${tenantId}\0${providerKey}`;
 
+/** the access list entry of one connection; `seq` orders the reads, so an older read never wins */
+interface ReachEntry extends SecretConnectionReach {
+  seq: number;
+}
+
+/** the system project roles the `externalSecrets.systemRolesEnabled` switch widens */
+const isSwitchRole = (role: string | undefined): role is keyof typeof EXTERNAL_SECRETS_SYSTEM_ROLE_SCOPES =>
+  role === 'project:admin' || role === 'project:editor';
+
 /** never holds up a swap or the shutdown, and its error says nothing to anyone */
 async function disconnect(provider: SecretProvider | undefined): Promise<void> {
   if (!provider) return;
@@ -89,6 +116,9 @@ export class SecretsManager {
   private readonly types = new Map<string, SecretProviderType>();
   private readonly cache = new SecretsCache();
   private readonly live = new Map<string, LiveConnection>();
+  /** P6-28: which projects reach each connection of this process (key: `liveId`) */
+  private readonly reach = new Map<string, ReachEntry>();
+  private reachSeq = 0;
   private readonly instanceId = randomUUID();
   private timer?: NodeJS.Timeout;
   private unsubscribe?: () => void;
@@ -162,6 +192,7 @@ export class SecretsManager {
       clearTimeout(live.retry);
     }
     this.live.clear();
+    this.reach.clear();
     await Promise.all(this.cache.clear().map(disconnect));
   }
 
@@ -173,13 +204,86 @@ export class SecretsManager {
     return this.types.get(name);
   }
 
+  /** every connection of the workspace (the workspace routes, `externalSecretsProvider:list` workspace wide) */
   async listConnections(tenantId: string): Promise<SecretConnectionDTO[]> {
     const rows = await this.deps.repos.secrets.list(tenantId);
-    return Promise.all(rows.map((row) => this.toDTO(row)));
+    return this.toDTOs(tenantId, rows, await this.sharesOf(tenantId, rows));
   }
 
   async getConnection(tenantId: string, providerKey: string): Promise<SecretConnectionDTO> {
-    return this.toDTO(await this.requireRow(tenantId, providerKey));
+    const row = await this.requireRow(tenantId, providerKey);
+    const [dto] = await this.toDTOs(tenantId, [row], await this.sharesOf(tenantId, [row]));
+    return dto;
+  }
+
+  /**
+   * P6-28: the connections a project reaches (n8n's list for a project): its own, the ones shared with
+   * it, and the tenant wide ones.
+   */
+  async listProjectConnections(tenantId: string, projectId: string): Promise<SecretConnectionDTO[]> {
+    const rows = await this.deps.repos.secrets.list(tenantId);
+    const shares = await this.sharesOf(tenantId, rows);
+    const reached = rows.filter((row) => reaches(reachOf(row, shares), projectId));
+    return this.toDTOs(tenantId, reached, shares);
+  }
+
+  /** P6-28: one connection the project reaches; any other is n8n's 404 */
+  async getProjectConnection(
+    tenantId: string,
+    projectId: string,
+    providerKey: string,
+  ): Promise<SecretConnectionDTO> {
+    const row = await this.requireRow(tenantId, providerKey);
+    const shares = await this.sharesOf(tenantId, [row]);
+    if (!reaches(reachOf(row, shares), projectId)) throw connectionNotFound(providerKey);
+    const [dto] = await this.toDTOs(tenantId, [row], shares);
+    return dto;
+  }
+
+  /**
+   * P6-28: before a change through a project route (n8n's `assertConnectionAccess`): the project must own
+   * the connection or have it shared (else 404 "not found in project"), and, unless the caller holds
+   * `scope` workspace wide, the project's role on it must hold `scope` (else 403).
+   */
+  async assertConnectionAccess(
+    tenantId: string,
+    projectId: string,
+    providerKey: string,
+    scope: Scope,
+    workspaceScopes: ReadonlySet<Scope>,
+  ): Promise<void> {
+    const { repos } = this.deps;
+    const notInProject = () =>
+      new ApiError(404, 'not_found', `Connection with key "${providerKey}" not found in project "${projectId}"`);
+    const row = await repos.secrets.get(tenantId, providerKey);
+    if (!row) throw notInProject();
+    const role =
+      row.projectId === projectId
+        ? OWNER_ROLE
+        : (await repos.secrets.accessFor(tenantId, row.id)).find((share) => share.projectId === projectId)?.role;
+    if (!role) throw notInProject();
+    if (workspaceScopes.has(scope)) return;
+    const granted = (RESOURCE_ROLE_SCOPES as Readonly<Record<string, ReadonlySet<Scope>>>)[role];
+    if (!granted?.has(scope)) throw ApiError.forbidden(TEXT_LOW_ACCESS);
+  }
+
+  /** P6-28: the workspace switch `externalSecrets.systemRolesEnabled` (tenants.settings), off by default */
+  async systemRolesEnabled(tenantId: string): Promise<boolean> {
+    const tenant = await this.deps.repos.tenants.get(tenantId);
+    const settings = (tenant?.settings ?? {}) as { externalSecrets?: { systemRolesEnabled?: unknown } };
+    return settings.externalSecrets?.systemRolesEnabled === true;
+  }
+
+  /**
+   * P6-28: whether the switch gives `userId` the vault `scope` in `projectId` through its system project
+   * role (project admin: every vault scope; project editor: read and list). Read on every call, so a
+   * removed member or a switch turned off takes effect at once.
+   */
+  async systemRoleAllows(tenantId: string, userId: string, projectId: string, scope: Scope): Promise<boolean> {
+    if (!isUuid(projectId) || !(await this.systemRolesEnabled(tenantId))) return false;
+    const relation = await this.deps.repos.projects.relations.get(tenantId, projectId, userId);
+    const role = relation?.role;
+    return isSwitchRole(role) && EXTERNAL_SECRETS_SYSTEM_ROLE_SCOPES[role].has(scope);
   }
 
   async createConnection(
@@ -194,22 +298,32 @@ export class SecretsManager {
     }
     const exists = () => ApiError.badRequest(`Connection with key "${input.providerKey}" already exists`);
     if (await repos.secrets.get(tenantId, input.providerKey)) throw exists();
+    // a project's own connection is not shared on create (n8n's project route); a workspace one may be
+    const projectId = input.projectId ?? null;
+    const shares = projectId ? [] : unique(input.projectIds ?? []);
+    await this.requireProjects(tenantId, projectId ? [projectId, ...shares] : shares);
     const id = randomUUID();
     let row: SecretConnectionRow;
     try {
-      row = await repos.secrets.create(tenantId, {
-        id,
-        providerKey: input.providerKey,
-        type: input.type,
-        settingsEnc: this.encryptSettings(tenantId, id, withoutSentinels(input.settings)),
-        isEnabled: input.isEnabled ?? false,
-        createdBy: actor?.userId ?? null,
+      // the row and its shares together: a connection never exists tenant wide by mistake
+      row = await this.inTransaction(async (r) => {
+        const created = await r.secrets.create(tenantId, {
+          id,
+          providerKey: input.providerKey,
+          type: input.type,
+          settingsEnc: this.encryptSettings(tenantId, id, withoutSentinels(input.settings)),
+          isEnabled: input.isEnabled ?? false,
+          createdBy: actor?.userId ?? null,
+          projectId,
+        });
+        if (shares.length) await r.secrets.setShares(tenantId, created.id, shares);
+        return created;
       });
     } catch (error) {
       if (isUniqueViolation(error)) throw exists();
       throw error;
     }
-    await this.audit(tenantId, row, 'created', actor);
+    await this.audit(tenantId, row, 'created', actor, shares.length ? { projectIds: shares } : {});
     await this.applyRow(row);
     await this.announce(tenantId, row.providerKey);
     return this.getConnection(tenantId, row.providerKey);
@@ -221,13 +335,18 @@ export class SecretsManager {
     input: SecretConnectionUpdateInput,
     actor?: SecretActor,
   ): Promise<SecretConnectionDTO> {
-    const { repos } = this.deps;
     const current = await this.requireRow(tenantId, providerKey);
     const typeChanged = input.type !== undefined && input.type !== current.type;
     if (typeChanged && !input.settings) {
       throw ApiError.badRequest('When changing the connection type, new settings must be provided as well');
     }
     if (input.type) this.requireType(input.type);
+    // P6-28: the owner project is never a share of its own connection
+    const shares =
+      input.projectIds === undefined
+        ? undefined
+        : unique(input.projectIds).filter((projectId) => projectId !== current.projectId);
+    if (shares) await this.requireProjects(tenantId, shares);
     let settingsEnc: string | undefined;
     if (input.settings) {
       // stored values never travel to another type; a form that left a field out keeps it
@@ -240,13 +359,30 @@ export class SecretsManager {
       ...(settingsEnc !== undefined ? { settingsEnc } : {}),
       ...(input.isEnabled !== undefined ? { isEnabled: input.isEnabled } : {}),
     };
-    const row = Object.keys(patch).length
-      ? await repos.secrets.update(tenantId, providerKey, patch)
-      : current;
+    const changed = Object.keys(patch).length > 0;
+    if (!changed && shares === undefined) {
+      // nothing to change: today's answer, and the provider is read again as before
+      await this.audit(tenantId, current, 'updated', actor);
+      await this.applyRow(current);
+      await this.announce(tenantId, providerKey);
+      return this.getConnection(tenantId, providerKey);
+    }
+    const row = await this.inTransaction(async (r) => {
+      const updated = changed ? await r.secrets.update(tenantId, providerKey, patch) : current;
+      if (updated && shares) await r.secrets.setShares(tenantId, updated.id, shares);
+      return updated;
+    });
     if (!row) throw connectionNotFound(providerKey);
-    await this.audit(tenantId, row, 'updated', actor);
+    await this.audit(tenantId, row, 'updated', actor, shares ? { projectIds: shares } : {});
+    if (!changed) {
+      // only the shares moved: the access list changes here and on the other processes, the vault is not read
+      await this.loadReach(row);
+      await this.announce(tenantId, providerKey, true);
+      return this.getConnection(tenantId, providerKey);
+    }
     // values read with the old settings are not served under the new ones
     if (settingsEnc !== undefined || typeChanged) await this.forget(tenantId, providerKey);
+    if (shares) await this.loadReach(row);
     await this.applyRow(row);
     await this.announce(tenantId, providerKey);
     return this.getConnection(tenantId, providerKey);
@@ -286,9 +422,26 @@ export class SecretsManager {
     return { success };
   }
 
-  /** names only, never values: `{<providerKey>: [secret names]}` */
+  /**
+   * names only, never values: `{<providerKey>: [secret names]}`. P6-28: the tenant wide connections only
+   * (n8n's global completions); a project reads its own through `projectCompletions`.
+   */
   async completions(tenantId: string): Promise<Record<string, string[]>> {
     const rows = await this.deps.repos.secrets.list(tenantId);
+    const shares = await this.sharesOf(tenantId, rows);
+    return this.names(
+      tenantId,
+      rows.filter((row) => reachOf(row, shares).tenantWide),
+    );
+  }
+
+  /** P6-28: the secret names of the connections a project owns or has shared (n8n's project completions) */
+  async projectCompletions(tenantId: string, projectId: string): Promise<Record<string, string[]>> {
+    if (!isUuid(projectId)) return {};
+    return this.names(tenantId, await this.deps.repos.secrets.list(tenantId, { projectId }));
+  }
+
+  private names(tenantId: string, rows: SecretConnectionRow[]): Record<string, string[]> {
     return Object.fromEntries(
       rows
         .filter((row) => row.isEnabled)
@@ -297,24 +450,33 @@ export class SecretsManager {
   }
 
   /**
-   * the `$secrets` object of a tenant, only for reading credential data (resolver.ts). P6 S1: `projectId` is
-   * the credential's project; until L8 every connection of the tenant stays readable.
+   * the `$secrets` object of a tenant, only for reading credential data (resolver.ts). P6-28: `projectId` is
+   * the credential's home project; it reads the connections that project owns, the ones shared with it and
+   * the tenant wide ones. No project reads the tenant wide ones only. Any other key reads as not reachable.
    */
   secretsFor(tenantId: string, projectId?: string | null): SecretsObject {
-    // stub (L8): every connection of the tenant stays readable
-    void projectId;
-    return createSecretsProxy(this.cache.view(tenantId));
+    const reader = projectId ?? null;
+    return createSecretsProxy(
+      this.cache.view(tenantId, (providerKey) => reaches(this.reach.get(liveId(tenantId, providerKey)), reader)),
+    );
   }
 
   /**
-   * P6 S1: whether a credential of `projectId` may read the vaults `providerKeys` (its `secret_keys`), on save
-   * and on test; throws when one is not open to the project. Passes until L8 fills it.
+   * P6-28: whether a credential of `projectId` may read the vaults `providerKeys` (its `secret_keys`), on save,
+   * on test and on a move; throws n8n's 400 naming every key the project cannot reach. A key counts whether
+   * its connection is enabled or not; a key with no connection cannot be reached.
    */
   async assertProjectAccess(tenantId: string, projectId: string, providerKeys: string[]): Promise<void> {
-    // stub (L8): passes everything until L8 reads project_secret_access (P6-35)
-    void tenantId;
-    void projectId;
-    void providerKeys;
+    const keys = unique(providerKeys);
+    if (!keys.length) return;
+    const reachable = new Set(await this.deps.repos.secrets.keysReachableFrom(tenantId, projectId, keys));
+    const missing = keys.filter((key) => !reachable.has(key)).sort();
+    if (!missing.length) return;
+    if (missing.length === 1) {
+      throw ApiError.badRequest(`The secret provider "${missing[0]}" does not exist in this project`);
+    }
+    const list = missing.map((key) => `"${key}"`).join(', ');
+    throw ApiError.badRequest(`The secret providers ${list} do not exist in this project`);
   }
 
   // -----------------------------------------------------------------------------------------
@@ -324,6 +486,28 @@ export class SecretsManager {
     const row = await this.deps.repos.secrets.get(tenantId, providerKey);
     if (!row) throw connectionNotFound(providerKey);
     return row;
+  }
+
+  /** P6-28: every id must be a project of this workspace (another workspace's id is 404) */
+  private async requireProjects(tenantId: string, projectIds: string[]): Promise<void> {
+    const found = await Promise.all(
+      projectIds.map((id) => (isUuid(id) ? this.deps.repos.projects.get(tenantId, id) : undefined)),
+    );
+    if (found.some((project) => !project)) throw ApiError.notFound('Project');
+  }
+
+  /** the work on one transaction's repositories */
+  private async inTransaction<T>(work: (repos: Repositories) => Promise<T>): Promise<T> {
+    return this.deps.database.db.transaction(async (tx) => work(createRepositories(tx)));
+  }
+
+  /** P6-28: the shares of these rows */
+  private async sharesOf(tenantId: string, rows: SecretConnectionRow[]): Promise<SecretConnectionShare[]> {
+    if (!rows.length) return [];
+    return this.deps.repos.secrets.sharesOf(
+      tenantId,
+      rows.map((row) => row.id),
+    );
   }
 
   private requireType(name: string): SecretProviderType {
@@ -350,7 +534,23 @@ export class SecretsManager {
     }
   }
 
-  private async toDTO(row: SecretConnectionRow): Promise<SecretConnectionDTO> {
+  private async toDTOs(
+    tenantId: string,
+    rows: SecretConnectionRow[],
+    shares: SecretConnectionShare[],
+  ): Promise<SecretConnectionDTO[]> {
+    const projects = new Map<string, SecretConnectionProject[]>();
+    for (const share of shares) {
+      const list = projects.get(share.connectionId) ?? [];
+      list.push({ ...share.project });
+      projects.set(share.connectionId, list);
+    }
+    return Promise.all(
+      rows.filter((row) => row.tenantId === tenantId).map((row) => this.toDTO(row, projects.get(row.id) ?? [])),
+    );
+  }
+
+  private async toDTO(row: SecretConnectionRow, projects: SecretConnectionProject[]): Promise<SecretConnectionDTO> {
     const live = this.live.get(liveId(row.tenantId, row.providerKey));
     return {
       id: row.id,
@@ -364,6 +564,8 @@ export class SecretsManager {
       credentialsCount: await this.deps.repos.secrets.countCredentialsUsing(row.tenantId, row.providerKey),
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
+      projectId: row.projectId ?? null,
+      projects,
     };
   }
 
@@ -379,7 +581,12 @@ export class SecretsManager {
       action: `secret_connection.${action}`,
       resourceType: 'secret_connection',
       resourceId: row.id,
-      metadata: { providerKey: row.providerKey, type: row.type, ...extra },
+      metadata: {
+        providerKey: row.providerKey,
+        type: row.type,
+        ...(row.projectId ? { projectId: row.projectId } : {}),
+        ...extra,
+      },
       ip: actor?.ip,
     });
   }
@@ -430,7 +637,50 @@ export class SecretsManager {
       clearTimeout(live.retry);
       this.live.delete(id);
     }
+    this.reach.delete(id);
     await disconnect(this.cache.delete(tenantId, providerKey));
+  }
+
+  // -----------------------------------------------------------------------------------------
+  // P6-28: the access list
+
+  /** an entry wins only over one read before it */
+  private setReach(id: string, entry: ReachEntry): void {
+    const current = this.reach.get(id);
+    if (!current || current.seq < entry.seq) this.reach.set(id, entry);
+  }
+
+  /** read the row's shares again. A failed read closes it to everyone but its owner until the next one. */
+  private async loadReach(row: SecretConnectionRow): Promise<void> {
+    const seq = ++this.reachSeq;
+    const id = liveId(row.tenantId, row.providerKey);
+    try {
+      const shares = await this.deps.repos.secrets.accessFor(row.tenantId, row.id);
+      this.setReach(id, { ...reachOfShares(row, shares.map((share) => share.projectId)), seq });
+    } catch (error) {
+      this.setReach(id, { projectId: row.projectId ?? null, sharedWith: new Set(), tenantWide: false, seq });
+      this.deps.logger.warn(
+        { code: pgErrorCode(error), tenantId: row.tenantId, providerKey: row.providerKey },
+        'Could not read the projects of an external secret connection',
+      );
+    }
+  }
+
+  /** the timer's rebuild of every enabled connection's entry, from one read */
+  private async reloadAllReach(rows: SecretConnectionRow[]): Promise<void> {
+    const seq = ++this.reachSeq;
+    const shares = await this.deps.repos.secrets.listAllEnabledShares();
+    const byConnection = new Map<string, string[]>();
+    for (const share of shares) {
+      const key = `${share.tenantId}\0${share.connectionId}`;
+      byConnection.set(key, [...(byConnection.get(key) ?? []), share.projectId]);
+    }
+    for (const row of rows) {
+      const id = liveId(row.tenantId, row.providerKey);
+      if (!this.live.has(id)) continue;
+      const sharedWith = byConnection.get(`${row.tenantId}\0${row.id}`) ?? [];
+      this.setReach(id, { ...reachOfShares(row, sharedWith), seq });
+    }
   }
 
   /** a new provider from the row. Until it has read the vault, whatever the cache holds keeps answering. */
@@ -488,6 +738,9 @@ export class SecretsManager {
         await this.failAndRetry(live, fixedText(error, TEXT_CONNECT), () => this.reconnect(live));
       return;
     }
+    if (await stale(provider)) return;
+    // P6-28: who may read it is known before anyone can
+    await this.loadReach(row);
     if (await stale(provider)) return;
     await disconnect(this.cache.set(row.tenantId, row.providerKey, provider));
     live.attempt = 0;
@@ -633,6 +886,8 @@ export class SecretsManager {
           await this.forget(live.tenantId, live.providerKey);
         }
       }
+      // P6-28: a share change whose bus message got lost is picked up here
+      await this.reloadAllReach(rows);
       await this.mapLimit(rows, async (row) => {
         const live = this.live.get(liveId(row.tenantId, row.providerKey));
         if (!live || live.version !== row.updatedAt.getTime()) {
@@ -669,21 +924,32 @@ export class SecretsManager {
     await this.connect(row);
   }
 
-  private async announce(tenantId: string, providerKey: string): Promise<void> {
+  /** `accessOnly`: only the projects that reach it changed (P6-28), the vault is not read again */
+  private async announce(tenantId: string, providerKey: string, accessOnly = false): Promise<void> {
     await this.deps
       .context()
-      .bus.publish(RELOAD_CHANNEL, { tenantId, providerKey, origin: this.instanceId })
+      .bus.publish(RELOAD_CHANNEL, {
+        tenantId,
+        providerKey,
+        origin: this.instanceId,
+        ...(accessOnly ? { accessOnly: true } : {}),
+      })
       .catch(() => {});
   }
 
   private async onReloadMessage(message: unknown): Promise<void> {
-    const { tenantId, providerKey, origin } = (message ?? {}) as Record<string, unknown>;
+    const { tenantId, providerKey, origin, accessOnly } = (message ?? {}) as Record<string, unknown>;
     if (typeof tenantId !== 'string' || typeof providerKey !== 'string') return;
     if (origin === this.instanceId || !this.running) return;
     try {
       const row = await this.deps.repos.secrets.get(tenantId, providerKey);
-      if (row) await this.reloadRow(row);
-      else await this.forget(tenantId, providerKey);
+      if (!row) {
+        await this.forget(tenantId, providerKey);
+        return;
+      }
+      // P6-28: the access list first, so a narrowed share holds before the vault is read again
+      if (row.isEnabled) await this.loadReach(row);
+      if (accessOnly !== true) await this.reloadRow(row);
     } catch (error) {
       this.deps.logger.warn(
         { code: pgErrorCode(error), tenantId, providerKey },
@@ -694,6 +960,33 @@ export class SecretsManager {
 }
 
 const connectionNotFound = (providerKey: string) => ApiError.notFound(`Connection with key "${providerKey}"`);
+
+const unique = (values: string[]): string[] => [...new Set(values)];
+
+/** P6-28: a row's reach from the projects it is shared with */
+function reachOfShares(row: SecretConnectionRow, sharedWith: string[]): SecretConnectionReach {
+  const projectId = row.projectId ?? null;
+  return { projectId, sharedWith: new Set(sharedWith), tenantWide: projectId === null && sharedWith.length === 0 };
+}
+
+/** P6-28: a row's reach from the shares of a listing */
+function reachOf(row: SecretConnectionRow, shares: SecretConnectionShare[]): SecretConnectionReach {
+  return reachOfShares(
+    row,
+    shares.filter((share) => share.connectionId === row.id).map((share) => share.project.id),
+  );
+}
+
+/**
+ * P6-28: whether a read under `projectId` (null: no project) may use the connection; no entry is no.
+ * Tenant wide: everyone. Otherwise only the owning project and the projects it is shared with.
+ */
+function reaches(reach: SecretConnectionReach | undefined, projectId: string | null): boolean {
+  if (!reach) return false;
+  if (reach.tenantWide) return true;
+  if (projectId === null) return false;
+  return reach.projectId === projectId || reach.sharedWith.has(projectId);
+}
 
 function withoutSentinels(settings: SecretProviderSettings): SecretProviderSettings {
   return Object.fromEntries(Object.entries(settings).filter(([, value]) => value !== REDACTED));

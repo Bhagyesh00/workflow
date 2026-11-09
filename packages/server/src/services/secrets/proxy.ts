@@ -2,6 +2,8 @@
  * The `$secrets` object (P4-07): `$secrets.<providerKey>.<secret>`, read only, with n8n's two errors.
  * It exists only while credential data is read (resolver.ts). The recording variant answers the same
  * reads without values, so that the engine itself says what an expression refers to (GHSA-jp7m).
+ * P6-28: the view is already cut to the vaults the credential's home project reaches (manager.ts
+ * `secretsFor`), so a key of another project reads as not reachable, never as found.
  */
 import { ExpressionError } from '@workflow/workflow';
 import type { SecretProvider } from './types';

@@ -1,11 +1,18 @@
 /**
- * External secret connections (P4-07). Every method takes the tenant first, except the one
- * system-level read the manager's startup load uses, which says so. `settingsEnc` is ciphertext; only
+ * External secret connections (P4-07) and their project shares (P6-28). Every method takes the tenant
+ * first, except the system-level reads the manager's load and refresh use, which say so. `settingsEnc` is ciphertext; only
  * the manager decrypts it.
  */
-import { and, asc, eq, type SQL, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
-import { credentials, projectSecretAccess, type SecretConnectionRow, secretConnections } from '../db/schema';
+import {
+  credentials,
+  type ProjectRow,
+  projectSecretAccess,
+  projects,
+  type SecretConnectionRow,
+  secretConnections,
+} from '../db/schema';
 import { type AccessListOptions, inUuids } from './shares';
 import { isUuid, now } from './util';
 
@@ -16,6 +23,20 @@ export type SecretConnectionInsert = Pick<
   /** the owning project (P6-28); absent or null = a workspace connection */
   projectId?: string | null;
 };
+
+/** P6-28: one `project_secret_access` row with the project it names */
+export interface SecretConnectionShare {
+  connectionId: string;
+  role: string;
+  project: Pick<ProjectRow, 'id' | 'name' | 'type' | 'icon'>;
+}
+
+/** P6-28: one `project_secret_access` row, system-level (the access list of every process) */
+export interface SecretAccessEntry {
+  tenantId: string;
+  connectionId: string;
+  projectId: string;
+}
 
 export type SecretConnectionPatch = Partial<
   Pick<SecretConnectionRow, 'type' | 'settingsEnc' | 'isEnabled' | 'state' | 'lastError'>
@@ -115,6 +136,68 @@ export class SecretConnectionRepository {
       );
   }
 
+  /** P6-28: the shares of these connections with their projects, oldest project name first */
+  async sharesOf(tenantId: string, connectionIds: string[]): Promise<SecretConnectionShare[]> {
+    const ids = [...new Set(connectionIds.filter(isUuid))];
+    if (!ids.length) return [];
+    return this.db
+      .select({
+        connectionId: projectSecretAccess.connectionId,
+        role: projectSecretAccess.role,
+        project: { id: projects.id, name: projects.name, type: projects.type, icon: projects.icon },
+      })
+      .from(projectSecretAccess)
+      .innerJoin(
+        projects,
+        and(eq(projects.tenantId, projectSecretAccess.tenantId), eq(projects.id, projectSecretAccess.projectId)),
+      )
+      .where(and(eq(projectSecretAccess.tenantId, tenantId), inArray(projectSecretAccess.connectionId, ids)))
+      .orderBy(asc(projects.name), asc(projects.id));
+  }
+
+  /**
+   * P6-28: the projects a connection is shared with become exactly `projectIds` (role
+   * `secretsProviderConnection:user` for new ones; a project that stays keeps its role). One transaction.
+   */
+  async setShares(tenantId: string, connectionId: string, projectIds: string[]): Promise<void> {
+    const wanted = [...new Set(projectIds)];
+    await this.db.transaction(async (tx) => {
+      const scope = and(eq(projectSecretAccess.tenantId, tenantId), eq(projectSecretAccess.connectionId, connectionId));
+      await tx
+        .delete(projectSecretAccess)
+        .where(wanted.length ? and(scope, notInArray(projectSecretAccess.projectId, wanted)) : scope);
+      if (wanted.length) {
+        await tx
+          .insert(projectSecretAccess)
+          .values(wanted.map((projectId) => ({ tenantId, connectionId, projectId })))
+          .onConflictDoNothing();
+      }
+    });
+  }
+
+  /**
+   * P6-28: the keys of `providerKeys` that a credential of `projectId` may read: a connection the project
+   * owns, one shared with it, or a workspace connection shared with no project. Enabled or not.
+   */
+  async keysReachableFrom(tenantId: string, projectId: string, providerKeys: string[]): Promise<string[]> {
+    const keys = [...new Set(providerKeys)];
+    if (!keys.length) return [];
+    const project = isUuid(projectId) ? sql`${projectId}::uuid` : sql`null::uuid`;
+    const rows = await this.db
+      .select({ providerKey: secretConnections.providerKey })
+      .from(secretConnections)
+      .where(
+        and(
+          eq(secretConnections.tenantId, tenantId),
+          inArray(secretConnections.providerKey, keys),
+          sql`(${secretConnections.projectId} = ${project}
+            or exists (select 1 from ${projectSecretAccess} where ${projectSecretAccess.tenantId} = ${secretConnections.tenantId} and ${projectSecretAccess.connectionId} = ${secretConnections.id} and ${projectSecretAccess.projectId} = ${project})
+            or (${secretConnections.projectId} is null and not exists (select 1 from ${projectSecretAccess} where ${projectSecretAccess.tenantId} = ${secretConnections.tenantId} and ${projectSecretAccess.connectionId} = ${secretConnections.id})))`,
+        ),
+      );
+    return rows.map((row) => row.providerKey);
+  }
+
   /** credentials whose secret_keys hold this connection, for the delete warning */
   async countCredentialsUsing(tenantId: string, providerKey: string): Promise<number> {
     const [row] = await this.db
@@ -136,5 +219,24 @@ export class SecretConnectionRepository {
   /** System-level: every tenant's enabled connections, for the load before jobs start. */
   async listAllEnabled(): Promise<SecretConnectionRow[]> {
     return this.db.select().from(secretConnections).where(eq(secretConnections.isEnabled, true));
+  }
+
+  /** System-level (P6-28): every share of every enabled connection, for the refresh of the access list. */
+  async listAllEnabledShares(): Promise<SecretAccessEntry[]> {
+    return this.db
+      .select({
+        tenantId: projectSecretAccess.tenantId,
+        connectionId: projectSecretAccess.connectionId,
+        projectId: projectSecretAccess.projectId,
+      })
+      .from(projectSecretAccess)
+      .innerJoin(
+        secretConnections,
+        and(
+          eq(secretConnections.tenantId, projectSecretAccess.tenantId),
+          eq(secretConnections.id, projectSecretAccess.connectionId),
+        ),
+      )
+      .where(eq(secretConnections.isEnabled, true));
   }
 }

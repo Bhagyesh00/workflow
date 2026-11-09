@@ -37,11 +37,14 @@ export class SecretsCache {
     return this.get(tenantId, providerKey)?.getSecretNames() ?? [];
   }
 
-  /** one tenant's providers, as `$secrets` reads them */
-  view(tenantId: string): SecretsView {
+  /**
+   * one tenant's providers, as `$secrets` reads them. P6-28: `allow` narrows them to the connections a
+   * project may read; a key it refuses is absent, as if the tenant had no such connection.
+   */
+  view(tenantId: string, allow: (providerKey: string) => boolean = () => true): SecretsView {
     return {
-      keys: () => [...(this.tenants.get(tenantId)?.keys() ?? [])],
-      provider: (providerKey) => this.get(tenantId, providerKey),
+      keys: () => [...(this.tenants.get(tenantId)?.keys() ?? [])].filter((key) => allow(key)),
+      provider: (providerKey) => (allow(providerKey) ? this.get(tenantId, providerKey) : undefined),
     };
   }
 

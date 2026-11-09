@@ -1,13 +1,15 @@
 /**
- * /rest/secret-providers (P4-07), n8n's connections model. Admin and owner manage connections and read
- * provider types; editor and above list secret names, never values. P6-28 (L8): project vaults under
- * `/secret-providers/projects/:projectId/connections` and the project's secret names, gated by
- * `externalSecretsProvider:*` and `externalSecret:list` on the project; C0 registers those 7 routes with
- * their final path and gate, and their handlers throw until L8.
+ * /rest/secret-providers (P4-07), n8n's connections model. P6-28: every route checks a scope. The
+ * workspace routes take `externalSecretsProvider:*` and `externalSecret:list` workspace wide (owner and
+ * admin); a workspace connection takes `projectIds` to share it with those projects only. The project
+ * routes (n8n's project connections controller) take the same scopes on `:projectId`, which a custom
+ * project role, or the `externalSecrets.systemRolesEnabled` switch (project admin all, project editor
+ * read), gives. Secret values never leave the manager; settings come back blanked.
  */
+import type { Scope } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { requireRole, requireScope } from '../http/auth';
+import { type AuthContext, requireAuth, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import type { SecretsManager } from '../services/secrets/manager';
 import type { SecretActor, SecretProviderType } from '../services/secrets/types';
@@ -24,17 +26,21 @@ const typeParams = z.object({ type: typeName });
 /** P6-28: the project's id (a non-uuid is the access service's 404) */
 const projectParams = z.object({ projectId: z.string() });
 const settings = z.record(z.string(), z.unknown());
+/** P6-28: the projects a workspace connection is shared with (an unknown id is the manager's 404) */
+const projectIds = z.array(z.string().min(1).max(64)).max(500);
 
 const createBody = z.object({
   providerKey,
   type: typeName,
   settings,
   isEnabled: z.boolean().optional(),
+  projectIds: projectIds.optional(),
 });
 const updateBody = z.object({
   type: typeName.optional(),
   settings: settings.optional(),
   isEnabled: z.boolean().optional(),
+  projectIds: projectIds.optional(),
 });
 
 /** a type as the settings form reads it, without `create` */
@@ -54,110 +60,151 @@ export function registerSecretConnectionRoutes(
     ip: request.ip,
   });
 
+  /**
+   * P6-28: the scope on the project, or the system role switch for a project admin or editor of it. A
+   * missing project stays the access service's 404.
+   */
+  const requireVaultScope = async (
+    request: FastifyRequest,
+    scope: Scope,
+    projectId: string,
+  ): Promise<AuthContext> => {
+    try {
+      return await requireScope(request, scope, { projectId });
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.statusCode !== 403) throw error;
+      const auth = requireAuth(request);
+      if (await secrets.systemRoleAllows(auth.tenant.id, auth.user.id, projectId, scope)) return auth;
+      throw error;
+    }
+  };
+  /** the caller's workspace wide scopes, which pass n8n's connection role check */
+  const workspaceScopes = async (request: FastifyRequest, auth: AuthContext): Promise<ReadonlySet<Scope>> =>
+    request.server.access ? request.server.access.scopesForAuth(auth) : new Set<Scope>();
+
   app.get('/secret-providers/types', async (request) => {
-    requireRole(request, 'admin');
+    await requireScope(request, 'externalSecretsProvider:list');
     return { data: secrets.listTypes().map(typeDTO) };
   });
 
   app.get('/secret-providers/types/:type', async (request) => {
-    requireRole(request, 'admin');
+    await requireScope(request, 'externalSecretsProvider:read');
     const type = secrets.getType(parse(typeParams, request.params).type);
     if (!type) throw ApiError.notFound('Provider type');
     return { data: typeDTO(type) };
   });
 
-  // n8n's path ends in /global (its project variants are not built); both reach the same list
+  // n8n's path ends in /global; both list the tenant wide connections (a project's are under /project/:id)
   for (const url of [
     '/secret-providers/completions/secrets',
     '/secret-providers/completions/secrets/global',
   ]) {
     app.get(url, async (request) => {
-      const auth = requireRole(request, 'editor');
+      const auth = await requireScope(request, 'externalSecret:list');
       return { data: await secrets.completions(auth.tenant.id) };
     });
   }
 
   app.get('/secret-providers/connections', async (request) => {
-    const auth = requireRole(request, 'admin');
+    // the scope is workspace wide, so every connection of the workspace is the caller's to see
+    const auth = await requireScope(request, 'externalSecretsProvider:list');
     return { data: await secrets.listConnections(auth.tenant.id) };
   });
 
   app.post('/secret-providers/connections', async (request) => {
-    const auth = requireRole(request, 'admin');
+    const auth = await requireScope(request, 'externalSecretsProvider:create');
     const body = parse(createBody, request.body);
     return { data: await secrets.createConnection(auth.tenant.id, body, actor(request)) };
   });
 
   app.get('/secret-providers/connections/:providerKey', async (request) => {
-    const auth = requireRole(request, 'admin');
+    const auth = await requireScope(request, 'externalSecretsProvider:read');
     const params = parse(keyParams, request.params);
     return { data: await secrets.getConnection(auth.tenant.id, params.providerKey) };
   });
 
   app.patch('/secret-providers/connections/:providerKey', async (request) => {
-    const auth = requireRole(request, 'admin');
+    const auth = await requireScope(request, 'externalSecretsProvider:update');
     const params = parse(keyParams, request.params);
     const body = parse(updateBody, request.body);
     return { data: await secrets.updateConnection(auth.tenant.id, params.providerKey, body, actor(request)) };
   });
 
   app.delete('/secret-providers/connections/:providerKey', async (request) => {
-    const auth = requireRole(request, 'admin');
+    const auth = await requireScope(request, 'externalSecretsProvider:delete');
     const params = parse(keyParams, request.params);
     await secrets.deleteConnection(auth.tenant.id, params.providerKey, actor(request));
     return { data: { ok: true } };
   });
 
   app.post('/secret-providers/connections/:providerKey/test', async (request) => {
-    const auth = requireRole(request, 'admin');
+    const auth = await requireScope(request, 'externalSecretsProvider:read');
     const params = parse(keyParams, request.params);
     return { data: await secrets.testConnection(auth.tenant.id, params.providerKey, actor(request)) };
   });
 
   app.post('/secret-providers/connections/:providerKey/reload', async (request) => {
-    const auth = requireRole(request, 'admin');
+    const auth = await requireScope(request, 'externalSecretsProvider:sync');
     const params = parse(keyParams, request.params);
     return { data: await secrets.reloadConnection(auth.tenant.id, params.providerKey, actor(request)) };
   });
 
-  // P6-28 (L8): project vaults, n8n's project connections controller; C0 stubs, gate first
+  // P6-28: project vaults, n8n's project connections controller; the gate first, then the body
   const projectOf = (request: FastifyRequest) => parse(projectParams, request.params).projectId;
-  const notImplemented = (): never => {
-    throw new Error('not implemented (L8)');
+  const keyOf = (request: FastifyRequest) => parse(keyParams, request.params).providerKey;
+
+  /** a change through a project: the project's role on the connection must allow it (n8n) */
+  const changeInProject = async (request: FastifyRequest, scope: Scope) => {
+    const projectId = projectOf(request);
+    const auth = await requireVaultScope(request, scope, projectId);
+    const providerKey = keyOf(request);
+    const held = await workspaceScopes(request, auth);
+    await secrets.assertConnectionAccess(auth.tenant.id, projectId, providerKey, scope, held);
+    return { auth, providerKey };
   };
 
   app.post('/secret-providers/projects/:projectId/connections', async (request) => {
-    await requireScope(request, 'externalSecretsProvider:create', { projectId: projectOf(request) });
-    return notImplemented();
+    const projectId = projectOf(request);
+    const auth = await requireVaultScope(request, 'externalSecretsProvider:create', projectId);
+    // the project owns what it creates; sharing is the workspace route's
+    const { projectIds: _shares, ...body } = parse(createBody, request.body);
+    return {
+      data: await secrets.createConnection(auth.tenant.id, { ...body, projectId }, actor(request)),
+    };
   });
 
   app.get('/secret-providers/projects/:projectId/connections', async (request) => {
-    await requireScope(request, 'externalSecretsProvider:list', { projectId: projectOf(request) });
-    return notImplemented();
+    const projectId = projectOf(request);
+    const auth = await requireVaultScope(request, 'externalSecretsProvider:list', projectId);
+    return { data: await secrets.listProjectConnections(auth.tenant.id, projectId) };
   });
 
   app.get('/secret-providers/projects/:projectId/connections/:providerKey', async (request) => {
-    await requireScope(request, 'externalSecretsProvider:read', { projectId: projectOf(request) });
-    return notImplemented();
+    const projectId = projectOf(request);
+    const auth = await requireVaultScope(request, 'externalSecretsProvider:read', projectId);
+    return { data: await secrets.getProjectConnection(auth.tenant.id, projectId, keyOf(request)) };
   });
 
   app.patch('/secret-providers/projects/:projectId/connections/:providerKey', async (request) => {
-    await requireScope(request, 'externalSecretsProvider:update', { projectId: projectOf(request) });
-    return notImplemented();
+    const { auth, providerKey } = await changeInProject(request, 'externalSecretsProvider:update');
+    const { projectIds: _shares, ...body } = parse(updateBody, request.body);
+    return { data: await secrets.updateConnection(auth.tenant.id, providerKey, body, actor(request)) };
   });
 
   app.delete('/secret-providers/projects/:projectId/connections/:providerKey', async (request) => {
-    await requireScope(request, 'externalSecretsProvider:delete', { projectId: projectOf(request) });
-    return notImplemented();
+    const { auth, providerKey } = await changeInProject(request, 'externalSecretsProvider:delete');
+    await secrets.deleteConnection(auth.tenant.id, providerKey, actor(request));
+    return { data: { ok: true } };
   });
 
   app.post('/secret-providers/projects/:projectId/connections/:providerKey/test', async (request) => {
-    await requireScope(request, 'externalSecretsProvider:update', { projectId: projectOf(request) });
-    return notImplemented();
+    const { auth, providerKey } = await changeInProject(request, 'externalSecretsProvider:update');
+    return { data: await secrets.testConnection(auth.tenant.id, providerKey, actor(request)) };
   });
 
   app.get('/secret-providers/completions/secrets/project/:projectId', async (request) => {
-    await requireScope(request, 'externalSecret:list', { projectId: projectOf(request) });
-    return notImplemented();
+    const projectId = projectOf(request);
+    const auth = await requireVaultScope(request, 'externalSecret:list', projectId);
+    return { data: await secrets.projectCompletions(auth.tenant.id, projectId) };
   });
 }

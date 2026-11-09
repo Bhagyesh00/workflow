@@ -1,10 +1,12 @@
 /**
- * External secrets contract (P4-07, P4-08). Final: L9's manager and L11's six providers build on it.
+ * External secrets contract (P4-07, P4-08; P6-28 adds the project fields). L9's manager and L11's six
+ * providers build on it.
  * A provider reaches its vault only through `deps.http` (the SSRF-guarded client) and reports fixed
  * error texts, never a response body. Secret values stay in the provider's memory.
  */
 import type { HttpClient } from '@workflow/core';
 import type { Logger, NodeProperty } from '@workflow/workflow';
+import type { ProjectRow } from '../../db/schema';
 
 export const SECRET_PROVIDER_STATES = [
   'initializing',
@@ -66,6 +68,9 @@ export interface SecretConnectionTestResult {
   error?: string;
 }
 
+/** P6-28: a project as a connection names it (the editor's `ProjectRef`) */
+export type SecretConnectionProject = Pick<ProjectRow, 'id' | 'name' | 'type' | 'icon'>;
+
 /** what the API shows of a connection: password settings blanked */
 export interface SecretConnectionDTO {
   id: string;
@@ -80,6 +85,10 @@ export interface SecretConnectionDTO {
   credentialsCount: number;
   createdAt: string;
   updatedAt: string;
+  /** P6-28: the owning project; null = a workspace connection */
+  projectId: string | null;
+  /** P6-28: the projects the connection is shared with (`project_secret_access`) */
+  projects: SecretConnectionProject[];
 }
 
 export interface SecretConnectionCreateInput {
@@ -87,12 +96,29 @@ export interface SecretConnectionCreateInput {
   type: string;
   settings: SecretProviderSettings;
   isEnabled?: boolean;
+  /** P6-28: the owning project (the project routes); absent = a workspace connection */
+  projectId?: string;
+  /** P6-28: share a workspace connection with these projects only (empty or absent: every project) */
+  projectIds?: string[];
 }
 
 export interface SecretConnectionUpdateInput {
   type?: string;
   settings?: SecretProviderSettings;
   isEnabled?: boolean;
+  /** P6-28: the projects the connection is shared with, replacing the list; absent = unchanged */
+  projectIds?: string[];
+}
+
+/**
+ * P6-28: which projects may read a connection. A workspace connection shared with no project is tenant
+ * wide; otherwise only its owning project and the projects it is shared with reach it.
+ */
+export interface SecretConnectionReach {
+  projectId: string | null;
+  sharedWith: ReadonlySet<string>;
+  /** every project and a read with no project reach it */
+  tenantWide: boolean;
 }
 
 /** who did it, for the audit rows */
