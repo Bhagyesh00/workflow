@@ -7,6 +7,7 @@ import {
   createWorkflow,
   memberAs,
   node,
+  realMember,
   resetDatabase,
   signup,
   type TestServer,
@@ -169,6 +170,17 @@ describe('public API test runs', () => {
     expect((await api(key, 'POST', runs(wf.id), {})).statusCode).toBe(403);
     expect((await api(key, 'POST', `${runs(wf.id)}/${randomUUID()}/cancel`)).statusCode).toBe(403);
     expect((await api(key, 'GET', runs(wf.id))).statusCode).toBe(200);
+  });
+
+  it('refuses a member key on a workflow of a project the user is not in, with the key scopes held (P6-34)', async () => {
+    const owner = await newOwner();
+    const wf = await evalWorkflow(owner, 1);
+    const member = await realMember(owner, { name: 'M' });
+    const made = await member.client.data(member.client.post('/rest/api-keys', { name: 'm', scopes: ALL }));
+    const key = made.key as string;
+    expect((await api(key, 'POST', runs(wf.id), {})).statusCode).toBe(403);
+    expect((await api(key, 'GET', runs(wf.id))).statusCode).toBe(403);
+    expect((await api(key, 'POST', `${runs(wf.id)}/${randomUUID()}/cancel`)).statusCode).toBe(403);
   });
 
   it('answers 404 for another tenant workflow and run', async () => {

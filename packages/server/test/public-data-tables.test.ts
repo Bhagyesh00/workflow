@@ -2,7 +2,17 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { API_KEY_SCOPES, assertApiKeyScope } from '../src/http/api-key-scopes';
 import type { AuthContext } from '../src/http/auth';
-import { createTestServer, memberAs, resetDatabase, signup, type TestServer } from './helpers';
+import {
+  addToProject,
+  createTestServer,
+  memberAs,
+  projectIn,
+  realMember,
+  resetDatabase,
+  signup,
+  type TestServer,
+  teamProjectOf,
+} from './helpers';
 
 let server: TestServer;
 
@@ -185,6 +195,37 @@ describe('public API data tables', () => {
     const bad = await api(a.key, 'POST', `/data-tables/${table.id}/rows`, { data: [{ nope: 1 }] });
     expect(bad.statusCode).toBe(400);
     expect((await api(a.key, 'GET', '/data-tables/not-a-uuid')).statusCode).toBe(400);
+  });
+
+  it('creates in the workspace default project, or in the project the body names (P6-34)', async () => {
+    const owner = await signup(server.app);
+    const key = (await owner.client.data(owner.client.post('/rest/api-keys', { name: 'k' }))).key as string;
+    const home = await teamProjectOf(server, owner.tenant.id);
+    const made = await api(key, 'POST', '/data-tables', { name: 'in_default', columns: [] });
+    expect(made.json().data.projectId).toBe(home);
+    const other = await projectIn(server, owner.tenant.id, 'Other');
+    const named = await api(key, 'POST', '/data-tables', { name: 'in_other', columns: [], projectId: other.id });
+    expect(named.statusCode).toBe(200);
+    expect(named.json().data.projectId).toBe(other.id);
+    const unknown = await api(key, 'POST', '/data-tables', {
+      name: 'nowhere',
+      columns: [],
+      projectId: '00000000-0000-4000-8000-000000000000',
+    });
+    expect(unknown.statusCode).toBe(404);
+  });
+
+  it('lets a member key create only in a project where the user holds dataTable:create (P6-34)', async () => {
+    const owner = await signup(server.app);
+    const member = await realMember(owner);
+    const mine = await projectIn(server, owner.tenant.id, 'Mine');
+    const theirs = await projectIn(server, owner.tenant.id, 'Theirs');
+    await addToProject(server, owner.tenant.id, mine.id, member.user.id, 'project:editor');
+    const key = (await member.client.data(member.client.post('/rest/api-keys', { name: 'm' }))).key as string;
+    const ok = await api(key, 'POST', '/data-tables', { name: 'ok', columns: [], projectId: mine.id });
+    expect(ok.statusCode).toBe(200);
+    const refused = await api(key, 'POST', '/data-tables', { name: 'no', columns: [], projectId: theirs.id });
+    expect(refused.statusCode).toBe(403);
   });
 
   it('refuses writes to a viewer key', async () => {

@@ -408,6 +408,7 @@ describe('data tables', () => {
     const table = await server.ctx.dataTables.create(a.tenant.id, {
       name: 'cases',
       columns: [{ name: 'question', type: 'string' }],
+      projectId: await teamProjectOf(server, a.tenant.id),
     });
     const access = server.ctx.dataTables.forProject(a.tenant.id, await teamProjectOf(server, a.tenant.id));
     const added = await access.addColumn(table.id, { name: 'score', type: 'number' });
@@ -470,16 +471,19 @@ describe('routes', () => {
     expect((await client.post(`${base}/new`, { concurrency: 11 })).statusCode).toBe(400);
   });
 
-  it('PUBLIC_EVALUATION_ROUTES holds the 5 rows with their scopes, spread into PUBLIC_ROUTES', () => {
+  it('PUBLIC_EVALUATION_ROUTES holds the 5 rows with their key scopes and workflow access, spread into PUBLIC_ROUTES', () => {
     const rows = Object.fromEntries(
-      PUBLIC_EVALUATION_ROUTES.map((r) => [`${r.method} ${r.path}`, [r.scope, r.role, r.response]]),
+      PUBLIC_EVALUATION_ROUTES.map((r) => [
+        `${r.method} ${r.path}`,
+        [r.scope, 'scope' in r.access ? r.access.scope : null, r.response],
+      ]),
     );
     expect(rows).toEqual({
-      'GET /workflows/:workflowId/test-runs': ['testRun:list', 'viewer', 'TestRun'],
-      'POST /workflows/:workflowId/test-runs': ['testRun:create', 'editor', 'TestRun'],
-      'GET /workflows/:workflowId/test-runs/:runId': ['testRun:read', 'viewer', 'TestRun'],
-      'GET /workflows/:workflowId/test-runs/:runId/test-cases': ['testRun:read', 'viewer', 'TestCase'],
-      'POST /workflows/:workflowId/test-runs/:runId/cancel': ['testRun:cancel', 'editor', 'Ok'],
+      'GET /workflows/:workflowId/test-runs': ['testRun:list', 'workflow:read', 'TestRun'],
+      'POST /workflows/:workflowId/test-runs': ['testRun:create', 'workflow:execute', 'TestRun'],
+      'GET /workflows/:workflowId/test-runs/:runId': ['testRun:read', 'workflow:read', 'TestRun'],
+      'GET /workflows/:workflowId/test-runs/:runId/test-cases': ['testRun:read', 'workflow:read', 'TestCase'],
+      'POST /workflows/:workflowId/test-runs/:runId/cancel': ['testRun:cancel', 'workflow:execute', 'Ok'],
     });
     expect(PUBLIC_EVALUATION_ROUTES.every((r) => r.tag === 'Evaluations')).toBe(true);
     expect(

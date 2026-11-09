@@ -394,11 +394,29 @@ describe('API key scopes', () => {
       'POST /variables': 'variable:create',
       'PUT /variables/:id': 'variable:update',
       'DELETE /variables/:id': 'variable:delete',
-      'GET /folders': 'folder:list',
-      'POST /folders': 'folder:create',
-      'GET /folders/:folderId': 'folder:read',
-      'PATCH /folders/:folderId': 'folder:update',
-      'DELETE /folders/:folderId': 'folder:delete',
+      'GET /projects/:projectId/folders': 'folder:list',
+      'POST /projects/:projectId/folders': 'folder:create',
+      'GET /projects/:projectId/folders/:folderId': 'folder:read',
+      'PATCH /projects/:projectId/folders/:folderId': 'folder:update',
+      'DELETE /projects/:projectId/folders/:folderId': 'folder:delete',
+      // P6-34: projects, project members, roles, transfers and the security policy
+      'GET /projects': 'project:list',
+      'POST /projects': 'project:create',
+      'PUT /projects/:projectId': 'project:update',
+      'DELETE /projects/:projectId': 'project:delete',
+      'GET /projects/:projectId/users': 'user:list',
+      'POST /projects/:projectId/users': 'project:manageMembers',
+      'PATCH /projects/:projectId/users/:userId': 'project:manageMembers',
+      'DELETE /projects/:projectId/users/:userId': 'project:manageMembers',
+      'PUT /workflows/:id/transfer': 'workflow:move',
+      'PUT /credentials/:id/transfer': 'credential:move',
+      'GET /roles': 'role:list',
+      'GET /roles/:slug': 'role:read',
+      'POST /roles': 'role:manage',
+      'PUT /roles/:slug': 'role:manage',
+      'DELETE /roles/:slug': 'role:manage',
+      'GET /settings/security-policy': 'securitySettings:manage',
+      'PUT /settings/security-policy': 'securitySettings:manage',
     });
   });
 
@@ -425,7 +443,7 @@ describe('API key scopes', () => {
     );
   });
 
-  it('the public handler checks the scope, after the role', async () => {
+  it('the public handler checks the key scope first, then the scopes of the key user', async () => {
     const owner = await signup(server.app);
     const key = await owner.client.data(owner.client.post('/rest/api-keys', { name: 'k' }));
     const res = await server.app.inject({
@@ -450,7 +468,9 @@ describe('API key scopes', () => {
       payload: JSON.stringify({ name: 'a', columns: [] }),
     });
     expect(refused.statusCode).toBe(403);
-    expect(assertApiKeyScope).not.toHaveBeenCalled();
+    // the key scope is checked first, so it ran; the user's missing workspace scope is what refused
+    expect(assertApiKeyScope).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(assertApiKeyScope).mock.calls[0][1]).toBe('dataTable:create');
   });
 
   it('the OpenAPI document holds the data-table routes and every reference resolves', async () => {

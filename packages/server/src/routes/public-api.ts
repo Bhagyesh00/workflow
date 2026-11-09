@@ -2,13 +2,12 @@
  * Public API `/api/v1` (X-API-KEY). Routes are declared in one table that drives both the Fastify
  * registration and the OpenAPI 3.1 document at `/api/v1/openapi.json`.
  */
-import type { NodeProperty } from '@workflow/workflow';
+import type { NodeProperty, Scope } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import type { Role } from '../db/schema';
 import { type ApiKeyScope, assertApiKeyScope } from '../http/api-key-scopes';
-import { type AuthContext, loadApiKey } from '../http/auth';
+import { type AuthContext, loadApiKey, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import {
   credentialCreateSchema,
@@ -19,13 +18,16 @@ import {
   workflowCreateSchema,
   workflowUpdateSchema,
 } from '../http/schemas';
-import { hasRole } from '../services/auth';
+import type { AccessTarget } from '../services/access';
 import { createCredential, deleteCredential } from './credentials';
 import { deleteExecution, executionListQuery, getExecution, listExecutions } from './executions';
 import { PUBLIC_DATA_TABLE_ROUTES } from './public-data-tables';
 import { PUBLIC_EVALUATION_ROUTES } from './public-evaluations';
-import { publicFolderHandlers } from './public-folders';
-import { createTag, createVariable, renameTag, tagDTO, updateVariable, variableDTO } from './resources';
+import { PUBLIC_FOLDER_ROUTES } from './public-folders';
+import { PUBLIC_PROJECT_ROUTES } from './public-projects';
+import { PUBLIC_ROLE_ROUTES } from './public-roles';
+import { PUBLIC_SECURITY_POLICY_ROUTES } from './public-security-policy';
+import { createTag, projectVariableDTO, renameTag, tagDTO } from './resources';
 
 export interface PublicApiInput {
   auth: AuthContext;
@@ -33,15 +35,45 @@ export interface PublicApiInput {
   query: any;
   body: any;
   request: FastifyRequest;
+  /** a create route (`access.create`): the project the dispatcher resolved with `targetProject` and checked */
+  projectId?: string;
 }
 
-interface ApiRoute {
+/** what a row's `target` reads: the request as it arrived, before the schemas ran */
+export interface RouteRequest {
+  params: any;
+  query: any;
+  body: any;
+}
+
+/** the row of the access model that `target` names (`AccessService` resolves it; another workspace's id is 404) */
+export type RouteTarget = (request: RouteRequest) => AccessTarget | undefined;
+
+/**
+ * Who may call a row (P6-34). The user's scope is checked on the row it names; the API key scope
+ * (`ApiRoute.scope`) is a second check, so a call needs both.
+ * - `scope` (and `target`): the user must hold one of the scopes on the target, else 403
+ *   "User is missing a scope required to perform this action"; no target = the workspace scopes.
+ * - `list`: any key may call; the handler narrows its rows to `AccessService.listFilter`. With a `target`
+ *   (a `projectId` in the query) the scope is checked on it first.
+ * - `create`: the project is the body's `projectId`, else the workspace default (`targetProject`); the scope is
+ *   checked in it and the handler gets it as `input.projectId`.
+ * - `open`: any signed-in key (static answers).
+ */
+export type RouteAccess =
+  | { scope: Scope | readonly Scope[]; target?: RouteTarget; list?: undefined; create?: undefined }
+  | { scope: Scope | readonly Scope[]; list: true; target?: RouteTarget; create?: undefined }
+  | { scope: Scope; create: true; target?: undefined; list?: undefined }
+  | { open: true };
+
+export interface ApiRoute {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string;
   summary: string;
   tag: string;
-  role: Role;
-  /** the API key scope of this route (n8n's); checked by assertApiKeyScope after the role */
+  /** who may call it, by the user's scopes (checked first) */
+  access: RouteAccess;
+  /** the API key scope of this route (n8n's); a key needs it as well as `access` */
   scope?: ApiKeyScope;
   params?: z.ZodObject;
   query?: z.ZodObject;
@@ -56,6 +88,8 @@ interface ApiRoute {
 
 const publicWorkflowListQuery = z.object({
   active: z.stringbool().optional(),
+  /** only the workflows of this project (needs `workflow:list` in it) */
+  projectId: z.uuid().optional(),
   tagId: z.string().max(64).optional(),
   name: z.string().max(128).optional(),
   limit: z.coerce.number().int().min(1).max(250).default(50),
@@ -71,30 +105,21 @@ const publicPublishBody = z.object({
   name: z.string().trim().min(1).max(128).optional(),
   description: z.string().max(2000).optional(),
 });
-/** P3-15 folders (handlers in public-folders.ts, L16) */
-const folderParams = z.object({ folderId: z.uuid() });
-const publicFolderListQuery = z.object({
-  parentFolderId: z.union([z.uuid(), z.literal('root')]).optional(),
-  /** comma-separated tag names; a folder must have all of them */
-  tags: z.string().max(2000).optional(),
-  limit: z.coerce.number().int().min(1).max(250).default(50),
-  cursor: z.string().max(512).optional(),
+/** P6-34: a variable is global, or belongs to a project; `state=empty` keeps the ones with no value */
+const publicVariableListQuery = z.object({
+  projectId: z.uuid().optional(),
+  state: z.enum(['empty']).optional(),
 });
-const publicFolderCreate = z.object({
-  name: z.string().trim().min(1).max(128),
-  parentFolderId: z.uuid().nullable().optional(),
-});
-const publicFolderUpdate = z.object({
-  name: z.string().trim().min(1).max(128).optional(),
-  parentFolderId: z.uuid().nullable().optional(),
-  /** same cap as folderUpdateSchema, which the handler re-parses with */
-  tagIds: z.array(z.uuid()).max(50).optional(),
-});
-const publicFolderDeleteQuery = z.object({
-  transferToFolderId: z.union([z.uuid(), z.literal('root')]).optional(),
-});
+const publicVariableCreate = variableCreateSchema.extend({ projectId: z.uuid().nullish() });
+const publicVariableUpdate = variableUpdateSchema.extend({ projectId: z.uuid().nullable().optional() });
+/** P6-34: a workflow or credential is created in the project the body names (else the default) */
+const publicWorkflowCreate = workflowCreateSchema.extend({ projectId: z.uuid().nullish() });
+const publicCredentialCreate = credentialCreateSchema.extend({ projectId: z.uuid().nullish() });
 const executionGetQuery = z.object({ includeData: z.stringbool().default(false) });
 const credentialTypeParams = z.object({ type: z.string().min(1).max(128) });
+
+const onWorkflow: RouteTarget = ({ params }) => ({ workflowId: params.id });
+const onExecution: RouteTarget = ({ params }) => ({ executionId: params.id });
 
 const actor = (input: PublicApiInput) => ({ userId: input.auth.user.id, ip: input.request.ip });
 
@@ -104,16 +129,18 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/workflows',
     summary: 'List workflows',
     tag: 'Workflows',
-    role: 'viewer',
+    access: { scope: 'workflow:list', list: true },
     scope: 'workflow:list',
     query: publicWorkflowListQuery,
     response: 'WorkflowSummary',
     list: true,
+    // the rows are the caller's: `listFor` narrows them to the `workflow:list` access filter
     handler: (ctx, { auth, query }) =>
-      ctx.workflows.list(auth.tenant.id, {
+      ctx.workflows.listFor(auth, {
         search: query.name,
         tagId: query.tagId,
         active: query.active,
+        projectId: query.projectId,
         limit: query.limit,
         cursor: query.cursor,
       }),
@@ -123,33 +150,40 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/workflows',
     summary: 'Create a workflow',
     tag: 'Workflows',
-    role: 'editor',
+    access: { scope: 'workflow:create', create: true },
     scope: 'workflow:create',
-    body: workflowCreateSchema,
+    body: publicWorkflowCreate,
     response: 'Workflow',
-    handler: async (ctx, input) => ({
-      data: await ctx.workflows.create(input.auth.tenant.id, input.body, actor(input)),
-    }),
+    handler: async (ctx, input) => {
+      const { projectId: _named, ...body } = input.body;
+      const created = await ctx.workflows.create(
+        input.auth.tenant.id,
+        { ...body, projectId: input.projectId },
+        actor(input),
+      );
+      return { data: await ctx.workflows.dtoFor(input.auth, created) };
+    },
   },
   {
     method: 'GET',
     path: '/workflows/:id',
     summary: 'Get a workflow',
     tag: 'Workflows',
-    role: 'viewer',
+    access: { scope: 'workflow:read', target: onWorkflow },
     scope: 'workflow:read',
     params: idParams,
     response: 'Workflow',
-    handler: async (ctx, { auth, params }) => ({
-      data: await ctx.workflows.dto(auth.tenant.id, await ctx.workflows.get(auth.tenant.id, params.id)),
-    }),
+    handler: async (ctx, { auth, params }) => {
+      const row = await ctx.workflows.get(auth.tenant.id, params.id);
+      return { data: await ctx.workflows.dtoFor(auth, await ctx.workflows.dto(auth.tenant.id, row), row) };
+    },
   },
   {
     method: 'PUT',
     path: '/workflows/:id',
     summary: 'Update a workflow (versionId enables optimistic concurrency)',
     tag: 'Workflows',
-    role: 'editor',
+    access: { scope: 'workflow:update', target: onWorkflow },
     scope: 'workflow:update',
     params: idParams,
     query: publicWorkflowUpdateQuery,
@@ -173,7 +207,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/workflows/:id',
     summary: 'Delete a workflow',
     tag: 'Workflows',
-    role: 'editor',
+    access: { scope: 'workflow:delete', target: onWorkflow },
     scope: 'workflow:delete',
     params: idParams,
     response: 'Ok',
@@ -188,7 +222,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/workflows/:id/activate',
     summary: 'Publish a workflow (a version, optionally named; default the current one)',
     tag: 'Workflows',
-    role: 'editor',
+    access: { scope: 'workflow:publish', target: onWorkflow },
     scope: 'workflow:activate',
     params: idParams,
     body: publicPublishBody,
@@ -206,7 +240,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/workflows/:id/archive',
     summary: 'Archive a workflow (unpublishes it; archiving an archived workflow is a no-op)',
     tag: 'Workflows',
-    role: 'editor',
+    access: { scope: 'workflow:delete', target: onWorkflow },
     scope: 'workflow:delete',
     params: idParams,
     response: 'Workflow',
@@ -221,7 +255,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/workflows/:id/unarchive',
     summary: 'Unarchive a workflow (stays unpublished)',
     tag: 'Workflows',
-    role: 'editor',
+    access: { scope: 'workflow:delete', target: onWorkflow },
     scope: 'workflow:delete',
     params: idParams,
     response: 'Workflow',
@@ -234,7 +268,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/workflows/:id/deactivate',
     summary: 'Deactivate a workflow',
     tag: 'Workflows',
-    role: 'editor',
+    access: { scope: 'workflow:unpublish', target: onWorkflow },
     scope: 'workflow:deactivate',
     params: idParams,
     response: 'Workflow',
@@ -247,19 +281,23 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/executions',
     summary: 'List executions',
     tag: 'Executions',
-    role: 'viewer',
+    access: { scope: 'execution:list', list: true },
     scope: 'execution:list',
     query: executionListQuery,
     response: 'Execution',
     list: true,
-    handler: (ctx, { auth, query }) => listExecutions(ctx, auth.tenant.id, query),
+    // an execution is listed when its workflow is (`execution:list` access filter)
+    handler: async (ctx, { auth, query }) =>
+      listExecutions(ctx, auth.tenant.id, query, {
+        filter: await ctx.access.listFilter(auth, 'execution:list'),
+      }),
   },
   {
     method: 'GET',
     path: '/executions/:id',
     summary: 'Get an execution (includeData=true adds the workflow snapshot and run data)',
     tag: 'Executions',
-    role: 'viewer',
+    access: { scope: 'execution:read', target: onExecution },
     scope: 'execution:read',
     params: idParams,
     query: executionGetQuery,
@@ -273,7 +311,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/executions/:id',
     summary: 'Delete an execution',
     tag: 'Executions',
-    role: 'editor',
+    access: { scope: 'execution:delete', target: onExecution },
     scope: 'execution:delete',
     params: idParams,
     response: 'Ok',
@@ -287,7 +325,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/executions/:id/retry',
     summary: 'Retry a failed execution',
     tag: 'Executions',
-    role: 'editor',
+    access: { scope: 'workflow:execute', target: onExecution },
     scope: 'execution:retry',
     params: idParams,
     body: z.object({ useCurrentWorkflow: z.boolean().optional() }),
@@ -305,15 +343,15 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/credentials',
     summary: 'Create a credential',
     tag: 'Credentials',
-    role: 'editor',
+    access: { scope: 'credential:create', create: true },
     scope: 'credential:create',
-    body: credentialCreateSchema,
+    body: publicCredentialCreate,
     response: 'CredentialRef',
     handler: async (ctx, input) => ({
       data: await createCredential(
         ctx,
         input.auth.tenant.id,
-        input.body,
+        { ...input.body, projectId: input.projectId },
         input.auth.user.id,
         input.request.ip,
       ),
@@ -324,7 +362,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/credentials/:id',
     summary: 'Delete a credential',
     tag: 'Credentials',
-    role: 'editor',
+    access: { scope: 'credential:delete', target: ({ params }) => ({ credentialId: params.id }) },
     scope: 'credential:delete',
     params: idParams,
     response: 'Ok',
@@ -344,7 +382,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/credentials/schema/:type',
     summary: 'JSON schema of the data of a credential type',
     tag: 'Credentials',
-    role: 'viewer',
+    access: { open: true },
     scope: 'credential:read',
     params: credentialTypeParams,
     response: 'JsonSchema',
@@ -359,7 +397,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/tags',
     summary: 'List tags',
     tag: 'Tags',
-    role: 'viewer',
+    access: { scope: 'tag:list' },
     scope: 'tag:list',
     response: 'Tag',
     list: true,
@@ -373,7 +411,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/tags',
     summary: 'Create a tag',
     tag: 'Tags',
-    role: 'editor',
+    access: { scope: 'tag:create' },
     scope: 'tag:create',
     body: tagSchema,
     response: 'Tag',
@@ -384,7 +422,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/tags/:id',
     summary: 'Get a tag',
     tag: 'Tags',
-    role: 'viewer',
+    access: { scope: 'tag:read' },
     scope: 'tag:read',
     params: idParams,
     response: 'Tag',
@@ -399,7 +437,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/tags/:id',
     summary: 'Rename a tag',
     tag: 'Tags',
-    role: 'editor',
+    access: { scope: 'tag:update' },
     scope: 'tag:update',
     params: idParams,
     body: tagSchema,
@@ -413,7 +451,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/tags/:id',
     summary: 'Delete a tag',
     tag: 'Tags',
-    role: 'editor',
+    access: { scope: 'tag:delete' },
     scope: 'tag:delete',
     params: idParams,
     response: 'Ok',
@@ -425,42 +463,60 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
   {
     method: 'GET',
     path: '/variables',
-    summary: 'List variables',
+    summary: 'List variables (projectId: one project; state=empty: only variables with no value)',
     tag: 'Variables',
-    role: 'viewer',
     scope: 'variable:list',
+    access: {
+      scope: ['variable:list', 'projectVariable:list'],
+      list: true,
+      target: ({ query }) =>
+        typeof query.projectId === 'string' ? { projectId: query.projectId } : undefined,
+    },
+    query: publicVariableListQuery,
     response: 'Variable',
     list: true,
-    handler: async (ctx, { auth }) => ({
-      data: (await ctx.repos.variables.list(auth.tenant.id)).map(variableDTO),
-      nextCursor: null,
-    }),
+    handler: async (ctx, { auth, query }) => {
+      const rows = await ctx.variables.list(
+        auth,
+        query.projectId === undefined ? {} : { projectId: query.projectId },
+      );
+      const shown = query.state === 'empty' ? rows.filter((row) => row.value === '') : rows;
+      return { data: shown.map(projectVariableDTO), nextCursor: null };
+    },
   },
   {
     method: 'POST',
     path: '/variables',
-    summary: 'Create a variable',
+    summary: 'Create a variable (projectId makes it a project variable)',
     tag: 'Variables',
-    role: 'admin',
     scope: 'variable:create',
-    body: variableCreateSchema,
+    // no `create: true`: a variable with no `projectId` is a workspace variable (global scopes), not one of the
+    // default project, so `targetProject` would change what the call makes; plan-S1 L13: "variables by projectId"
+    access: {
+      scope: ['variable:create', 'projectVariable:create'],
+      target: ({ body }) => (typeof body?.projectId === 'string' ? { projectId: body.projectId } : undefined),
+    },
+    body: publicVariableCreate,
     response: 'Variable',
     handler: async (ctx, { auth, body }) => ({
-      data: await createVariable(ctx, auth.tenant.id, body.key, body.value),
+      data: projectVariableDTO(await ctx.variables.create(auth, body)),
     }),
   },
   {
     method: 'PUT',
     path: '/variables/:id',
-    summary: 'Update a variable',
+    summary: 'Update a variable (projectId moves it between global and a project)',
     tag: 'Variables',
-    role: 'admin',
     scope: 'variable:update',
+    access: {
+      scope: ['variable:update', 'projectVariable:update'],
+      target: ({ params }) => ({ variableId: params.id }),
+    },
     params: idParams,
-    body: variableUpdateSchema,
+    body: publicVariableUpdate,
     response: 'Variable',
     handler: async (ctx, { auth, params, body }) => ({
-      data: await updateVariable(ctx, auth.tenant.id, params.id, body),
+      data: projectVariableDTO(await ctx.variables.update(auth, params.id, body)),
     }),
   },
   {
@@ -468,75 +524,24 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     path: '/variables/:id',
     summary: 'Delete a variable',
     tag: 'Variables',
-    role: 'admin',
     scope: 'variable:delete',
+    access: {
+      scope: ['variable:delete', 'projectVariable:delete'],
+      target: ({ params }) => ({ variableId: params.id }),
+    },
     params: idParams,
     response: 'Ok',
     handler: async (ctx, { auth, params }) => {
-      if (!(await ctx.repos.variables.delete(auth.tenant.id, params.id))) throw ApiError.notFound('Variable');
+      await ctx.variables.delete(auth, params.id);
       return { data: { ok: true } };
     },
   },
-  {
-    method: 'GET',
-    path: '/folders',
-    summary: 'List folders',
-    tag: 'Folders',
-    role: 'viewer',
-    scope: 'folder:list',
-    query: publicFolderListQuery,
-    response: 'Folder',
-    list: true,
-    handler: (ctx, input) => publicFolderHandlers.list(ctx, input),
-  },
-  {
-    method: 'POST',
-    path: '/folders',
-    summary: 'Create a folder',
-    tag: 'Folders',
-    role: 'editor',
-    scope: 'folder:create',
-    body: publicFolderCreate,
-    response: 'Folder',
-    handler: (ctx, input) => publicFolderHandlers.create(ctx, input),
-  },
-  {
-    method: 'GET',
-    path: '/folders/:folderId',
-    summary: 'Get a folder',
-    tag: 'Folders',
-    role: 'viewer',
-    scope: 'folder:read',
-    params: folderParams,
-    response: 'Folder',
-    handler: (ctx, input) => publicFolderHandlers.get(ctx, input),
-  },
-  {
-    method: 'PATCH',
-    path: '/folders/:folderId',
-    summary: 'Rename, move or tag a folder',
-    tag: 'Folders',
-    role: 'editor',
-    scope: 'folder:update',
-    params: folderParams,
-    body: publicFolderUpdate,
-    response: 'Folder',
-    handler: (ctx, input) => publicFolderHandlers.update(ctx, input),
-  },
-  {
-    method: 'DELETE',
-    path: '/folders/:folderId',
-    summary: 'Delete a folder (transferToFolderId moves its content; omitted archives its workflows to root)',
-    tag: 'Folders',
-    role: 'editor',
-    scope: 'folder:delete',
-    params: folderParams,
-    query: publicFolderDeleteQuery,
-    response: 'Ok',
-    handler: (ctx, input) => publicFolderHandlers.remove(ctx, input),
-  },
+  ...PUBLIC_FOLDER_ROUTES,
   ...PUBLIC_DATA_TABLE_ROUTES,
   ...PUBLIC_EVALUATION_ROUTES,
+  ...PUBLIC_PROJECT_ROUTES,
+  ...PUBLIC_ROLE_ROUTES,
+  ...PUBLIC_SECURITY_POLICY_ROUTES,
 ];
 
 /** JSON schema of credential data from the type's properties */
@@ -614,12 +619,84 @@ const COMPONENTS: Record<string, unknown> = {
       updatedAt: { type: 'string', format: 'date-time' },
     },
   },
+  ProjectRef: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      name: { type: 'string' },
+      type: { enum: ['personal', 'team'] },
+    },
+  },
+  Project: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      name: { type: 'string' },
+      type: { enum: ['personal', 'team'] },
+      icon: { type: ['object', 'null'], description: '{ type: icon | emoji, value }' },
+      description: { type: ['string', 'null'] },
+      role: { type: 'string', description: "The caller's role in the project, when it has one" },
+      scopes: { type: 'array', items: { type: 'string' }, description: "The caller's scopes in the project" },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+  ProjectUser: {
+    type: 'object',
+    properties: {
+      userId: { type: 'string', format: 'uuid' },
+      email: { type: 'string' },
+      name: { type: 'string' },
+      role: { type: 'string', description: 'A project role slug, such as project:editor' },
+    },
+  },
+  ProjectUsersResult: {
+    type: 'object',
+    properties: {
+      conflicts: {
+        type: 'array',
+        description: 'Users who already hold another role in the project',
+        items: {
+          type: 'object',
+          properties: {
+            userId: { type: 'string', format: 'uuid' },
+            currentRole: { type: 'string' },
+            requestedRole: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+  Role: {
+    type: 'object',
+    properties: {
+      slug: { type: 'string' },
+      displayName: { type: 'string' },
+      description: { type: ['string', 'null'] },
+      systemRole: { type: 'boolean' },
+      roleType: { enum: ['global', 'project', 'workflow', 'credential', 'secretsProviderConnection'] },
+      scopes: { type: 'array', items: { type: 'string' } },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+  SecurityPolicy: {
+    type: 'object',
+    properties: {
+      personalSpacePublishing: { type: 'boolean' },
+      personalSpaceSharing: { type: 'boolean' },
+      publishedPersonalWorkflowsCount: { type: 'integer' },
+      sharedPersonalWorkflowsCount: { type: 'integer' },
+      sharedPersonalCredentialsCount: { type: 'integer' },
+    },
+  },
   Variable: {
     type: 'object',
     properties: {
       id: { type: 'string', format: 'uuid' },
       key: { type: 'string' },
       value: { type: 'string' },
+      projectId: { type: ['string', 'null'], format: 'uuid', description: 'Null for a global variable' },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
     },
@@ -632,6 +709,9 @@ const COMPONENTS: Record<string, unknown> = {
       active: { type: 'boolean' },
       isArchived: { type: 'boolean' },
       folderId: { type: ['string', 'null'], format: 'uuid' },
+      projectId: { type: 'string', format: 'uuid', description: 'The project that owns it' },
+      homeProject: { oneOf: [ref('ProjectRef'), { type: 'null' }] },
+      sharedWithProjects: { type: 'array', items: ref('ProjectRef') },
       publishedVersionId: { type: ['string', 'null'], format: 'uuid' },
       tags: { type: 'array', items: ref('TagRef') },
       nodeTypes: { type: 'array', items: { type: 'string' } },
@@ -656,6 +736,9 @@ const COMPONENTS: Record<string, unknown> = {
       id: { type: 'string', format: 'uuid' },
       name: { type: 'string' },
       parentFolderId: { type: ['string', 'null'], format: 'uuid' },
+      projectId: { type: 'string', format: 'uuid', description: 'The project that owns it' },
+      homeProject: { oneOf: [ref('ProjectRef'), { type: 'null' }] },
+      sharedWithProjects: { type: 'array', items: ref('ProjectRef') },
       tags: { type: 'array', items: ref('TagRef') },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
@@ -676,6 +759,14 @@ const COMPONENTS: Record<string, unknown> = {
       versionId: { type: 'string', format: 'uuid' },
       folderId: { type: ['string', 'null'], format: 'uuid' },
       isArchived: { type: 'boolean' },
+      projectId: { type: 'string', format: 'uuid', description: 'The project that owns it' },
+      homeProject: { oneOf: [ref('ProjectRef'), { type: 'null' }] },
+      sharedWithProjects: { type: 'array', items: ref('ProjectRef') },
+      scopes: {
+        type: 'array',
+        items: { type: 'string' },
+        description: "The caller's scopes on the workflow",
+      },
       publishedVersionId: { type: ['string', 'null'], format: 'uuid' },
       tags: { type: 'array', items: ref('TagRef') },
       createdAt: { type: 'string', format: 'date-time' },
@@ -723,6 +814,7 @@ const COMPONENTS: Record<string, unknown> = {
     properties: {
       id: { type: 'string', format: 'uuid' },
       name: { type: 'string' },
+      projectId: { type: 'string', format: 'uuid', description: 'The project that owns it' },
       columns: { type: 'array', items: ref('DataTableColumn') },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
@@ -857,7 +949,7 @@ export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown
         },
         400: errorResponse('Invalid request'),
         401: errorResponse('Missing or invalid API key'),
-        403: errorResponse(`Requires the ${route.role} role or higher`),
+        403: errorResponse('Missing a scope required to perform this action'),
         404: errorResponse('Not found'),
       },
     };
@@ -868,7 +960,7 @@ export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown
       title: `${ctx.config.brand.name} Public API`,
       version: '1.0.0',
       description:
-        'Manage workflows, executions, credentials, tags and variables of one workspace. Authenticate with an API key in the X-API-KEY header. Lists use cursor pagination: pass `nextCursor` as `cursor`.',
+        'Manage workflows, executions, credentials, tags, variables, projects and roles of one workspace. A key sees and changes only what its user may: the user scopes in each project and the key scopes both apply. Authenticate with an API key in the X-API-KEY header. Lists use cursor pagination: pass `nextCursor` as `cursor`.',
     },
     servers: [{ url: `${ctx.config.baseUrl}/api/v1` }],
     security: [{ ApiKey: [] }],
@@ -882,6 +974,12 @@ export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown
 }
 
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** what a row asks of the caller, for the reference page: the user's scope(s), or the key scope */
+function accessLabel(access: RouteAccess, keyScope: ApiKeyScope | undefined): string {
+  if ('open' in access) return keyScope ?? 'any key';
+  return ([] as string[]).concat(access.scope as string | string[]).join(' or ');
+}
 
 /** A readable, script-free reference of the public API (rendered from the route table). */
 export function renderApiDocs(ctx: ServerContext): string {
@@ -906,7 +1004,7 @@ export function renderApiDocs(ctx: ServerContext): string {
       const rows = PUBLIC_ROUTES.filter((r) => r.tag === group)
         .map(
           (r) => `<li class="op">
-  <div class="sig"><span class="m m-${r.method.toLowerCase()}">${r.method}</span><code class="path">${escapeHtml(r.path)}</code><span class="role">${r.role}+</span></div>
+  <div class="sig"><span class="m m-${r.method.toLowerCase()}">${r.method}</span><code class="path">${escapeHtml(r.path)}</code><span class="role">${escapeHtml(accessLabel(r.access, r.scope))}</span></div>
   <p>${escapeHtml(r.summary)}</p>
   ${r.query ? `<p class="fields"><span>Query</span> ${describe(r.query)}</p>` : ''}
   ${r.body ? `<p class="fields"><span>Body</span> ${describe(r.body)}</p>` : ''}
@@ -937,6 +1035,37 @@ ${sections}
 </main></body></html>`;
 }
 
+const stringOf = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
+
+/**
+ * The access check of one call, before the schemas run (so a refused caller gets 403, not 400). Returns the
+ * project of a `create` row. `requireScope` reads the signed-in key's user: scopes of its workspace role plus
+ * its project roles, on the target, with another workspace's id as 404.
+ */
+async function checkAccess(
+  ctx: ServerContext,
+  request: FastifyRequest,
+  access: RouteAccess,
+  params: unknown,
+): Promise<string | undefined> {
+  if ('open' in access) return undefined;
+  const auth = request.auth!;
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  if (access.create) {
+    const projectId = await ctx.access.targetProject(auth, stringOf(body.projectId) ?? null);
+    await requireScope(request, access.scope, { projectId });
+    return projectId;
+  }
+  const target = access.target?.({
+    params,
+    query: request.query ?? {},
+    body: typeof request.body === 'object' && request.body !== null ? body : {},
+  });
+  if (access.list && !target) return undefined;
+  await requireScope(request, access.scope, target);
+  return undefined;
+}
+
 export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerContext }): Promise<void> {
   const { ctx } = opts;
   let document: Record<string, unknown> | undefined;
@@ -965,12 +1094,16 @@ export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerC
       handler: async (request, reply) => {
         await loadApiKey(request, ctx.auth);
         const auth = request.auth!;
-        if (!hasRole(auth.role, route.role)) throw ApiError.forbidden();
+        // the key's own scope first (a key that lacks it learns nothing about any row), then the user's
+        // scopes on the row (403 before any body check); an id that is no uuid is a 400 for every caller
         assertApiKeyScope(auth, route.scope);
+        const params = route.params ? parse(route.params, request.params) : {};
+        const projectId = await checkAccess(ctx, request, route.access, params);
         const input: PublicApiInput = {
           auth,
           request,
-          params: route.params ? parse(route.params, request.params) : {},
+          projectId,
+          params,
           query: route.query ? parse(route.query, request.query) : {},
           body: route.body ? parse(route.body, request.body ?? {}) : undefined,
         };

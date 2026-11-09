@@ -18,7 +18,8 @@
  * - `stream: true` rows answer an open stream (SSE, the AI builder, MCP): the test reads their status through
  *   a real listener and aborts.
  *
- * After C0 only L13 edits this file (its public rows, `/folders` gone); L24 edits it last. Later stages
+ * After C0 only L13 edits this file (its public rows: `/folders` gone for `/projects/:projectId/folders`, the
+ * new project, role, transfer and security policy rows, the unfiltered list rows as `scope: null`); L24 edits it last. Later stages
  * add one row per new route in their own C0.
  */
 import type { Scope } from '@workflow/workflow';
@@ -1163,9 +1164,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'public-api.ts',
     method: 'GET',
     path: '/api/v1/executions',
-    scope: 'execution:list',
+    scope: null,
     target: 'execution',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the access filter of `execution:list` narrows the rows (as n8n)',
   },
   {
     file: 'public-api.ts',
@@ -1189,46 +1192,6 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     path: '/api/v1/executions/:id/retry',
     scope: 'workflow:execute',
     target: 'execution',
-    legacyMin: 'editor',
-  },
-  {
-    file: 'public-api.ts',
-    method: 'GET',
-    path: '/api/v1/folders',
-    scope: 'folder:list',
-    target: 'folder',
-    legacyMin: 'viewer',
-  },
-  {
-    file: 'public-api.ts',
-    method: 'POST',
-    path: '/api/v1/folders',
-    scope: 'folder:create',
-    target: 'folder',
-    legacyMin: 'editor',
-  },
-  {
-    file: 'public-api.ts',
-    method: 'DELETE',
-    path: '/api/v1/folders/:folderId',
-    scope: 'folder:delete',
-    target: 'folder',
-    legacyMin: 'editor',
-  },
-  {
-    file: 'public-api.ts',
-    method: 'GET',
-    path: '/api/v1/folders/:folderId',
-    scope: 'folder:read',
-    target: 'folder',
-    legacyMin: 'viewer',
-  },
-  {
-    file: 'public-api.ts',
-    method: 'PATCH',
-    path: '/api/v1/folders/:folderId',
-    scope: 'folder:update',
-    target: 'folder',
     legacyMin: 'editor',
   },
   {
@@ -1283,9 +1246,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'public-api.ts',
     method: 'GET',
     path: '/api/v1/variables',
-    scope: 'variable:list',
+    scope: null,
     target: 'variable',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the access filter of `variable:list` narrows the rows (as n8n)',
   },
   {
     file: 'public-api.ts',
@@ -1315,9 +1280,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'public-api.ts',
     method: 'GET',
     path: '/api/v1/workflows',
-    scope: 'workflow:list',
+    scope: null,
     target: 'workflow',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the access filter of `workflow:list` narrows the rows (as n8n)',
   },
   {
     file: 'public-api.ts',
@@ -1389,9 +1356,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'public-data-tables.ts',
     method: 'GET',
     path: '/api/v1/data-tables',
-    scope: 'dataTable:listProject',
+    scope: null,
     target: 'dataTable',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the access filter of `dataTable:listProject` narrows the rows (as n8n)',
   },
   {
     file: 'public-data-tables.ts',
@@ -1554,6 +1523,174 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:read',
     target: 'testRun',
     legacyMin: 'viewer',
+  },
+
+  // public-folders.ts
+  {
+    file: 'public-folders.ts',
+    method: 'GET',
+    path: '/api/v1/projects/:projectId/folders',
+    scope: 'folder:list',
+    target: 'project',
+    legacyMin: 'viewer',
+  },
+  {
+    file: 'public-folders.ts',
+    method: 'POST',
+    path: '/api/v1/projects/:projectId/folders',
+    scope: 'folder:create',
+    target: 'project',
+    legacyMin: 'editor',
+  },
+  {
+    file: 'public-folders.ts',
+    method: 'DELETE',
+    path: '/api/v1/projects/:projectId/folders/:folderId',
+    scope: 'folder:delete',
+    target: 'folder',
+    legacyMin: 'editor',
+  },
+  {
+    file: 'public-folders.ts',
+    method: 'GET',
+    path: '/api/v1/projects/:projectId/folders/:folderId',
+    scope: 'folder:read',
+    target: 'folder',
+    legacyMin: 'viewer',
+  },
+  {
+    file: 'public-folders.ts',
+    method: 'PATCH',
+    path: '/api/v1/projects/:projectId/folders/:folderId',
+    scope: 'folder:update',
+    target: 'folder',
+    legacyMin: 'editor',
+  },
+
+  // public-projects.ts
+  {
+    file: 'public-projects.ts',
+    method: 'GET',
+    path: '/api/v1/projects',
+    scope: null,
+    target: 'project',
+    access: 'auth',
+  },
+  {
+    file: 'public-projects.ts',
+    method: 'POST',
+    path: '/api/v1/projects',
+    scope: 'project:create',
+    target: 'project',
+  },
+  {
+    file: 'public-projects.ts',
+    method: 'DELETE',
+    path: '/api/v1/projects/:projectId',
+    scope: 'project:delete',
+    target: 'project',
+  },
+  {
+    file: 'public-projects.ts',
+    method: 'PUT',
+    path: '/api/v1/projects/:projectId',
+    scope: 'project:update',
+    target: 'project',
+  },
+  {
+    file: 'public-projects.ts',
+    method: 'GET',
+    path: '/api/v1/projects/:projectId/users',
+    scope: 'user:list',
+    target: 'project',
+  },
+  {
+    file: 'public-projects.ts',
+    method: 'POST',
+    path: '/api/v1/projects/:projectId/users',
+    scope: 'project:manageMembers',
+    target: 'project',
+  },
+  {
+    file: 'public-projects.ts',
+    method: 'DELETE',
+    path: '/api/v1/projects/:projectId/users/:userId',
+    scope: 'project:manageMembers',
+    target: 'project',
+  },
+  {
+    file: 'public-projects.ts',
+    method: 'PATCH',
+    path: '/api/v1/projects/:projectId/users/:userId',
+    scope: 'project:manageMembers',
+    target: 'project',
+  },
+  {
+    file: 'public-projects.ts',
+    method: 'PUT',
+    path: '/api/v1/workflows/:id/transfer',
+    scope: 'workflow:move',
+    target: 'workflow',
+  },
+  {
+    file: 'public-projects.ts',
+    method: 'PUT',
+    path: '/api/v1/credentials/:id/transfer',
+    scope: 'credential:move',
+    target: 'credential',
+  },
+
+  // public-roles.ts
+  {
+    file: 'public-roles.ts',
+    method: 'GET',
+    path: '/api/v1/roles',
+    scope: 'role:list',
+    target: 'role',
+  },
+  {
+    file: 'public-roles.ts',
+    method: 'POST',
+    path: '/api/v1/roles',
+    scope: 'role:manage',
+    target: 'role',
+  },
+  {
+    file: 'public-roles.ts',
+    method: 'DELETE',
+    path: '/api/v1/roles/:slug',
+    scope: 'role:manage',
+    target: 'role',
+  },
+  {
+    file: 'public-roles.ts',
+    method: 'GET',
+    path: '/api/v1/roles/:slug',
+    scope: 'role:read',
+    target: 'role',
+  },
+  {
+    file: 'public-roles.ts',
+    method: 'PUT',
+    path: '/api/v1/roles/:slug',
+    scope: 'role:manage',
+    target: 'role',
+  },
+
+  // public-security-policy.ts
+  {
+    file: 'public-security-policy.ts',
+    method: 'GET',
+    path: '/api/v1/settings/security-policy',
+    scope: 'securitySettings:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'public-security-policy.ts',
+    method: 'PUT',
+    path: '/api/v1/settings/security-policy',
+    scope: 'securitySettings:manage',
+    target: 'tenant',
   },
 
   // push.ts

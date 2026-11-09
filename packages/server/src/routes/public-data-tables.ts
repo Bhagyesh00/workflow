@@ -1,13 +1,12 @@
 /**
  * Public API data tables (P4-18), n8n's public controller: 16 routes with API-key scopes and cursor
  * paging (limit default 100, max 250). PUBLIC_DATA_TABLE_ROUTES is final and carries everything a
- * PUBLIC_ROUTES row needs (C0c spreads it into public-api.ts, which has the role and scope gates).
+ * PUBLIC_ROUTES row needs (public-api.ts spreads it and runs the `access` check, then the key scope).
  * The handlers call the same DataTableService as /rest/data-tables; lists answer `{data, nextCursor}`
  * where the cursor is an opaque offset.
  */
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import type { Role } from '../db/schema';
 import type { ApiKeyScope } from '../http/api-key-scopes';
 import { ApiError } from '../http/errors';
 import {
@@ -23,7 +22,7 @@ import {
   dataTableRowsSort,
   jsonQuery,
 } from './data-tables';
-import type { PublicApiInput } from './public-api';
+import type { PublicApiInput, RouteAccess, RouteTarget } from './public-api';
 
 type Handler = (ctx: ServerContext, input: PublicApiInput) => Promise<unknown>;
 
@@ -48,7 +47,7 @@ export type PublicDataTableHandler =
 /** the cursor is an opaque offset: `o` and the number of rows already sent */
 const CURSOR_PREFIX = 'o';
 
-function decodeCursor(raw: string | undefined): number {
+export function decodeCursor(raw: string | undefined): number {
   if (raw === undefined) return 0;
   const text = Buffer.from(raw, 'base64url').toString('utf8');
   const skip = text.startsWith(CURSOR_PREFIX) ? Number(text.slice(CURSOR_PREFIX.length)) : Number.NaN;
@@ -62,10 +61,11 @@ function decodeCursor(raw: string | undefined): number {
   return skip;
 }
 
-const encodeCursor = (skip: number) => Buffer.from(`${CURSOR_PREFIX}${skip}`, 'utf8').toString('base64url');
+export const encodeCursor = (skip: number) =>
+  Buffer.from(`${CURSOR_PREFIX}${skip}`, 'utf8').toString('base64url');
 
 /** one page of `{count, data}` as `{data, nextCursor}` */
-function paged<T, U>(page: { count: number; data: T[] }, skip: number, map: (item: T) => U) {
+export function paged<T, U>(page: { count: number; data: T[] }, skip: number, map: (item: T) => U) {
   const end = skip + page.data.length;
   return {
     data: page.data.map(map),
@@ -94,11 +94,13 @@ const actorOf = ({ auth, request }: PublicApiInput) => ({ userId: auth.user.id, 
 export const publicDataTableHandlers: Record<PublicDataTableHandler, Handler> = {
   list: async (ctx, { auth, query }) => {
     const skip = decodeCursor(query.cursor);
+    // `caller`: only the tables of the projects the key's user may list (`dataTable:listProject`)
     const page = await ctx.dataTables.list(auth.tenant.id, {
       skip,
       take: query.limit,
       sortBy: query.sortBy,
       name: query.filter?.name,
+      caller: auth,
     });
     return paged(page, skip, tableDTO);
   },
@@ -106,13 +108,20 @@ export const publicDataTableHandlers: Record<PublicDataTableHandler, Handler> = 
     data: tableDTO(
       await ctx.dataTables.create(
         input.auth.tenant.id,
-        { name: input.body.name, columns: input.body.columns },
+        // the dispatcher resolved the project (`targetProject`) and checked `dataTable:create` in it; `caller`
+        // makes the answer carry the table's project
+        {
+          name: input.body.name,
+          columns: input.body.columns,
+          projectId: input.projectId,
+          caller: input.auth,
+        },
         actorOf(input),
       ),
     ),
   }),
   get: async (ctx, { auth, params }) => ({
-    data: tableDTO(await ctx.dataTables.get(auth.tenant.id, params.dataTableId)),
+    data: tableDTO(await ctx.dataTables.get(auth.tenant.id, params.dataTableId, auth)),
   }),
   update: async (ctx, input) => ({
     data: tableDTO(
@@ -121,6 +130,7 @@ export const publicDataTableHandlers: Record<PublicDataTableHandler, Handler> = 
         input.params.dataTableId,
         { name: input.body.name },
         actorOf(input),
+        input.auth,
       ),
     ),
   }),
@@ -129,7 +139,8 @@ export const publicDataTableHandlers: Record<PublicDataTableHandler, Handler> = 
     return { data: true };
   },
   dependencies: async (ctx, { auth, params }) => ({
-    data: await ctx.dataTables.dependencies(auth.tenant.id, params.dataTableId),
+    // a workflow the key's user cannot list is left out
+    data: await ctx.dataTables.dependencies(auth.tenant.id, params.dataTableId, auth),
   }),
   listColumns: async (ctx, { auth, params }) => ({
     data: (await ctx.dataTables.columns.list(auth.tenant.id, params.dataTableId)).map(columnDTO),
@@ -258,6 +269,8 @@ const rowsQuery = z.object({
 const createBody = z.object({
   name: dataTableNameSchema,
   columns: z.array(dataTableColumnSchema).default([]),
+  /** the project that owns the table; absent, the workspace's default */
+  projectId: z.uuid().nullish(),
 });
 const updateBody = z.object({ name: dataTableNameSchema });
 const columnUpdateBody = z.object({
@@ -270,7 +283,8 @@ export interface PublicDataTableRoute {
   path: string;
   summary: string;
   tag: 'DataTable';
-  role: Role;
+  /** who may call it, by the user's scopes; the key must hold `scope` as well */
+  access: RouteAccess;
   scope: ApiKeyScope;
   params?: z.ZodObject;
   query?: z.ZodObject;
@@ -292,13 +306,14 @@ const route = (
 });
 
 const one = '/data-tables/:dataTableId';
+const onTable: RouteTarget = ({ params }) => ({ dataTableId: params.dataTableId });
 
 export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
   route('list', {
     method: 'GET',
     path: '/data-tables',
     summary: 'List data tables',
-    role: 'viewer',
+    access: { scope: 'dataTable:listProject', list: true },
     scope: 'dataTable:list',
     query: listQuery,
     response: 'DataTable',
@@ -308,7 +323,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'POST',
     path: '/data-tables',
     summary: 'Create a data table',
-    role: 'editor',
+    access: { scope: 'dataTable:create', create: true },
     scope: 'dataTable:create',
     body: createBody,
     response: 'DataTable',
@@ -317,7 +332,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'GET',
     path: one,
     summary: 'Get a data table',
-    role: 'viewer',
+    access: { scope: 'dataTable:read', target: onTable },
     scope: 'dataTable:read',
     params: tableParams,
     response: 'DataTable',
@@ -326,7 +341,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'PATCH',
     path: one,
     summary: 'Rename a data table',
-    role: 'editor',
+    access: { scope: 'dataTable:update', target: onTable },
     scope: 'dataTable:update',
     params: tableParams,
     body: updateBody,
@@ -336,7 +351,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'DELETE',
     path: one,
     summary: 'Delete a data table',
-    role: 'editor',
+    access: { scope: 'dataTable:delete', target: onTable },
     scope: 'dataTable:delete',
     params: tableParams,
     response: 'DataTableResult',
@@ -345,7 +360,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'GET',
     path: `${one}/dependencies`,
     summary: 'List the workflows that use a data table',
-    role: 'viewer',
+    access: { scope: 'dataTable:read', target: onTable },
     scope: 'dataTable:read',
     params: tableParams,
     response: 'DataTableDependency',
@@ -354,7 +369,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'GET',
     path: `${one}/columns`,
     summary: 'List the columns of a data table',
-    role: 'viewer',
+    access: { scope: 'dataTable:readColumn', target: onTable },
     scope: 'dataTableColumn:read',
     params: tableParams,
     response: 'DataTableColumn',
@@ -363,7 +378,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'POST',
     path: `${one}/columns`,
     summary: 'Add a column',
-    role: 'editor',
+    access: { scope: 'dataTable:writeColumn', target: onTable },
     scope: 'dataTableColumn:create',
     params: tableParams,
     body: dataTableColumnAddBody,
@@ -373,7 +388,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'PATCH',
     path: `${one}/columns/:columnId`,
     summary: 'Rename or move a column',
-    role: 'editor',
+    access: { scope: 'dataTable:writeColumn', target: onTable },
     scope: 'dataTableColumn:update',
     params: columnParams,
     body: columnUpdateBody,
@@ -383,7 +398,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'DELETE',
     path: `${one}/columns/:columnId`,
     summary: 'Delete a column',
-    role: 'editor',
+    access: { scope: 'dataTable:writeColumn', target: onTable },
     scope: 'dataTableColumn:delete',
     params: columnParams,
     response: 'DataTableResult',
@@ -392,7 +407,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'GET',
     path: `${one}/rows`,
     summary: 'List rows',
-    role: 'viewer',
+    access: { scope: 'dataTable:readRow', target: onTable },
     scope: 'dataTableRow:read',
     params: tableParams,
     query: rowsQuery,
@@ -403,7 +418,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'POST',
     path: `${one}/rows`,
     summary: 'Insert rows',
-    role: 'editor',
+    access: { scope: 'dataTable:writeRow', target: onTable },
     scope: 'dataTableRow:create',
     params: tableParams,
     body: dataTableInsertBody,
@@ -413,7 +428,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'POST',
     path: `${one}/rows/upsert`,
     summary: 'Update the row that matches, or insert one',
-    role: 'editor',
+    access: { scope: 'dataTable:writeRow', target: onTable },
     scope: 'dataTableRow:upsert',
     params: tableParams,
     body: dataTableChangeBody,
@@ -423,7 +438,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'PATCH',
     path: `${one}/rows/update`,
     summary: 'Update the rows that match',
-    role: 'editor',
+    access: { scope: 'dataTable:writeRow', target: onTable },
     scope: 'dataTableRow:update',
     params: tableParams,
     body: dataTableChangeBody,
@@ -433,7 +448,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'DELETE',
     path: `${one}/rows/delete`,
     summary: 'Delete the rows that match',
-    role: 'editor',
+    access: { scope: 'dataTable:writeRow', target: onTable },
     scope: 'dataTableRow:delete',
     params: tableParams,
     query: dataTableDeleteQuery,
@@ -443,7 +458,7 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     method: 'DELETE',
     path: `${one}/rows/clear`,
     summary: 'Delete every row',
-    role: 'editor',
+    access: { scope: 'dataTable:writeRow', target: onTable },
     scope: 'dataTableRow:delete',
     params: tableParams,
     response: 'DataTableResult',

@@ -445,9 +445,34 @@ describe('routes/public-data-tables.ts', () => {
     }
   });
 
-  it('gives reads to viewers and writes to editors', () => {
+  it('checks the data-table scope of the key user: reads read, writes write, the list filters', () => {
+    const scopes = Object.fromEntries(
+      PUBLIC_DATA_TABLE_ROUTES.map((r) => [
+        `${r.method} ${r.path}`,
+        'scope' in r.access ? r.access.scope : null,
+      ]),
+    );
+    const one = '/data-tables/:dataTableId';
+    expect(scopes).toEqual({
+      'GET /data-tables': 'dataTable:listProject',
+      'POST /data-tables': 'dataTable:create',
+      [`GET ${one}`]: 'dataTable:read',
+      [`PATCH ${one}`]: 'dataTable:update',
+      [`DELETE ${one}`]: 'dataTable:delete',
+      [`GET ${one}/dependencies`]: 'dataTable:read',
+      [`GET ${one}/columns`]: 'dataTable:readColumn',
+      [`POST ${one}/columns`]: 'dataTable:writeColumn',
+      [`PATCH ${one}/columns/:columnId`]: 'dataTable:writeColumn',
+      [`DELETE ${one}/columns/:columnId`]: 'dataTable:writeColumn',
+      [`GET ${one}/rows`]: 'dataTable:readRow',
+      [`POST ${one}/rows`]: 'dataTable:writeRow',
+      [`POST ${one}/rows/upsert`]: 'dataTable:writeRow',
+      [`PATCH ${one}/rows/update`]: 'dataTable:writeRow',
+      [`DELETE ${one}/rows/delete`]: 'dataTable:writeRow',
+      [`DELETE ${one}/rows/clear`]: 'dataTable:writeRow',
+    });
     for (const route of PUBLIC_DATA_TABLE_ROUTES) {
-      expect(route.role, `${route.method} ${route.path}`).toBe(route.method === 'GET' ? 'viewer' : 'editor');
+      expect('role' in route, `${route.method} ${route.path}`).toBe(false);
     }
   });
 

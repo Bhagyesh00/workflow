@@ -1,17 +1,18 @@
 /**
  * Public API evaluation test runs (P5-12), n8n's public evaluations controller: 5 routes with the
  * `testRun:*` API key scopes. PUBLIC_EVALUATION_ROUTES is final and carries everything a PUBLIC_ROUTES
- * row needs (public-api.ts spreads it; the role and scope gates run there). The handlers call
+ * row needs (public-api.ts spreads it and runs the `access` check, then the key scope). As n8n's test-runs
+ * controller, `testRun:*` is only the key scope: the user needs `workflow:read` (list, get, cases) or
+ * `workflow:execute` (start, cancel) on the workflow. The handlers call
  * `ctx.evaluations`; lists answer `{data, nextCursor}` with the cursor helpers of public-data-tables.ts.
  * Create answers 201 (409 `Workflow has no evaluation trigger`; no 402, there is no licence gate).
  */
 import { MAX_EVALUATION_CONCURRENCY, MAX_EVALUATION_ROWS } from '@workflow/workflow';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import type { Role } from '../db/schema';
 import type { ApiKeyScope } from '../http/api-key-scopes';
 import { ApiError } from '../http/errors';
-import type { PublicApiInput } from './public-api';
+import type { PublicApiInput, RouteAccess, RouteTarget } from './public-api';
 
 type Handler = (ctx: ServerContext, input: PublicApiInput) => Promise<unknown>;
 
@@ -22,7 +23,8 @@ export interface PublicEvaluationRoute {
   path: string;
   summary: string;
   tag: 'Evaluations';
-  role: Role;
+  /** who may call it, by the user's workflow scope; the key must hold `scope` (`testRun:*`) as well */
+  access: RouteAccess;
   scope: ApiKeyScope;
   params?: z.ZodObject;
   query?: z.ZodObject;
@@ -128,6 +130,8 @@ const route = (
   handler: (ctx, input) => publicEvaluationHandlers[name](ctx, input),
 });
 
+const onWorkflow: RouteTarget = ({ params }) => ({ workflowId: params.workflowId });
+
 const runs = '/workflows/:workflowId/test-runs';
 const one = `${runs}/:runId`;
 
@@ -136,7 +140,7 @@ export const PUBLIC_EVALUATION_ROUTES: PublicEvaluationRoute[] = [
     method: 'GET',
     path: runs,
     summary: 'List the test runs of a workflow',
-    role: 'viewer',
+    access: { scope: 'workflow:read', target: onWorkflow },
     scope: 'testRun:list',
     params: workflowParams,
     query: listQuery,
@@ -147,7 +151,7 @@ export const PUBLIC_EVALUATION_ROUTES: PublicEvaluationRoute[] = [
     method: 'POST',
     path: runs,
     summary: 'Start a test run of the workflow (one case per row of its Evaluation Trigger)',
-    role: 'editor',
+    access: { scope: 'workflow:execute', target: onWorkflow },
     scope: 'testRun:create',
     params: workflowParams,
     body: createBody,
@@ -158,7 +162,7 @@ export const PUBLIC_EVALUATION_ROUTES: PublicEvaluationRoute[] = [
     method: 'GET',
     path: one,
     summary: 'Get a test run',
-    role: 'viewer',
+    access: { scope: 'workflow:read', target: onWorkflow },
     scope: 'testRun:read',
     params: runParams,
     response: 'TestRun',
@@ -167,7 +171,7 @@ export const PUBLIC_EVALUATION_ROUTES: PublicEvaluationRoute[] = [
     method: 'GET',
     path: `${one}/test-cases`,
     summary: 'List the test cases of a test run',
-    role: 'viewer',
+    access: { scope: 'workflow:read', target: onWorkflow },
     scope: 'testRun:read',
     params: runParams,
     query: casesQuery,
@@ -178,7 +182,7 @@ export const PUBLIC_EVALUATION_ROUTES: PublicEvaluationRoute[] = [
     method: 'POST',
     path: `${one}/cancel`,
     summary: 'Cancel a test run',
-    role: 'editor',
+    access: { scope: 'workflow:execute', target: onWorkflow },
     scope: 'testRun:cancel',
     params: runParams,
     response: 'Ok',
