@@ -4,10 +4,11 @@
  * Every query filters tenant_id.
  */
 import type { Scope } from '@workflow/workflow';
-import { and, asc, count, countDistinct, desc, eq, max, sql } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, gt, isNull, max, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import {
   type CustomRoleRow,
+  invitations,
   memberships,
   type ProjectIcon,
   projectRelations,
@@ -200,13 +201,38 @@ export class RoleRepository {
       .orderBy(asc(projects.name), desc(projects.id));
   }
 
-  /** moves every member holding workspace role `from` to `to`; returns how many moved */
+  /** the invitations not yet accepted nor expired that give workspace role `slug`: holders too (as n8n's invited users) */
+  async pendingInvitations(tenantId: string, slug: string): Promise<number> {
+    const [row] = await this.db
+      .select({ n: count() })
+      .from(invitations)
+      .where(
+        and(
+          eq(invitations.tenantId, tenantId),
+          eq(invitations.role, slug),
+          isNull(invitations.acceptedAt),
+          gt(invitations.expiresAt, now()),
+        ),
+      );
+    return row?.n ?? 0;
+  }
+
+  /**
+   * Moves every member holding workspace role `from` to `to`, and every invitation not yet accepted that
+   * gives it; returns how many members moved.
+   */
   async reassignMembers(tenantId: string, from: string, to: string): Promise<number> {
     const rows = await this.db
       .update(memberships)
       .set({ role: to })
       .where(and(eq(memberships.tenantId, tenantId), eq(memberships.role, from)))
       .returning({ userId: memberships.userId });
+    await this.db
+      .update(invitations)
+      .set({ role: to })
+      .where(
+        and(eq(invitations.tenantId, tenantId), eq(invitations.role, from), isNull(invitations.acceptedAt)),
+      );
     return rows.length;
   }
 }

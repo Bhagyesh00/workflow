@@ -187,6 +187,39 @@ export class RoleService {
     if (!scopes.has('role:manage') && !scopes.has('role:manageProject')) throw missingScope();
   }
 
+  /**
+   * A role never gives what its writer lacks (an owner holds every scope): the scopes must all be in
+   * `held`, the caller's scopes where the role applies.
+   */
+  private assertHeld(
+    auth: AuthContext,
+    scopes: Iterable<Scope>,
+    held: ReadonlySet<Scope>,
+    action = 'save the role',
+  ): void {
+    if (auth.role === 'owner') return;
+    const missing = [...scopes].filter((scope) => !held.has(scope));
+    if (missing.length) {
+      throw ApiError.forbidden(`Couldn't ${action}: you don't have these scopes: ${missing.join(', ')}`);
+    }
+  }
+
+  /**
+   * The scopes an update adds must be the caller's where the role applies: in the workspace for a global
+   * role, in every project that uses it for a project role (so a holder cannot widen its own role).
+   */
+  private async assertAddedHeld(auth: AuthContext, existing: CustomRoleRow, scopes: Scope[]): Promise<void> {
+    const added = scopes.filter((scope) => !existing.scopes.includes(scope));
+    if (!added.length || auth.role === 'owner') return;
+    if (existing.roleType === 'global') {
+      this.assertHeld(auth, added, await this.access.scopesForAuth(auth));
+      return;
+    }
+    for (const { projectId } of await this.repos.roles.assignmentsOf(auth.tenant.id, existing.slug)) {
+      this.assertHeld(auth, added, await this.access.scopesForAuth(auth, { projectId }));
+    }
+  }
+
   /** every scope must be on the type's allow list; a global role also gets n8n's baseline */
   private checkedScopes(roleType: 'project' | 'global', scopes: Scope[]): Scope[] {
     const allowed = customRoleAllowedScopes(roleType);
@@ -290,6 +323,8 @@ export class RoleService {
     await this.assertManage(auth, input.roleType);
     const tenantId = auth.tenant.id;
     const scopes = this.checkedScopes(input.roleType, input.scopes);
+    // a project role gives nothing until a project member manager assigns it there
+    if (input.roleType === 'global') this.assertHeld(auth, scopes, await this.access.scopesForAuth(auth));
     await this.assertNameFree(tenantId, input.roleType, input.displayName);
     let row: CustomRoleRow;
     try {
@@ -324,6 +359,7 @@ export class RoleService {
     if (!existing) throw ApiError.notFound(`Role "${slug}"`);
     await this.assertManage(auth, existing.roleType);
     const scopes = patch.scopes ? this.checkedScopes(existing.roleType, patch.scopes) : undefined;
+    if (scopes) await this.assertAddedHeld(auth, existing, scopes);
     if (patch.displayName !== undefined) {
       await this.assertNameFree(tenantId, existing.roleType, patch.displayName, slug);
     }
@@ -359,9 +395,11 @@ export class RoleService {
     if (!existing) throw ApiError.notFound(`Role "${slug}"`);
     if (actor) await this.assertManage(actor, existing.roleType);
 
-    const reassignTo = options.reassignRoleSlug;
+    // as n8n: a holder of the role cannot move its holders, itself among them, to another role
+    const reassignTo = actor?.role === slug ? undefined : options.reassignRoleSlug;
     const inUse = (await this.repos.roles.usageBySlug(tenantId)).get(slug);
-    const held = (inUse?.users ?? 0) > 0;
+    // a pending invitation that gives the role is a holder too
+    const held = (inUse?.users ?? 0) > 0 || (await this.repos.roles.pendingInvitations(tenantId, slug)) > 0;
     if (held && !(reassignTo && existing.roleType === 'global')) {
       throw ApiError.badRequest('Cannot delete role assigned to users');
     }
@@ -370,6 +408,15 @@ export class RoleService {
       const target = reassignTo === slug || reassignTo === 'owner' ? undefined : await this.find(tenantId, reassignTo);
       if (target?.roleType !== 'global') {
         throw ApiError.badRequest(`Cannot reassign the members to the role "${reassignTo}"`);
+      }
+      // `member` is the floor every workspace user starts from
+      if (actor && reassignTo !== 'member') {
+        this.assertHeld(
+          actor,
+          await this.access.globalScopes(tenantId, reassignTo),
+          await this.access.scopesForAuth(actor),
+          'move the members',
+        );
       }
     }
 

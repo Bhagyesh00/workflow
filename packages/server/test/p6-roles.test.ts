@@ -447,3 +447,121 @@ describe('lists', () => {
     expect((await owner.client.get('/rest/roles/project:editor/members')).statusCode).toBe(404);
   });
 });
+
+describe('a role never gives what its writer lacks (roles-1)', () => {
+  it('a holder of role:manage cannot widen its own role nor create a wider one', async () => {
+    const owner = await signup(server.app);
+    const tenantId = owner.tenant.id;
+    const { member: manager, role } = await memberWithGlobalRole(owner, ['role:read', 'role:manage']);
+    const slug = encodeURIComponent(role.slug);
+    const widen = await manager.client.patch(`/rest/roles/${slug}`, {
+      scopes: ['role:read', 'role:manage', 'user:changeRole', 'credential:read'],
+    });
+    expect(widen.statusCode).toBe(403);
+    expect(widen.json().error.message).toBe(
+      "Couldn't save the role: you don't have these scopes: user:changeRole, credential:read",
+    );
+    expect((await server.ctx.repos.roles.get(tenantId, role.slug))?.scopes).not.toContain('user:changeRole');
+    expect((await server.ctx.access.globalScopes(tenantId, role.slug)).has('user:changeRole')).toBe(false);
+
+    const wider = await manager.client.post('/rest/roles', {
+      displayName: name('Wide'),
+      roleType: 'global',
+      scopes: ['user:changeRole'],
+    });
+    expect(wider.statusCode).toBe(403);
+    // inside its own scopes it still works, and the owner may widen it
+    const narrow = await manager.client.post('/rest/roles', {
+      displayName: name('Narrow'),
+      roleType: 'global',
+      scopes: ['role:read'],
+    });
+    expect(narrow.statusCode).toBe(200);
+    const byOwner = await owner.client.patch(`/rest/roles/${slug}`, {
+      scopes: ['role:read', 'role:manage', 'user:changeRole'],
+    });
+    expect(byOwner.statusCode).toBe(200);
+  });
+
+  it('a holder of role:manageProject cannot widen a project role it holds in a project', async () => {
+    const owner = await signup(server.app);
+    const tenantId = owner.tenant.id;
+    const project = await projectIn(server, tenantId, name('Team'));
+    const { member: manager } = await memberWithGlobalRole(owner, ['role:manageProject']);
+    const role = await createRole(owner, 'project', ['workflow:read']);
+    await addToProject(server, tenantId, project.id, manager.user.id, role.slug);
+    const slug = encodeURIComponent(role.slug);
+
+    const widen = await manager.client.patch(`/rest/roles/${slug}`, {
+      scopes: ['workflow:read', 'workflow:delete'],
+    });
+    expect(widen.statusCode).toBe(403);
+    expect(widen.json().error.message).toBe(
+      "Couldn't save the role: you don't have these scopes: workflow:delete",
+    );
+    const scopes = await server.ctx.access.scopesFor(tenantId, manager.user.id, { projectId: project.id });
+    expect(scopes.has('workflow:delete')).toBe(false);
+
+    // a project role no project uses, and a narrower one, still change
+    const unused = await createRole(owner, 'project', ['workflow:read']);
+    const free = await manager.client.patch(`/rest/roles/${encodeURIComponent(unused.slug)}`, {
+      scopes: ['workflow:read', 'workflow:delete'],
+    });
+    expect(free.statusCode).toBe(200);
+    expect((await manager.client.patch(`/rest/roles/${slug}`, { scopes: [] })).statusCode).toBe(200);
+  });
+
+  it('reassigning holders: never to a role wider than the caller, never by a holder of the role (n8n)', async () => {
+    const owner = await signup(server.app);
+    const tenantId = owner.tenant.id;
+    const doomed = await createRole(owner, 'global', ['variable:list']);
+    const holder = await realMember(owner);
+    await server.ctx.repos.memberships.updateRole(tenantId, holder.user.id, doomed.slug);
+    const { member: manager } = await memberWithGlobalRole(owner, ['role:manage', 'user:changeRole']);
+    const doomedSlug = encodeURIComponent(doomed.slug);
+
+    const toAdmin = await manager.client.delete(`/rest/roles/${doomedSlug}?reassignRoleSlug=admin`);
+    expect(toAdmin.statusCode).toBe(403);
+    expect(toAdmin.json().error.message).toMatch(/^Couldn't move the members: you don't have these scopes: /);
+    expect((await server.ctx.repos.memberships.get(tenantId, holder.user.id))?.role).toBe(doomed.slug);
+    expect(await server.ctx.repos.roles.get(tenantId, doomed.slug)).toBeDefined();
+
+    const { member: self, role: own } = await memberWithGlobalRole(owner, ['role:manage', 'user:changeRole']);
+    const mine = await self.client.delete(
+      `/rest/roles/${encodeURIComponent(own.slug)}?reassignRoleSlug=member`,
+    );
+    expect(mine.statusCode).toBe(400);
+    expect(mine.json().error.message).toBe('Cannot delete role assigned to users');
+    expect((await server.ctx.repos.memberships.get(tenantId, self.user.id))?.role).toBe(own.slug);
+
+    // member, the floor every workspace user starts from, still goes
+    const ok = await manager.client.delete(`/rest/roles/${doomedSlug}?reassignRoleSlug=member`);
+    expect(ok.statusCode).toBe(200);
+    expect((await server.ctx.repos.memberships.get(tenantId, holder.user.id))?.role).toBe('member');
+  });
+});
+
+describe('a pending invitation holds its role', () => {
+  it('refuses the delete with the users text, and a reassign moves the invitation', async () => {
+    const owner = await signup(server.app);
+    const tenantId = owner.tenant.id;
+    const role = await createRole(owner, 'global', ['variable:list']);
+    const invite = await owner.client.data<{ id: string }>(
+      owner.client.post('/rest/members/invite', {
+        email: `pending-${suffix()}@example.com`,
+        role: role.slug,
+      }),
+    );
+    const slug = encodeURIComponent(role.slug);
+
+    const refused = await owner.client.delete(`/rest/roles/${slug}`);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.message).toBe('Cannot delete role assigned to users');
+    expect(await server.ctx.repos.roles.get(tenantId, role.slug)).toBeDefined();
+
+    const ok = await owner.client.delete(`/rest/roles/${slug}?reassignRoleSlug=member`);
+    expect(ok.statusCode).toBe(200);
+    const pending = await server.ctx.repos.invitations.listPending(tenantId);
+    expect(pending.find((i) => i.id === invite.id)?.role).toBe('member');
+  });
+});
