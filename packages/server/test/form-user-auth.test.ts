@@ -6,6 +6,7 @@ import { FormAuthService } from '../src/services/form-auth';
 import { normalizePath } from '../src/services/webhook-paths';
 import type { WebhookReply } from '../src/services/webhooks';
 import {
+  addToProject,
   chain,
   createTestServer,
   createWorkflow,
@@ -14,6 +15,7 @@ import {
   memberAs,
   node,
   outputOf,
+  realMember,
   resetDatabase,
   signup,
   TEST_REDIS,
@@ -191,9 +193,13 @@ describe('POST /rest/form-auth/code', () => {
     const first = await owner();
     const second = await owner();
     const email = `both-${Math.random().toString(36).slice(2, 8)}@example.com`;
-    const { client: both, user } = await memberAs(first, 'viewer', { email, name: 'Both' });
-    await server.ctx.repos.memberships.add(second.tenant.id, user.id, 'viewer');
+    const { client: both, user } = await realMember(first, { email, name: 'Both' });
+    // in the second workspace: a member who views the team project that holds the form
+    await server.ctx.repos.memberships.add(second.tenant.id, user.id, 'member');
     await server.ctx.repos.projects.ensurePersonal(second.tenant.id, user);
+    const team = second.client.defaultProjectId;
+    if (!team) throw new Error('the second workspace has no team project');
+    await addToProject(server, second.tenant.id, team, user.id, 'project:viewer');
     await active(second.client, [form()]);
     const url = `/form/${second.tenant.slug}/who`;
     const { cookie } = await signedInCookie(both, url);
