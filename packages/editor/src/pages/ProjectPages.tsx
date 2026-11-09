@@ -3,13 +3,17 @@
  * (`/shared/*`), and one project (`/projects/:id/*`, a personal project too) with its header, tabs and the
  * existing list pages inside. The routes are in App.tsx (C0-final for S1).
  *
- * stub (L18): C0 renders the existing list pages, so the routes work; the header and tabs render nothing yet.
+ * The layout sets the current project (`useProjectStore`) from the route, so lists and creates read it; the
+ * list tabs render the existing pages (L20 filters them by project).
  */
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { Outlet } from 'react-router';
+import { errorMessage, isApiError } from '../api/client';
+import { useProject } from '../api/queries';
 import { ProjectHeader } from '../components/projects/ProjectHeader';
 import { ProjectTabs } from '../components/projects/ProjectTabs';
-import { PageLoader } from '../components/ui/misc';
+import { EmptyState, PageLoader } from '../components/ui/misc';
+import { useProjectStore } from '../stores/project-store';
 import { ExecutionsPage } from './ExecutionsPage';
 import { WorkflowsPage } from './WorkflowsPage';
 
@@ -28,8 +32,28 @@ export interface ProjectLayoutProps {
   projectId?: string;
 }
 
-/** header, tabs and the tab's page (`<Outlet />`) */
+/** header, tabs and the tab's page (`<Outlet />`); a project the user cannot open shows why instead */
 export function ProjectLayout({ kind, projectId }: ProjectLayoutProps) {
+  const setCurrentProject = useProjectStore((s) => s.setCurrentProject);
+  const current = kind === 'project' ? (projectId ?? null) : null;
+  useEffect(() => {
+    setCurrentProject(current);
+    return () => setCurrentProject(null);
+  }, [current, setCurrentProject]);
+  const project = useProject(kind === 'project' ? projectId : null);
+  if (kind === 'project' && project.isLoading) return <PageLoader label="Loading the project" />;
+  if (kind === 'project' && project.error) {
+    const missing = isApiError(project.error, 404);
+    return (
+      <EmptyState
+        className="h-full"
+        title={missing ? 'Project not found' : 'You cannot open this project'}
+        description={
+          missing ? 'It may have been deleted, or it is in another workspace.' : errorMessage(project.error)
+        }
+      />
+    );
+  }
   return (
     <>
       <ProjectHeader kind={kind} projectId={projectId} />
@@ -46,7 +70,7 @@ export interface ProjectResourcePageProps {
   projectId?: string;
 }
 
-/** one list tab; C0 shows the existing page of that list */
+/** one list tab: the existing page of that list */
 export function ProjectResourcePage({ resource }: ProjectResourcePageProps) {
   switch (resource) {
     case 'workflows':

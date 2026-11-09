@@ -3,9 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Check,
   ChevronsUpDown,
-  History,
   Inbox,
-  KeyRound,
   LogOut,
   Monitor,
   Moon,
@@ -14,8 +12,6 @@ import {
   Settings,
   Sparkles,
   Sun,
-  Table2,
-  Workflow,
 } from 'lucide-react';
 import { useEffect, useSyncExternalStore } from 'react';
 import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
@@ -58,15 +54,12 @@ function useNarrowScreen(): boolean {
   );
 }
 
+// P6-41: Workflows, Executions, Credentials and Data tables are tabs of the project pages (ProjectTabs)
 const NAV = [
-  { to: '/workflows', label: 'Workflows', icon: Workflow },
   // P5-67: shown while the Assistant is on, to members once a model is set (lib/assistant-access.ts)
   { to: '/assistant', label: 'Assistant', icon: Sparkles },
-  { to: '/executions', label: 'Executions', icon: History },
   // P3-19: shown while workflow reviews are on for the workspace
   { to: '/inbox', label: 'Inbox', icon: Inbox },
-  { to: '/credentials', label: 'Credentials', icon: KeyRound },
-  { to: '/data-tables', label: 'Data tables', icon: Table2 },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -80,7 +73,7 @@ function TenantSwitcher({ me, collapsed }: { me: Me; collapsed: boolean }) {
       queryClient.clear();
       queryClient.setQueryData(queryKeys.me, { ...me, ...result });
       await queryClient.invalidateQueries({ queryKey: queryKeys.me });
-      navigate('/workflows');
+      navigate('/home/workflows');
       toast.success(`Switched to ${result.tenant.name}`);
     },
     onError: (error) => toast.error('Could not switch workspace', errorMessage(error)),
@@ -249,7 +242,7 @@ export function AppShell() {
         try {
           // /auth/me names the workspace the session uses now (and rebinds this tab to it)
           await queryClient.refetchQueries({ queryKey: queryKeys.me, exact: true });
-          navigate('/workflows');
+          navigate('/home/workflows');
           await queryClient.resetQueries({ predicate: (query) => query.queryKey[0] !== queryKeys.me[0] });
           const next = queryClient.getQueryData<Me>(queryKeys.me);
           toast.info(
@@ -322,9 +315,7 @@ export function AppShell() {
                   cx(
                     'flex items-center gap-2.5 rounded-lg text-sm font-semibold transition-colors',
                     collapsed ? 'justify-center p-2' : 'px-2.5 py-2',
-                    isActive || (to === '/workflows' && location.pathname.startsWith('/workflow/'))
-                      ? 'bg-brand-soft text-brand'
-                      : 'text-ink-2 hover:bg-surface-3 hover:text-ink',
+                    isActive ? 'bg-brand-soft text-brand' : 'text-ink-2 hover:bg-surface-3 hover:text-ink',
                   )
                 }
               >

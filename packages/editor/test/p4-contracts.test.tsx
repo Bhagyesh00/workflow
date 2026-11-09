@@ -84,7 +84,7 @@ describe('routes and navigation', () => {
   it('renders the data table pages inside the shell with nav link and storage banner', async () => {
     const { unmount } = renderApp('/data-tables');
     expect(await screen.findByText('data tables list stub')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Data tables' }).getAttribute('href')).toBe('/data-tables');
+    expect(screen.getByRole('link', { name: 'Data tables' }).getAttribute('href')).toBe('/home/data-tables');
     expect(screen.getByText('storage banner stub')).toBeTruthy();
     unmount();
 
@@ -446,7 +446,12 @@ describe('demo backend', () => {
       demo.handle({
         method: 'POST',
         path: '/node-types/options',
-        body: { kind: 'listSearch', method, filter },
+        body: {
+          kind: 'listSearch',
+          method,
+          filter,
+          projectId: demo.defaultProjectFor(demo.auth().tenant.id).id,
+        },
       });
     expect((await search('tableSearch', 'lea')).body).toEqual({
       data: { results: [{ name: 'Leads', value: 't1' }] },
