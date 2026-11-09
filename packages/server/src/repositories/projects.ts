@@ -58,6 +58,14 @@ export interface MovedResources {
   dataTables: number;
 }
 
+/** what a project owns */
+export interface ProjectContents {
+  workflowIds: string[];
+  credentialIds: string[];
+  folderIds: string[];
+  dataTables: Array<{ id: string; name: string }>;
+}
+
 export class ProjectRelationRepository {
   constructor(private readonly db: DbOrTx) {}
 
@@ -267,6 +275,63 @@ export class ProjectRepository {
       .from(projects)
       .where(eq(projects.tenantId, tenantId))
       .orderBy(sql`${projects.type} = 'team'`, asc(projects.name), asc(projects.id));
+  }
+
+  /** how many personal and team projects the workspace has */
+  async countByType(tenantId: string): Promise<{ personal: number; team: number }> {
+    const rows = await this.db
+      .select({ type: projects.type, n: count() })
+      .from(projects)
+      .where(eq(projects.tenantId, tenantId))
+      .groupBy(projects.type);
+    const out = { personal: 0, team: 0 };
+    for (const row of rows) out[row.type] = row.n;
+    return out;
+  }
+
+  /** the ids of what a project owns (a delete moves or wipes them); data tables come with their names */
+  async contents(tenantId: string, id: string): Promise<ProjectContents> {
+    if (!isUuid(id)) return { workflowIds: [], credentialIds: [], folderIds: [], dataTables: [] };
+    const [wf, cr, fo, dt] = await Promise.all([
+      this.db
+        .select({ id: workflows.id })
+        .from(workflows)
+        .where(and(eq(workflows.tenantId, tenantId), eq(workflows.projectId, id))),
+      this.db
+        .select({ id: credentials.id })
+        .from(credentials)
+        .where(and(eq(credentials.tenantId, tenantId), eq(credentials.projectId, id))),
+      this.db
+        .select({ id: folders.id })
+        .from(folders)
+        .where(and(eq(folders.tenantId, tenantId), eq(folders.projectId, id))),
+      this.db
+        .select({ id: dataTables.id, name: dataTables.name })
+        .from(dataTables)
+        .where(and(eq(dataTables.tenantId, tenantId), eq(dataTables.projectId, id))),
+    ]);
+    return {
+      workflowIds: wf.map((row) => row.id),
+      credentialIds: cr.map((row) => row.id),
+      folderIds: fo.map((row) => row.id),
+      dataTables: dt,
+    };
+  }
+
+  /** the names among `names` that data tables of the project already use (names are unique per project) */
+  async dataTableNamesIn(tenantId: string, projectId: string, names: string[]): Promise<string[]> {
+    if (!isUuid(projectId) || !names.length) return [];
+    const rows = await this.db
+      .select({ name: dataTables.name })
+      .from(dataTables)
+      .where(
+        and(
+          eq(dataTables.tenantId, tenantId),
+          eq(dataTables.projectId, projectId),
+          inArray(dataTables.name, names),
+        ),
+      );
+    return rows.map((row) => row.name);
   }
 
   /** team projects of the workspace (the `maxTeamProjects` limit) */

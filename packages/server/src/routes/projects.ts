@@ -9,7 +9,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import { requireAuth, requireScope } from '../http/auth';
-import { parse } from '../http/errors';
+import { ApiError, parse } from '../http/errors';
 
 const projectParams = z.object({ projectId: z.string() });
 const userParams = z.object({ projectId: z.string(), userId: z.uuid() });
@@ -80,11 +80,16 @@ export function registerProjectRoutes(app: FastifyInstance, ctx: ServerContext):
     return { data: await projects.update(auth, projectId, parse(projectPatchBody, request.body)) };
   });
 
-  app.post('/projects/:projectId/users', async (request) => {
+  app.post('/projects/:projectId/users', async (request, reply) => {
     const { projectId } = parse(projectParams, request.params);
     const auth = await requireScope(request, 'project:manageMembers', { projectId });
     const body = parse(addUsersBody, request.body);
-    return { data: await projects.addUsers(auth, projectId, body.relations) };
+    const { added, conflicts } = await projects.addUsers(auth, projectId, body.relations);
+    if (added > 0) return reply.status(201).send({ data: { conflicts } });
+    if (conflicts.length > 0) {
+      throw ApiError.conflict('No users were added: they are already members of this project', { conflicts });
+    }
+    return { data: { conflicts } };
   });
 
   app.patch('/projects/:projectId/users/:userId', async (request) => {
