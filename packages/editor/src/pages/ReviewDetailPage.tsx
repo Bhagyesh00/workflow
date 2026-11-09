@@ -98,6 +98,15 @@ export function ReviewDetailPage() {
     queryFn: () => reviewsApi.get(reviewId),
     retry: false,
   });
+  // P6-39: the request's workflow, for `workflow:publish` there (a project role counts; no workspace role but
+  // owner and admin holds it)
+  const workflowId = query.data?.workflowId;
+  const workflow = useQuery({
+    queryKey: ['workflow-reviews', 'workflow', workflowId],
+    queryFn: () => workflowsApi.get(workflowId as string),
+    enabled: Boolean(workflowId),
+    retry: false,
+  });
 
   if (query.isLoading) return <PageLoader />;
   if (query.error || !query.data) {
@@ -116,9 +125,9 @@ export function ReviewDetailPage() {
   const open = review.state === 'open';
   const userId = me?.user.id;
   // whoever manages the reviews switch decides any request (`securitySettings:manage`: owner and admin);
-  // a reviewer needs `workflow:publish`. The server checks the reviewer's scopes on the workflow again.
+  // a reviewer needs `workflow:publish` on the workflow. The server checks the reviewer's scopes there again.
   const isAdmin = canWith(me, 'securitySettings:manage');
-  const canPublish = isAdmin || canWith(me, 'workflow:publish');
+  const canPublish = isAdmin || canWith(me, 'workflow:publish', workflow.data);
   const isAuthor = Boolean(userId && review.authors.some((a) => a.id === userId));
   const isReviewer = Boolean(userId && review.reviewers.some((r) => r.id === userId));
   const canDecide = open && (isAdmin || (isReviewer && !isAuthor && canPublish));

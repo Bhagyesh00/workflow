@@ -4,7 +4,7 @@
  * paths C0c calls. No database: each register function takes its services as explicit deps, so these
  * run on a bare Fastify with recording fakes. Stub return values are never asserted (lanes fill those).
  */
-import { GLOBAL_ROLE_SCOPES, type Scope } from '@workflow/workflow';
+import { GLOBAL_ROLE_SCOPES, PROJECT_ROLE_SCOPES, type Scope } from '@workflow/workflow';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ServiceDeps } from '../src/context';
@@ -19,7 +19,7 @@ import { registerDataTableRoutes } from '../src/routes/data-tables';
 import { registerFormAuthRoutes } from '../src/routes/form-auth';
 import { PUBLIC_DATA_TABLE_ROUTES, publicDataTableHandlers } from '../src/routes/public-data-tables';
 import { registerSecretConnectionRoutes } from '../src/routes/secret-connections';
-import { type AccessService, LEGACY_ROLE_SCOPES } from '../src/services/access';
+import type { AccessService } from '../src/services/access';
 import { DataTableService } from '../src/services/data-tables';
 import { FormAuthService } from '../src/services/form-auth';
 import { FormTokenService } from '../src/services/form-tokens';
@@ -64,15 +64,23 @@ afterEach(async () => {
 });
 
 /**
- * P6 S1: `requireScope` reads `request.server.access`. This fake answers the scopes of the legacy role
- * map (owner and admin: their global scopes) without a row lookup, so a converted data table or vault
- * route keeps today's rule on this bare app.
+ * P6-39: the test names `editor` and `viewer` are a `member` holding `project:editor` or `project:viewer` on
+ * the project of every row here (the row lookup of the real service is not on this bare app).
  */
-const legacyFakeAccess = {
+const TEST_ROLE_SCOPES: Readonly<Record<'editor' | 'viewer', ReadonlySet<Scope>>> = {
+  editor: new Set([...GLOBAL_ROLE_SCOPES.member, ...PROJECT_ROLE_SCOPES['project:editor']]),
+  viewer: new Set([...GLOBAL_ROLE_SCOPES.member, ...PROJECT_ROLE_SCOPES['project:viewer']]),
+};
+
+/**
+ * P6 S1: `requireScope` reads `request.server.access`. This fake answers owner and admin their global scopes
+ * and the test names `TEST_ROLE_SCOPES`, without a row lookup.
+ */
+const testFakeAccess = {
   async scopesForAuth(auth: AuthContext): Promise<ReadonlySet<Scope>> {
     const role = auth.role as string;
     if (role === 'owner' || role === 'admin') return GLOBAL_ROLE_SCOPES[role];
-    if (role === 'editor' || role === 'viewer') return LEGACY_ROLE_SCOPES[role];
+    if (role === 'editor' || role === 'viewer') return TEST_ROLE_SCOPES[role];
     return new Set();
   },
 } as unknown as AccessService;
@@ -81,7 +89,7 @@ async function build(register: (rest: FastifyInstance) => void): Promise<Fastify
   const instance = Fastify();
   instance.setErrorHandler(handleError);
   instance.decorateRequest('auth', null);
-  instance.decorate('access', legacyFakeAccess);
+  instance.decorate('access', testFakeAccess);
   instance.addHook('onRequest', async (request) => {
     const role = request.headers['x-test-role'];
     if (role) {
@@ -339,11 +347,13 @@ const SECRET_ROUTES: RouteRow[] = [
   { method: 'DELETE', url: connection, minimum: 'admin', calls: 'deleteConnection' },
   { method: 'POST', url: `${connection}/test`, minimum: 'admin', calls: 'testConnection' },
   { method: 'POST', url: `${connection}/reload`, minimum: 'admin', calls: 'reloadConnection' },
-  { method: 'GET', url: `${providers}/completions/secrets`, minimum: 'editor', calls: 'completions' },
+  // P6-39: the global names need the global `externalSecret:list` (owner and admin); a project editor lists a
+  // project's names on `/completions/secrets/project/:projectId`
+  { method: 'GET', url: `${providers}/completions/secrets`, minimum: 'admin', calls: 'completions' },
   {
     method: 'GET',
     url: `${providers}/completions/secrets/global`,
-    minimum: 'editor',
+    minimum: 'admin',
     calls: 'completions',
   },
 ];

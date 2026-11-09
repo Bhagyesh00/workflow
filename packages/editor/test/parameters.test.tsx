@@ -10,7 +10,7 @@ import { renderParameters, runDataFor } from './utils';
 /** P6-43: option calls name the saved workflow, else a project: the setup works in the default project */
 function signedInInProject() {
   const demo = signedIn();
-  useProjectStore.getState().setCurrentProject(demo.defaultProjectFor(demo.auth().tenant.id).id);
+  useProjectStore.getState().setCurrentProject(demo.oldestTeamProject(demo.auth().tenant.id).id);
   return demo;
 }
 

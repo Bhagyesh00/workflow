@@ -6,8 +6,6 @@
  * that project holds (owner: `workflow:owner`, `credential:owner`, ...; sharee: the share's role). Owners
  * and admins are implicit `project:admin` members of every team project. A resource of another
  * workspace, or an id that is not a uuid, is 404 with the name the service uses today.
- *
- * Old roles (`editor`, `viewer`) keep today's rights through `LEGACY_ROLE_SCOPES` until the cutover (L24).
  */
 import {
   DATA_TABLE_ERRORS,
@@ -26,7 +24,7 @@ import {
   type ResourceRoleSlug,
   type Scope,
 } from '@workflow/workflow';
-import type { CredentialRow, LegacyRole, Role } from '../db/schema';
+import type { CredentialRow, Role } from '../db/schema';
 import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
@@ -56,91 +54,12 @@ export const MISSING_SCOPE_MESSAGE = 'User is missing a scope required to perfor
 
 const set = (scopes: readonly Scope[]): ReadonlySet<Scope> => new Set(scopes);
 
-/** the old `viewer`: what today's `requireRole(request, 'viewer')` routes allow (research-C2-routes "today") */
-const LEGACY_VIEWER_SCOPES: readonly Scope[] = [
-  'annotationTag:list',
-  'apiKey:create',
-  'credential:list',
-  'dataTable:list',
-  'dataTable:listProject',
-  'dataTable:read',
-  'dataTable:readColumn',
-  'dataTable:readRow',
-  'execution:list',
-  'execution:read',
-  'folder:list',
-  'folder:read',
-  'instanceAi:message',
-  'mcp:oauth',
-  'mcpApiKey:create',
-  'mcpApiKey:rotate',
-  'project:list',
-  'project:read',
-  'projectVariable:list',
-  'projectVariable:read',
-  'tag:list',
-  'tag:read',
-  'user:list',
-  'variable:list',
-  'variable:read',
-  'workflow:list',
-  'workflow:read',
-];
-
-/** the old `editor`: the viewer's rights plus today's `requireRole(request, 'editor')` routes */
-const LEGACY_EDITOR_SCOPES: readonly Scope[] = [
-  ...LEGACY_VIEWER_SCOPES,
-  'annotationTag:create',
-  'annotationTag:update',
-  'annotationTag:delete',
-  'credential:create',
-  'credential:read',
-  'credential:update',
-  'credential:delete',
-  'dataTable:create',
-  'dataTable:update',
-  'dataTable:delete',
-  'dataTable:writeColumn',
-  'dataTable:writeRow',
-  'execution:delete',
-  'externalSecret:list',
-  'folder:create',
-  'folder:update',
-  'folder:delete',
-  'tag:create',
-  'tag:update',
-  'tag:delete',
-  'workflow:create',
-  'workflow:update',
-  'workflow:delete',
-  'workflow:execute',
-  'workflow:publish',
-  'workflow:unpublish',
-];
-
-/**
- * Old workspace roles, workspace wide, equal to today's route rules (research-C2-routes "today" and
- * "scope after", row by row). A viewer has no `credential:read`, `workflow:publish` (the review routes
- * open to viewers today still need an editor in the service), `tag:create`, `tag:update` or
- * `annotationTag:*` writes; an editor keeps `tag:delete` and `annotationTag:*`. Both get the new
- * `project:list` and `project:read`; neither gets `project:create`, `role:*`, `:share` or `:move`.
- * L24 removes this map.
- */
-export const LEGACY_ROLE_SCOPES: Readonly<Record<LegacyRole, ReadonlySet<Scope>>> = {
-  editor: set(LEGACY_EDITOR_SCOPES),
-  viewer: set(LEGACY_VIEWER_SCOPES),
-};
-
 const NO_SCOPES: ReadonlySet<Scope> = new Set<Scope>();
 
 const DEFAULT_POLICY: PersonalSpacePolicy = { personalSpacePublishing: true, personalSpaceSharing: true };
 
 function isGlobalSystemRole(role: string): role is GlobalRoleSlug {
   return (GLOBAL_ROLE_SLUGS as readonly string[]).includes(role);
-}
-
-function isLegacyRole(role: string): role is LegacyRole {
-  return role === 'editor' || role === 'viewer';
 }
 
 function resourceMask(role: string): ReadonlySet<Scope> {
@@ -221,7 +140,6 @@ export class AccessService {
   /** the scopes a workspace role gives everywhere in the workspace */
   async globalScopes(tenantId: string, role: Role): Promise<ReadonlySet<Scope>> {
     if (isGlobalSystemRole(role)) return GLOBAL_ROLE_SCOPES[role];
-    if (isLegacyRole(role)) return LEGACY_ROLE_SCOPES[role];
     const custom = await this.repos.roles.get(tenantId, role);
     if (custom?.roleType !== 'global') return NO_SCOPES;
     return set([...custom.scopes.filter(isScope), ...MANDATORY_INSTANCE_SCOPES]);
@@ -370,8 +288,7 @@ export class AccessService {
 
   /**
    * The project a create goes to: the given id (404 when it is not a project of the workspace), else the
-   * default. Until the cutover (L24) the default is the oldest team project; L24 makes it the caller's
-   * personal project. This is the one place that changes.
+   * caller's personal project (n8n: a new row with no project goes to the creator's personal project).
    */
   async targetProject(auth: AuthContext, projectId?: string | null): Promise<string> {
     if (projectId !== undefined && projectId !== null) {
@@ -379,7 +296,10 @@ export class AccessService {
       if (!project) throw ApiError.notFound('Project');
       return project.id;
     }
-    return this.repos.projects.defaultProjectFor(auth.tenant.id);
+    const personal =
+      (await this.repos.projects.getPersonal(auth.tenant.id, auth.user.id)) ??
+      (await this.repos.projects.ensurePersonal(auth.tenant.id, auth.user));
+    return personal.id;
   }
 
   /**

@@ -92,15 +92,9 @@ export async function writeProject(
   return id;
 }
 
-/**
- * The scope a definition needs. Tools written before scopes (a test seam that still says `minRole`) map
- * to the scope that role held in the legacy map; nothing else in the product sets `minRole`.
- */
-export function toolAccess(def: Pick<AssistantToolDefinition, 'access' | 'minRole'>): Scope {
-  if (def.access) return def.access;
-  if (def.minRole === 'viewer') return 'instanceAi:message';
-  if (def.minRole === 'editor') return 'workflow:update';
-  return 'instanceAi:manage';
+/** the scope a definition needs (`access`) */
+export function toolAccess(def: Pick<AssistantToolDefinition, 'access'>): Scope {
+  return def.access;
 }
 
 /** what the model reads when the caller has lost the access a tool needs (also while a call is checked) */
@@ -116,7 +110,7 @@ export const ASSISTANT_TOOL_NO_ACCESS = 'You no longer have access to this tool'
 export async function toolDenial(
   ctx: ServerContext,
   caller: Pick<AssistantCaller, 'tenant' | 'user' | 'role'>,
-  def: Pick<AssistantToolDefinition, 'access' | 'minRole' | 'target'>,
+  def: Pick<AssistantToolDefinition, 'access' | 'target'>,
   input?: unknown,
 ): Promise<string | null> {
   const scope = toolAccess(def);
@@ -246,12 +240,9 @@ export interface AssistantToolDefinition<I = any> {
   input: z.ZodType<I>;
   /**
    * The scope the caller needs (P6-37): held where the writes land to be offered, then on `target`. Every
-   * built-in tool sets it; only a test seam that predates scopes leaves it out and says `minRole`, which
-   * `toolAccess` maps to the scope that role held. An MCP tool sets it too.
+   * tool sets it, an MCP tool too.
    */
-  access?: Scope;
-  /** @deprecated only a test seam that predates scopes sets it; `toolAccess` maps it */
-  minRole?: Role;
+  access: Scope;
   /** what the call acts on, from its input: a project (`projectId` given), a workflow, a data table...; absent or null: the home scopes decide */
   target?(input: I): AccessTarget | null;
   permission?: AssistantPermissionKey;

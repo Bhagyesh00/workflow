@@ -985,8 +985,10 @@ describe('demo backend', () => {
       error: { message: 'The data in the file does not seem to be a workflow JSON file!' },
     });
     expect((await call('POST', '/workflows/from-url', { url: 'ftp://x' })).status).toBe(400);
+    // P6-39: a project viewer may not import into the team project (its personal project is its own)
     backend().setDemoRole('viewer');
-    expect((await call('POST', '/workflows/from-url', { url })).status).toBe(403);
+    const teamId = backend().oldestTeamProject(backend().auth().tenant.id).id;
+    expect((await call('POST', '/workflows/from-url', { url, projectId: teamId })).status).toBe(403);
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });

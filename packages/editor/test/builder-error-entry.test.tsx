@@ -13,6 +13,7 @@ import { ErrorPanel } from '../src/components/ndv/DataPanes';
 import { builderErrorMessage } from '../src/features/builder/error-entry';
 import { BUILDER_NOTIFY_ASKED_KEY, notifyBuilderDone } from '../src/features/builder/notify';
 import { useBuilderStore } from '../src/stores/builder-store';
+import { useProjectStore } from '../src/stores/project-store';
 import { useUiStore } from '../src/stores/ui-store';
 import { backend, signedIn } from './backend';
 import { server } from './setup';
@@ -49,6 +50,7 @@ describe('Fix with AI (P5-65)', () => {
   });
   afterEach(() => {
     useBuilderStore.getState().reset();
+    useProjectStore.getState().setCurrentProject(null);
   });
 
   it('opens the builder panel with the node and its error', async () => {
@@ -67,8 +69,10 @@ describe('Fix with AI (P5-65)', () => {
     expect(builderErrorMessage('A', 'x'.repeat(9000)).length).toBeLessThan(1100);
   });
 
-  it('is hidden for a viewer', async () => {
+  it('is hidden for a viewer of the project it works in', async () => {
     backend().setDemoRole('viewer');
+    // P6-39: a project viewer still creates in its personal project, so it works in the team project here
+    useProjectStore.getState().setCurrentProject(backend().oldestTeamProject(backend().auth().tenant.id).id);
     serve();
     withProviders(<ErrorPanel error={ERROR} />);
     await screen.findByTestId('node-error');

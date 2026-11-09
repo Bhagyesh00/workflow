@@ -27,7 +27,7 @@ const bigTool: AssistantToolDefinition<{ n: number }> = {
   name: 'big_read',
   description: 'Read a lot',
   input: z.object({ n: z.number() }),
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   async handler(_ctx, _run, input) {
     return `chunk ${input.n}: ${'lorem ipsum '.repeat(120)}`;
   },

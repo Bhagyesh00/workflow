@@ -17,7 +17,7 @@ function setup() {
   const other = demo.createProject({ tenantId, name: 'Ops', type: 'team' });
   const addMember = (id: string, name: string, projectRole: string) => {
     demo.users.push({ id, email: `${id.slice(2)}@example.com`, name, password: 'x' });
-    demo.memberships.push({ tenantId, userId: id, role: 'viewer', globalRole: 'member' });
+    demo.memberships.push({ tenantId, userId: id, role: 'member' });
     demo.projectRelations.push({ tenantId, projectId: project.id, userId: id, role: projectRole });
   };
   return { demo, tenantId, project, other, addMember };

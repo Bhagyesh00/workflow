@@ -312,14 +312,14 @@ export class WorkflowService {
 
   async create(
     tenantId: string,
-    input: CreateInput & { projectId?: string },
+    input: CreateInput & { projectId: string },
     actor: Actor,
   ): Promise<WorkflowDTO> {
     assertGraph(input as unknown as WorkflowDefinition, this.deps.nodeTypes);
     assertNodeGroups(input as unknown as WorkflowDefinition, this.deps.nodeTypes);
     await assertFolderInTenant(this.repos, tenantId, input.folderId);
-    // P6 S1: the project the route resolved (`AccessService.targetProject`), else the workspace's default (L24 makes it required)
-    const projectId = input.projectId ?? (await this.repos.projects.defaultProjectFor(tenantId));
+    // P6 S1: the project the caller resolved (`AccessService.targetProject`)
+    const { projectId } = input;
     // P6-22: a workflow and its folder are in one project
     if (input.folderId) {
       const folder = await this.repos.folders.get(tenantId, input.folderId);

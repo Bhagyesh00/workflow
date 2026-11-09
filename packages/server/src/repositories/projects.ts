@@ -16,7 +16,6 @@ import {
   type ProjectRow,
   projectRelations,
   projects,
-  tenants,
   type UserRow,
   users,
   workflowShares,
@@ -232,25 +231,6 @@ export class ProjectRepository {
       .orderBy(asc(projects.createdAt), asc(projects.id))
       .limit(1);
     return row;
-  }
-
-  /**
-   * The project a create without a `projectId` goes to until the cutover: the oldest team project, made
-   * (named after the workspace, as migration 0022) when the workspace has none. L24 removes it.
-   */
-  async defaultProjectFor(tenantId: string): Promise<string> {
-    const existing = await this.oldestTeam(tenantId);
-    if (existing) return existing.id;
-    const [tenant] = await this.db
-      .select({ name: tenants.name })
-      .from(tenants)
-      .where(eq(tenants.id, tenantId));
-    if (!tenant) throw new Error('The workspace does not exist');
-    await this.create(tenantId, { name: tenant.name.slice(0, 255), type: 'team' });
-    // two first calls may each make one; the oldest wins for both
-    const oldest = await this.oldestTeam(tenantId);
-    if (!oldest) throw new Error('The default project could not be made');
-    return oldest.id;
   }
 
   /** the projects the member has a relation on, with that role; personal first, then by name */

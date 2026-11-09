@@ -37,7 +37,7 @@ afterEach(() => setCurrentTenant(null));
 function asMember(projectRole?: string): { demo: MockBackend; teamId: string } {
   const demo = signedIn();
   const tenantId = demo.auth().tenant.id;
-  const team = demo.defaultProjectFor(tenantId);
+  const team = demo.oldestTeamProject(tenantId);
   if (projectRole)
     demo.projectRelations.push({
       tenantId,
@@ -137,11 +137,12 @@ describe('workflow list gates', () => {
     expect(screen.queryByRole('button', { name: 'Create workflow' })).toBeNull();
   });
 
-  it('the old viewer word holds the same rights as before', async () => {
+  it('the old viewer name is a project viewer of the team project (P6-39)', async () => {
     const demo = signedIn();
-    demo.seedWorkflow({ name: 'Old flow' });
+    const teamId = demo.oldestTeamProject(demo.auth().tenant.id).id;
+    demo.seedWorkflow({ name: 'Old flow', projectId: teamId });
     demo.setDemoRole('viewer');
-    renderApp('/home/workflows');
+    renderApp(`/projects/${teamId}/workflows`);
     const { menu } = await openMenu('Old flow');
     expect(items(menu)).toEqual(['Open', 'Add to favorites', 'Download as JSON']);
     expect(screen.queryByRole('button', { name: 'Create workflow' })).toBeNull();
@@ -311,7 +312,7 @@ describe('settings gates read the workspace role scopes', () => {
     demo.setDemoRole('owner');
     renderApp('/settings/mcp');
     expect(await screen.findByRole('switch', { name: 'MCP access' }, LONG)).toBeTruthy();
-    expect(backend().auth().globalRole).toBe('owner');
+    expect(backend().auth().role).toBe('owner');
   });
 
   it('the Roles link and the reviews switch follow their scopes', async () => {

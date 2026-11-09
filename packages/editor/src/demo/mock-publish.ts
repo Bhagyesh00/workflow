@@ -49,8 +49,8 @@ export function registerPublishRoutes(backend: MockBackend): void {
     return version;
   };
   backend.on('POST', '/workflows/:id/activate', ({ params, body }) => {
-    backend.requireRole('editor');
     const wf = backend.workflow(params[0]);
+    backend.requireScope('workflow:publish', { scopes: backend.rowScopes(wf) });
     const input = (body ?? {}) as PublishBody;
     const versionId = input.versionId ?? wf.versionId;
     const version = versionOf(wf, versionId);
@@ -68,8 +68,8 @@ export function registerPublishRoutes(backend: MockBackend): void {
     return backend.toDto(wf);
   });
   backend.on('POST', '/workflows/:id/deactivate', ({ params }) => {
-    backend.requireRole('editor');
     const wf = backend.workflow(params[0]);
+    backend.requireScope('workflow:unpublish', { scopes: backend.rowScopes(wf) });
     const was = wf.publishedVersionId;
     wf.active = false;
     wf.publishedVersionId = null;
@@ -77,8 +77,8 @@ export function registerPublishRoutes(backend: MockBackend): void {
     return backend.toDto(wf);
   });
   backend.on('PATCH', '/workflows/:id/versions/:versionId', ({ params, body }) => {
-    backend.requireRole('editor');
     const wf = backend.workflow(params[0]);
+    backend.requireScope('workflow:update', { scopes: backend.rowScopes(wf) });
     const version = versionOf(wf, params[1]);
     const patch = (body ?? {}) as VersionPatchBody;
     if (patch.versionName === undefined && patch.description === undefined)

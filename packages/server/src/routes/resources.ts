@@ -32,7 +32,7 @@ export const variableDTO = (v: VariableRow) => ({
 /** a variable on the editor's pages and `/rest/variables`: `projectId` is null for a global one */
 export const projectVariableDTO = (v: VariableRow) => ({ ...variableDTO(v), projectId: v.projectId });
 
-/** a workspace role in a member route: a system or old word, or a custom global slug (checked against the roles) */
+/** a workspace role in a member route: a system role or a custom global slug (checked against the roles) */
 const memberRoleSchema = z.string().trim().min(1).max(64);
 
 /** POST /variables: with `projectId` a project variable (`projectVariable:create` on it) */

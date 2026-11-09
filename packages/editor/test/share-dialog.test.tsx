@@ -28,7 +28,7 @@ afterEach(() => {
 function setup() {
   const demo = signedIn();
   const tenantId = demo.auth().tenant.id;
-  const alpha = demo.defaultProjectFor(tenantId);
+  const alpha = demo.oldestTeamProject(tenantId);
   const beta = demo.createProject({ tenantId, name: 'Beta team', type: 'team' });
   const gamma = demo.createProject({ tenantId, name: 'Gamma team', type: 'team' });
   const wf = demo.seedWorkflow({ name: 'Alpha flow', projectId: alpha.id });

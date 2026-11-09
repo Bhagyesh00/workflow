@@ -329,7 +329,11 @@ describe('credentials', () => {
       name: 'Ed',
     });
     const started = await editor.data(editor.get(`/rest/oauth2/authorize?credentialId=${credential.id}`));
-    await client.data(client.patch(`/rest/members/${joined.user.id}`, { role: 'viewer' }));
+    await client.data(
+      client.patch(`/rest/projects/${client.defaultProjectId}/users/${joined.user.id}`, {
+        role: 'project:viewer',
+      }),
+    );
     const editorState = new URL(started.url).searchParams.get('state')!;
     const revoked = await server.app.inject({
       url: `/rest/oauth2/callback?code=zzz&state=${encodeURIComponent(editorState)}`,

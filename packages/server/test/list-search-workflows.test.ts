@@ -94,7 +94,7 @@ describe('Execute Workflow listSearch searchWorkflows', () => {
     const { client, tenant } = await signup(server.app);
     const total = 120;
     const ids: string[] = [];
-    const projectId = await server.ctx.repos.projects.defaultProjectFor(tenant.id);
+    const projectId = (await server.ctx.repos.projects.oldestTeam(tenant.id))!.id;
     for (let i = 0; i < total; i++) {
       const id = randomUUID();
       ids.push(id);

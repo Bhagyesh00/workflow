@@ -11,13 +11,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setCurrentTenant } from '../src/api/client';
 import { WorkflowSettingsModal } from '../src/components/workflow/WorkflowSettingsModal';
 import { mcpDemoState } from '../src/demo/mock-mcp';
+import { addDemoRole } from '../src/demo/mock-roles';
 import { backend, signedIn } from './backend';
 import { server } from './setup';
 import { renderApp, withProviders } from './utils';
 
 afterEach(() => setCurrentTenant(null));
 
-function as(role: 'viewer' | 'editor' | 'admin') {
+function as(role: 'viewer' | 'admin') {
   const mock = signedIn();
   mock.setDemoRole(role);
   return mock;
@@ -156,8 +157,19 @@ describe('Settings > MCP (P5-15)', () => {
     );
   });
 
-  it('an editor sees the workflows without switches or bulk buttons', async () => {
-    as('editor');
+  it('a workspace role with workflow:update sees the workflows without switches or bulk buttons', async () => {
+    // P6-39: no system role but owner and admin holds workflow:update in the workspace; a custom global role may
+    const mock = signedIn();
+    addDemoRole(mock, {
+      tenantId: mock.auth().tenant.id,
+      slug: 'global:builder',
+      displayName: 'Builder',
+      description: null,
+      systemRole: false,
+      roleType: 'global',
+      scopes: ['workflow:list', 'workflow:read', 'workflow:update'],
+    });
+    mock.setDemoRole('global:builder');
     backend().seedWorkflow({ name: 'Sync orders', settings: { availableInMCP: true } });
     renderApp('/settings/mcp');
     expect(await screen.findByText('Sync orders')).toBeTruthy();

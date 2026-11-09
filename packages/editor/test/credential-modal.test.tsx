@@ -182,7 +182,7 @@ describe('invitation links (R13, R40)', () => {
       token: 'invite-token-123456',
       tenantId: mock.tenants[0].id,
       email: 'new@example.com',
-      role: 'editor',
+      role: 'member',
     });
     const { router } = renderApp('/invitations/invite-token-123456');
     expect(await screen.findByRole('button', { name: 'Accept invitation' })).toBeTruthy();

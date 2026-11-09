@@ -19,7 +19,7 @@ function setup() {
     ['u-ann', 'Ann Arbor', 'project:viewer'],
   ] as const) {
     demo.users.push({ id, email: `${id.slice(2)}@example.com`, name, password: 'x' });
-    demo.memberships.push({ tenantId, userId: id, role: 'viewer', globalRole: 'member' });
+    demo.memberships.push({ tenantId, userId: id, role: 'member' });
     demo.projectRelations.push({ tenantId, projectId: project.id, userId: id, role });
   }
   return { demo, tenantId, project };
@@ -73,7 +73,7 @@ describe('project settings page', () => {
   it('a project admin adds a member from the page', async () => {
     const { demo, tenantId, project } = setup();
     demo.users.push({ id: 'u-new', email: 'new@example.com', name: 'Nina New', password: 'x' });
-    demo.memberships.push({ tenantId, userId: 'u-new', role: 'viewer', globalRole: 'member' });
+    demo.memberships.push({ tenantId, userId: 'u-new', role: 'member' });
     demo.projectRelations.push({
       tenantId,
       projectId: project.id,

@@ -95,7 +95,7 @@ describe('GET /data-tables/:id and lists', () => {
   it('another workspace table is 404', async () => {
     const { member } = await setup();
     const other = await signup(server.app);
-    const project = await server.ctx.repos.projects.defaultProjectFor(other.tenant.id);
+    const project = (await server.ctx.repos.projects.oldestTeam(other.tenant.id))!.id;
     const foreign = await dataTableIn(server, other.tenant.id, project, 'Foreign');
     expect((await member.client.get(`/rest/data-tables/${foreign.id}`)).statusCode).toBe(404);
     expect((await member.client.get(`/rest/data-tables/${randomUUID()}`)).statusCode).toBe(404);

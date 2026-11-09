@@ -68,7 +68,7 @@ describe('page', () => {
     renderApp('/data-tables/missing');
     expect(await screen.findByText('Data table not found')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Back to data tables' }).getAttribute('href')).toBe(
-      '/data-tables',
+      '/home/data-tables',
     );
   });
 
@@ -544,7 +544,9 @@ describe('sort, filter and search', () => {
 
 describe('viewers', () => {
   it('see the rows but no way to change them', async () => {
-    const table = await dataTablesApi.create({ name: 'Leads', columns: COLUMNS });
+    // P6-39: a project viewer of the team project (its personal project is its own)
+    const projectId = backend().oldestTeamProject(backend().auth().tenant.id).id;
+    const table = await dataTablesApi.create({ name: 'Leads', columns: COLUMNS, projectId });
     await dataTablesApi.insertRows(table.id, [ANN], 'count');
     backend().setDemoRole('viewer');
     renderApp(`/data-tables/${table.id}`);

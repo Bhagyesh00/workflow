@@ -49,7 +49,7 @@ describe('project pages', () => {
 
   it('a project shows its name and icon, adds Variables and Settings, and sets the current project', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     renderApp(`/projects/${team.id}/workflows`);
     expect(await screen.findByRole('heading', { name: team.name }, { timeout: 20_000 })).toBeTruthy();
     await waitFor(async () =>
@@ -97,7 +97,7 @@ describe('project pages', () => {
 
   it('an old viewer gets no Create button and no Settings tab', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     demo.setDemoRole('viewer');
     renderApp(`/projects/${team.id}/workflows`);
     expect(await screen.findByRole('heading', { name: team.name }, { timeout: 20_000 })).toBeTruthy();
@@ -110,7 +110,7 @@ describe('project pages', () => {
 describe('Create button', () => {
   it('offers workflow, credential, folder, data table and variable on a project', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     renderApp(`/projects/${team.id}/workflows`);
     await userEvent.setup().click(await screen.findByRole('button', { name: 'Create' }, { timeout: 20_000 }));
     const menu = await screen.findByRole('menu');
@@ -123,7 +123,7 @@ describe('Create button', () => {
 
   it('Workflow creates in the project and opens it', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     const { router } = renderApp(`/projects/${team.id}/workflows`);
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Create' }, { timeout: 20_000 }));
@@ -148,7 +148,7 @@ describe('Create button', () => {
 
   it('Folder opens the folder dialog and Variable goes to the project variables tab', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     const { router } = renderApp(`/projects/${team.id}/workflows`);
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Create' }, { timeout: 20_000 }));
@@ -233,7 +233,7 @@ describe('demo project API', () => {
     const tenantId = demo.auth().tenant.id;
     const sam = demo.users.push({ id: 'u-sam', email: 'sam@example.com', name: 'Sam', password: 'x' });
     expect(sam).toBeGreaterThan(0);
-    demo.memberships.push({ tenantId, userId: 'u-sam', role: 'viewer', globalRole: 'member' });
+    demo.memberships.push({ tenantId, userId: 'u-sam', role: 'member' });
     const team = detail(await call('POST', '/projects', { name: 'Crew' }));
     const add = (role: string) =>
       call('POST', `/projects/${team.id}/users`, { relations: [{ userId: 'u-sam', role }] });

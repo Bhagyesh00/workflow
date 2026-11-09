@@ -97,7 +97,7 @@ describe('GET /workflows/:id', () => {
   it('answers 404 for a workflow of another workspace', async () => {
     const { member } = await setup();
     const other = await signup(server.app);
-    const project = await server.ctx.repos.projects.defaultProjectFor(other.tenant.id);
+    const project = (await server.ctx.repos.projects.oldestTeam(other.tenant.id))!.id;
     const foreign = await workflowIn(server, other.tenant.id, project);
     const res = await member.client.get(`/rest/workflows/${foreign.id}`);
     expect(res.statusCode).toBe(404);

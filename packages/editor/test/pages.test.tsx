@@ -111,7 +111,7 @@ describe('settings', () => {
     await user.type(within(dialog).getByLabelText('Email'), 'new@example.com');
     await user.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
     expect(await within(dialog).findByText(/\/invitation\//)).toBeTruthy();
-    expect(backend().invitations[0]).toMatchObject({ email: 'new@example.com', role: 'editor' });
+    expect(backend().invitations[0]).toMatchObject({ email: 'new@example.com', role: 'member' });
   });
 });
 

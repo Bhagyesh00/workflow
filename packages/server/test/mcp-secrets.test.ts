@@ -93,6 +93,7 @@ describe('secrets', () => {
     const table = await server.ctx.dataTables.create(tenant.id, {
       name: 'seeded',
       columns: [{ name: 'item', type: 'string' }],
+      projectId: (await server.ctx.repos.projects.getPersonal(tenant.id, user.id))!.id,
     });
     const column = table.columns[0];
     await server.ctx.dataTables.rows.insert(tenant.id, table.id, [{ item: 'pen' }], 'count');
@@ -130,6 +131,7 @@ describe('secrets', () => {
       delete_data_table_column: { dataTableId: table.id, columnId: randomUUID() },
       add_data_table_rows: { dataTableId: table.id, rows: [{ thing: 'cup' }] },
       search_folders: {},
+      search_projects: {},
       create_folder: { name: 'Another' },
       update_folder: { folderId: folder.id, name: 'Renamed' },
       move_workflows_to_folder: { workflowIds: [workflow.id], folderId: null },

@@ -318,7 +318,11 @@ describe('the publish guard and decisions', () => {
     const reviewer = await member(owner, 'editor');
     const wf = await createWorkflow(requester.client, manual());
     const review = await openReview(requester.client, wf.id, [reviewer.id]);
-    await owner.client.data(owner.client.patch(`/rest/members/${requester.id}`, { role: 'viewer' }));
+    await owner.client.data(
+      owner.client.patch(`/rest/projects/${owner.client.defaultProjectId}/users/${requester.id}`, {
+        role: 'project:viewer',
+      }),
+    );
     const result = await reviewer.client.data(decide(reviewer.client, review.id, { decision: 'approved' }));
     expect(result.autoPublish).toEqual({
       status: 'failed',
@@ -334,7 +338,9 @@ describe('the publish guard and decisions', () => {
     const reviewer = await member(owner, 'editor');
     const a = await createWorkflow(requester.client, manual('A'));
     const left = await openReview(requester.client, a.id, [reviewer.id]);
-    await owner.client.data(owner.client.delete(`/rest/members/${requester.id}`));
+    await owner.client.data(
+      owner.client.request('DELETE', `/rest/members/${requester.id}`, { deleteData: true }),
+    );
     const gone = await reviewer.client.data(decide(reviewer.client, left.id, { decision: 'approved' }));
     expect(gone.autoPublish).toEqual({
       status: 'failed',
@@ -451,7 +457,11 @@ describe('read gate, tenants and comments', () => {
       owner.client.post(`/rest/workflow-reviews/${review.id}/comments`, { body: 'Thanks' }),
     );
 
-    await owner.client.data(owner.client.patch(`/rest/members/${demoted.id}`, { role: 'viewer' }));
+    await owner.client.data(
+      owner.client.patch(`/rest/projects/${owner.client.defaultProjectId}/users/${demoted.id}`, {
+        role: 'project:viewer',
+      }),
+    );
     expect((await demoted.client.get(`/rest/workflow-reviews/${review.id}`)).statusCode).toBe(200);
     expect(
       (await demoted.client.post(`/rest/workflow-reviews/${review.id}/comments`, { body: 'x' })).statusCode,
@@ -554,7 +564,11 @@ describe('update-version, archive, delete and the inbox', () => {
     expect((await outsider.client.get(`/rest/workflow-reviews/${review.id}`)).statusCode).toBe(200);
 
     // an author who can no longer publish is refused
-    await owner.client.data(owner.client.patch(`/rest/members/${author.id}`, { role: 'viewer' }));
+    await owner.client.data(
+      owner.client.patch(`/rest/projects/${owner.client.defaultProjectId}/users/${author.id}`, {
+        role: 'project:viewer',
+      }),
+    );
     const refused = await update(author.client, 'x');
     expect(refused.statusCode).toBe(403);
     expect(refused.json().error.message).toBe(

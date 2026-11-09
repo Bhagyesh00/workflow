@@ -111,8 +111,8 @@ function save(backend: MockBackend, draft: AssistantDraftDTO, name: string): Sto
     folderId: null,
     isArchived: false,
     publishedVersionId: null,
-    // P6-03: the current project, as `seedWorkflow` and POST /workflows (the default project until L20 sends one)
-    projectId: backend.defaultProjectFor(tenant.id).id,
+    // P6-39: the caller's personal project, as the server's `targetProject` with no project named
+    projectId: backend.targetProject().id,
   };
   backend.workflows.push(wf);
   backend.recordVersion(wf, null);

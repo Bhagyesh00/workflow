@@ -20,7 +20,7 @@ afterEach(() => useUiStore.setState({ sidebarCollapsed: false }));
 describe('project sidebar', () => {
   it('lists Overview, Shared with you, Personal and the team projects, and moves the old entries out', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     renderApp('/home/workflows');
     const nav = await mainNav();
     expect(await within(nav).findByRole('link', { name: 'Overview' })).toBeTruthy();
@@ -44,7 +44,7 @@ describe('project sidebar', () => {
 
   it('marks the page family the route is in', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     const { router } = renderApp('/home/workflows');
     const nav = await mainNav();
     await waitFor(() =>
@@ -95,7 +95,7 @@ describe('project sidebar', () => {
 
   it('lists favorite projects', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     const { queryClient } = renderApp('/home/workflows');
     const nav = await mainNav();
     await within(nav).findByRole('link', { name: 'Overview' });
@@ -119,7 +119,7 @@ describe('project sidebar', () => {
 
   it('keeps names and icons on the collapsed rail', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     useUiStore.setState({ sidebarCollapsed: true });
     renderApp('/home/workflows');
     const nav = await mainNav();

@@ -206,12 +206,12 @@ describe('demo.resourceMapper', () => {
     });
   });
 
-  it('refuses an unknown method, a viewer and a signed-out caller', async () => {
+  it('refuses an unknown method and a signed-out caller; a project viewer still maps (its personal project, P6-39)', async () => {
     await expect(load({})).rejects.toMatchObject({ status: 401 });
     signedIn();
     await expect(load({}, 'nope')).rejects.toMatchObject({ status: 400, code: 'unknown_method' });
     backend().setDemoRole('viewer');
-    await expect(load({})).rejects.toMatchObject({ status: 403 });
+    await expect(load({})).resolves.toMatchObject({ fields: expect.any(Array) });
   });
 });
 

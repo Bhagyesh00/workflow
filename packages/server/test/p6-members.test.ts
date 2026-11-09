@@ -57,7 +57,7 @@ async function memberWithWork(owner: Owner) {
 }
 
 describe('member roles', () => {
-  it('an invitation takes the system roles, the old words and a custom global slug', async () => {
+  it('an invitation takes the system roles and a custom global slug; the old words are refused (P6-39)', async () => {
     const owner = await ws();
     await repos().roles.create(owner.tenant.id, {
       slug: 'global:auditor',
@@ -65,13 +65,20 @@ describe('member roles', () => {
       roleType: 'global',
       scopes: ['workflow:read'],
     });
-    for (const role of ['admin', 'member', 'editor', 'viewer', 'global:auditor']) {
+    for (const role of ['admin', 'member', 'global:auditor']) {
       const res = await owner.client.post('/rest/members/invite', {
         email: `${randomUUID().slice(0, 8)}@example.com`,
         role,
       });
       expect(res.statusCode, role).toBe(200);
       expect(res.json().data.role).toBe(role);
+    }
+    for (const role of ['editor', 'viewer']) {
+      const res = await owner.client.post('/rest/members/invite', {
+        email: `${randomUUID().slice(0, 8)}@example.com`,
+        role,
+      });
+      expect(res.statusCode, role).toBe(400);
     }
   });
 

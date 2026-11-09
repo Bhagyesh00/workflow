@@ -1,6 +1,6 @@
 /**
- * Phase 6 S1 C0f2 contracts: `canWith` over a me and a row, the demo's global scopes by role (`setDemoRole`,
- * `LEGACY_DEMO_SCOPES`), the redirects of the old list routes, the Security shell, and the FULL demo parts of
+ * Phase 6 S1 C0f2 contracts: `canWith` over a me and a row, the demo's global scopes by role (`setDemoRole`;
+ * P6-39: the old test names are project roles), the redirects of the old list routes, the Security shell, and the FULL demo parts of
  * commit 0: projects of the seed, `GET /roles`, `/settings/security`, project variables, member roles and the
  * credential `isGlobal` flag. Stubs (501) are the lanes' and are not asserted here.
  */
@@ -9,7 +9,7 @@ import { GLOBAL_ROLE_SCOPES, type Scope } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Me, Project, ProjectDetail, RolesMap, SecurityPolicy } from '../src/api/types';
 import { seedDemo } from '../src/demo/install';
-import { LEGACY_DEMO_SCOPES, MISSING_SCOPE, MockBackend } from '../src/demo/mock-backend';
+import { MISSING_SCOPE, MockBackend } from '../src/demo/mock-backend';
 import { addDemoRole } from '../src/demo/mock-roles';
 import { canWith } from '../src/lib/permissions';
 import { backend, signedIn } from './backend';
@@ -70,45 +70,42 @@ describe('demo global scopes', () => {
     expect(login.globalScopes).toEqual(owner.globalScopes);
   });
 
-  it("setDemoRole('viewer') gives no workflow:update, and old words keep today's rights", async () => {
-    backend().setDemoRole('viewer');
-    const viewer = await me();
-    expect(viewer.role).toBe('viewer');
-    expect(viewer.globalScopes).toContain('workflow:read');
-    expect(viewer.globalScopes).not.toContain('workflow:update');
-    expect(viewer.globalScopes).not.toContain('credential:read');
-    expect(canWith(viewer, 'workflow:update')).toBe(false);
-    expect(backend().memberships[0].role).toBe('viewer');
-
-    backend().setDemoRole('editor');
-    const editor = await me();
-    expect(new Set(editor.globalScopes)).toEqual(new Set(LEGACY_DEMO_SCOPES.editor));
-    expect(canWith(editor, 'workflow:update')).toBe(true);
-    for (const old of [viewer, editor]) {
-      for (const scope of [
-        'instanceAi:manage',
-        'securitySettings:manage',
-        'role:manage',
-        'project:create',
-        'workflow:share',
-        'workflow:move',
-        'credential:share',
-        'credential:move',
-      ] as Scope[])
-        expect(old.globalScopes).not.toContain(scope);
-      expect(old.globalScopes).toContain('project:list');
+  it("setDemoRole('viewer') and ('editor') make a member with that project role on the team project (P6-39)", async () => {
+    const team = backend().oldestTeamProject(backend().session!.tenantId);
+    const relationOf = () =>
+      backend().projectRelations.find((r) => r.projectId === team.id && r.userId === backend().session!.userId);
+    for (const name of ['viewer', 'editor'] as const) {
+      backend().setDemoRole(name);
+      const now = await me();
+      expect(now.role).toBe('member');
+      expect(new Set(now.globalScopes)).toEqual(new Set(GLOBAL_ROLE_SCOPES.member));
+      expect(backend().memberships[0].role).toBe('member');
+      expect(relationOf()?.role).toBe(`project:${name}`);
+      for (const scope of ['instanceAi:manage', 'securitySettings:manage', 'role:manage', 'project:create'] as Scope[])
+        expect(now.globalScopes).not.toContain(scope);
     }
+    expect(backend().projectScopes(team)).toContain('workflow:update');
+    backend().setDemoRole('viewer');
+    expect(backend().projectScopes(team)).not.toContain('workflow:update');
+    expect(backend().projectScopes(team)).toContain('workflow:read');
+    expect(canWith(await me(), 'workflow:update')).toBe(false);
   });
 
-  it('a member keeps the old modules at the lowest rank', async () => {
+  it('a member holds the global member scopes; a workspace role leaves the project relations alone', async () => {
     backend().setDemoRole('member');
     const member = await me();
     expect(member.role).toBe('member');
     expect(new Set(member.globalScopes)).toEqual(new Set(GLOBAL_ROLE_SCOPES.member));
-    expect(backend().memberships[0]).toMatchObject({ role: 'viewer', globalRole: 'member' });
-    expect(backend().auth().role).toBe('viewer');
+    expect(backend().auth().role).toBe('member');
+    backend().setDemoRole('editor');
+    backend().setDemoRole('viewer');
+    const team = backend().oldestTeamProject(backend().session!.tenantId);
+    const mine = () =>
+      backend().projectRelations.filter((r) => r.projectId === team.id && r.userId === backend().session!.userId);
+    expect(mine().map((r) => r.role)).toEqual(['project:viewer']);
     backend().setDemoRole('admin');
-    expect(backend().memberships[0].globalRole).toBeUndefined();
+    expect(backend().memberships[0].role).toBe('admin');
+    expect(mine().map((r) => r.role)).toEqual(['project:viewer']);
     expect((await me()).role).toBe('admin');
   });
 
@@ -152,7 +149,7 @@ describe('routes', () => {
 describe('demo projects', () => {
   beforeEach(() => void signedIn());
 
-  it('a workspace has one team project and the owner a personal one; rows go to the default project', async () => {
+  it('a workspace has one team project and the owner a personal one; seeded rows go to the team project, a create with no project to the personal one', async () => {
     const { tenant, user } = backend().auth();
     const team = backend().projects.filter((p) => p.tenantId === tenant.id && p.type === 'team');
     expect(team.map((p) => p.name)).toEqual(['Test Space']);
@@ -178,9 +175,10 @@ describe('demo projects', () => {
       Mine: 'personal',
     });
 
+    // P6-39: a create with no project goes to the caller's personal project
     const cred = await data<{ id: string }>('POST', '/credentials', { name: 'C', type: 'crmApi', data: {} });
     const creds = await data<Array<{ id: string; projectId: string }>>('GET', '/credentials', undefined, {
-      projectId: team[0].id,
+      projectId: personal.id,
     });
     expect(creds.map((c) => c.id)).toEqual([cred.id]);
   });
@@ -201,7 +199,7 @@ describe('demo projects', () => {
     const demo = new MockBackend();
     seedDemo(demo);
     const tenantId = demo.session!.tenantId;
-    const team = demo.defaultProjectFor(tenantId);
+    const team = demo.oldestTeamProject(tenantId);
     expect(team.name).toBe('Acme Operations');
     expect(demo.workflows.filter((w) => w.tenantId === tenantId).every((w) => w.projectId === team.id)).toBe(
       true,
@@ -251,7 +249,7 @@ describe('demo roles, security, variables, members, credentials', () => {
   });
 
   it('variables honour projectId', async () => {
-    const team = backend().defaultProjectFor(backend().auth().tenant.id);
+    const team = backend().oldestTeamProject(backend().auth().tenant.id);
     await data('POST', '/variables', { key: 'global', value: 'g' });
     const pv = await data<{ id: string; projectId: string }>('POST', '/variables', {
       key: 'local',
@@ -267,9 +265,10 @@ describe('demo roles, security, variables, members, credentials', () => {
     expect(scoped.map((v) => v.key)).toEqual(['local']);
     expect((await call('POST', '/variables', { key: 'x', value: 'y', projectId: 'nope' })).status).toBe(404);
 
+    // P6-39: a project editor may not make a global variable, and manages the variables of its project
     backend().setDemoRole('editor');
     expect((await call('POST', '/variables', { key: 'e', value: 'e' })).status).toBe(403);
-    expect((await call('DELETE', `/variables/${pv.id}`)).status).toBe(403);
+    expect((await call('DELETE', `/variables/${pv.id}`)).status).toBe(200);
   });
 
   it('member routes take member and a custom global role slug', async () => {
@@ -280,7 +279,7 @@ describe('demo roles, security, variables, members, credentials', () => {
       name: 'Mia',
       workspaceName: 'Other',
     });
-    backend().memberships.push({ tenantId: tenant.id, userId: other.user.id, role: 'editor' });
+    backend().memberships.push({ tenantId: tenant.id, userId: other.user.id, role: 'admin' });
     expect(
       (await data<{ role: string }>('PATCH', `/members/${other.user.id}`, { role: 'member' })).role,
     ).toBe('member');

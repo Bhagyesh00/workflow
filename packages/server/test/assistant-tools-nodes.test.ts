@@ -338,8 +338,11 @@ describe('Assistant node and model tools (P5-69)', () => {
   });
 
   it('get_node_parameter_options lists values through a credential of this workspace, inside one wrapper', async () => {
+    // P6-39: with no workflow the options load in the caller's personal project, so the credential is one of it
+    const editorHome = (await h.ctx.repos.projects.getPersonal(h.tenantId, h.editor.userId))!.id;
     const credential = await h.owner.client.data<{ id: string }>(
       h.owner.client.post('/rest/credentials', {
+        projectId: editorHome,
         name: 'Options account',
         type: 'openAiApi',
         data: { apiKey: 'sk-options-key-0000000000000000', baseUrl: optionsUrl },

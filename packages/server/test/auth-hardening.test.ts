@@ -99,7 +99,7 @@ describe('invitation links (R13, R40)', () => {
   it('points at the editor route /invitation/:token', async () => {
     const owner = await signup(server.app);
     const invite = await owner.client.data(
-      owner.client.post('/rest/members/invite', { email: 'new@example.com', role: 'editor' }),
+      owner.client.post('/rest/members/invite', { email: 'new@example.com', role: 'member' }),
     );
     expect(new URL(invite.inviteUrl).pathname).toBe(`/invitation/${invite.token}`);
   });

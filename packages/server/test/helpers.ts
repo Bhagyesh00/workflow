@@ -501,8 +501,23 @@ export async function startMcpTestServer(
 // ---------------------------------------------------------------------------------------------
 // client
 
+/**
+ * P6-39: the routes that take a `projectId` in the body for a create (node options: the project a create would
+ * go to). Since the cutover a body with none means the caller's personal project; the old tests' work lives in
+ * the team project, so `TestClient` names it.
+ */
+const CREATE_ROUTES =
+  /^\/rest\/(workflows|workflows\/from-url|credentials|credentials\/test|data-tables|data-tables\/csv\/preview|folders|node-types\/options)(\?.*)?$/;
+
 export class TestClient {
   cookie?: string;
+  /**
+   * P6-39: the project a create goes to when its body names none (`CREATE_ROUTES`): the team project `signup`
+   * made, or the one `memberAs` added the member to. A folder with a parent and a credential test of a saved
+   * credential keep their own project. Unset (`realMember`, `signup(app, { projects: 'real' })`): the
+   * server's rule (the caller's personal project).
+   */
+  defaultProjectId?: string;
 
   constructor(
     readonly app: FastifyInstance,
@@ -526,11 +541,23 @@ export class TestClient {
         ...(method !== 'GET' ? { origin: this.origin, 'content-type': 'application/json' } : {}),
         ...headers,
       },
-      payload: body === undefined ? undefined : JSON.stringify(body),
+      payload: body === undefined ? undefined : JSON.stringify(this.withProject(method, url, body)),
     });
     const setCookie = res.cookies.find((c) => c.name === 'wf_session');
     if (setCookie) this.cookie = setCookie.value ? `wf_session=${setCookie.value}` : undefined;
     return res;
+  }
+
+  /** the body of a create with the default project added (`defaultProjectId`), else the body as is */
+  private withProject(method: string, url: string, body: unknown): unknown {
+    if (method !== 'POST' || !this.defaultProjectId || !CREATE_ROUTES.test(url)) return body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+    const fields = body as Record<string, unknown>;
+    if (fields.projectId !== undefined) return body;
+    if (url.startsWith('/rest/folders') && fields.parentFolderId) return body;
+    if (url.startsWith('/rest/credentials/test') && fields.id !== undefined) return body;
+    if (url.startsWith('/rest/node-types/options') && fields.workflowId !== undefined) return body;
+    return { ...fields, projectId: this.defaultProjectId };
   }
 
   get = (url: string, headers?: Record<string, string>) => this.request('GET', url, undefined, headers);
@@ -558,15 +585,22 @@ export async function signup(
     name: string;
     workspaceName: string;
     remoteAddress: string;
+    /**
+     * P6-39: `team` (default) also makes one team project named after the workspace, through
+     * `POST /rest/projects`, where the client's creates go (`defaultProjectId`), as the old tests'
+     * workspaces had; `real` keeps the workspace as production signup leaves it (a personal project only).
+     */
+    projects: 'team' | 'real';
   }> = {},
 ) {
   counter++;
   const client = new TestClient(app, ORIGIN, input.remoteAddress);
+  const workspaceName = input.workspaceName ?? `Workspace ${counter}`;
   const res = await client.post('/rest/auth/signup', {
     email: input.email ?? `user${counter}-${randomUUID().slice(0, 8)}@example.com`,
     password: input.password ?? 'Passw0rd!',
     name: input.name ?? `User ${counter}`,
-    workspaceName: input.workspaceName ?? `Workspace ${counter}`,
+    workspaceName,
   });
   if (res.statusCode !== 200) throw new Error(`signup failed: ${res.body}`);
   const data = res.json().data as {
@@ -574,6 +608,12 @@ export async function signup(
     tenant: { id: string; slug: string };
     role: string;
   };
+  if ((input.projects ?? 'team') === 'team') {
+    const project = await client.data<{ id: string }>(
+      client.post('/rest/projects', { name: workspaceName.slice(0, 255) }),
+    );
+    client.defaultProjectId = project.id;
+  }
   return { client, ...data };
 }
 
@@ -589,10 +629,19 @@ export interface TestMember {
   email: string;
 }
 
+/** P6-39: the old test names of a member set-up and the project role each now holds on the team project */
+const OLD_TEST_ROLES: Readonly<Record<string, string>> = {
+  editor: 'project:editor',
+  viewer: 'project:viewer',
+};
+
 /**
  * Invites a new user into `owner`'s workspace with `role` and accepts the invitation on a new client
  * (invite plus accept, as the old tests did by hand). `owner` is any signed-in admin or owner, such as
- * the answer of `signup`. L24 changes only this body (legacy roles become `member` plus a project role).
+ * the answer of `signup`. P6-39: the old names `editor` and `viewer` invite a `member` and add it to the
+ * owner's team project (`owner.client.defaultProjectId`) as `project:editor` or `project:viewer`, so the old
+ * tests keep their rights there; any other role is invited as is. Every role but `member` creates in that
+ * team project (`defaultProjectId`).
  */
 export async function memberAs(
   owner: { client: TestClient },
@@ -601,8 +650,11 @@ export async function memberAs(
 ): Promise<TestMember> {
   counter++;
   const email = options.email ?? `${role}-${counter}-${randomUUID().slice(0, 8)}@example.com`;
+  const projectRole = Object.hasOwn(OLD_TEST_ROLES, role) ? OLD_TEST_ROLES[role] : undefined;
+  const team = owner.client.defaultProjectId;
+  if (projectRole && !team) throw new Error(`memberAs(owner, '${role}') needs the owner's team project`);
   const invite = await owner.client.data<{ token: string }>(
-    owner.client.post('/rest/members/invite', { email, role }),
+    owner.client.post('/rest/members/invite', { email, role: projectRole ? 'member' : role }),
   );
   const client = new TestClient(owner.client.app, options.origin ?? ORIGIN, options.remoteAddress);
   const accepted = await client.data<Omit<TestMember, 'client' | 'email'>>(
@@ -611,6 +663,14 @@ export async function memberAs(
       password: options.password ?? 'Passw0rd!',
     }),
   );
+  if (projectRole && team) {
+    await owner.client.data(
+      owner.client.post(`/rest/projects/${team}/users`, {
+        relations: [{ userId: accepted.user.id, role: projectRole }],
+      }),
+    );
+  }
+  if (role !== 'member') client.defaultProjectId = team;
   return { client, ...accepted, email };
 }
 
@@ -622,9 +682,11 @@ export async function realMember(
   return memberAs(owner, 'member', options);
 }
 
-/** the id of the workspace's team project, where the old tests' work lives (signup makes it) */
+/** the id of the workspace's oldest team project, where the old tests' work lives (`signup` makes it) */
 export async function teamProjectOf(server: { ctx: ServerContext }, tenantId: string): Promise<string> {
-  return server.ctx.repos.projects.defaultProjectFor(tenantId);
+  const team = await server.ctx.repos.projects.oldestTeam(tenantId);
+  if (!team) throw new Error('The workspace has no team project (signup with projects: real)');
+  return team.id;
 }
 
 /** a team project of the workspace, made through the repository (no route) */

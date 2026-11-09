@@ -29,6 +29,8 @@ export async function seed(
     { ignoreSignupSetting: true },
   );
   await ctx.repos.sessions.delete(sha256(result.token));
+  // P6-39: the sample workflow goes to the owner's personal project (signup made it)
+  const personal = await ctx.repos.projects.ensurePersonal(result.tenant.id, result.user);
 
   const trigger = 'When clicking ‘Execute workflow’';
   const workflow = await ctx.workflows.create(
@@ -63,6 +65,7 @@ export async function seed(
       ],
       connections: { [trigger]: { main: [[{ node: 'Edit Fields', type: 'main', index: 0 }]] } },
       settings: {},
+      projectId: personal.id,
     },
     { userId: result.user.id },
   );

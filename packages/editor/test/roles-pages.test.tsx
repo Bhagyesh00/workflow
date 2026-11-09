@@ -14,7 +14,7 @@ const T = { timeout: 20_000 };
 function addMember(demo: ReturnType<typeof signedIn>, id: string, name: string, globalRole = 'member') {
   const tenantId = demo.auth().tenant.id;
   demo.users.push({ id, email: `${id}@example.com`, name, password: 'x' });
-  demo.memberships.push({ tenantId, userId: id, role: 'viewer', globalRole });
+  demo.memberships.push({ tenantId, userId: id, role: globalRole });
   return tenantId;
 }
 
@@ -24,7 +24,7 @@ describe('roles page', () => {
   it('lists the project roles with their type and usage, and switches to the workspace roles', async () => {
     const demo = signedIn();
     const tenantId = addMember(demo, 'u-sam', 'Sam Shaw');
-    const team = demo.defaultProjectFor(tenantId);
+    const team = demo.oldestTeamProject(tenantId);
     demo.projectRelations.push({ tenantId, projectId: team.id, userId: 'u-sam', role: 'project:reviewer' });
     renderApp('/settings/roles');
     expect(await screen.findByRole('tab', { name: 'Project roles' }, T)).toBeTruthy();
@@ -80,7 +80,7 @@ describe('roles page', () => {
   it('refuses to delete a project role that is in use and offers only Close', async () => {
     const demo = signedIn();
     const tenantId = addMember(demo, 'u-sam', 'Sam Shaw');
-    const team = demo.defaultProjectFor(tenantId);
+    const team = demo.oldestTeamProject(tenantId);
     demo.projectRelations.push({ tenantId, projectId: team.id, userId: 'u-sam', role: 'project:reviewer' });
     renderApp('/settings/roles');
     const user = userEvent.setup();
@@ -117,7 +117,7 @@ describe('roles page', () => {
     await user.click(del);
     await waitFor(() => expect(findCustomRole(demo, tenantId, 'global:triage')).toBeUndefined());
     const membership = demo.memberships.find((m) => m.userId === 'u-sam');
-    expect(membership?.globalRole).toBe('member');
+    expect(membership?.role).toBe('member');
   });
 });
 
@@ -125,7 +125,7 @@ describe('assignments tab', () => {
   it('lists the projects that use a project role and their members', async () => {
     const demo = signedIn();
     const tenantId = addMember(demo, 'u-sam', 'Sam Shaw');
-    const team = demo.defaultProjectFor(tenantId);
+    const team = demo.oldestTeamProject(tenantId);
     demo.projectRelations.push({ tenantId, projectId: team.id, userId: 'u-sam', role: 'project:reviewer' });
     renderApp('/settings/project-roles/edit/project%3Areviewer');
     const user = userEvent.setup();

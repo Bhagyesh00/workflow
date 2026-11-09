@@ -83,7 +83,7 @@ export const createWorkflowTool: McpToolDefinition<z.output<typeof createInput>>
         projectId,
         folderId: input.folderId ?? null,
         ...(input.tagIds ? { tagIds: input.tagIds } : {}),
-      } as unknown as z.output<typeof workflowCreateSchema>,
+      } as unknown as z.output<typeof workflowCreateSchema> & { projectId: string },
       mcpActor(caller),
     );
     return {

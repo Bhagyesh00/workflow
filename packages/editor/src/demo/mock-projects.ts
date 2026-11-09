@@ -22,13 +22,13 @@ const GLOBAL_ROLE_NAMES: Record<string, string> = { owner: 'Owner', admin: 'Admi
 
 /**
  * The projects the signed-in user sees: their personal project, and the workspace's team projects (all of
- * them with the global `project:list`, which owner, admin and the old words hold; else the ones they are a
+ * them with the global `project:list`, which owner and admin hold; else the ones they are a
  * member of).
  */
 export function visibleProjects(backend: MockBackend): StoredProject[] {
-  const { user, tenant, globalRole } = backend.auth();
+  const { user, tenant, role } = backend.auth();
   const personal = backend.personalProject(tenant.id, user.id);
-  const listAll = backend.globalScopesOf(globalRole, tenant.id).includes('project:list');
+  const listAll = backend.globalScopesOf(role, tenant.id).includes('project:list');
   const memberOf = new Set(
     backend.projectRelations
       .filter((r) => r.tenantId === tenant.id && r.userId === user.id)
@@ -70,11 +70,11 @@ export function projectDetail(backend: MockBackend, p: StoredProject): ProjectDe
   const implicitMembers: ProjectImplicitMember[] =
     p.type === 'team'
       ? backend.memberships
-          .filter((m) => m.tenantId === p.tenantId && (m.globalRole ?? m.role) in GLOBAL_ROLE_NAMES)
+          .filter((m) => m.tenantId === p.tenantId && m.role in GLOBAL_ROLE_NAMES)
           .filter((m) => !related.has(m.userId))
           .flatMap((m) => {
             const u = userOf(m.userId);
-            const slug = m.globalRole ?? m.role;
+            const slug = m.role;
             return u
               ? [
                   {
@@ -181,7 +181,7 @@ export function registerProjectRoutes(backend: MockBackend): void {
       const membership = backend.memberships.find((m) => m.tenantId === p.tenantId && m.userId === userId);
       if (!membership) throw new HttpError(404, 'not_found', 'User not found');
       // owners and admins already reach every team project
-      if ((membership.globalRole ?? membership.role) in GLOBAL_ROLE_NAMES) continue;
+      if (membership.role in GLOBAL_ROLE_NAMES) continue;
       const existing = backend.projectRelations.find((r) => r.projectId === p.id && r.userId === userId);
       if (!existing) {
         backend.projectRelations.push({ tenantId: p.tenantId, projectId: p.id, userId, role });

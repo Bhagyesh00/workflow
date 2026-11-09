@@ -118,8 +118,8 @@ describe('routes and navigation', () => {
       const link = await screen.findByRole('link', { name: 'External secrets' });
       expect(link.getAttribute('href')).toBe('/settings/external-secrets');
     } else {
-      // the role has loaded once the account page shows it
-      await screen.findAllByText(role);
+      // the role has loaded once the account page shows it (P6-39: the old test names are a `member`)
+      await screen.findAllByText('member');
       expect(screen.queryByRole('link', { name: 'External secrets' })).toBeNull();
     }
   });
@@ -450,7 +450,7 @@ describe('demo backend', () => {
           kind: 'listSearch',
           method,
           filter,
-          projectId: demo.defaultProjectFor(demo.auth().tenant.id).id,
+          projectId: demo.oldestTeamProject(demo.auth().tenant.id).id,
         },
       });
     expect((await search('tableSearch', 'lea')).body).toEqual({

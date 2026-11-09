@@ -287,16 +287,17 @@ describe('listen', () => {
     expect(listen.formTestUrls).toEqual([]);
   });
 
-  it('listen-test-trigger is 404 for an editor on an unknown workflow, 403 for a viewer, 401 signed out', async () => {
+  it('listen-test-trigger is 404 on an unknown workflow (before any scope), 401 signed out', async () => {
     const owner = await signup(server.app);
     const viewer = await member(owner, 'viewer');
     const editor = await member(owner, 'editor');
     const url = `/rest/workflows/${UNKNOWN_ID}/listen-test-trigger`;
     expect((await new TestClient(server.app).post(url, { nodeName: 'A' })).statusCode).toBe(401);
-    expect((await viewer.post(url, { nodeName: 'A' })).statusCode).toBe(403);
-    expect((await viewer.delete(url)).statusCode).toBe(403);
+    // P6 S1: the scope is checked on the workflow, so an unknown id is 404 for every role
+    expect((await viewer.post(url, { nodeName: 'A' })).statusCode).toBe(404);
+    expect((await viewer.delete(url)).statusCode).toBe(404);
     expect((await editor.post(url, { nodeName: 'A' })).statusCode).toBe(404);
-    expect((await editor.post(url, {})).statusCode).toBe(400);
+    expect((await editor.post(url, {})).statusCode).toBe(404);
     expect((await editor.delete(url)).statusCode).toBe(404);
   });
 });
@@ -465,7 +466,8 @@ describe('API key scopes', () => {
       method: 'POST',
       url: '/api/v1/data-tables',
       headers: { 'x-api-key': viewerKey.key, 'content-type': 'application/json' },
-      payload: JSON.stringify({ name: 'a', columns: [] }),
+      // P6-39: into the team project, where a viewer may not create (with no project it is its personal one)
+      payload: JSON.stringify({ name: 'a', columns: [], projectId: owner.client.defaultProjectId }),
     });
     expect(refused.statusCode).toBe(403);
     // the key scope is checked first, so it ran; the user's missing workspace scope is what refused
@@ -518,7 +520,8 @@ describe('every new /rest route requires its role', () => {
     ['DELETE', '/secret-providers/connections/abc', 'admin'],
     ['POST', '/secret-providers/connections/abc/test', 'admin'],
     ['POST', '/secret-providers/connections/abc/reload', 'admin'],
-    ['GET', '/secret-providers/completions/secrets', 'editor'],
+    // P6-39: the global names are owner and admin only
+    ['GET', '/secret-providers/completions/secrets', 'admin'],
     ['POST', '/form-auth/code', 'viewer'],
     ['POST', `/workflows/${id}/listen-test-trigger`, 'editor'],
     ['DELETE', `/workflows/${id}/listen-test-trigger`, 'editor'],
@@ -540,7 +543,11 @@ describe('every new /rest route requires its role', () => {
       const body = method === 'GET' || method === 'DELETE' ? undefined : {};
       expect((await anonymous.request(method, url, body)).statusCode, label).toBe(401);
       const lower = below[role];
-      if (lower) expect((await lower.request(method, url, body)).statusCode, label).toBe(403);
+      if (lower) {
+        // P6 S1: a route checked on its row looks the unknown id up first (404); the others refuse (403)
+        const refused = (await lower.request(method, url, body)).statusCode;
+        expect(path.includes(id) ? [403, 404] : [403], label).toContain(refused);
+      }
       const res = await clients[role].request(method, url, body);
       // past the role gate: the handler answers (an unknown id is a 404, a bad body or id a 400)
       expect([200, 400, 404], `${label} ${res.body}`).toContain(res.statusCode);
@@ -731,7 +738,7 @@ describe('config, plans and logger', () => {
 describe('execution services', () => {
   const services = async (ctx: TestServer['ctx'], tenantId: string, executionId: string) => {
     const tenant = (await ctx.repos.tenants.get(tenantId))!;
-    const projectId = await ctx.repos.projects.defaultProjectFor(tenantId);
+    const projectId = (await ctx.repos.projects.oldestTeam(tenantId))!.id;
     return ctx.executions.buildServices({
       tenant,
       executionId,

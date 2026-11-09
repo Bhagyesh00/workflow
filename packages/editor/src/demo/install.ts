@@ -51,13 +51,13 @@ export function seedDemo(backend: MockBackend): void {
   backend.signIn('demo@example.com');
   const tenantId = backend.session!.tenantId;
   const ops = backend.users.find((u) => u.email === 'ops@example.com')!;
-  backend.memberships.push({ tenantId, userId: ops.id, role: 'editor' });
+  backend.memberships.push({ tenantId, userId: ops.id, role: 'member' });
   const labs = backend.tenants.find((t) => t.name === 'Acme Labs')!;
   backend.memberships.push({ tenantId: labs.id, userId: backend.session!.userId, role: 'admin' });
 
-  // P6-03: one team project (the workspace's) and a personal project per member; the old editor is a project
-  // editor of the team project (as migration 0024), owners and admins reach it through their role
-  const team = backend.defaultProjectFor(tenantId);
+  // P6-03: one team project (the workspace's) and a personal project per member; the ops member is a project
+  // editor of the team project, owners and admins reach it through their role
+  const team = backend.oldestTeamProject(tenantId);
   team.icon = { ...demoProjects.team.icon };
   team.description = demoProjects.team.description;
   backend.personalProject(tenantId, ops.id);

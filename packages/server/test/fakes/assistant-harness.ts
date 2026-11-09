@@ -30,7 +30,7 @@ import {
   effectiveAssistantSettings,
 } from '../../src/services/assistant/settings';
 import { assistantTools, builtInAssistantTools } from '../../src/services/assistant/tools';
-import { type AssistantToolDefinition, toolAccess } from '../../src/services/assistant/types';
+import { type AssistantToolDefinition, homeScopes, toolAccess } from '../../src/services/assistant/types';
 import {
   createTestServer,
   createWorkflow,
@@ -153,8 +153,8 @@ export interface AssistantHarness {
     answer: AssistantConfirmAnswer,
   ): Promise<LightMyRequestResponse>;
   /**
-   * each named tool exists with this scope (`access`), and is offered to exactly the roles whose scopes
-   * hold it (the legacy role map until L24: owner, admin, editor and viewer of the workspace)
+   * each named tool exists with this scope (`access`), and is offered to exactly the users who hold it where
+   * their writes land (P6-39: the personal project; `editor` and `viewer` are members of the team project)
    */
   expectToolRoles(table: Record<string, Scope>): Promise<void>;
   /** a scripted model call of `name(args)` through the whole path (thread, chat, run loop, tool, result) */
@@ -321,6 +321,9 @@ export async function createAssistantHarness(
       }),
     );
     const tenantId = owner.tenantId;
+    // P6-39: a pinned credential is checked in the saving admin's own project; the model is shared with all
+    // users (global), so any admin may save it again
+    await ctx.repos.credentials.update(tenantId, credential.id, { isGlobal: true });
     const baseSettings: AssistantTenantSettings = {
       credentialId: credential.id,
       nodeType: HARNESS_MODEL.nodeType,
@@ -486,10 +489,20 @@ export async function createAssistantHarness(
         expect(def ? toolAccess(def) : undefined, `scope of ${name}`).toBe(scope);
         for (const role of HARNESS_ROLES) {
           const byRole: Record<string, HarnessUser> = { owner, admin, editor, viewer };
-          const user = await ctx.repos.users.get((byRole[role] as HarnessUser).userId);
-          const caller = { tenant: row as NonNullable<typeof row>, user: user as NonNullable<typeof user>, role };
-          const offered = (await assistantTools(ctx, caller, settings, extraTools)).some((d) => d.name === name);
-          const held = (await ctx.access.globalScopes(tenantId, role)).has(scope);
+          const userId = (byRole[role] as HarnessUser).userId;
+          const user = await ctx.repos.users.get(userId);
+          // P6-39: `editor` and `viewer` are test names; the workspace role is the stored one (`member`)
+          const membership = await ctx.repos.memberships.get(tenantId, userId);
+          const caller = {
+            tenant: row as NonNullable<typeof row>,
+            user: user as NonNullable<typeof user>,
+            role: membership?.role ?? role,
+          };
+          const offered = (await assistantTools(ctx, caller, settings, extraTools)).some(
+            (d) => d.name === name,
+          );
+          // a tool is offered when the scope is held where the caller's writes land (its personal project)
+          const held = (await homeScopes(ctx, caller)).has(scope);
           expect(offered, `${name} offered to ${role}`).toBe(held);
         }
       }

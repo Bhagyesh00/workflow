@@ -203,16 +203,20 @@ describe('MCP Server Trigger workspace sign-in', () => {
     const owner = await signup();
     const viewer = await signup('Viewer');
     const editor = await signup('Editor');
-    await server.ctx.repos.memberships.add(owner.tenant.id, viewer.user.id, 'viewer');
-    await server.ctx.repos.projects.ensurePersonal(
-      owner.tenant.id,
-      (await server.ctx.repos.users.get(viewer.user.id))!,
-    );
-    await server.ctx.repos.memberships.add(owner.tenant.id, editor.user.id, 'editor');
-    await server.ctx.repos.projects.ensurePersonal(
-      owner.tenant.id,
-      (await server.ctx.repos.users.get(editor.user.id))!,
-    );
+    // P6-39: members holding project:viewer and project:editor on the team project where the triggers live
+    const team = await server.ctx.repos.projects.create(owner.tenant.id, { name: 'Team', type: 'team' });
+    owner.client.defaultProjectId = team.id;
+    for (const [user, role] of [
+      [viewer, 'project:viewer'],
+      [editor, 'project:editor'],
+    ] as const) {
+      await server.ctx.repos.memberships.add(owner.tenant.id, user.user.id, 'member');
+      await server.ctx.repos.projects.ensurePersonal(
+        owner.tenant.id,
+        (await server.ctx.repos.users.get(user.user.id))!,
+      );
+      await server.ctx.repos.projects.relations.add(owner.tenant.id, team.id, user.user.id, role);
+    }
     const strict = await signedInTrigger(owner);
     const open = await signedInTrigger(owner, { requireExecuteAccess: false });
 

@@ -9,6 +9,9 @@ import { renderApp } from './utils';
 
 const LONG = { timeout: 20_000 };
 
+/** P6-39: a folder with no project goes to the personal project; these sit with the seeded workflows */
+const teamId = () => backend().oldestTeamProject(backend().auth().tenant.id).id;
+
 function seed(name: string, extra: Record<string, unknown> = {}) {
   return backend().seedWorkflow({ name, nodes: [], connections: {}, ...extra });
 }
@@ -63,7 +66,7 @@ describe('canDrop', () => {
 describe('drag to folder', () => {
   it('drops a workflow on a folder row', async () => {
     signedIn();
-    const f = await foldersApi.create({ name: 'Alpha' });
+    const f = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     const wf = seed('Dragged');
     await openList('/workflows', 'Dragged');
     expect(drag(rowOf('Dragged'), rowOf('Alpha'))).toBe(true);
@@ -74,8 +77,8 @@ describe('drag to folder', () => {
 
   it('drops a folder on a folder row; a folder cannot be dropped on itself', async () => {
     signedIn();
-    const a = await foldersApi.create({ name: 'Alpha' });
-    const b = await foldersApi.create({ name: 'Beta' });
+    const a = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
+    const b = await foldersApi.create({ name: 'Beta', projectId: teamId() });
     await openList('/workflows', 'Beta');
     expect(drag(rowOf('Beta'), rowOf('Beta'))).toBe(false);
     expect(folderState(backend()).folders.find((x) => x.id === b.id)?.parentFolderId).toBeNull();
@@ -87,7 +90,7 @@ describe('drag to folder', () => {
 
   it('drops a workflow on a breadcrumb item (the top level)', async () => {
     signedIn();
-    const a = await foldersApi.create({ name: 'Alpha' });
+    const a = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     const wf = seed('Inside', { folderId: a.id });
     await openList(`/workflows?folder=${a.id}`, 'Inside');
     const crumbs = await screen.findByRole('navigation', { name: 'Folder path' });
@@ -100,7 +103,7 @@ describe('drag to folder', () => {
 
   it('a workflow already in the folder is not accepted; the current breadcrumb item is not a target', async () => {
     signedIn();
-    const a = await foldersApi.create({ name: 'Alpha' });
+    const a = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     seed('Inside', { folderId: a.id });
     await openList(`/workflows?folder=${a.id}`, 'Inside');
     const crumbs = await screen.findByRole('navigation', { name: 'Folder path' });
@@ -114,7 +117,7 @@ describe('drag to folder', () => {
 
   it('an archived workflow is not draggable and the move route refuses it', async () => {
     signedIn();
-    const a = await foldersApi.create({ name: 'Alpha' });
+    const a = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     const old = seed('Old one', { isArchived: true });
     seed('Live one');
     await openList('/workflows', 'Live one');
@@ -130,7 +133,7 @@ describe('drag to folder', () => {
 
   it('a viewer cannot drag', async () => {
     signedIn();
-    await foldersApi.create({ name: 'Alpha' });
+    await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     seed('Plain');
     backend().setDemoRole('viewer');
     await openList('/workflows', 'Plain');

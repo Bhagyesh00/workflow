@@ -75,13 +75,13 @@ describe('authentication', () => {
       token: 'tok123',
       tenantId: tenant.id,
       email: 'new@example.com',
-      role: 'editor',
+      role: 'member',
     });
     const { router } = renderApp('/invitation/tok123');
     await user.type(await screen.findByLabelText('Your name'), 'Newcomer');
     await user.type(screen.getByLabelText('Password'), 'welcome-123');
     await user.click(screen.getByRole('button', { name: 'Accept invitation' }));
     await waitFor(() => expect(router.state.location.pathname).toBe('/home/workflows'));
-    expect(backend().memberships.some((m) => m.tenantId === tenant.id && m.role === 'editor')).toBe(true);
+    expect(backend().memberships.some((m) => m.tenantId === tenant.id && m.role === 'member')).toBe(true);
   });
 });

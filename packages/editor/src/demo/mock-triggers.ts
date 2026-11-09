@@ -57,8 +57,8 @@ export function registerTriggerListenRoutes(backend: MockBackend): void {
     return null;
   });
   backend.on('POST', '/workflows/:id/listen-test-trigger', ({ params, body }) => {
-    backend.requireRole('editor');
     const wf = backend.workflow(params[0]);
+    backend.requireScope('workflow:execute', { scopes: backend.rowScopes(wf) });
     const nodeName = String(body.nodeName ?? '');
     if (!wf.nodes.some((n) => n.name === nodeName))
       throw new HttpError(400, 'bad_request', `Node "${nodeName}" does not exist`);
@@ -69,8 +69,9 @@ export function registerTriggerListenRoutes(backend: MockBackend): void {
     return { expiresAt: new Date(expiresAt).toISOString() };
   });
   backend.on('DELETE', '/workflows/:id/listen-test-trigger', ({ params }) => {
-    backend.requireRole('editor');
-    listeningOf(backend).delete(backend.workflow(params[0]).id);
+    const wf = backend.workflow(params[0]);
+    backend.requireScope('workflow:execute', { scopes: backend.rowScopes(wf) });
+    listeningOf(backend).delete(wf.id);
     return { ok: true };
   });
 }

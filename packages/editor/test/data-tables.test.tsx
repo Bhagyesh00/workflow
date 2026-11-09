@@ -419,13 +419,18 @@ describe('import and download', () => {
   });
 });
 
+// P6-39: a project viewer of the team project (its personal project is its own)
 describe('viewers', () => {
+  const teamId = () => backend().oldestTeamProject(backend().auth().tenant.id).id;
+
   it('reads, downloads and stars but cannot change anything', async () => {
-    await dataTablesApi.create({ name: 'Leads', columns: [] });
+    await dataTablesApi.create({ name: 'Leads', columns: [], projectId: teamId() });
     backend().setDemoRole('viewer');
-    await expect(dataTablesApi.create({ name: 'No', columns: [] })).rejects.toBeInstanceOf(ApiError);
+    await expect(dataTablesApi.create({ name: 'No', columns: [], projectId: teamId() })).rejects.toBeInstanceOf(
+      ApiError,
+    );
     const user = userEvent.setup();
-    await openList();
+    renderApp(`/projects/${teamId()}/data-tables`);
     await screen.findByRole('link', { name: 'Leads' });
     expect(screen.queryByRole('button', { name: 'New data table' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Actions for Leads' }));
@@ -439,8 +444,7 @@ describe('viewers', () => {
   it('gets no create dialog from a link', async () => {
     backend().setDemoRole('viewer');
     await dataTablesApi.limits();
-    renderApp('/data-tables?new=1');
-    await screen.findByRole('heading', { name: 'Data tables' });
+    renderApp(`/projects/${teamId()}/data-tables?new=1`);
     await screen.findByText('No data tables yet');
     expect(screen.queryByRole('dialog', { name: 'New data table' })).toBeNull();
   });

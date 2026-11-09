@@ -38,15 +38,13 @@ import type {
 
 export type { Scope };
 
-/** P6-39: the old words, mapped by the server's legacy role map until L24 removes them */
-export type LegacyRole = 'editor' | 'viewer';
 /** P6-03: the system workspace roles */
 export type SystemRole = 'owner' | 'admin' | 'member';
-/** a workspace role: a system role, an old word, or a custom global role slug (as the server's db/role-types.ts) */
-export type Role = SystemRole | LegacyRole | (string & {});
+/** a workspace role: a system role or a custom global role slug (as the server's db/role-types.ts) */
+export type Role = SystemRole | (string & {});
 
-/** the roles the member pages offer today; L24 changes the list */
-export const ROLES: Role[] = ['owner', 'admin', 'editor', 'viewer'];
+/** the system workspace roles (P6-39: the old `editor` and `viewer` are project roles now) */
+export const ROLES: Role[] = ['owner', 'admin', 'member'];
 
 export interface User {
   id: string;

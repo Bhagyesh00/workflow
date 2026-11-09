@@ -26,7 +26,7 @@ beforeEach(async () => {
   await resetDatabase(server.ctx);
 });
 
-async function member(owner: Owner, role: 'admin' | 'editor' | 'viewer') {
+async function member(owner: Owner, role: 'admin' | 'editor' | 'viewer' | 'member') {
   return (await memberAs(owner, role)).client;
 }
 
@@ -90,18 +90,18 @@ describe('annotation tags', () => {
     expect((await client.post('/rest/annotation-tags', { name: 'x'.repeat(24) })).statusCode).toBe(200);
   });
 
-  it('a viewer reads but cannot write (403); another tenant sees 404 and its own list', async () => {
+  it('a viewer (any member, P6-39 as n8n) reads and writes; another tenant sees 404 and its own list', async () => {
     const owner = await signup(server.app);
     const viewer = await member(owner, 'viewer');
     const t = await tag(owner.client, 'mine');
     expect((await viewer.get('/rest/annotation-tags')).statusCode).toBe(200);
-    expect((await viewer.post('/rest/annotation-tags', { name: 'x' })).statusCode).toBe(403);
-    expect((await viewer.patch(`/rest/annotation-tags/${t.id}`, { name: 'y' })).statusCode).toBe(403);
-    expect((await viewer.delete(`/rest/annotation-tags/${t.id}`)).statusCode).toBe(403);
+    expect((await viewer.post('/rest/annotation-tags', { name: 'x' })).statusCode).toBe(200);
+    expect((await viewer.patch(`/rest/annotation-tags/${t.id}`, { name: 'y' })).statusCode).toBe(200);
     const other = await signup(server.app);
     expect((await other.client.patch(`/rest/annotation-tags/${t.id}`, { name: 'z' })).statusCode).toBe(404);
     expect((await other.client.delete(`/rest/annotation-tags/${t.id}`)).statusCode).toBe(404);
     expect((await other.client.data(other.client.get('/rest/annotation-tags'))).length).toBe(0);
+    expect((await viewer.delete(`/rest/annotation-tags/${t.id}`)).statusCode).toBe(200);
     // the same name is free in another workspace
     expect((await other.client.post('/rest/annotation-tags', { name: 'mine' })).statusCode).toBe(200);
   });
@@ -156,13 +156,15 @@ describe('PATCH /executions/:id', () => {
     );
   });
 
-  it('a viewer gets 403 and nothing is written', async () => {
+  it('a viewer of the project annotates (execution:read, P6-39 as n8n); a member outside it gets 403 and nothing is written', async () => {
     const owner = await signup(server.app);
-    const viewer = await member(owner, 'viewer');
+    const outsider = await member(owner, 'member');
     const run = await execution(owner);
-    expect((await viewer.patch(`/rest/executions/${run}`, { vote: 'up' })).statusCode).toBe(403);
+    expect((await outsider.patch(`/rest/executions/${run}`, { vote: 'up' })).statusCode).toBe(403);
     const rows = await server.ctx.database.pool.query('select 1 from execution_annotations');
     expect(rows.rowCount).toBe(0);
+    const viewer = await member(owner, 'viewer');
+    expect((await viewer.patch(`/rest/executions/${run}`, { vote: 'up' })).statusCode).toBe(200);
   });
 
   it('24 distinct tags fit on one execution; the same id twice counts once', async () => {

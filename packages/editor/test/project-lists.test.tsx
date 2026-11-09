@@ -21,7 +21,7 @@ beforeEach(() => useProjectStore.getState().setCurrentProject(null));
 /** the default team project, a second team project and a workflow in each */
 function twoProjects(demo: MockBackend) {
   const tenantId = demo.auth().tenant.id;
-  const alpha = demo.defaultProjectFor(tenantId);
+  const alpha = demo.oldestTeamProject(tenantId);
   const beta = demo.createProject({ tenantId, name: 'Beta team', type: 'team' });
   const inAlpha = demo.seedWorkflow({ name: 'Alpha flow', projectId: alpha.id });
   const inBeta = demo.seedWorkflow({ name: 'Beta flow', projectId: beta.id });

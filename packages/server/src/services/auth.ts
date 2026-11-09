@@ -17,30 +17,18 @@ export const SESSION_TTL_MS = 14 * 86_400_000;
 export const SESSION_REFRESH_MS = 3_600_000;
 const INVITATION_TTL_MS = 7 * 86_400_000;
 
+/** the system words a workspace role can be besides a custom global slug */
+const MEMBER_ROLES: ReadonlySet<string> = new Set<SystemRole>(['owner', 'admin', 'member']);
+
 /**
- * The legacy rank of `requireRole` and the unconverted `hasRole` gates. P6-03: `member` ranks 0 and so
- * does any other slug (a custom role), so every unconverted gate refuses them (fail closed).
+ * P6-39 (C2-Q3): an invitation sent before the cutover may still hold an old word. On accept it becomes
+ * `member` plus this project role on the workspace's oldest team project (as migration 0024 did for the
+ * memberships). The invite route refuses these words, so no new invitation holds one.
  */
-export const ROLE_RANK: Readonly<Record<SystemRole | LegacyRole, number>> = {
-  member: 0,
-  viewer: 1,
-  editor: 2,
-  admin: 3,
-  owner: 4,
+const OLD_INVITATION_ROLES: Readonly<Record<LegacyRole, string>> = {
+  editor: 'project:editor',
+  viewer: 'project:viewer',
 };
-
-/** the words a workspace role can be besides a custom global slug */
-const MEMBER_ROLES: ReadonlySet<string> = new Set(['owner', 'admin', 'member', 'editor', 'viewer']);
-
-function rankOf(role: Role): number {
-  return Object.hasOwn(ROLE_RANK, role) ? ROLE_RANK[role as SystemRole | LegacyRole] : 0;
-}
-
-/** fail closed: an unknown role ranks 0, and a minimum that is not a ranked role is never met */
-export function hasRole(role: Role, minimum: Role): boolean {
-  if (!Object.hasOwn(ROLE_RANK, minimum)) return false;
-  return rankOf(role) >= rankOf(minimum);
-}
 
 export function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -183,12 +171,7 @@ export class AuthService {
         plan: this.config.defaultPlan,
       });
       await repos.memberships.add(tenant.id, user.id, 'owner');
-      // P6-03: the workspace's team project (named after it) and the owner's personal project
-      await repos.projects.create(tenant.id, {
-        name: input.workspaceName.slice(0, 255),
-        type: 'team',
-        creatorId: user.id,
-      });
+      // P6-39: the owner's personal project; team projects are made on the projects page (n8n)
       await repos.projects.ensurePersonal(tenant.id, user);
       return { user, tenant };
     });
@@ -237,8 +220,8 @@ export class AuthService {
   // invitations
 
   /**
-   * P6-31: a role a member may hold in a workspace: a system role, an old one (`editor`, `viewer`, until the
-   * cutover) or the slug of one of the workspace's custom roles of type global. Anything else is a 400.
+   * P6-31: a role a member may hold in a workspace: a system role (owner, admin, member) or the slug of one
+   * of the workspace's custom roles of type global. Anything else, the old words included, is a 400.
    */
   async assertMemberRole(tenantId: string, role: string): Promise<void> {
     if (MEMBER_ROLES.has(role)) return;
@@ -290,9 +273,19 @@ export class AuthService {
     }
     const accepted = await this.repos.invitations.markAccepted(invitation.tenantId, invitation.id);
     if (!accepted) throw ApiError.notFound('Invitation');
-    await this.repos.memberships.add(invitation.tenantId, user.id, invitation.role);
+    const oldProjectRole = Object.hasOwn(OLD_INVITATION_ROLES, invitation.role)
+      ? OLD_INVITATION_ROLES[invitation.role as LegacyRole]
+      : undefined;
+    const role: Role = oldProjectRole ? 'member' : invitation.role;
+    await this.repos.memberships.add(invitation.tenantId, user.id, role);
     // P6-03: every member has a personal project in the workspace
     await this.repos.projects.ensurePersonal(invitation.tenantId, user);
+    // with no team project left there is no shared work to grant: the member joins with its personal project
+    // only, and the audit line says so (`projectId: null`), so an admin can add it to a project
+    const team = oldProjectRole ? await this.repos.projects.oldestTeam(invitation.tenantId) : null;
+    if (oldProjectRole && team) {
+      await this.repos.projects.relations.add(invitation.tenantId, team.id, user.id, oldProjectRole);
+    }
     const tenant = (await this.repos.tenants.get(invitation.tenantId))!;
     const sessionToken = await this.createSession(user.id, tenant.id, meta);
     await this.repos.audit.add(tenant.id, {
@@ -300,10 +293,15 @@ export class AuthService {
       action: 'member.joined',
       resourceType: 'user',
       resourceId: user.id,
-      metadata: { role: invitation.role },
+      metadata: {
+        role,
+        ...(oldProjectRole
+          ? { invitedAs: invitation.role, projectRole: oldProjectRole, projectId: team?.id ?? null }
+          : {}),
+      },
       ip: meta.ip,
     });
-    return { user, tenant, role: invitation.role, token: sessionToken };
+    return { user, tenant, role, token: sessionToken };
   }
 
   // -------------------------------------------------------------------------------------------

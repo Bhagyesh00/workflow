@@ -2254,7 +2254,7 @@ export const demoGroupedWorkflow: WorkflowDefinition & { name: string } = {
 /**
  * P6-03: the demo seed's projects (demo/install.ts). The workspace's team project is named after the workspace
  * (as migration 0022 backfills); every member has a personal project named after them. Seeded workflows and
- * credentials go to the team project (the server's default project until L24).
+ * credentials go to the team project.
  */
 export const demoProjects = {
   team: {

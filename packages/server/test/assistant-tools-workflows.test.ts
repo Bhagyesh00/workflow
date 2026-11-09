@@ -6,9 +6,8 @@
  * follows; a secret-shaped parameter never reaches the fake LLM; values off sends structure only;
  * archive, unarchive, unpublish, restore (never publishes) and version rename go through cards.
  */
-import type { AssistantConfirmation } from '@workflow/workflow';
+import type { AssistantConfirmation, Scope } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Scope } from '@workflow/workflow';
 import {
   type AssistantHarness,
   CANARY,
@@ -33,8 +32,6 @@ const ROLES: Record<string, Scope> = {
   restore_workflow_version: 'workflow:update',
   update_workflow_version: 'workflow:update',
 };
-const READS = new Set<string>(['workflow:list', 'workflow:read']);
-const WRITES = Object.keys(ROLES).filter((name) => !READS.has(ROLES[name] as string));
 
 type Body = { tools?: Array<{ function?: { name?: string } }> };
 
@@ -105,14 +102,13 @@ describe('Assistant workflow tools (P5-69)', () => {
     await h.expectToolRoles(ROLES);
   });
 
-  it("a viewer's model gets no write tool, and a forged write call is refused", async () => {
+  it("a viewer's write call on a team workflow is refused (P6-39: its write tools act in its personal project)", async () => {
     const call = await callTool(h.viewer, 'publish_workflow', { workflowId });
     const request = h.fake.requests.at(-2) as Body;
     const names = (request.tools ?? []).map((t) => t.function?.name);
     expect(names).toContain('list_workflows');
-    for (const write of WRITES) expect(names).not.toContain(write);
     expect(call.status.pending).toHaveLength(0);
-    expect(call.result).toMatch(/publish_workflow|not found|unknown|not available/i);
+    expect(call.result).toMatch(/missing a scope|publish_workflow|not found|unknown|not available/i);
     const row = await h.ctx.repos.workflows.get(h.tenantId, workflowId);
     expect(row?.active).toBe(false);
   });

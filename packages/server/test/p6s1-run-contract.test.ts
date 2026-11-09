@@ -267,28 +267,28 @@ describe('run project', () => {
 });
 
 describe('service creates', () => {
-  it("fall back to the workspace's default project", async () => {
-    const owner = await signup(server.app);
+  it("a route create with no project goes to the caller's personal project (P6-39)", async () => {
+    const owner = await signup(server.app, { projects: 'real' });
     const tenantId = owner.tenant.id;
-    const fallback = await server.ctx.repos.projects.defaultProjectFor(tenantId);
+    const personal = (await server.ctx.repos.projects.getPersonal(tenantId, owner.user.id))!.id;
 
     const wf = await createWorkflow(owner.client, { nodes: nodes(), connections: chain('Start', 'Probe') });
-    expect((await server.ctx.repos.workflows.get(tenantId, wf.id))?.projectId).toBe(fallback);
+    expect((await server.ctx.repos.workflows.get(tenantId, wf.id))?.projectId).toBe(personal);
 
-    const credential = await server.ctx.credentials.create(tenantId, {
-      name: 'Key',
-      type: 'testApi',
-      data: { apiKey: 'k' },
-    });
-    expect(credential.projectId).toBe(fallback);
+    const credential = await owner.client.data<{ id: string }>(
+      owner.client.post('/rest/credentials', { name: 'Key', type: 'testApi', data: { apiKey: 'k' } }),
+    );
+    expect((await server.ctx.repos.credentials.get(tenantId, credential.id))?.projectId).toBe(personal);
 
-    const folder = await server.ctx.folders.create(tenantId, { name: 'Folder' } as never, {
-      userId: owner.user.id,
-    });
-    expect((await server.ctx.repos.folders.get(tenantId, folder.id))?.projectId).toBe(fallback);
+    const folder = await owner.client.data<{ id: string }>(
+      owner.client.post('/rest/folders', { name: 'Folder' }),
+    );
+    expect((await server.ctx.repos.folders.get(tenantId, folder.id))?.projectId).toBe(personal);
 
-    const table = await server.ctx.dataTables.create(tenantId, { name: 'table', columns: [] });
-    expect((await server.ctx.repos.dataTables.get(tenantId, table.id))?.projectId).toBe(fallback);
+    const table = await owner.client.data<{ id: string }>(
+      owner.client.post('/rest/data-tables', { name: 'table', columns: [] }),
+    );
+    expect((await server.ctx.repos.dataTables.get(tenantId, table.id))?.projectId).toBe(personal);
   });
 
   it('take the given project', async () => {
@@ -314,10 +314,10 @@ describe('service creates', () => {
       { userId: owner.user.id },
     );
     expect((await server.ctx.repos.folders.get(tenantId, folder.id))?.projectId).toBe(project.id);
-    // a sub-folder stays in its parent's project
+    // a sub-folder is in its parent's project
     const child = await server.ctx.folders.create(
       tenantId,
-      { name: 'Child', parentFolderId: folder.id } as never,
+      { name: 'Child', parentFolderId: folder.id, projectId: project.id } as never,
       { userId: owner.user.id },
     );
     expect((await server.ctx.repos.folders.get(tenantId, child.id))?.projectId).toBe(project.id);
@@ -358,12 +358,12 @@ describe('pre-run, save and publish checks', () => {
     });
   });
 
-  it('SecretsManager.assertProjectAccess passes until L8', async () => {
+  it('SecretsManager.assertProjectAccess refuses a vault the project has no connection for (L8 filled it)', async () => {
     const owner = await signup(server.app);
     const project = await teamProject(owner.tenant.id, 'Vaults');
     await expect(
       server.ctx.secrets.assertProjectAccess(owner.tenant.id, project.id, ['vault']),
-    ).resolves.toBeUndefined();
+    ).rejects.toMatchObject({ statusCode: 400 });
   });
 });
 

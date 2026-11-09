@@ -64,8 +64,16 @@ async function connect(
   return res.json().data as AssistantMcpConnectionDTO;
 }
 
+/**
+ * A credential shared with all users (global): P6-39 checks a pinned credential in the saving admin's own
+ * project, and a global one is usable in every project.
+ */
 async function credential(type: string, data: Record<string, unknown>, name = `${type}-${Math.random()}`) {
-  return h.owner.client.data<{ id: string }>(h.owner.client.post('/rest/credentials', { name, type, data }));
+  const made = await h.owner.client.data<{ id: string }>(
+    h.owner.client.post('/rest/credentials', { name, type, data }),
+  );
+  await h.ctx.repos.credentials.update(h.tenantId, made.id, { isGlobal: true });
+  return made;
 }
 
 type Body = {
@@ -448,13 +456,16 @@ describe('Assistant MCP servers (P5-72)', () => {
       expect(s.calls.filter((c) => c.name === 'read_file')).toHaveLength(1);
     });
 
-    it('a blocked key or a blocked tool hides it; a viewer is offered none; access off offers none', async () => {
+    it('a blocked key or a blocked tool hides it; a viewer is offered them too; access off offers none', async () => {
       const s = await server([readTool, writeTool]);
       const conn = await connect({ name: 'Files', url: s.url });
       expect(await offeredTo(h.editor)).toEqual(
         expect.arrayContaining(['mcp_Files_read_file', 'mcp_Files_write_file']),
       );
-      expect((await offeredTo(h.viewer)).filter((n) => n.startsWith('mcp_'))).toEqual([]);
+      // P6-39: the tools act where the caller's writes land, its personal project, which a viewer holds too
+      expect(await offeredTo(h.viewer)).toEqual(
+        expect.arrayContaining(['mcp_Files_read_file', 'mcp_Files_write_file']),
+      );
       expect(await offeredTo(h.admin)).toContain('mcp_Files_write_file');
 
       await h.setSettings({ mcpAccessEnabled: true, permissions: { mcpWrite: 'blocked' } });
@@ -785,25 +796,10 @@ describe('Assistant MCP servers (P5-72)', () => {
       expect(theirs.requests).toEqual([]);
     });
 
-    it('an approved call after a demotion, a block or a switch-off does not run', async () => {
+    // P6-39: no demotion case any more: the tools act in the caller's personal project, which every member holds
+    it('an approved call after a block or a switch-off does not run', async () => {
       const s = await server([writeTool]);
       await connect({ name: 'Files', url: s.url });
-      const setRole = (role: string) =>
-        h.ctx.database.pool.query('update memberships set role = $3 where tenant_id = $1 and user_id = $2', [
-          h.tenantId,
-          h.editor.userId,
-          role,
-        ]);
-
-      // demoted to viewer
-      const demoted = await waiting(h.editor, 'mcp_Files_write_file', { path: 'd' }, 'd1');
-      await setRole('viewer');
-      try {
-        await answered(h.editor, demoted.threadId, demoted.card.requestId, h.fake.requests.length);
-      } finally {
-        await setRole('editor');
-      }
-      expect(toolMessage('d1') ?? '').toMatch(/^Error:/);
 
       // blocked after the card was written
       const blocked = await waiting(h.editor, 'mcp_Files_write_file', { path: 'b' }, 'b1');

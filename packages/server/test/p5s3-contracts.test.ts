@@ -468,7 +468,8 @@ describe('routes', () => {
     // ids are checked before the service runs
     const { client } = await signup(server.app);
     expect((await client.get('/rest/workflows/not-a-uuid/test-runs')).statusCode).toBe(400);
-    expect((await client.post(`${base}/new`, { concurrency: 11 })).statusCode).toBe(400);
+    // P6-38: the scope is checked on the workflow first, so an unknown workflow is 404 before the body check
+    expect((await client.post(`${base}/new`, { concurrency: 11 })).statusCode).toBe(404);
   });
 
   it('PUBLIC_EVALUATION_ROUTES holds the 5 rows with their key scopes and workflow access, spread into PUBLIC_ROUTES', () => {

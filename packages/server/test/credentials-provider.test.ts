@@ -51,6 +51,7 @@ async function createCredential(
     name: input.name ?? 'Cred',
     type: input.type,
     data: input.data as never,
+    projectId: await teamProjectOf(server, tenantId),
   });
   return row;
 }

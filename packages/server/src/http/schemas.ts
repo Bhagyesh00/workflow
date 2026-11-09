@@ -250,6 +250,3 @@ export const variableUpdateSchema = z.object({
   key: variableKey.optional(),
   value: z.string().max(4096).optional(),
 });
-
-/** P6-03: `member` joins the old words; L10 moves the member routes to their own schema, L24 deletes this */
-export const roleSchema = z.enum(['owner', 'admin', 'member', 'editor', 'viewer']);

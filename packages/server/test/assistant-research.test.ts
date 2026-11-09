@@ -487,17 +487,9 @@ describe('Assistant web research (P5-73)', () => {
   });
 
   describe('roles', () => {
-    it('gives a viewer neither tool', async () => {
+    it('offers both tools where the caller may create workflows (P6-39: a viewer holds its personal project)', async () => {
       await configure(null, { fetchUrl: 'always_allow', webSearch: 'always_allow' });
-      for (const [name, args] of [
-        ['web_search', { query: 'x' }],
-        ['fetch_url', { url: `${siteUrl}/page` }],
-      ] as const) {
-        const turn = await h.callTool(h.viewer, name, args);
-        expect(turn.status.isSuspended).toBe(false);
-      }
-      expect(hitsOn('/page')).toHaveLength(0);
-      expect(hitsOn('/search')).toHaveLength(0);
+      await h.expectToolRoles({ web_search: 'workflow:create', fetch_url: 'workflow:create' });
     });
   });
 });

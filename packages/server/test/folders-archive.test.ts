@@ -486,7 +486,8 @@ describe('favorites', () => {
     const add = (client: TestClient, resourceType: string, resourceId: string) =>
       client.post('/rest/favorites', { resourceType, resourceId });
     expect((await add(owner.client, 'workflow', theirs.id)).statusCode).toBe(404);
-    expect((await add(owner.client, 'project', mine.id)).statusCode).toBe(400);
+    // P6-26: a project is a favorite type; a workflow id is no project
+    expect((await add(owner.client, 'project', mine.id)).statusCode).toBe(404);
     expect((await add(owner.client, 'workflow', 'x')).statusCode).toBe(400);
     expect((await add(viewer, 'workflow', mine.id)).statusCode).toBe(200);
     expect((await owner.client.get('/rest/favorites')).json().data).toEqual([]);

@@ -37,38 +37,30 @@ afterAll(async () => {
   await server?.close();
 });
 
-/** the expected table: the grant scopes that unlock the tool, its `access` scope and the old role that holds it (the legacy map) */
-const EXPECTED: Record<string, { scopes: McpScope[]; access: Scope; minRole: Role }> = {
-  search_nodes: { scopes: ['workflow:read', 'workflow:write'], access: 'workflow:read', minRole: 'viewer' },
-  get_node_types: { scopes: ['workflow:read', 'workflow:write'], access: 'workflow:read', minRole: 'viewer' },
+/** the expected table: the grant scopes that unlock the tool, its `access` scope and `read`: a project viewer may call it (else it needs a project editor) */
+const EXPECTED: Record<string, { scopes: McpScope[]; access: Scope; read: boolean }> = {
+  search_nodes: { scopes: ['workflow:read', 'workflow:write'], access: 'workflow:read', read: true },
+  get_node_types: { scopes: ['workflow:read', 'workflow:write'], access: 'workflow:read', read: true },
   get_workflow_best_practices: {
     scopes: ['workflow:read', 'workflow:write'],
     access: 'workflow:read',
-    minRole: 'viewer',
+    read: true,
   },
   get_workflow_format_reference: {
     scopes: ['workflow:read', 'workflow:write'],
     access: 'workflow:read',
-    minRole: 'viewer',
+    read: true,
   },
-  validate_workflow: {
-    scopes: ['workflow:read', 'workflow:write'],
-    access: 'workflow:read',
-    minRole: 'viewer',
-  },
-  validate_node_config: {
-    scopes: ['workflow:read', 'workflow:write'],
-    access: 'workflow:read',
-    minRole: 'viewer',
-  },
-  create_workflow: { scopes: ['workflow:write'], access: 'workflow:create', minRole: 'editor' },
-  update_workflow: { scopes: ['workflow:write'], access: 'workflow:update', minRole: 'editor' },
-  archive_workflow: { scopes: ['workflow:write'], access: 'workflow:delete', minRole: 'editor' },
-  restore_workflow_version: { scopes: ['workflow:write'], access: 'workflow:update', minRole: 'editor' },
-  explore_node_resources: { scopes: ['credential:read'], access: 'credential:read', minRole: 'editor' },
+  validate_workflow: { scopes: ['workflow:read', 'workflow:write'], access: 'workflow:read', read: true },
+  validate_node_config: { scopes: ['workflow:read', 'workflow:write'], access: 'workflow:read', read: true },
+  create_workflow: { scopes: ['workflow:write'], access: 'workflow:create', read: false },
+  update_workflow: { scopes: ['workflow:write'], access: 'workflow:update', read: false },
+  archive_workflow: { scopes: ['workflow:write'], access: 'workflow:delete', read: false },
+  restore_workflow_version: { scopes: ['workflow:write'], access: 'workflow:update', read: false },
+  explore_node_resources: { scopes: ['credential:read'], access: 'credential:read', read: false },
 };
-const RANK: Record<Role, number> = { member: 0, viewer: 1, editor: 2, admin: 3, owner: 4 };
-const ROLES: Role[] = ['viewer', 'editor', 'admin', 'owner'];
+/** P6-39: the workspace roles (the old `editor` and `viewer` are members with a project role) */
+const ROLES: Role[] = ['member', 'admin', 'owner'];
 
 async function signup() {
   // signup allows 20 calls an hour per IP: every workspace comes from its own address
@@ -96,8 +88,16 @@ type User = Awaited<ReturnType<typeof signup>>;
 /** a user of `owner`'s workspace with `role` and an MCP key */
 async function member(owner: User, role: Role) {
   const other = await signup();
-  // an old-role user with no project of its own: only the role's workspace scopes count (the legacy map under test)
-  await server.ctx.repos.memberships.add(owner.tenant.id, other.user.id, role);
+  // P6-39: the old names are a `member` holding that project role on the owner's team project, and no project of
+  // its own; any other role is the workspace role
+  const projectRole = role === 'editor' || role === 'viewer' ? `project:${role}` : undefined;
+  await server.ctx.repos.memberships.add(owner.tenant.id, other.user.id, projectRole ? 'member' : role);
+  if (projectRole) {
+    const team =
+      (await server.ctx.repos.projects.oldestTeam(owner.tenant.id)) ??
+      (await server.ctx.repos.projects.create(owner.tenant.id, { name: 'Team', type: 'team' }));
+    await server.ctx.repos.projects.relations.add(owner.tenant.id, team.id, other.user.id, projectRole);
+  }
   const key = (
     await server.ctx.auth.createApiKey(owner.tenant.id, other.user.id, MCP_KEY_LABEL, [], MCP_KEY_AUDIENCE)
   ).key;
@@ -205,8 +205,7 @@ describe('tool table (drift)', () => {
       expect(tool.description.length, tool.name).toBeGreaterThan(20);
       expect(mcpToolDescriptor(tool).inputSchema.type, tool.name).toBe('object');
       // a tool a viewer may call never writes; a write tool says it is not read only
-      if (EXPECTED[tool.name].minRole === 'viewer')
-        expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+      if (EXPECTED[tool.name].read) expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
       if (tool.scopes.includes('workflow:write') && tool.scopes.length === 1) {
         expect(tool.annotations?.readOnlyHint, tool.name).toBe(false);
       }
@@ -229,12 +228,13 @@ describe('tool table (drift)', () => {
     const stranger = await signup();
     for (const role of ROLES) {
       const c = await caller(user.tenant.id, stranger.user.id, role, [...MCP_SCOPES]);
+      const held = await server.ctx.access.globalScopes(user.tenant.id, role);
       const listed = (await listMcpTools(server.ctx, c))
         .filter((t) => MCP_BUILDER_TOOLS.includes(t))
         .map((t) => t.name)
         .sort();
       const expected = Object.entries(EXPECTED)
-        .filter(([, e]) => RANK[role] >= RANK[e.minRole])
+        .filter(([, e]) => held.has(e.access))
         .map(([name]) => name)
         .sort();
       expect(listed, role).toEqual(expected);
@@ -249,7 +249,7 @@ describe('tool table (drift)', () => {
         .map((t) => t.name)
         .sort();
     const support = Object.entries(EXPECTED)
-      .filter(([, e]) => e.minRole === 'viewer')
+      .filter(([, e]) => e.read)
       .map(([name]) => name)
       .sort();
     expect(await names(['workflow:read'])).toEqual(support);
@@ -291,7 +291,13 @@ describe('tool table (drift)', () => {
     const viewer = await member(owner, 'viewer');
     const listed = await rpcCall(owner.url, viewer.key, 'tools/list');
     const names = listed.result.tools.map((t: { name: string }) => t.name);
-    for (const name of ['search_nodes', 'validate_workflow', 'get_workflow_format_reference']) {
+    // P6-39: a project viewer reads the project's credentials (n8n), so it may explore node resources too
+    for (const name of [
+      'search_nodes',
+      'validate_workflow',
+      'get_workflow_format_reference',
+      'explore_node_resources',
+    ]) {
       expect(names).toContain(name);
     }
     for (const name of [
@@ -299,7 +305,6 @@ describe('tool table (drift)', () => {
       'update_workflow',
       'archive_workflow',
       'restore_workflow_version',
-      'explore_node_resources',
     ]) {
       expect(names).not.toContain(name);
     }
@@ -1228,9 +1233,10 @@ describe('explore_node_resources', () => {
     expect(refused.text).toContain('was not found in this workspace');
   });
 
-  it('needs the editor role and the credential:read scope', async () => {
+  it('needs credential:read in a project (a member with none is refused) and the credential:read grant', async () => {
     const owner = await signup();
-    const viewer = await member(owner, 'viewer');
+    // P6-39: a project viewer holds credential:read; a member with no project role does not
+    const viewer = await member(owner, 'member');
     const refused = await call(viewer, 'explore_node_resources', {
       nodeType: 'core.executeWorkflow',
       method: 'searchWorkflows',

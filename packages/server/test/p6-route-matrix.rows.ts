@@ -13,8 +13,12 @@
  *   row with no `access` is a role-only gate that `legacyMin` names (DELETE /tenant, owner only).
  * - `target` is the row `:id` stands for (the other path params are filled by their names), so a refused
  *   role meets a real row and answers 403, not 404.
- * - `legacyMin` is today's minimum role (`requireRole`), pinned until L24: it is optional and ignored after
- *   L24, so later stages write rows without it. `change` notes a rule that differs from today on purpose.
+ * - `legacyMin` was the minimum role of the old model (`requireRole`), pinned until the cutover (P6-39): it is
+ *   read by nothing now and later stages write rows without it. `change` notes a rule that differs from the old
+ *   model on purpose.
+ * - `exactScopes` names every scope a custom role needs for the row when the route checks more than `scope`.
+ * - `check` says where the route checks the scope when that is not the row's target: `personal` (a create
+ *   with no project goes to the caller's personal project) or `global` (the workspace role's scopes).
  * - `stream: true` rows answer an open stream (SSE, the AI builder, MCP): the test reads their status through
  *   a real listener and aborts.
  *
@@ -66,6 +70,9 @@ export interface RouteMatrixRow {
   legacyMin?: Role;
   change?: string;
   stream?: boolean;
+  check?: 'personal' | 'global';
+  /** the scopes a custom role needs to pass the row (default: `scope` alone), when the route checks more than one */
+  exactScopes?: Scope[];
 }
 
 export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
@@ -77,6 +84,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:update',
     target: 'workflow',
     legacyMin: 'editor',
+    check: 'global',
   },
   {
     file: 'ai-sessions.ts',
@@ -85,6 +93,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:update',
     target: 'workflow',
     legacyMin: 'editor',
+    check: 'global',
   },
   {
     file: 'ai-sessions.ts',
@@ -93,6 +102,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:update',
     target: 'workflow',
     legacyMin: 'editor',
+    check: 'global',
   },
   {
     file: 'ai-sessions.ts',
@@ -101,6 +111,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:update',
     target: 'workflow',
     legacyMin: 'editor',
+    check: 'global',
   },
 
   // ai.ts
@@ -112,6 +123,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'workflow',
     legacyMin: 'editor',
     stream: true,
+    check: 'global',
   },
   {
     file: 'ai.ts',
@@ -386,9 +398,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'credentials.ts',
     method: 'GET',
     path: '/rest/credentials',
-    scope: 'credential:list',
+    scope: null,
     target: 'credential',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the access filter of `credential:list` narrows the rows (as n8n)',
   },
   {
     file: 'credentials.ts',
@@ -397,6 +411,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'credential:create',
     target: 'credential',
     legacyMin: 'editor',
+    check: 'personal',
   },
   {
     file: 'credentials.ts',
@@ -430,6 +445,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'credential:read',
     target: 'credential',
     legacyMin: 'editor',
+    check: 'personal',
   },
   {
     file: 'credentials.ts',
@@ -438,6 +454,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'credential:update',
     target: 'credential',
     legacyMin: 'editor',
+    check: 'global',
   },
   {
     file: 'credentials.ts',
@@ -454,6 +471,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'credential:update',
     target: 'credential',
     legacyMin: 'editor',
+    check: 'global',
   },
   {
     file: 'credentials.ts',
@@ -477,9 +495,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'data-tables.ts',
     method: 'GET',
     path: '/rest/data-tables',
-    scope: 'dataTable:listProject',
+    scope: null,
     target: 'dataTable',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the access filter of `dataTable:listProject` narrows the rows (as n8n)',
   },
   {
     file: 'data-tables.ts',
@@ -488,6 +508,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'dataTable:create',
     target: 'dataTable',
     legacyMin: 'editor',
+    check: 'global',
   },
   {
     file: 'data-tables.ts',
@@ -632,6 +653,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'dataTable:create',
     target: 'dataTable',
     legacyMin: 'editor',
+    check: 'global',
   },
   {
     file: 'data-tables.ts',
@@ -705,17 +727,21 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'executions.ts',
     method: 'GET',
     path: '/rest/binary-data',
-    scope: 'execution:read',
+    scope: null,
     target: 'execution',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: "No gate on the route: `assertBinaryAccess` checks `execution:read` on the query's run",
   },
   {
     file: 'executions.ts',
     method: 'GET',
     path: '/rest/executions',
-    scope: 'execution:list',
+    scope: null,
     target: 'execution',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the access filter of `execution:list` narrows the rows (as n8n)',
   },
   {
     file: 'executions.ts',
@@ -793,9 +819,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'folders.ts',
     method: 'GET',
     path: '/rest/folders',
-    scope: 'folder:list',
+    scope: null,
     target: 'folder',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the access filter of `folder:list` narrows the rows (as n8n)',
   },
   {
     file: 'folders.ts',
@@ -804,6 +832,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'folder:create',
     target: 'folder',
     legacyMin: 'editor',
+    check: 'personal',
   },
   {
     file: 'folders.ts',
@@ -1027,19 +1056,22 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'mcp-settings.ts',
     method: 'GET',
     path: '/rest/mcp/workflows',
-    scope: 'workflow:list',
+    scope: null,
     target: 'workflow',
+    access: 'auth',
     legacyMin: 'editor',
-    change: 'CHANGE check: a member (old viewer) lists the workflows it can read',
+    change:
+      'The list has no gate: the service lists the workflows the caller may update (`workflow:update` per workflow)',
   },
   {
     file: 'mcp-settings.ts',
     method: 'PATCH',
     path: '/rest/mcp/workflows/toggle-access',
-    scope: 'workflow:update',
+    scope: null,
     target: 'workflow',
+    access: 'auth',
     legacyMin: 'admin',
-    change: 'CHANGE: today admin only, after anyone with workflow:update on that workflow',
+    change: 'No gate on the route: the service checks `workflow:update` per workflow of the body',
   },
 
   // projects.ts
@@ -1134,6 +1166,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'credential:create',
     target: 'credential',
     legacyMin: 'editor',
+    check: 'personal',
   },
   {
     file: 'public-api.ts',
@@ -1293,6 +1326,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:create',
     target: 'workflow',
     legacyMin: 'editor',
+    check: 'personal',
   },
   {
     file: 'public-api.ts',
@@ -1369,6 +1403,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'dataTable:create',
     target: 'dataTable',
     legacyMin: 'editor',
+    check: 'personal',
   },
   {
     file: 'public-data-tables.ts',
@@ -1601,8 +1636,9 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'public-projects.ts',
     method: 'GET',
     path: '/api/v1/projects/:projectId/users',
-    scope: 'user:list',
+    scope: 'project:read',
     target: 'project',
+    change: "The handler needs `project:read` on the project; `user:list` is every member's",
   },
   {
     file: 'public-projects.ts',
@@ -1890,6 +1926,8 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     path: '/rest/roles/:slug/assignments/:projectId/members',
     scope: 'role:manage',
     target: 'role',
+    exactScopes: ['role:manage', 'project:list'],
+    change: 'The service also needs `project:list` on the project',
   },
   { file: 'roles.ts', method: 'GET', path: '/rest/roles/:slug/members', scope: 'role:read', target: 'role' },
 
@@ -2069,9 +2107,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'settings.ts',
     method: 'POST',
     path: '/rest/node-types/options',
-    scope: 'workflow:update',
+    scope: null,
     target: 'none',
+    access: 'auth',
     legacyMin: 'editor',
+    change: "No gate on the route: `loadNodeOptions` checks the body's workflow (or the personal project)",
   },
   {
     file: 'settings.ts',
@@ -2277,9 +2317,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'workflow-reviews.ts',
     method: 'GET',
     path: '/rest/workflow-reviews',
-    scope: 'workflow:read',
+    scope: null,
     target: 'review',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the service lists the reviews of the workflows the caller may read',
   },
   {
     file: 'workflow-reviews.ts',
@@ -2288,46 +2330,59 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:publish',
     target: 'review',
     legacyMin: 'editor',
+    check: 'global',
   },
   {
     file: 'workflow-reviews.ts',
     method: 'GET',
     path: '/rest/workflow-reviews/:id',
-    scope: 'workflow:read',
+    scope: null,
     target: 'review',
+    access: 'auth',
     legacyMin: 'viewer',
+    change:
+      "No gate on the route: the service checks `workflow:read` on the review's workflow (a review the caller cannot read is 404)",
   },
   {
     file: 'workflow-reviews.ts',
     method: 'GET',
     path: '/rest/workflow-reviews/:id/activity',
-    scope: 'workflow:read',
+    scope: null,
     target: 'review',
+    access: 'auth',
     legacyMin: 'viewer',
+    change:
+      "No gate on the route: the service checks `workflow:read` on the review's workflow (a review the caller cannot read is 404)",
   },
   {
     file: 'workflow-reviews.ts',
     method: 'POST',
     path: '/rest/workflow-reviews/:id/comments',
-    scope: 'workflow:read',
+    scope: null,
     target: 'review',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: "No gate on the route: the service checks `workflow:read` on the review's workflow",
   },
   {
     file: 'workflow-reviews.ts',
     method: 'POST',
     path: '/rest/workflow-reviews/:id/decision',
-    scope: 'workflow:publish',
+    scope: null,
     target: 'review',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: "No gate on the route: the service checks `workflow:publish` on the review's workflow",
   },
   {
     file: 'workflow-reviews.ts',
     method: 'POST',
     path: '/rest/workflow-reviews/:id/update-version',
-    scope: 'workflow:publish',
+    scope: null,
     target: 'review',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: "No gate on the route: the service checks `workflow:publish` on the review's workflow",
   },
   {
     file: 'workflow-reviews.ts',
@@ -2336,6 +2391,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:publish',
     target: 'review',
     legacyMin: 'editor',
+    check: 'global',
   },
 
   // workflows.ts
@@ -2351,9 +2407,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'workflows.ts',
     method: 'GET',
     path: '/rest/workflows',
-    scope: 'workflow:list',
+    scope: null,
     target: 'workflow',
+    access: 'auth',
     legacyMin: 'viewer',
+    change: 'The list has no gate: the access filter of `workflow:list` narrows the rows (as n8n)',
   },
   {
     file: 'workflows.ts',
@@ -2362,6 +2420,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:create',
     target: 'workflow',
     legacyMin: 'editor',
+    check: 'personal',
   },
   {
     file: 'workflows.ts',
@@ -2530,6 +2589,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:create',
     target: 'workflow',
     legacyMin: 'editor',
+    check: 'personal',
   },
   {
     file: 'workflows.ts',
@@ -2538,5 +2598,6 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'workflow:update',
     target: 'workflow',
     legacyMin: 'editor',
+    check: 'global',
   },
 ];

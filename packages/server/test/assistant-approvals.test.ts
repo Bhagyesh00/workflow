@@ -21,6 +21,7 @@ import type {
 } from '@workflow/workflow';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { type AccessTarget, MISSING_SCOPE_MESSAGE } from '../src/services/access';
 import {
   ASSISTANT_APPROVAL_TEXTS,
   ASSISTANT_APPROVED_RUN_STOPPED,
@@ -28,7 +29,6 @@ import {
   approvalPreview,
 } from '../src/services/assistant/approvals';
 import { createRunScope } from '../src/services/assistant/run';
-import { ASSISTANT_TOOL_NO_ACCESS } from '../src/services/assistant/tool-adapter';
 import type { AssistantToolDefinition } from '../src/services/assistant/types';
 import {
   type AssistantHarness,
@@ -45,11 +45,15 @@ const SECRET = 'sk-proj-ApprovedSecret0123456789abcdefXYZ';
 const calls: Array<{ tool: string; args: unknown }> = [];
 const long = { started: 0, aborted: 0 };
 
+/** P6-39: what `write_row` acts on (null: the caller's home, its personal project); set by the demotion test */
+let writeTarget: AccessTarget | null = null;
+
 const writeRow: AssistantToolDefinition<{ table: string; name: string; summary?: string }> = {
   name: 'write_row',
   description: 'Add a row to a table',
   input: z.object({ table: z.string(), name: z.string(), summary: z.string().optional() }),
-  minRole: 'editor',
+  access: 'workflow:update',
+  target: () => writeTarget,
   permission: 'mutateDataTableRows',
   grantKey: (input) => `rows:${input.table}`,
   async approval(_ctx, _caller, input) {
@@ -73,7 +77,7 @@ const dropTable: AssistantToolDefinition<{ table: string }> = {
   name: 'drop_table',
   description: 'Delete a table',
   input: z.object({ table: z.string() }),
-  minRole: 'editor',
+  access: 'workflow:update',
   permission: 'deleteDataTable',
   grantKey: () => null,
   async handler(_ctx, _run, input) {
@@ -86,7 +90,7 @@ const longWrite: AssistantToolDefinition<{ workflow: string }> = {
   name: 'long_write',
   description: 'A write that runs until it is stopped',
   input: z.object({ workflow: z.string() }),
-  minRole: 'editor',
+  access: 'workflow:update',
   permission: 'updateWorkflow',
   async handler(_ctx, run) {
     long.started++;
@@ -106,7 +110,7 @@ const secretPage: AssistantToolDefinition<{ url: string }> = {
   name: 'secret_page',
   description: 'Save a page',
   input: z.object({ url: z.string() }),
-  minRole: 'editor',
+  access: 'workflow:update',
   permission: 'createWorkflow',
   untrusted: 'web-page',
   async handler(_ctx, _run, input) {
@@ -119,7 +123,7 @@ const fetchNote: AssistantToolDefinition<{ url: string }> = {
   name: 'fetch_note',
   description: 'Read a note',
   input: z.object({ url: z.string() }),
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   permission: 'fetchUrl',
   async handler(_ctx, _run, input) {
     calls.push({ tool: 'fetch_note', args: input });
@@ -131,7 +135,7 @@ const tempWrite: AssistantToolDefinition<{ folder: string }> = {
   name: 'temp_write',
   description: 'Make a folder',
   input: z.object({ folder: z.string() }),
-  minRole: 'editor',
+  access: 'workflow:update',
   permission: 'createFolder',
   async handler(_ctx, _run, input) {
     calls.push({ tool: 'temp_write', args: input });
@@ -143,7 +147,7 @@ const askPick: AssistantToolDefinition<{ topic: string }> = {
   name: 'ask_pick',
   description: 'Ask the person to pick',
   input: z.object({ topic: z.string() }),
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   async suspendFor(_ctx, _run, input) {
     return {
       inputType: 'questions',
@@ -435,12 +439,14 @@ describe('Assistant approvals (P5-68)', () => {
   });
 
   it("a demoted user's approval does not run", async () => {
+    // P6-39: the tool writes in the team project, where the editor is demoted to a project viewer
+    const team = h.owner.client.defaultProjectId!;
+    writeTarget = { projectId: team };
     const setRole = (role: string) =>
-      h.ctx.database.pool.query('update memberships set role = $3 where tenant_id = $1 and user_id = $2', [
-        h.tenantId,
-        h.editor.userId,
-        role,
-      ]);
+      h.ctx.database.pool.query(
+        'update project_relations set role = $4 where tenant_id = $1 and project_id = $2 and user_id = $3',
+        [h.tenantId, team, h.editor.userId, `project:${role}`],
+      );
     try {
       const { threadId, status } = await cardTurn(h, h.editor, [
         { toolCalls: [call('r1', 'write_row', { table: 'Leads', name: 'Jo' })] },
@@ -452,9 +458,10 @@ describe('Assistant approvals (P5-68)', () => {
       expect(res.statusCode).toBe(200);
       await settled(h, h.editor, threadId, requests);
       expect(calls).toEqual([]);
-      expect(lastToolResult(h, 'r1')).toBe(`Error: ${ASSISTANT_TOOL_NO_ACCESS}`);
+      expect(lastToolResult(h, 'r1')).toBe(`Error: ${MISSING_SCOPE_MESSAGE}`);
     } finally {
       await setRole('editor');
+      writeTarget = null;
     }
   });
 

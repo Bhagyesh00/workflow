@@ -21,7 +21,7 @@ import { newId } from '../src/lib/ids';
 import { useBuilderStore } from '../src/stores/builder-store';
 import { useUiStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
-import { backend, signedIn } from './backend';
+import { addMembership, backend, signedIn } from './backend';
 import { server } from './setup';
 import { renderApp } from './utils';
 
@@ -309,7 +309,7 @@ describe('builder panel (P5-62)', () => {
     const b = backend();
     const viewer = newId();
     b.users.push({ id: viewer, email: 'vic@example.com', name: 'Vic', password: 'secret-pass-1' });
-    b.memberships.push({ tenantId: b.session!.tenantId, userId: viewer, role: 'viewer' });
+    addMembership(viewer, 'viewer');
     const wf = b.seedWorkflow({ name: 'Empty', nodes: [], connections: {} });
     b.session = { userId: viewer, tenantId: b.session!.tenantId };
     await openEditor(`/workflow/${wf.id}`);

@@ -152,12 +152,12 @@ export class CredentialService {
 
   async create(
     tenantId: string,
-    input: { name: string; type: string; data: DataObject; projectId?: string },
+    input: { name: string; type: string; data: DataObject; projectId: string },
     userId?: string,
   ) {
     this.resolvedType(input.type);
-    // P6 S1: the project the route resolved, else the workspace's default (L24 makes it required)
-    const projectId = input.projectId ?? (await this.repos.projects.defaultProjectFor(tenantId));
+    // P6 S1: the project the caller resolved (`AccessService.targetProject`)
+    const { projectId } = input;
     const id = randomUUID();
     const clean = stripSentinels(input.data);
     const row = await this.repos.credentials.create(tenantId, {

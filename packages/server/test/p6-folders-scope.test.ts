@@ -187,7 +187,10 @@ describe('a folder moves only inside its project', () => {
 describe('favorites', () => {
   it('a project can be a favorite, and it comes back with its name', async () => {
     const { member, alpha } = await setup();
-    const add = await member.client.post('/rest/favorites', { resourceType: 'project', resourceId: alpha.id });
+    const add = await member.client.post('/rest/favorites', {
+      resourceType: 'project',
+      resourceId: alpha.id,
+    });
     expect(add.statusCode).toBe(200);
     expect(add.json().data).toMatchObject({ resourceType: 'project', resourceId: alpha.id, name: 'Alpha' });
     const list = (await member.client.get('/rest/favorites')).json().data as Array<{ resourceId: string }>;
@@ -227,7 +230,9 @@ describe('favorites', () => {
       ['folder', inAlpha.id],
       ['workflow', wf.id],
     ]) {
-      expect((await member.client.post('/rest/favorites', { resourceType, resourceId })).statusCode).toBe(200);
+      expect((await member.client.post('/rest/favorites', { resourceType, resourceId })).statusCode).toBe(
+        200,
+      );
     }
     expect((await member.client.get('/rest/favorites')).json().data).toHaveLength(3);
     await server.ctx.repos.projects.relations.remove(owner.tenant.id, alpha.id, member.user.id);

@@ -142,7 +142,11 @@ describe('Assistant workspace and credential tools (P5-69)', () => {
 
   it('folders: create, move a workflow in, list, delete with a card every time', async () => {
     const name = `folder_${suffix()}`;
-    const made = await cardFor(h.editor, 'create_folder', { name });
+    // P6-39: in the team project, where the workflow lives (with no project it goes to the personal one)
+    const made = await cardFor(h.editor, 'create_folder', {
+      name,
+      projectId: h.owner.client.defaultProjectId,
+    });
     expect(made.card.details.facts).toEqual([
       { label: 'Name', value: name },
       { label: 'Inside', value: 'Top level' },

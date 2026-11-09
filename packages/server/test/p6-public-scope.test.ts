@@ -133,7 +133,7 @@ describe('workflows', () => {
     expect((await api(mine.ownerKey, 'DELETE', `/workflows/${theirs.inAlpha.id}`)).statusCode).toBe(404);
   });
 
-  it('creates in the named project, refuses the others, and a member needs a project', async () => {
+  it("creates in the named project, refuses the others, and with none in the member's personal project", async () => {
     const { memberKey, ownerKey, alpha, beta } = await setup();
     const body = { name: 'New', nodes: [], connections: {} };
     const made = await api(memberKey, 'POST', '/workflows', { ...body, projectId: alpha.id });
@@ -142,8 +142,8 @@ describe('workflows', () => {
     const refused = await api(memberKey, 'POST', '/workflows', { ...body, projectId: beta.id });
     expect(refused.statusCode).toBe(403);
     expect(refused.json().error.message).toBe(FORBIDDEN);
-    // no projectId: the workspace default project, where this member has no relation
-    expect((await api(memberKey, 'POST', '/workflows', body)).statusCode).toBe(403);
+    // no projectId: the member's personal project (P6-39)
+    expect((await api(memberKey, 'POST', '/workflows', body)).statusCode).toBe(200);
     expect(
       (await api(memberKey, 'POST', '/workflows', { ...body, projectId: randomUUID() })).statusCode,
     ).toBe(404);

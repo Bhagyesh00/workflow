@@ -93,10 +93,9 @@ describe('settings', () => {
     });
     expect((await user.client.patch('/rest/mcp/settings', { other: true })).statusCode).toBe(400);
 
-    await setRole(user.tenant.id, user.user.id, 'viewer');
+    // P6-39: the old viewer and editor are members: they read the settings, only an admin changes them
+    await setRole(user.tenant.id, user.user.id, 'member');
     expect((await user.client.get('/rest/mcp/settings')).statusCode).toBe(200);
-    expect((await user.client.patch('/rest/mcp/settings', { mcpAccessEnabled: true })).statusCode).toBe(403);
-    await setRole(user.tenant.id, user.user.id, 'editor');
     expect((await user.client.patch('/rest/mcp/settings', { mcpAccessEnabled: true })).statusCode).toBe(403);
     expect((await new TestClient(server.app, server.url).get('/rest/mcp/settings')).statusCode).toBe(401);
   });
@@ -146,7 +145,7 @@ describe('api key', () => {
     expect(JSON.stringify(await server.ctx.repos.audit.list(user.tenant.id, 20))).not.toContain(rotated.key);
 
     // a viewer has an own key too
-    await setRole(user.tenant.id, user.user.id, 'viewer');
+    await setRole(user.tenant.id, user.user.id, 'member');
     expect((await user.client.get('/rest/mcp/api-key')).statusCode).toBe(200);
     expect((await user.client.post('/rest/mcp/api-key/rotate')).statusCode).toBe(200);
   });
@@ -182,7 +181,7 @@ describe('workflows and toggle-access', () => {
     ).toEqual([b.id]);
     // P6-35: the list is the workflows the caller can edit; a user whose own project holds the workflows
     // still lists them whatever the old workspace role says (the member cases are in p6-mcp-scope.test.ts)
-    await setRole(user.tenant.id, user.user.id, 'viewer');
+    await setRole(user.tenant.id, user.user.id, 'member');
     expect((await user.client.get('/rest/mcp/workflows')).statusCode).toBe(200);
   });
 
@@ -232,7 +231,7 @@ describe('workflows and toggle-access', () => {
     expect((await toggle({ availableInMCP: true, folderId: foreignFolder.id })).statusCode).toBe(404);
 
     // P6-35: no admin gate; every workflow needs `workflow:update` for the caller, who still has these
-    await setRole(user.tenant.id, user.user.id, 'editor');
+    await setRole(user.tenant.id, user.user.id, 'member');
     expect((await toggle({ availableInMCP: true, allWorkflows: true })).statusCode).toBe(200);
     expect(await flagOf(user.tenant.id, one.id)).toBe(true);
   });

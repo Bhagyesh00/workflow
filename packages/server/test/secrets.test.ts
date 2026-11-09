@@ -522,7 +522,7 @@ describe('connections API', () => {
     }
   });
 
-  it('admin and owner manage, an editor lists names, a viewer gets nothing', async () => {
+  it('admin and owner manage and list names, a project editor or viewer gets nothing global', async () => {
     const owner = await signup(server.app);
     await connection(owner, 'main', { key: 'value', other: 'value-2' });
     const admin = await member(owner, 'admin');
@@ -537,9 +537,11 @@ describe('connections API', () => {
       expect((await client.post(`${CONNECTIONS}/main/test`)).statusCode).toBe(403);
       expect((await client.delete(`${CONNECTIONS}/main`)).statusCode).toBe(403);
     }
-    const completions = await editor.data(editor.get(`${PROVIDERS}/completions/secrets`));
+    // P6-39: the global names need the global `externalSecret:list` (owner and admin)
+    const completions = await admin.data(admin.get(`${PROVIDERS}/completions/secrets`));
     expect(completions).toEqual({ main: ['key', 'other'] });
     expect(JSON.stringify(completions)).not.toContain('value');
+    expect((await editor.get(`${PROVIDERS}/completions/secrets`)).statusCode).toBe(403);
     expect((await viewer.get(`${PROVIDERS}/completions/secrets`)).statusCode).toBe(403);
   });
 
@@ -817,6 +819,7 @@ describe('states, retries and refresh', () => {
       // the credential service got the manager from start: a worker builds no routes
       const credential = await fresh.credentials.create(owner.tenant.id, {
         name: 'C',
+        projectId: await teamProjectOf(server, owner.tenant.id),
         type: 'testApi',
         data: { apiKey: '={{ $secrets.main.key }}' },
       });
@@ -1013,6 +1016,7 @@ describe('credentials read secrets', () => {
     const run = async (expression: string) => {
       const credential = await server.ctx.credentials.create(owner.tenant.id, {
         name: `C ${randomUUID()}`,
+        projectId: await teamProjectOf(server, owner.tenant.id),
         type: 'testApi',
         data: { apiKey: expression },
       });
@@ -1046,6 +1050,7 @@ describe('credentials read secrets', () => {
     await owner.client.data(owner.client.post('/rest/variables', { key: 'prefix', value: 'p-' }));
     const credential = await server.ctx.credentials.create(owner.tenant.id, {
       name: 'C',
+      projectId: await teamProjectOf(server, owner.tenant.id),
       type: 'testApi',
       data: { apiKey: '={{ $vars.prefix + $secrets.main.key }}' },
     });
@@ -1154,6 +1159,7 @@ describe('credentials read secrets', () => {
     const owner = await signup(server.app);
     const oauth2 = await server.ctx.credentials.create(owner.tenant.id, {
       name: 'O2',
+      projectId: await teamProjectOf(server, owner.tenant.id),
       type: 'testPkceOAuth2Api',
       data: { authUrl: 'https://auth.example.com/a', clientId: '={{ $secrets.nope.id }}' },
     });
@@ -1163,6 +1169,7 @@ describe('credentials read secrets', () => {
 
     const oauth1 = await server.ctx.credentials.create(owner.tenant.id, {
       name: 'O1',
+      projectId: await teamProjectOf(server, owner.tenant.id),
       type: 'oAuth1Api',
       data: {
         requestTokenUrl: `${remoteUrl}/request`,
@@ -1181,6 +1188,7 @@ describe('credentials read secrets', () => {
     await connection(owner, 'main', { consumerKey: 'key-from-vault', consumerSecret: 'secret-from-vault' });
     const credential = await server.ctx.credentials.create(owner.tenant.id, {
       name: 'O1',
+      projectId: await teamProjectOf(server, owner.tenant.id),
       type: 'oAuth1Api',
       data: {
         requestTokenUrl: `${remoteUrl}/request`,
@@ -1204,6 +1212,7 @@ describe('credentials read secrets', () => {
     const owner = await signup(server.app);
     const credential = await server.ctx.credentials.create(owner.tenant.id, {
       name: 'Plain',
+      projectId: await teamProjectOf(server, owner.tenant.id),
       type: 'testApi',
       data: { apiKey: 'typed' },
     });

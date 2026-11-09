@@ -224,7 +224,6 @@ describe('Assistant writes by project', () => {
   it('every built-in tool names its scope', () => {
     for (const tool of builtInAssistantTools()) {
       expect(tool.access, tool.name).toBeDefined();
-      expect(tool.minRole, `${tool.name} has no minRole`).toBeUndefined();
       expect(toolAccess(tool), tool.name).toBe(tool.access);
     }
   });
@@ -313,7 +312,7 @@ describe('Assistant routes by scope', () => {
         type: 'httpBearerAuth',
         data: { token: 'tok-scope-test-0000' },
       });
-      // the admin of the workspace works in the default team project: the other project's credential is refused
+      // the admin's own project is its personal project (P6-39): another project's credential is refused
       const refused = await h.admin.client.post('/rest/assistant/mcp-connections', {
         name: `Docs ${suffix()}`,
         url: 'https://mcp.example.com/mcp',
@@ -323,7 +322,8 @@ describe('Assistant routes by scope', () => {
       expect(refused.statusCode).toBe(400);
       expect(refused.json().error.message).toContain('does not have access to the credential');
 
-      const usable = await credentialIn(h.server, h.tenantId, mine, {
+      const adminHome = (await h.ctx.repos.projects.getPersonal(h.tenantId, h.admin.userId))!.id;
+      const usable = await credentialIn(h.server, h.tenantId, adminHome, {
         name: `Bearer ${suffix()}`,
         type: 'httpBearerAuth',
         data: { token: 'tok-scope-own-0000' },

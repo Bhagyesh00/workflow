@@ -215,11 +215,11 @@ describe('the Assistant routes', () => {
     const viewer = await inviteMember(owner, 'viewer');
     const editor = await inviteMember(owner, 'editor');
 
-    // drafts: accept and discard are editor
+    // drafts: P6-39, a viewer builds in its personal project, so it passes the gate (a bad body or no draft)
     const accept = await viewer.client.post(`/rest/assistant/threads/${id}/drafts/${id}/accept`, {});
-    expect(accept.statusCode).toBe(403);
+    expect([400, 404]).toContain(accept.statusCode);
     const discard = await viewer.client.post(`/rest/assistant/threads/${id}/drafts/${id}/discard`, {});
-    expect(discard.statusCode).toBe(403);
+    expect([400, 404]).toContain(discard.statusCode);
     // settings are admin
     expect((await viewer.client.get('/rest/assistant/settings')).statusCode).toBe(403);
     expect((await editor.client.patch('/rest/assistant/settings', { enabled: false })).statusCode).toBe(403);

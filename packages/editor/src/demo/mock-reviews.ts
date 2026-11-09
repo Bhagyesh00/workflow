@@ -12,7 +12,7 @@
  * its id on the request and loses its name.
  * State lives in `backend.ext.reviews`.
  */
-import type { ReviewActivity, ReviewUser, WorkflowReviewDTO } from '../api/types';
+import type { ReviewActivity, ReviewUser, Role, WorkflowReviewDTO } from '../api/types';
 import { newId } from '../lib/ids';
 import type { MockBackend } from './mock-backend';
 import { copy, HttpError, listResult, now, page } from './mock-http';
@@ -31,7 +31,6 @@ interface ReviewStore {
   activity: StoredActivity[];
 }
 
-const RANK = { viewer: 0, editor: 1, admin: 2, owner: 3 } as const;
 /** control characters other than tab, newline and carriage return are refused (as the server does) */
 function hasControlChars(value: string): boolean {
   for (const ch of value) {
@@ -56,23 +55,24 @@ export function registerReviewRoutes(backend: MockBackend): void {
     const u = backend.users.find((x) => x.id === id);
     return { id, name: u?.name ?? 'Unknown', email: u?.email ?? '' };
   };
-  /** a member whose workspace role holds `workflow:publish` (P6-43: scopes, not the old words) */
-  const publisher = (tenantId: string, userId: string) => {
+  /**
+   * a member who holds `workflow:publish` on the workflow (its project role counts, as the server's
+   * `scopesOf`), or in the workspace when no workflow is named
+   */
+  const publisher = (tenantId: string, userId: string, workflowId?: string) => {
+    const wf = workflowId ? backend.workflows.find((w) => w.id === workflowId) : undefined;
+    const project = wf?.projectId ? backend.projects.find((p) => p.id === wf.projectId) : undefined;
+    if (project) return backend.scopesOfUserIn(project, userId).includes('workflow:publish');
     const m = backend.memberships.find((x) => x.tenantId === tenantId && x.userId === userId);
-    return (
-      m !== undefined && backend.globalScopesOf(m.globalRole ?? m.role, tenantId).includes('workflow:publish')
-    );
+    return m !== undefined && backend.globalScopesOf(m.role, tenantId).includes('workflow:publish');
   };
-  /** the signed-in user may publish in the workspace or in one of its projects */
-  const mayPublish = () => {
-    try {
-      backend.requireScopeAnywhere('workflow:publish');
-      return true;
-    } catch {
-      return false;
-    }
+  /** the signed-in user may publish the workflow (its project role counts), or in the workspace with none */
+  const mayPublish = (workflowId: string | null | undefined) => {
+    const { user: me, tenant } = backend.auth();
+    return publisher(tenant.id, me.id, workflowId ?? undefined);
   };
-  const isAdmin = (role: keyof typeof RANK) => RANK[role] >= RANK.admin;
+  /** an admin of reviews holds the global `workflow:move` (as the server's `ADMIN_SCOPE`, P6-39: no rank) */
+  const isAdmin = (role: Role) => backend.globalScopesOf(role, backend.auth().tenant.id).includes('workflow:move');
 
   const emit = (_r: StoredReview) =>
     backend.emit({ type: 'workflowReviewChanged', data: { workflowId: '', requestId: '' } });
@@ -113,9 +113,11 @@ export function registerReviewRoutes(backend: MockBackend): void {
     if (!r || !participant) throw new HttpError(404, 'not_found', 'Review request not found');
     return { r, me, tenant, role };
   };
-  const canDecide = (r: StoredReview, meId: string, role: keyof typeof RANK) =>
+  const canDecide = (r: StoredReview, meId: string, role: Role) =>
     isAdmin(role) ||
-    (r.reviewers.some((x) => x.id === meId) && !r.authors.some((x) => x.id === meId) && mayPublish());
+    (r.reviewers.some((x) => x.id === meId) &&
+      !r.authors.some((x) => x.id === meId) &&
+      mayPublish(r.workflowId));
 
   const visibleTo = (tab: 'to_review' | 'mine' | undefined) => {
     const { user: me, tenant, role } = backend.auth();
@@ -148,7 +150,12 @@ export function registerReviewRoutes(backend: MockBackend): void {
     const { user: me, tenant } = backend.requireScopeAnywhere('workflow:update');
     if (query.workflowId) backend.workflow(query.workflowId);
     return backend.memberships
-      .filter((m) => m.tenantId === tenant.id && m.userId !== me.id && publisher(tenant.id, m.userId))
+      .filter(
+        (m) =>
+          m.tenantId === tenant.id &&
+          m.userId !== me.id &&
+          publisher(tenant.id, m.userId, typeof query.workflowId === 'string' ? query.workflowId : undefined),
+      )
       .map((m) => user(m.userId));
   });
 
@@ -169,7 +176,7 @@ export function registerReviewRoutes(backend: MockBackend): void {
     if (ids.includes(me.id))
       throw new HttpError(400, 'bad_request', 'You cannot assign yourself as a reviewer');
     for (const id of ids) {
-      if (!publisher(tenant.id, id))
+      if (!publisher(tenant.id, id, wf.id))
         throw new HttpError(400, 'bad_request', 'Reviewers must be able to publish this workflow');
     }
     if (openReviewOf(backend, wf.id))
@@ -210,8 +217,9 @@ export function registerReviewRoutes(backend: MockBackend): void {
 
   backend.on('POST', '/workflow-reviews/:id/update-version', ({ params, body }) => {
     const { user: me, tenant, role } = backend.auth();
-    // any member who can publish may move it (n8n); others get 404 (non-participant) or 403
-    if (!mayPublish()) {
+    // any member who can publish the workflow may move it (n8n); others get 404 (non-participant) or 403
+    const asked = store(backend).requests.find((x) => x.id === params[0] && x.tenantId === tenant.id);
+    if (!mayPublish(asked?.workflowId)) {
       readable(params[0]);
       throw new HttpError(
         403,
@@ -277,7 +285,7 @@ export function registerReviewRoutes(backend: MockBackend): void {
       (v) => v.workflowId === wf.id && v.versionId === r.workflowVersionId,
     );
     let autoPublish: { status: 'published' | 'failed'; message?: string };
-    if (!publisher(tenant.id, requesterId)) {
+    if (!publisher(tenant.id, requesterId, wf.id)) {
       autoPublish = {
         status: 'failed',
         message: 'The review requester no longer has permission to publish this workflow',

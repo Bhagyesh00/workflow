@@ -155,7 +155,7 @@ const writeNote: AssistantToolDefinition<{ note: string }> = {
   name: 'write_note',
   description: 'Write a note',
   input: z.object({ note: z.string() }),
-  minRole: 'editor',
+  access: 'workflow:update',
   permission: 'createFolder',
   async approval(_ctx, _caller, input) {
     return {

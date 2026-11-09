@@ -193,7 +193,11 @@ describe('OAuth1 sign-in flow', () => {
     });
     const started = await editor.data(editor.get(`/rest/oauth1/authorize?credentialId=${credential.id}`));
     expect(new URL(started.url).searchParams.get('oauth_token')).toBe('rt-1');
-    await client.data(client.patch(`/rest/members/${joined.user.id}`, { role: 'viewer' }));
+    await client.data(
+      client.patch(`/rest/projects/${client.defaultProjectId}/users/${joined.user.id}`, {
+        role: 'project:viewer',
+      }),
+    );
     const state = new URL(
       oauthFields(received.filter((r) => r.url === '/request_token').at(-1)!.headers.authorization)
         .oauth_callback,

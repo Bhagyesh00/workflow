@@ -13,7 +13,7 @@ const probe: AssistantToolDefinition = {
   name: 'settings_probe',
   description: 'A tool under the tagWorkflow permission (test seam)',
   input: z.object({}),
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   permission: 'tagWorkflow',
   async handler() {
     return { ok: true };
@@ -55,6 +55,8 @@ async function credential(type: string, data: Record<string, unknown>, user = h.
       data,
     }),
   );
+  // P6-39: a pinned credential is checked in the saving admin's own project; a global one is usable in all
+  await h.ctx.repos.credentials.update(h.tenantId, created.id, { isGlobal: true });
   return created.id;
 }
 

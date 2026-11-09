@@ -96,7 +96,9 @@ describe('Assistant data table tools (P5-69)', () => {
     });
     expect(dataTablesTools).toHaveLength(11);
     for (const tool of dataTablesTools) {
-      const read = ['dataTable:listProject', 'dataTable:read', 'dataTable:readRow'].includes(tool.access as string);
+      const read = ['dataTable:listProject', 'dataTable:read', 'dataTable:readRow'].includes(
+        tool.access as string,
+      );
       expect(tool.permission === undefined, `${tool.name} permission`).toBe(read);
       expect(tool.untrusted !== undefined, `${tool.name} untrusted`).toBe(read);
     }
@@ -182,11 +184,13 @@ describe('Assistant data table tools (P5-69)', () => {
     });
   });
 
-  it('a viewer cannot create or change: the write tools are not offered and nothing waits', async () => {
+  it("a viewer cannot create in or change the team project's tables: nothing waits", async () => {
     const name = `nope_${suffix()}`;
     const table = await makeTable([{ name: 'Keep', qty: 1 }]);
+    // P6-39: a viewer creates in its personal project; in the team project it only reads
+    const team = h.owner.client.defaultProjectId!;
     for (const [tool, args] of [
-      ['create_data_table', { name, columns: [] }],
+      ['create_data_table', { name, columns: [], projectId: team }],
       ['insert_data_table_rows', { dataTableId: table.id, rows: [{ name: 'X', qty: 1 }] }],
       ['delete_data_table', { dataTableId: table.id }],
     ] as const) {

@@ -9,6 +9,7 @@
 import type { AssistantEvent } from '@workflow/workflow';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { type AccessTarget, MISSING_SCOPE_MESSAGE } from '../src/services/access';
 import type { AssistantToolDefinition } from '../src/services/assistant/types';
 import { type AssistantHarness, createAssistantHarness, toolResultOf } from './fakes/assistant-harness';
 import type { FakeLlmStep } from './fakes/fake-llm';
@@ -33,7 +34,7 @@ vi.mock('../src/services/assistant/mcp', async (importOriginal) => {
             name: 'mcp_docs_search',
             description: 'Search the docs server',
             input: zod.object({ query: zod.string() }),
-            minRole: 'viewer',
+            access: 'instanceAi:message',
             untrusted: 'mcp:docs',
             async handler(_ctx: unknown, _run: unknown, input: { query: string }) {
               return `found: ${input.query}`;
@@ -73,7 +74,7 @@ const hiddenTool: AssistantToolDefinition<Record<string, never>> = {
   name: 'hidden_tool',
   description: 'Never offered',
   input: z.object({}),
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   available: () => false,
   async handler() {
     hidden++;
@@ -81,11 +82,15 @@ const hiddenTool: AssistantToolDefinition<Record<string, never>> = {
   },
 };
 
+/** P6-39: what `make_table` acts on (null: the caller's home, its personal project); set by the demotion case */
+let tableTarget: AccessTarget | null = null;
+
 const makeTable: AssistantToolDefinition<{ name: string }> = {
   name: 'make_table',
   description: 'Make a table',
   input: z.object({ name: z.string() }),
-  minRole: 'editor',
+  access: 'workflow:update',
+  target: () => tableTarget,
   artifact: (input, result) => ({
     type: 'data-table',
     id: String((result as { id: string }).id),
@@ -204,13 +209,15 @@ describe('Assistant seams', () => {
     >;
     expect(artifact.payload.artifact).toEqual({ type: 'data-table', id: 'table-1', name: 'Leads' });
 
-    // demoted between the list and the call: the tool was offered, the call is refused
+    // demoted between the list and the call: the tool was offered, the call is refused. P6-39: the tool acts
+    // on the team project, where the editor becomes a project viewer
+    const team = h.owner.client.defaultProjectId!;
+    tableTarget = { projectId: team };
     const setRole = (role: string) =>
-      h.ctx.database.pool.query('update memberships set role = $3 where tenant_id = $1 and user_id = $2', [
-        h.tenantId,
-        h.editor.userId,
-        role,
-      ]);
+      h.ctx.database.pool.query(
+        'update project_relations set role = $4 where tenant_id = $1 and project_id = $2 and user_id = $3',
+        [h.tenantId, team, h.editor.userId, `project:${role}`],
+      );
     try {
       const other = await h.createThread(h.editor);
       queue(
@@ -228,11 +235,10 @@ describe('Assistant seams', () => {
       );
       await h.chat(h.editor, other, 'Make another');
       await h.waitForStatus(h.editor, other, 'idle');
-      expect(toolResultOf([h.fake.requests.at(-1)], 'table_2')).toBe(
-        'Error: You no longer have access to this tool',
-      );
+      expect(toolResultOf([h.fake.requests.at(-1)], 'table_2')).toBe(`Error: ${MISSING_SCOPE_MESSAGE}`);
     } finally {
       await setRole('editor');
+      tableTarget = null;
     }
   });
 });

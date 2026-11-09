@@ -128,7 +128,7 @@ function rolesMap(backend: MockBackend, tenantId: string, withUsage: boolean): R
   const usage = (role: CustomRole): CustomRole => {
     if (!withUsage) return role;
     if (role.roleType === 'global') {
-      const usedByUsers = members.filter((m) => (m.globalRole ?? m.role) === role.slug).length;
+      const usedByUsers = members.filter((m) => m.role === role.slug).length;
       return { ...role, usedByUsers };
     }
     if (role.roleType === 'project') {
@@ -226,7 +226,7 @@ export function registerRoleRoutes(backend: MockBackend): void {
     if (!role) throw new HttpError(404, 'not_found', `Role "${slug}" not found`);
     requireManage(backend, role.roleType);
     const holders = backend.memberships.filter(
-      (m) => m.tenantId === tenant.id && (m.globalRole ?? m.role) === slug,
+      (m) => m.tenantId === tenant.id && m.role === slug,
     );
     const used = backend.projectRelations.some((r) => r.tenantId === tenant.id && r.role === slug);
     const reassign = query.reassignRoleSlug;
@@ -241,15 +241,7 @@ export function registerRoleRoutes(backend: MockBackend): void {
       if (!target) {
         throw new HttpError(400, 'bad_request', `Cannot reassign the members to the role "${reassign}"`);
       }
-      for (const m of holders) {
-        if (reassign === 'admin') {
-          m.role = 'admin';
-          m.globalRole = undefined;
-        } else {
-          m.role = 'viewer';
-          m.globalRole = reassign;
-        }
-      }
+      for (const m of holders) m.role = reassign;
     }
     state(backend).roles = state(backend).roles.filter((r) => r !== role);
     return publicRole(role);
@@ -293,7 +285,7 @@ export function registerRoleRoutes(backend: MockBackend): void {
       throw new HttpError(404, 'not_found', `Role "${params[0]}" not found`);
     }
     const members = backend.memberships
-      .filter((m) => m.tenantId === tenant.id && (m.globalRole ?? m.role) === params[0])
+      .filter((m) => m.tenantId === tenant.id && m.role === params[0])
       .map((m) => memberOf(backend, m.userId, params[0]));
     return { members, total: members.length } satisfies RoleMembersPage;
   });

@@ -67,7 +67,7 @@ export function registerAnnotationRoutes(backend: MockBackend): void {
   });
 
   backend.on('POST', '/annotation-tags', ({ body }) => {
-    const { tenant } = backend.requireRole('editor');
+    const { tenant } = backend.requireScope('annotationTag:create');
     const name = parseName(body.name);
     if (duplicate(tenant.id, name)) throw conflict(name);
     const stamp = now();
@@ -83,7 +83,7 @@ export function registerAnnotationRoutes(backend: MockBackend): void {
   });
 
   backend.on('PATCH', '/annotation-tags/:id', ({ params, body }) => {
-    const { tenant } = backend.requireRole('editor');
+    const { tenant } = backend.requireScope('annotationTag:update');
     const tag = tagOf(tenant.id, params[0]);
     const name = parseName(body.name);
     if (duplicate(tenant.id, name, tag.id)) throw conflict(name);
@@ -96,7 +96,7 @@ export function registerAnnotationRoutes(backend: MockBackend): void {
   });
 
   backend.on('DELETE', '/annotation-tags/:id', ({ params }) => {
-    const { tenant } = backend.requireRole('editor');
+    const { tenant } = backend.requireScope('annotationTag:delete');
     const tag = tagOf(tenant.id, params[0]);
     backend.ext.annotationTags = tagList(backend).filter((t) => t !== tag);
     for (const e of backend.executions) {
@@ -108,9 +108,13 @@ export function registerAnnotationRoutes(backend: MockBackend): void {
   });
 
   backend.on('PATCH', '/executions/:id', ({ params, body }) => {
-    const { tenant } = backend.requireRole('editor');
+    const { tenant } = backend.auth();
     const execution = backend.executions.find((e) => e.id === params[0] && e.tenantId === tenant.id);
     if (!execution) throw notFound('Execution');
+    // P6-39: n8n's `execution:read` on the run (its workflow's project)
+    backend.requireScope('execution:read', {
+      scopes: backend.rowScopes(backend.workflows.find((w) => w.id === execution.workflowId) ?? {}),
+    });
     const tags = body.tags;
     const vote = body.vote;
     if (tags === undefined && vote === undefined)

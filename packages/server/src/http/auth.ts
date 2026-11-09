@@ -12,7 +12,6 @@ import type { Repositories } from '../repositories';
 import { type AccessService, type AccessTarget, MISSING_SCOPE_MESSAGE } from '../services/access';
 import {
   type AuthService,
-  hasRole,
   SESSION_COOKIE,
   SESSION_REFRESH_MS,
   SESSION_TTL_MS,
@@ -23,7 +22,7 @@ import { ApiError } from './errors';
 export interface AuthContext {
   user: UserRow;
   tenant: TenantRow;
-  /** the workspace role: a system slug (owner, admin, member), a legacy one (editor, viewer) or a custom slug */
+  /** the workspace role: a system slug (owner, admin, member) or a custom global role slug */
   role: Role;
   sessionId?: string;
   apiKeyId?: string;
@@ -129,17 +128,6 @@ export async function loadApiKey(request: FastifyRequest, auth: AuthService): Pr
 export function requireAuth(request: FastifyRequest): AuthContext {
   if (!request.auth) throw ApiError.unauthorized();
   return request.auth;
-}
-
-/**
- * The legacy gate (fail closed): `member`, an unknown or a custom slug ranks 0, so a route that still
- * uses it refuses them. Routes move to `requireScope` lane by lane; `PATCH /executions/:id` keeps it
- * until the cutover (L24).
- */
-export function requireRole(request: FastifyRequest, minimum: Role): AuthContext {
-  const auth = requireAuth(request);
-  if (!hasRole(auth.role, minimum)) throw ApiError.forbidden();
-  return auth;
 }
 
 /**

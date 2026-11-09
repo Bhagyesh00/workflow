@@ -319,7 +319,9 @@ describe('the token', () => {
     const url = `/form/${admin.tenant.slug}/who`;
     const { cookie } = await signedInCookie(viewer.client, url);
     expect((await hitForm(url, { headers: { cookie } })).statusCode).toBe(200);
-    await admin.client.data(admin.client.delete(`/rest/members/${viewer.id}`));
+    await admin.client.data(
+      admin.client.request('DELETE', `/rest/members/${viewer.id}`, { deleteData: true }),
+    );
     const after = await hitForm(url, { headers: { cookie } });
     expect(after.statusCode).toBe(302);
     expect(after.headers.location).toContain('/form-auth');

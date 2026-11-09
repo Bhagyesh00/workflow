@@ -10,6 +10,9 @@ import { renderApp } from './utils';
 
 const LONG = { timeout: 20_000 };
 
+/** P6-39: a folder with no project goes to the personal project; these sit with the seeded workflows */
+const teamId = () => backend().oldestTeamProject(backend().auth().tenant.id).id;
+
 function seed(name: string, extra: Record<string, unknown> = {}) {
   return backend().seedWorkflow({ name, nodes: [], connections: {}, ...extra });
 }
@@ -79,7 +82,7 @@ describe('folders on the workflows page', () => {
   it('opens a folder (?folder=), shows its path and only its workflows, and creates a workflow in it', async () => {
     const user = userEvent.setup();
     signedIn();
-    const a = await foldersApi.create({ name: 'Alpha' });
+    const a = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     const b = await foldersApi.create({ name: 'Beta', parentFolderId: a.id });
     seed('Top flow');
     seed('Alpha flow', { folderId: a.id });
@@ -111,7 +114,7 @@ describe('folders on the workflows page', () => {
   it('a search looks through every folder', async () => {
     const user = userEvent.setup();
     signedIn();
-    const a = await foldersApi.create({ name: 'Alpha' });
+    const a = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     seed('Deep invoice', { folderId: a.id });
     await openList('/workflows', 'Alpha');
     expect(screen.queryByRole('link', { name: 'Deep invoice' })).toBeNull();
@@ -122,8 +125,8 @@ describe('folders on the workflows page', () => {
   it('moves a workflow and a folder with the Move dialog', async () => {
     const user = userEvent.setup();
     signedIn();
-    const a = await foldersApi.create({ name: 'Alpha' });
-    const b = await foldersApi.create({ name: 'Beta' });
+    const a = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
+    const b = await foldersApi.create({ name: 'Beta', projectId: teamId() });
     const wf = seed('Mover');
     await openList('/workflows', 'Mover');
     await user.click(screen.getByRole('button', { name: 'Actions for Mover' }));
@@ -149,7 +152,7 @@ describe('folders on the workflows page', () => {
   it('renames a folder and the delete dialog shows the counts', async () => {
     const user = userEvent.setup();
     signedIn();
-    const a = await foldersApi.create({ name: 'Alpha' });
+    const a = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     await foldersApi.create({ name: 'Kid', parentFolderId: a.id });
     seed('In alpha', { folderId: a.id });
     seed('Also alpha', { folderId: a.id });
@@ -179,7 +182,7 @@ describe('folders on the workflows page', () => {
   it('deleting with "move the content" keeps the workflows and subfolders', async () => {
     const user = userEvent.setup();
     signedIn();
-    const a = await foldersApi.create({ name: 'Alpha' });
+    const a = await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     await foldersApi.create({ name: 'Kid', parentFolderId: a.id });
     const wf = seed('Stays', { folderId: a.id });
     await openList('/workflows', 'Alpha');
@@ -201,7 +204,7 @@ describe('favorites', () => {
   it('stars a workflow and a folder, lists them in the left nav and unstars', async () => {
     const user = userEvent.setup();
     signedIn();
-    const f = await foldersApi.create({ name: 'Reports' });
+    const f = await foldersApi.create({ name: 'Reports', projectId: teamId() });
     const wf = seed('Nightly');
     await openList('/workflows', 'Nightly');
     expect(screen.queryByRole('navigation', { name: 'Favorites' })).toBeNull();
@@ -284,13 +287,14 @@ describe('viewers', () => {
   it('cannot create, move, archive or drag, but can star', async () => {
     signedIn();
     backend().setDemoRole('viewer');
-    const f = await foldersApi.create({ name: 'Alpha' }).catch(() => null);
+    const f = await foldersApi.create({ name: 'Alpha', projectId: teamId() }).catch(() => null);
     expect(f).toBeNull();
     backend().setDemoRole('owner');
-    await foldersApi.create({ name: 'Alpha' });
+    await foldersApi.create({ name: 'Alpha', projectId: teamId() });
     seed('Plain');
     backend().setDemoRole('viewer');
-    await openList('/workflows', 'Plain');
+    // P6-39: a project viewer of the team project (its personal project is its own)
+    await openList(`/projects/${teamId()}/workflows`, 'Plain');
     expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
     expect(row('Plain').getAttribute('draggable')).toBeNull();
     const user = userEvent.setup();

@@ -91,6 +91,9 @@ async function signup() {
   });
   if (res.statusCode !== 200) throw new Error(`signup failed: ${res.body}`);
   const data = res.json().data as { tenant: { id: string; slug: string } };
+  // P6-39: signup makes no team project; the old default (where these tests' work lives) is made here
+  const team = await client.data<{ id: string }>(client.post('/rest/projects', { name: `Scope ${id}` }));
+  client.defaultProjectId = team.id;
   return { client, ...data };
 }
 

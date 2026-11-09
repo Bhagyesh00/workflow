@@ -197,7 +197,7 @@ export interface DataTableActor {
 export interface DataTableCreateInput {
   name: string;
   columns: DataTableCreateColumn[];
-  /** P6 S1: the project the route resolved; absent: the workspace's default (L24 makes it required) */
+  /** P6-39: the project; required unless `caller` is given, for whom `targetProject` resolves it */
   projectId?: string;
   /**
    * the signed-in caller (the REST route): the project is then resolved for it (`targetProject`), it must
@@ -605,11 +605,11 @@ export class DataTableService {
 
   async create(
     tenantId: string,
-    input: DataTableCreateInput,
+    input: DataTableCreateInput & ({ caller: AuthContext } | { projectId: string }),
     actor?: DataTableActor,
   ): Promise<DataTableForCaller> {
     const { caller, ...rest } = input;
-    if (!caller) return this.insertTable(tenantId, rest, actor);
+    if (!caller) return this.insertTable(tenantId, { ...rest, projectId: rest.projectId! }, actor);
     const { access } = this.deps.context();
     const projectId = await access.targetProject(caller, rest.projectId);
     const held = await access.scopesForAuth(caller, { projectId });
@@ -620,7 +620,7 @@ export class DataTableService {
 
   private async insertTable(
     tenantId: string,
-    input: Omit<DataTableCreateInput, 'caller'>,
+    input: Omit<DataTableCreateInput, 'caller'> & { projectId: string },
     actor?: DataTableActor,
   ): Promise<DataTableInfo> {
     const name = tableName(input.name);
@@ -636,7 +636,7 @@ export class DataTableService {
     }
     assertColumnInputs(name, columns);
     const stored = cells.map((row) => this.toCells(row, columns));
-    const projectId = input.projectId ?? (await this.deps.repos.projects.defaultProjectFor(tenantId));
+    const { projectId } = input;
     try {
       const made = await this.deps.database.db.transaction(async (tx) => {
         const repos = createRepositories(tx);

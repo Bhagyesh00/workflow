@@ -23,12 +23,7 @@ const ROLE_HINTS: Record<Role, string> = {
   owner: 'Everything, including billing and deleting the workspace',
   admin: 'Members, projects and all resources',
   member: 'Only the projects they belong to, with the role they get in each',
-  editor: 'Workflows, credentials and executions',
-  viewer: 'Read-only, cannot read credentials',
 };
-
-/** the old words stay offered until the cutover removes them (L24); a new invitation still defaults to editor */
-const LEGACY_WORDS: readonly string[] = ['editor', 'viewer'];
 
 function titleCase(slug: string): string {
   return slug.charAt(0).toUpperCase() + slug.slice(1);
@@ -229,23 +224,19 @@ export function MembersSettingsPage() {
   const members = useQuery({ queryKey: queryKeys.members, queryFn: membersApi.list });
   const roles = useRoles();
   const [projectsOf, setProjectsOf] = useState<string | null>(null);
-  // system roles first, then the custom workspace roles, then the old words (until L24)
-  const roleOptions = useMemo(() => {
-    const named = (roles.data?.global ?? [])
-      .filter((r) => r.slug !== 'owner')
-      .map((r) => ({ slug: r.slug, label: r.displayName, hint: r.description ?? ROLE_HINTS[r.slug] ?? '' }));
-    const legacy = LEGACY_WORDS.filter((w) => !named.some((n) => n.slug === w)).map((w) => ({
-      slug: w,
-      label: titleCase(w),
-      hint: ROLE_HINTS[w] ?? '',
-    }));
-    return [...named, ...legacy];
-  }, [roles.data]);
+  // system roles first, then the custom workspace roles
+  const roleOptions = useMemo(
+    () =>
+      (roles.data?.global ?? [])
+        .filter((r) => r.slug !== 'owner')
+        .map((r) => ({ slug: r.slug, label: r.displayName, hint: r.description ?? ROLE_HINTS[r.slug] ?? '' })),
+    [roles.data],
+  );
   const roleLabel = (slug: string) =>
     roles.data?.global.find((r) => r.slug === slug)?.displayName ?? titleCase(slug);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState<Role>('editor');
+  const [role, setRole] = useState<Role>('member');
   const [link, setLink] = useState<string | null>(null);
   const refresh = () => queryClient.invalidateQueries({ queryKey: queryKeys.members });
   const invite = useMutation({

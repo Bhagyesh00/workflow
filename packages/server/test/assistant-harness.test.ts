@@ -21,7 +21,7 @@ const echo: AssistantToolDefinition = {
   name: 'harness_echo',
   description: 'Echo the input (test seam)',
   input: z.object({ text: z.string() }),
-  minRole: 'editor',
+  access: 'workflow:update',
   async handler(_ctx, _run, input) {
     return input;
   },
@@ -111,7 +111,9 @@ describe('createAssistantHarness', () => {
       const user = harness.users[role];
       expect(user.role).toBe(role);
       expect(user.tenantId).toBe(tenantId);
-      expect((await ctx.repos.memberships.get(tenantId, user.userId))?.role).toBe(role);
+      // P6-39: `editor` and `viewer` are members holding that role on the team project
+      const stored = (await ctx.repos.memberships.get(tenantId, user.userId))?.role;
+      expect(stored).toBe(role === 'editor' || role === 'viewer' ? 'member' : role);
       const me = await user.client.get('/rest/settings');
       expect(me.statusCode).toBe(200);
     }

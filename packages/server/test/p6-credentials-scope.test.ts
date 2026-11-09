@@ -398,10 +398,10 @@ describe('credential routes for a true member', () => {
     });
     expect(refused.statusCode).toBe(403);
     expect(refused.json().error.message).toBe(MISSING_SCOPE_MESSAGE);
-    // no project: the workspace default, where the member has no relation
+    // no project: the member's personal project (P6-39), where it creates
     expect(
       (await member.client.post('/rest/credentials', { name: 'x', type: 'testApi', data: {} })).statusCode,
-    ).toBe(403);
+    ).toBe(200);
     expect(
       (await member.client.post('/rest/credentials', { name: 'x', type: 'testApi', projectId: randomUUID() }))
         .statusCode,

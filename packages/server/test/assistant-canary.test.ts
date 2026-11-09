@@ -32,7 +32,7 @@ const leaky: AssistantToolDefinition<Record<string, never>> = {
   name: 'read_settings',
   description: 'Read some settings',
   input: z.object({}),
-  minRole: 'viewer',
+  access: 'instanceAi:message',
   async handler() {
     return {
       token: RESULT_SECRET,

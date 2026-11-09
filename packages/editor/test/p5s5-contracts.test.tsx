@@ -118,7 +118,8 @@ describe('S5 routes', () => {
       { timeout: 20_000 },
     );
     const nav = await screen.findByRole('navigation', { name: 'Main' }, { timeout: 20_000 });
-    await within(nav).findByRole('link', { name: 'Workflows' });
+    // P6-41: the lists moved to the project navigation; Settings is the main nav's last link
+    await within(nav).findByRole('link', { name: 'Settings' });
     return { nav, queryClient };
   }
 

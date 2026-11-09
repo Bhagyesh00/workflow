@@ -90,7 +90,7 @@ async function setup(role = 'project:editor') {
 /** a workflow of another workspace */
 async function foreignWorkflow() {
   const stranger = await signup(server.app);
-  const projectId = await server.ctx.repos.projects.defaultProjectFor(stranger.tenant.id);
+  const projectId = (await server.ctx.repos.projects.oldestTeam(stranger.tenant.id))!.id;
   return workflowIn(server, stranger.tenant.id, projectId, { name: 'Foreign' });
 }
 

@@ -39,39 +39,39 @@ afterAll(async () => {
   await server?.close();
 });
 
-/** the expected table: the grant scope that unlocks the tool, its `access` scope and the old role that holds it (the legacy map) */
-const EXPECTED: Record<string, { scope: McpScope; access: Scope; minRole: Role }> = {
-  search_workflows: { scope: 'workflow:read', access: 'workflow:list', minRole: 'viewer' },
-  get_workflow_details: { scope: 'workflow:read', access: 'workflow:read', minRole: 'viewer' },
-  get_workflow_history: { scope: 'workflow:read', access: 'workflow:read', minRole: 'viewer' },
-  get_workflow_version: { scope: 'workflow:read', access: 'workflow:read', minRole: 'viewer' },
-  get_workflow_versions_diff: { scope: 'workflow:read', access: 'workflow:read', minRole: 'viewer' },
-  publish_workflow: { scope: 'workflow:write', access: 'workflow:publish', minRole: 'editor' },
-  unpublish_workflow: { scope: 'workflow:write', access: 'workflow:unpublish', minRole: 'editor' },
-  get_workflow_execution: { scope: 'execution:read', access: 'execution:read', minRole: 'viewer' },
-  search_workflow_executions: { scope: 'execution:read', access: 'execution:list', minRole: 'viewer' },
-  execute_workflow: { scope: 'workflow:execute', access: 'workflow:execute', minRole: 'editor' },
-  test_workflow: { scope: 'workflow:execute', access: 'workflow:execute', minRole: 'editor' },
-  prepare_workflow_pin_data: { scope: 'workflow:execute', access: 'workflow:execute', minRole: 'editor' },
-  list_credentials: { scope: 'credential:read', access: 'credential:list', minRole: 'viewer' },
-  list_workflow_tags: { scope: 'tag:read', access: 'tag:list', minRole: 'viewer' },
-  search_data_tables: { scope: 'dataTable:read', access: 'dataTable:listProject', minRole: 'viewer' },
-  get_data_table_rows: { scope: 'dataTable:read', access: 'dataTable:readRow', minRole: 'viewer' },
-  create_data_table: { scope: 'dataTable:write', access: 'dataTable:create', minRole: 'editor' },
-  rename_data_table: { scope: 'dataTable:write', access: 'dataTable:update', minRole: 'editor' },
-  add_data_table_column: { scope: 'dataTable:write', access: 'dataTable:writeColumn', minRole: 'editor' },
-  rename_data_table_column: { scope: 'dataTable:write', access: 'dataTable:writeColumn', minRole: 'editor' },
-  delete_data_table_column: { scope: 'dataTable:write', access: 'dataTable:writeColumn', minRole: 'editor' },
-  add_data_table_rows: { scope: 'dataTable:write', access: 'dataTable:writeRow', minRole: 'editor' },
-  search_folders: { scope: 'project:read', access: 'folder:list', minRole: 'viewer' },
-  create_folder: { scope: 'project:write', access: 'folder:create', minRole: 'editor' },
-  update_folder: { scope: 'project:write', access: 'folder:update', minRole: 'editor' },
-  move_workflows_to_folder: { scope: 'workflow:write', access: 'workflow:update', minRole: 'editor' },
-  search_projects: { scope: 'project:read', access: 'project:read', minRole: 'viewer' },
+/** the expected table: the grant scope that unlocks the tool, its `access` scope and `read`: a project viewer may call it (else it needs a project editor) */
+const EXPECTED: Record<string, { scope: McpScope; access: Scope; read: boolean }> = {
+  search_workflows: { scope: 'workflow:read', access: 'workflow:list', read: true },
+  get_workflow_details: { scope: 'workflow:read', access: 'workflow:read', read: true },
+  get_workflow_history: { scope: 'workflow:read', access: 'workflow:read', read: true },
+  get_workflow_version: { scope: 'workflow:read', access: 'workflow:read', read: true },
+  get_workflow_versions_diff: { scope: 'workflow:read', access: 'workflow:read', read: true },
+  publish_workflow: { scope: 'workflow:write', access: 'workflow:publish', read: false },
+  unpublish_workflow: { scope: 'workflow:write', access: 'workflow:unpublish', read: false },
+  get_workflow_execution: { scope: 'execution:read', access: 'execution:read', read: true },
+  search_workflow_executions: { scope: 'execution:read', access: 'execution:list', read: true },
+  execute_workflow: { scope: 'workflow:execute', access: 'workflow:execute', read: false },
+  test_workflow: { scope: 'workflow:execute', access: 'workflow:execute', read: false },
+  prepare_workflow_pin_data: { scope: 'workflow:execute', access: 'workflow:execute', read: false },
+  list_credentials: { scope: 'credential:read', access: 'credential:list', read: true },
+  list_workflow_tags: { scope: 'tag:read', access: 'tag:list', read: true },
+  search_data_tables: { scope: 'dataTable:read', access: 'dataTable:listProject', read: true },
+  get_data_table_rows: { scope: 'dataTable:read', access: 'dataTable:readRow', read: true },
+  create_data_table: { scope: 'dataTable:write', access: 'dataTable:create', read: false },
+  rename_data_table: { scope: 'dataTable:write', access: 'dataTable:update', read: false },
+  add_data_table_column: { scope: 'dataTable:write', access: 'dataTable:writeColumn', read: false },
+  rename_data_table_column: { scope: 'dataTable:write', access: 'dataTable:writeColumn', read: false },
+  delete_data_table_column: { scope: 'dataTable:write', access: 'dataTable:writeColumn', read: false },
+  add_data_table_rows: { scope: 'dataTable:write', access: 'dataTable:writeRow', read: false },
+  search_folders: { scope: 'project:read', access: 'folder:list', read: true },
+  create_folder: { scope: 'project:write', access: 'folder:create', read: false },
+  update_folder: { scope: 'project:write', access: 'folder:update', read: false },
+  move_workflows_to_folder: { scope: 'workflow:write', access: 'workflow:update', read: false },
+  search_projects: { scope: 'project:read', access: 'project:read', read: true },
 };
 
-const ROLES: Role[] = ['viewer', 'editor', 'admin', 'owner'];
-const RANK: Record<Role, number> = { member: 0, viewer: 1, editor: 2, admin: 3, owner: 4 };
+/** P6-39: the workspace roles (the old `editor` and `viewer` are members with a project role) */
+const ROLES: Role[] = ['member', 'admin', 'owner'];
 
 /** the tenant server's own tools: the table minus the build tools (P5-13, tested by L9) */
 const ownTools = () => {
@@ -99,8 +99,16 @@ async function signup() {
 /** a user of `owner`'s workspace with `role` and an MCP key */
 async function member(owner: Awaited<ReturnType<typeof signup>>, role: Role) {
   const other = await signup();
-  // an old-role user with no project of its own: only the role's workspace scopes count (the legacy map under test)
-  await server.ctx.repos.memberships.add(owner.tenant.id, other.user.id, role);
+  // P6-39: the old names are a `member` holding that project role on the owner's team project, and no project of
+  // its own; any other role is the workspace role
+  const projectRole = role === 'editor' || role === 'viewer' ? `project:${role}` : undefined;
+  await server.ctx.repos.memberships.add(owner.tenant.id, other.user.id, projectRole ? 'member' : role);
+  if (projectRole) {
+    const team =
+      (await server.ctx.repos.projects.oldestTeam(owner.tenant.id)) ??
+      (await server.ctx.repos.projects.create(owner.tenant.id, { name: 'Team', type: 'team' }));
+    await server.ctx.repos.projects.relations.add(owner.tenant.id, team.id, other.user.id, projectRole);
+  }
   const key = (
     await server.ctx.auth.createApiKey(owner.tenant.id, other.user.id, MCP_KEY_LABEL, [], MCP_KEY_AUDIENCE)
   ).key;
@@ -169,8 +177,7 @@ describe('tool table (drift)', () => {
       expect(tool.description.length, tool.name).toBeGreaterThan(10);
       expect(mcpToolDescriptor(tool).inputSchema.type, tool.name).toBe('object');
       // read tools say so; a tool that a viewer may call never writes
-      if (EXPECTED[tool.name].minRole === 'viewer')
-        expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+      if (EXPECTED[tool.name].read) expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
     }
   });
 
@@ -180,9 +187,10 @@ describe('tool table (drift)', () => {
     const stranger = await signup();
     for (const role of ROLES) {
       const c = await caller(user.tenant.id, stranger.user.id, role, [...MCP_SCOPES]);
+      const held = await server.ctx.access.globalScopes(user.tenant.id, role);
       const listed = (await listMcpTools(server.ctx, c)).filter((t) => !MCP_BUILDER_TOOLS.includes(t));
       const expected = Object.entries(EXPECTED)
-        .filter(([, e]) => RANK[role] >= RANK[e.minRole])
+        .filter(([, e]) => held.has(e.access))
         .map(([name]) => name)
         .sort();
       expect(listed.map((t) => t.name).sort(), role).toEqual(expected);
@@ -247,13 +255,16 @@ describe('tool table (drift)', () => {
   it('a viewer key lists only read tools and cannot run or write over the endpoint', async () => {
     const owner = await signup();
     const viewer = await member(owner, 'viewer');
+    // P6-39: the workflow lives in the team project the viewer belongs to
+    owner.client.defaultProjectId = (await server.ctx.repos.projects.oldestTeam(owner.tenant.id))!.id;
     const wf = await webhookWorkflow(owner.client);
     const listed = (await rpcCall(owner.url, viewer.key, 'tools/list')).result.tools.map(
       (t: { name: string }) => t.name,
     );
     // the own read tools plus L9's support tools (node search and details, format reference, validate):
-    // read only, no write, no run, no secret
+    // read only, no write, no run, no secret. P6-39: a project viewer reads credentials, so it explores too
     const builderReadTools = [
+      'explore_node_resources',
       'get_node_types',
       'get_workflow_best_practices',
       'get_workflow_format_reference',
@@ -264,7 +275,7 @@ describe('tool table (drift)', () => {
     expect(listed.sort()).toEqual(
       [
         ...Object.entries(EXPECTED)
-          .filter(([, e]) => e.minRole === 'viewer')
+          .filter(([, e]) => e.read)
           .map(([name]) => name),
         ...builderReadTools,
       ].sort(),

@@ -35,7 +35,10 @@ beforeEach(async () => {
 const pool = () => server.ctx.database.pool;
 
 /** a member of `owner`'s workspace with the given role */
-async function member(owner: Awaited<ReturnType<typeof signup>>, role: 'admin' | 'editor' | 'viewer') {
+async function member(
+  owner: Awaited<ReturnType<typeof signup>>,
+  role: 'admin' | 'editor' | 'viewer' | 'member',
+) {
   return (await memberAs(owner, role)).client;
 }
 
@@ -379,9 +382,10 @@ describe('P3 workflows API', () => {
 });
 
 describe('P3 executions API', () => {
-  it('PATCH /executions/:id: viewer 403, other tenant 404, body checked', async () => {
+  it('PATCH /executions/:id: a member outside the project 403, other tenant 404, body checked', async () => {
     const owner = await signup(server.app);
-    const viewer = await member(owner, 'viewer');
+    // P6-39: execution:read, so a project viewer annotates; a member with no project role does not
+    const viewer = await member(owner, 'member');
     const other = await signup(server.app);
     const wf = await createWorkflow(owner.client, manual());
     const { executionId } = await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/run`, {}));
@@ -412,19 +416,28 @@ describe('P3 public API', () => {
 
   it('lists the folder routes and the new workflow fields in openapi.json', async () => {
     const doc = (await server.app.inject({ url: '/api/v1/openapi.json' })).json();
-    expect(Object.keys(doc.paths['/folders']).sort()).toEqual(['get', 'post']);
-    expect(Object.keys(doc.paths['/folders/{folderId}']).sort()).toEqual(['delete', 'get', 'patch']);
-    expect(doc.paths['/folders/{folderId}'].delete.parameters.map((p: { name: string }) => p.name)).toContain(
-      'transferToFolderId',
-    );
+    expect(Object.keys(doc.paths['/projects/{projectId}/folders']).sort()).toEqual(['get', 'post']);
+    expect(Object.keys(doc.paths['/projects/{projectId}/folders/{folderId}']).sort()).toEqual([
+      'delete',
+      'get',
+      'patch',
+    ]);
     expect(
-      doc.paths['/folders'].get.responses[200].content['application/json'].schema.properties.data.items,
+      doc.paths['/projects/{projectId}/folders/{folderId}'].delete.parameters.map(
+        (p: { name: string }) => p.name,
+      ),
+    ).toContain('transferToFolderId');
+    expect(
+      doc.paths['/projects/{projectId}/folders'].get.responses[200].content['application/json'].schema
+        .properties.data.items,
     ).toEqual({ $ref: '#/components/schemas/Folder' });
     expect(doc.components.schemas.Folder.properties.tags.items).toEqual({
       $ref: '#/components/schemas/TagRef',
     });
     // the published PATCH body caps tagIds as the handler's folderUpdateSchema does (50)
-    const patchBody = doc.paths['/folders/{folderId}'].patch.requestBody.content['application/json'].schema;
+    const patchBody =
+      doc.paths['/projects/{projectId}/folders/{folderId}'].patch.requestBody.content['application/json']
+        .schema;
     expect(patchBody.properties.tagIds.maxItems).toBe(50);
     expect(doc.paths['/workflows/{id}'].put.parameters.map((p: { name: string }) => p.name)).toContain(
       'publishIfActive',
@@ -435,13 +448,15 @@ describe('P3 public API', () => {
   });
 
   it('checks keys and roles on the folder and archive routes', async () => {
-    const { ownerKey, viewerKey } = await keys();
-    expect((await api(undefined, 'GET', '/folders')).statusCode).toBe(401);
-    expect((await api(viewerKey, 'POST', '/folders', { name: 'F' })).statusCode).toBe(403);
+    const { owner, ownerKey, viewerKey } = await keys();
+    // P6-34: the public folder routes are under a project
+    const folders = `/projects/${owner.client.defaultProjectId}/folders`;
+    expect((await api(undefined, 'GET', folders)).statusCode).toBe(401);
+    expect((await api(viewerKey, 'POST', folders, { name: 'F' })).statusCode).toBe(403);
     // GET /folders/:folderId is folder:read, as the list: a viewer passes the role check (L16 stub: 501)
     const folderId = '00000000-0000-4000-8000-000000000001';
-    expect([200, 404, 501]).toContain((await api(viewerKey, 'GET', `/folders/${folderId}`)).statusCode);
-    expect((await api(viewerKey, 'GET', '/folders')).statusCode).not.toBe(403);
+    expect([200, 404, 501]).toContain((await api(viewerKey, 'GET', `${folders}/${folderId}`)).statusCode);
+    expect((await api(viewerKey, 'GET', folders)).statusCode).not.toBe(403);
     const wf = await api(ownerKey, 'POST', '/workflows', { name: 'W', nodes: [] });
     const id = wf.json().data.id;
     expect((await api(viewerKey, 'POST', `/workflows/${id}/archive`)).statusCode).toBe(403);

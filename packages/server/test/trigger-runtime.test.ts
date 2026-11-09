@@ -422,8 +422,8 @@ describe('GET /active-workflows/error/:id', () => {
 
     const other = await signup(server.app, { workspaceName: 'Other' });
     const res = await other.client.get(url(wf.id));
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.message).toContain('could not be found');
+    // P6 S1: another workspace's workflow id is 404 at the scope check
+    expect(res.statusCode).toBe(404);
     expect(res.body).not.toContain('Connection lost');
     expect((await new TestClient(server.app).get(url(wf.id))).statusCode).toBe(401);
   });

@@ -2,13 +2,13 @@
  * /rest/executions/* and /rest/binary-data. P6-25: a run follows its workflow: the routes check
  * `execution:*` (or `workflow:execute`) on the run, which resolves through its workflow's projects; a run
  * with no workflow (`workflow_id` null) holds only the global scopes, so owner and admin. The list passes the
- * caller's access filter. `PATCH /executions/:id` keeps today's editor gate until the cutover (L24).
+ * caller's access filter. `PATCH /executions/:id` (annotations) needs `execution:read` on the run (P6-39).
  */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import type { ExecutionRow } from '../db/schema';
-import { type AuthContext, requireAuth, requireRole, requireScope } from '../http/auth';
+import { type AuthContext, requireAuth, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { decodeCursor, encodeCursor, page, paginationQuery } from '../http/pagination';
 import { annotationPatchSchema, idParams } from '../http/schemas';
@@ -225,9 +225,8 @@ export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext
     return { data: { ...(await getExecution(ctx, auth.tenant.id, id)), scopes } };
   });
 
-  // P3-09: tags and / or vote. Today's editor gate stays until the cutover (L24; n8n: `execution:read`)
+  // P3-09: tags and / or vote; n8n's `execution:read` on the run (P6-39)
   app.patch('/executions/:id', async (request) => {
-    requireRole(request, 'editor');
     const { auth, id } = await onExecution(request, 'execution:read');
     const body = parse(annotationPatchSchema, request.body);
     return {

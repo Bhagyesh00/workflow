@@ -170,14 +170,18 @@ describe('DraftCard', () => {
     expect(within(card).getByRole('button', { name: 'Accept' })).toBeTruthy();
   });
 
-  it('a viewer sees why Accept and Discard are off', async () => {
+  it('a project viewer keeps Accept and Discard: it creates in its personal project (P6-39)', async () => {
     await draftOfSavedWorkflow();
     backend().setDemoRole('viewer');
     renderCard(draftDto());
     const card = await loadedCard('Draft Hook poster');
-    await within(card).findByText(DRAFT_VIEWER_REASON, undefined, WAIT);
-    expect((within(card).getByRole('button', { name: 'Accept' }) as HTMLButtonElement).disabled).toBe(true);
-    expect((within(card).getByRole('button', { name: 'Discard' }) as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(
+      () =>
+        expect((within(card).getByRole('button', { name: 'Accept' }) as HTMLButtonElement).disabled).toBe(false),
+      WAIT,
+    );
+    expect((within(card).getByRole('button', { name: 'Discard' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(within(card).queryByText(DRAFT_VIEWER_REASON)).toBeNull();
   });
 
   it('a new workflow lists the nodes it adds, and markup stays text', async () => {

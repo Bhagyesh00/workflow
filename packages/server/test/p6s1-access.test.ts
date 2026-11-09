@@ -1,7 +1,7 @@
 /**
  * P6-03 C0 access contract (C0c1): AccessService scopes, masks, implicit members, 404 against 403,
  * the per-request cache, list filters and the repository narrowing, custom roles, the personal space
- * policy, the legacy role map and the credential checks. Rows are set up through the repositories.
+ * policy, the old roles (gone since P6-39) and the credential checks. Rows are set up through the repositories.
  */
 import { randomUUID } from 'node:crypto';
 import {
@@ -17,7 +17,7 @@ import type { FastifyRequest } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Role } from '../src/db/schema';
 import { type AuthContext, requireScope } from '../src/http/auth';
-import { AccessService, LEGACY_ROLE_SCOPES, MISSING_SCOPE_MESSAGE } from '../src/services/access';
+import { AccessService, MISSING_SCOPE_MESSAGE } from '../src/services/access';
 import {
   assertCredentialsUsable,
   InaccessibleCredentialError,
@@ -263,43 +263,12 @@ describe('scopesFor', () => {
   });
 });
 
-describe('legacy roles', () => {
-  it('give editor and viewer today rights, workspace wide', async () => {
+describe('old roles (P6-39)', () => {
+  it('are gone: editor and viewer are no system role and hold no scope', async () => {
     const { tenant } = await workspace();
-    const viewer = LEGACY_ROLE_SCOPES.viewer;
-    const editor = LEGACY_ROLE_SCOPES.editor;
-    for (const scope of ['credential:read', 'annotationTag:create', 'tag:create', 'tag:update'] as Scope[]) {
-      expect(viewer.has(scope)).toBe(false);
-      expect(editor.has(scope)).toBe(true);
-    }
-    expect(editor.has('tag:delete')).toBe(true);
-    for (const scope of viewer) expect(editor.has(scope)).toBe(true);
-    for (const scope of ['project:list', 'project:read', 'workflow:read', 'credential:list'] as Scope[]) {
-      expect(viewer.has(scope)).toBe(true);
-    }
-    const never: Scope[] = [
-      'project:create',
-      'role:manage',
-      'workflow:share',
-      'workflow:move',
-      'credential:share',
-      'credential:move',
-    ];
-    for (const scope of never) {
-      expect(viewer.has(scope)).toBe(false);
-      expect(editor.has(scope)).toBe(false);
-    }
-    expect(await access.globalScopes(tenant.id, 'editor')).toBe(editor);
-    expect(await access.globalScopes(tenant.id, 'viewer')).toBe(viewer);
+    expect((await access.globalScopes(tenant.id, 'editor')).size).toBe(0);
+    expect((await access.globalScopes(tenant.id, 'viewer')).size).toBe(0);
     expect(await access.globalScopes(tenant.id, 'member')).toBe(GLOBAL_ROLE_SCOPES.member);
-
-    // workspace wide: an old editor updates a workflow of a project it has no relation on
-    const project = await team(tenant.id, 'Team');
-    const workflow = await workflowIn(tenant.id, project.id);
-    const old = await user(tenant.id, 'editor');
-    const scopes = await access.scopesFor(tenant.id, old.id, { workflowId: workflow.id });
-    expect(scopes.has('workflow:update')).toBe(true);
-    expect(scopes.has('workflow:share')).toBe(false);
   });
 });
 
@@ -368,10 +337,8 @@ describe('listFilter and the repositories', () => {
     await repos().projects.relations.add(tenant.id, mine.id, member.id, 'project:viewer');
     await repos().projects.relations.add(tenant.id, sharee.id, member.id, 'project:editor');
     const lonely = await user(tenant.id, 'member');
-    const old = await user(tenant.id, 'viewer');
 
     expect(await access.listFilter(authOf(tenant, owner, 'owner'), 'workflow:list')).toEqual({ all: true });
-    expect(await access.listFilter(authOf(tenant, old, 'viewer'), 'workflow:list')).toEqual({ all: true });
     expect(await access.listFilter(authOf(tenant, lonely, 'member'), 'workflow:list')).toEqual({
       all: false,
       projectIds: [],
@@ -531,11 +498,14 @@ describe('credentials', () => {
 });
 
 describe('projects, variables and the target project', () => {
-  it('targetProject takes the given id, else the oldest team project, which is made when missing', async () => {
+  it("targetProject takes the given id, else the caller's personal project (P6-39)", async () => {
     const { tenant, owner } = await workspace('Fresh');
     const auth = authOf(tenant, owner, 'owner');
     const made = await access.targetProject(auth);
-    expect(await repos().projects.get(tenant.id, made)).toMatchObject({ type: 'team', name: 'Fresh' });
+    expect(await repos().projects.get(tenant.id, made)).toMatchObject({
+      type: 'personal',
+      ownerUserId: owner.id,
+    });
     expect(await access.targetProject(auth)).toBe(made);
     const second = await team(tenant.id, 'Second');
     expect(await access.targetProject(auth, second.id)).toBe(second.id);

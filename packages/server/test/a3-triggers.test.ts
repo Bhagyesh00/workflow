@@ -345,7 +345,9 @@ describe('R39: push streams are re-validated', () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const stream = await openStream(viewer.cookie!);
     try {
-      await owner.client.data(owner.client.delete(`/rest/members/${userId}`));
+      await owner.client.data(
+        owner.client.request('DELETE', `/rest/members/${userId}`, { deleteData: true }),
+      );
       await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
       await waitFor(async () => stream.ended(), { message: 'the stream to end' });
     } finally {

@@ -118,9 +118,14 @@ describe('public API', () => {
   });
 
   it('applies the key owner role', async () => {
-    const { key } = await apiKey('viewer');
+    const { key, client } = await apiKey('viewer');
     expect((await api(key, 'GET', '/workflows')).statusCode).toBe(200);
-    const res = await api(key, 'POST', '/workflows', { name: 'x', nodes: [] });
+    // P6-39: a project viewer cannot create in the team project (its personal project is its own)
+    const res = await api(key, 'POST', '/workflows', {
+      name: 'x',
+      nodes: [],
+      projectId: client.defaultProjectId,
+    });
     expect(res.statusCode).toBe(403);
   });
 

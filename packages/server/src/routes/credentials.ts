@@ -80,7 +80,7 @@ async function accessFields(
 export async function createCredential(
   ctx: ServerContext,
   tenantId: string,
-  body: z.output<typeof credentialCreateSchema> & { projectId?: string },
+  body: z.output<typeof credentialCreateSchema> & { projectId: string },
   userId: string,
   ip: string,
 ) {
@@ -182,7 +182,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     return { data, nextCursor: null };
   });
 
-  // P6-24: into the body's project (else the workspace default) with `credential:create` there
+  // P6-24: into the body's project (else the caller's personal project) with `credential:create` there
   app.post('/credentials', async (request) => {
     const auth = requireAuth(request);
     const projectId = await ctx.access.targetProject(auth, rawField(request, 'projectId'));

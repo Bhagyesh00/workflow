@@ -11,7 +11,6 @@ import {
   resetDatabase,
   signup,
   type TestServer,
-  teamProjectOf,
 } from './helpers';
 
 let server: TestServer;
@@ -36,7 +35,7 @@ async function viewerKey() {
   const owner = await signup(server.app);
   const { client: viewer } = await memberAs(owner, 'viewer', { email: 'v@example.com', name: 'V' });
   const key = await viewer.data(viewer.post('/rest/api-keys', { name: 'v' }));
-  return key.key as string;
+  return { key: key.key as string, team: owner.client.defaultProjectId! };
 }
 
 const api = (key: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, payload?: unknown) =>
@@ -197,14 +196,18 @@ describe('public API data tables', () => {
     expect((await api(a.key, 'GET', '/data-tables/not-a-uuid')).statusCode).toBe(400);
   });
 
-  it('creates in the workspace default project, or in the project the body names (P6-34)', async () => {
+  it("creates in the caller's personal project (P6-39), or in the project the body names (P6-34)", async () => {
     const owner = await signup(server.app);
     const key = (await owner.client.data(owner.client.post('/rest/api-keys', { name: 'k' }))).key as string;
-    const home = await teamProjectOf(server, owner.tenant.id);
+    const home = (await server.ctx.repos.projects.getPersonal(owner.tenant.id, owner.user.id))!.id;
     const made = await api(key, 'POST', '/data-tables', { name: 'in_default', columns: [] });
     expect(made.json().data.projectId).toBe(home);
     const other = await projectIn(server, owner.tenant.id, 'Other');
-    const named = await api(key, 'POST', '/data-tables', { name: 'in_other', columns: [], projectId: other.id });
+    const named = await api(key, 'POST', '/data-tables', {
+      name: 'in_other',
+      columns: [],
+      projectId: other.id,
+    });
     expect(named.statusCode).toBe(200);
     expect(named.json().data.projectId).toBe(other.id);
     const unknown = await api(key, 'POST', '/data-tables', {
@@ -228,10 +231,12 @@ describe('public API data tables', () => {
     expect(refused.statusCode).toBe(403);
   });
 
-  it('refuses writes to a viewer key', async () => {
-    const key = await viewerKey();
+  it('refuses writes in the team project to a viewer key', async () => {
+    const { key, team } = await viewerKey();
     expect((await api(key, 'GET', '/data-tables')).statusCode).toBe(200);
-    expect((await api(key, 'POST', '/data-tables', { name: 't', columns: [] })).statusCode).toBe(403);
+    expect(
+      (await api(key, 'POST', '/data-tables', { name: 't', columns: [], projectId: team })).statusCode,
+    ).toBe(403);
   });
 });
 

@@ -17,7 +17,7 @@ import { reviewGate, useReviewUi } from '../src/features/reviews/review-publish'
 import { newId } from '../src/lib/ids';
 import { useToastStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
-import { backend, signedIn } from './backend';
+import { addMembership, backend, signedIn } from './backend';
 import { renderApp, testQueryClient } from './utils';
 
 const node = (id: string, name: string, type: string, x: number): WorkflowNode => ({
@@ -33,7 +33,7 @@ function addMember(name: string, role: 'viewer' | 'editor' | 'admin'): string {
   const b = backend();
   const id = newId();
   b.users.push({ id, email: `${name.toLowerCase()}@example.com`, name, password: 'secret-pass-1' });
-  b.memberships.push({ tenantId: b.session!.tenantId, userId: id, role });
+  addMembership(id, role);
   return id;
 }
 
@@ -365,8 +365,9 @@ describe('review detail', () => {
   it('offers neither button to a reviewer who can no longer publish', async () => {
     const s = await scene();
     const review = await submitRequest(s);
-    const membership = backend().memberships.find((m) => m.userId === s.reviewer);
-    if (membership) membership.role = 'viewer';
+    // P6-39: the reviewer becomes a project viewer of the workflow's project
+    const relation = backend().projectRelations.find((r) => r.userId === s.reviewer);
+    if (relation) relation.role = 'project:viewer';
     actAs(s.reviewer);
     renderApp(`/inbox/${review.id}`);
     expect(await screen.findByRole('heading', { name: /Ship version two/ })).toBeTruthy();

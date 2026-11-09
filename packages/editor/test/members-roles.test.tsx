@@ -18,7 +18,7 @@ function setup() {
   const growth = demo.createProject({ tenantId, name: 'Growth', type: 'team' });
   demo.createProject({ tenantId, name: 'Ops', type: 'team' });
   demo.users.push({ id: 'u-sam', email: 'sam@example.com', name: 'Sam Shaw', password: 'x' });
-  demo.memberships.push({ tenantId, userId: 'u-sam', role: 'viewer', globalRole: 'member' });
+  demo.memberships.push({ tenantId, userId: 'u-sam', role: 'member' });
   demo.projectRelations.push({ tenantId, projectId: growth.id, userId: 'u-sam', role: 'project:editor' });
   addDemoRole(demo, {
     tenantId,
@@ -49,7 +49,7 @@ describe('members page roles', () => {
     const user = userEvent.setup();
     await user.selectOptions(select, 'global:auditor');
     await waitFor(() =>
-      expect(backend().memberships.find((m) => m.userId === 'u-sam')?.globalRole).toBe('global:auditor'),
+      expect(backend().memberships.find((m) => m.userId === 'u-sam')?.role).toBe('global:auditor'),
     );
     expect(await screen.findByText('Role updated', {}, T)).toBeTruthy();
   });

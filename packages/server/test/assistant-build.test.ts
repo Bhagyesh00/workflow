@@ -219,8 +219,11 @@ describe('build_workflow', () => {
   });
 
   it('GET shows the draft, the diff and the credential Accept assigns', async () => {
+    // P6-39: the draft lands in the owner's personal project, so the credential is one of it
+    const personal = (await h.ctx.repos.projects.getPersonal(h.tenantId, h.owner.userId))!.id;
     const credential = await h.owner.client.data<{ id: string }>(
       h.owner.client.post('/rest/credentials', {
+        projectId: personal,
         name: 'Hook header',
         type: 'httpHeaderAuth',
         data: { name: 'x-key', value: 'header-secret-value-1' },
@@ -489,18 +492,16 @@ describe('build_workflow', () => {
     expect(sent).not.toContain(CANARY.secret);
   });
 
-  it("another user's draft is 404, a viewer's Accept 403", async () => {
+  it("another user's draft is 404 to every role (P6-39: a viewer builds in its personal project)", async () => {
     const { threadId, draftId } = await buildDraft();
     const shown = await seen(threadId, draftId);
-    for (const user of [h.admin, h.editor]) {
+    for (const user of [h.admin, h.editor, h.viewer]) {
       expect((await user.client.get(draftUrl(threadId, draftId))).statusCode).toBe(404);
       expect(
         (await user.client.post(`${draftUrl(threadId, draftId)}/accept`, { updatedAt: shown })).statusCode,
       ).toBe(404);
       expect((await user.client.post(`${draftUrl(threadId, draftId)}/discard`, {})).statusCode).toBe(404);
     }
-    expect((await h.viewer.client.post(`${draftUrl(threadId, draftId)}/accept`, {})).statusCode).toBe(403);
-    expect((await h.viewer.client.post(`${draftUrl(threadId, draftId)}/discard`, {})).statusCode).toBe(403);
     expect((await h.other.owner.client.get(draftUrl(threadId, draftId))).statusCode).toBe(404);
     expect((await h.owner.client.get(draftUrl(threadId, 'not-a-draft'))).statusCode).toBe(404);
     expect((await draftsOf(threadId))[draftId].status).toBe('open');

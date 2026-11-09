@@ -157,10 +157,10 @@ describe('the check', () => {
     expect(viewer.statusCode).toBe(403);
   });
 
-  it('names neither: the default project of a create, with workflow:create there', async () => {
+  it("names neither: the caller's personal project (P6-39), with workflow:create there", async () => {
     const { member, owner } = await setup();
-    const denied = await member.client.post('/rest/node-types/options', body('readTarget'));
-    expect(denied.statusCode).toBe(403);
+    const own = await member.client.post('/rest/node-types/options', body('readTarget'));
+    expect(own.statusCode).toBe(200);
     const allowed = await owner.client.post('/rest/node-types/options', body('readTarget'));
     expect(allowed.statusCode).toBe(200);
   });

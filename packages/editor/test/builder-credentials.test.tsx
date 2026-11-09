@@ -87,9 +87,11 @@ describe('credentials of a draft on the canvas (P5-62)', () => {
 
   it('the draft gets the first credential of each type, the request carries none, and the review shows it', async () => {
     const user = userEvent.setup();
+    // P6-39: a create with no project goes to the personal project; these belong with the workflow's team project
+    const projectId = backend().oldestTeamProject(backend().auth().tenant.id).id;
     for (const body of [
-      { name: 'Main CRM', type: 'crmApi', data: { apiKey: 'main-secret' } },
-      { name: 'Backup CRM', type: 'crmApi', data: { apiKey: 'backup-secret' } },
+      { name: 'Main CRM', type: 'crmApi', data: { apiKey: 'main-secret' }, projectId },
+      { name: 'Backup CRM', type: 'crmApi', data: { apiKey: 'backup-secret' }, projectId },
     ]) {
       await backend().handle({ method: 'POST', path: '/credentials', body });
     }

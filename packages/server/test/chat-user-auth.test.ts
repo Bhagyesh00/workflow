@@ -225,7 +225,9 @@ describe('the Chat Trigger with Workspace sign-in', () => {
     const { cookie } = await signedIn(viewer.client, url);
     const authToken = String(configOf((await get(url, { cookie })).body).authToken);
     expect((await get(url, { cookie })).statusCode).toBe(200);
-    await admin.client.data(admin.client.delete(`/rest/members/${viewer.id}`));
+    await admin.client.data(
+      admin.client.request('DELETE', `/rest/members/${viewer.id}`, { deleteData: true }),
+    );
     const page = await get(url, { cookie });
     expect(page.statusCode).toBe(302);
     expect(String(page.headers.location)).toContain('/form-auth');

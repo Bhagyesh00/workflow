@@ -174,7 +174,7 @@ describe('auth', () => {
     const other = await signup(server.app, { workspaceName: 'Other' });
     const accepted = await memberAs(owner, 'editor', { email: other.user.email, name: 'Other' });
     expect(accepted.tenant.id).toBe(owner.tenant.id);
-    expect(accepted.role).toBe('editor');
+    expect(accepted.role).toBe('member');
 
     const me = await other.client.data(other.client.get('/rest/auth/me'));
     expect(me.tenants.map((t: { slug: string }) => t.slug).sort()).toEqual(['main', 'other']);
@@ -182,7 +182,7 @@ describe('auth', () => {
       other.client.post('/rest/auth/switch-tenant', { tenantId: owner.tenant.id }),
     );
     expect(switched.tenant.id).toBe(owner.tenant.id);
-    expect(switched.role).toBe('editor');
+    expect(switched.role).toBe('member');
     expect((await other.client.data(other.client.get('/rest/auth/me'))).tenant.id).toBe(owner.tenant.id);
 
     const stranger = await signup(server.app);
@@ -192,11 +192,15 @@ describe('auth', () => {
 });
 
 describe('members and roles', () => {
-  it('invites a viewer who can read but not write', async () => {
+  it('invites a member who, as a project viewer, can read but not write', async () => {
     const owner = await signup(server.app);
+    const team = owner.client.defaultProjectId!;
     const wf = await createWorkflow(owner.client, { nodes: [node('Start', 'core.manualTrigger')] });
+    // P6-39: the old words are no workspace role any more
+    const old = await owner.client.post('/rest/members/invite', { email: 'old@example.com', role: 'viewer' });
+    expect(old.statusCode).toBe(400);
     const invite = await owner.client.data(
-      owner.client.post('/rest/members/invite', { email: 'viewer@example.com', role: 'viewer' }),
+      owner.client.post('/rest/members/invite', { email: 'viewer@example.com', role: 'member' }),
     );
     expect(invite.inviteUrl).toContain(invite.token);
 
@@ -204,7 +208,12 @@ describe('members and roles', () => {
     const joined = await viewer.data(
       viewer.post(`/rest/invitations/${invite.token}/accept`, { name: 'Viewer', password: 'Passw0rd!' }),
     );
-    expect(joined.role).toBe('viewer');
+    expect(joined.role).toBe('member');
+    await owner.client.data(
+      owner.client.post(`/rest/projects/${team}/users`, {
+        relations: [{ userId: joined.user.id, role: 'project:viewer' }],
+      }),
+    );
     // invitations are single-use
     const again = await new TestClient(server.app).post(`/rest/invitations/${invite.token}/accept`, {
       name: 'V',
@@ -217,14 +226,13 @@ describe('members and roles', () => {
     expect((await viewer.get('/rest/credentials')).statusCode).toBe(200);
 
     const writes = [
-      await viewer.post('/rest/workflows', { name: 'x', nodes: [] }),
+      await viewer.post('/rest/workflows', { name: 'x', nodes: [], projectId: team }),
       await viewer.patch(`/rest/workflows/${wf.id}`, { versionId: wf.versionId, name: 'y' }),
       await viewer.delete(`/rest/workflows/${wf.id}`),
       await viewer.post(`/rest/workflows/${wf.id}/run`, {}),
-      await viewer.post('/rest/credentials', { name: 'c', type: 'testApi', data: {} }),
-      await viewer.post('/rest/tags', { name: 't' }),
+      await viewer.post('/rest/credentials', { name: 'c', type: 'testApi', data: {}, projectId: team }),
       await viewer.post('/rest/variables', { key: 'K', value: 'v' }),
-      await viewer.post('/rest/members/invite', { email: 'x@example.com', role: 'viewer' }),
+      await viewer.post('/rest/members/invite', { email: 'x@example.com', role: 'member' }),
     ];
     for (const res of writes) {
       expect(res.statusCode).toBe(403);
@@ -233,10 +241,12 @@ describe('members and roles', () => {
     const cred = await owner.client.data(
       owner.client.post('/rest/credentials', { name: 'c', type: 'testApi', data: { apiKey: 'secret' } }),
     );
-    expect((await viewer.get(`/rest/credentials/${cred.id}`)).statusCode).toBe(403);
+    // P6-39 (n8n): a project viewer reads a credential of its project, and any member makes tags
+    expect((await viewer.get(`/rest/credentials/${cred.id}`)).statusCode).toBe(200);
+    expect((await viewer.post('/rest/tags', { name: 't' })).statusCode).toBe(200);
 
     const members = await owner.client.data(owner.client.get('/rest/members'));
-    expect(members.map((m: { role: string }) => m.role).sort()).toEqual(['owner', 'viewer']);
+    expect(members.map((m: { role: string }) => m.role).sort()).toEqual(['member', 'owner']);
   });
 
   it('manages roles and protects the last owner', async () => {
@@ -248,7 +258,7 @@ describe('members and roles', () => {
     const adminId = user.id;
 
     // admins cannot touch owners or grant ownership
-    expect((await admin.patch(`/rest/members/${owner.user.id}`, { role: 'viewer' })).statusCode).toBe(403);
+    expect((await admin.patch(`/rest/members/${owner.user.id}`, { role: 'member' })).statusCode).toBe(403);
     expect(
       (await admin.post('/rest/members/invite', { email: 'o@example.com', role: 'owner' })).statusCode,
     ).toBe(403);
@@ -256,12 +266,12 @@ describe('members and roles', () => {
     const demote = await owner.client.patch(`/rest/members/${owner.user.id}`, { role: 'admin' });
     expect(demote.statusCode).toBe(409);
 
-    await owner.client.data(owner.client.patch(`/rest/members/${adminId}`, { role: 'editor' }));
+    await owner.client.data(owner.client.patch(`/rest/members/${adminId}`, { role: 'member' }));
     expect(
-      (await admin.post('/rest/members/invite', { email: 'z@example.com', role: 'viewer' })).statusCode,
+      (await admin.post('/rest/members/invite', { email: 'z@example.com', role: 'member' })).statusCode,
     ).toBe(403);
 
-    await owner.client.data(owner.client.delete(`/rest/members/${adminId}`));
+    await owner.client.data(owner.client.request('DELETE', `/rest/members/${adminId}`, { deleteData: true }));
     // removing a member ends their sessions in that workspace
     expect((await admin.get('/rest/auth/me')).statusCode).toBe(401);
 

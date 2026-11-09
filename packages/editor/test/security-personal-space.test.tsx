@@ -17,7 +17,7 @@ function setup() {
   const demo = signedIn();
   const { tenant, user } = demo.auth();
   const personal = demo.personalProject(tenant.id, user.id);
-  const team = demo.defaultProjectFor(tenant.id);
+  const team = demo.oldestTeamProject(tenant.id);
   const shared = demo.seedWorkflow({
     name: 'Shared flow',
     projectId: personal.id,

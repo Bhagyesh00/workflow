@@ -83,7 +83,7 @@ describe('node credential picker', () => {
   function setup() {
     const demo = signedIn();
     const tenantId = demo.auth().tenant.id;
-    const alpha = demo.defaultProjectFor(tenantId);
+    const alpha = demo.oldestTeamProject(tenantId);
     const beta = demo.createProject({ tenantId, name: 'Beta team', type: 'team' });
     credential(demo, 'Alpha key', alpha.id);
     credential(demo, 'Beta key', beta.id);
@@ -175,7 +175,7 @@ describe('node credential picker', () => {
 describe('option and list calls', () => {
   it('a saved workflow is named by its id', async () => {
     const demo = signedIn();
-    const dto = openWorkflow(demo, demo.defaultProjectFor(demo.auth().tenant.id).id);
+    const dto = openWorkflow(demo, demo.oldestTeamProject(demo.auth().tenant.id).id);
     const spy = vi.spyOn(nodeTypesApi, 'loadOptions');
     renderParameters(kitchenSink, { parameters: { resource: 'deal' } });
     await waitFor(() => expect(spy).toHaveBeenCalled(), LONG);
@@ -185,7 +185,7 @@ describe('option and list calls', () => {
 
   it('with no saved workflow the call names the project page’s project', async () => {
     const demo = signedIn();
-    const team = demo.defaultProjectFor(demo.auth().tenant.id);
+    const team = demo.oldestTeamProject(demo.auth().tenant.id);
     useProjectStore.getState().setCurrentProject(team.id);
     const spy = vi.spyOn(nodeTypesApi, 'loadOptions');
     renderParameters(kitchenSink, { parameters: { resource: 'deal' } });
@@ -214,7 +214,7 @@ describe('option and list calls', () => {
       body: { ...body, projectId: 'nope' },
     });
     expect(unknown.status).toBe(404);
-    const team = backend().defaultProjectFor(backend().auth().tenant.id);
+    const team = backend().oldestTeamProject(backend().auth().tenant.id);
     const named = await backend().handle({
       method: 'POST',
       path: '/node-types/options',

@@ -112,7 +112,7 @@ describe('R63: token-bearing paths are redacted in request logs', () => {
   it('logs no invitation token, resume signature or execution id, on any request log line', async () => {
     const { client } = await signup(server.app);
     const invite = await client.data(
-      client.post('/rest/members/invite', { email: 'new@example.com', role: 'editor' }),
+      client.post('/rest/members/invite', { email: 'new@example.com', role: 'member' }),
     );
     const guessed = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
     const executionId = randomUUID();
