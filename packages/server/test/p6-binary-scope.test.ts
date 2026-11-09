@@ -3,18 +3,22 @@
  * `execution:read` on that run (through its workflow); an Assistant thread attachment is its thread owner's
  * only; a webhook lifecycle hook's file (`activation/<workflowId>/...`) needs `workflow:read` on that workflow,
  * and an older `activation/<file>` without one is owner and admin only. Another workspace's id, a path
- * trick or an unknown folder is 404.
+ * trick or an unknown folder is 404. Inside a run a node reads, and a retry copies, only the files of this
+ * run, its parent runs and the runs of workflows owned by or shared into its project.
  */
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { NodePackage, NodeType } from '@workflow/workflow';
+import type { NodePackage, NodeType, WorkflowNode } from '@workflow/workflow';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { StoredRunOptions } from '../src/services/executions';
 import {
   addToProject,
+  chain,
   createTestServer,
   memberAs,
   node,
+  outputOf,
   projectIn,
   realMember,
   resetDatabase,
@@ -22,6 +26,7 @@ import {
   type TestClient,
   type TestServer,
   waitFor,
+  waitForExecution,
   workflowIn,
 } from './helpers';
 
@@ -64,7 +69,49 @@ const binaryHook: NodeType = {
   },
 };
 
-const hookPackage: NodePackage = { name: 'p6-binary-tests', nodes: [binaryHook], credentials: [] };
+/** reads the file of its first input item (`binary.data`) as text */
+const readFile: NodeType = {
+  description: {
+    name: 'p6.readFile',
+    displayName: 'Read the input file',
+    description: '',
+    group: ['transform'],
+    version: 1,
+    defaults: { name: 'Read' },
+    inputs: ['main'],
+    outputs: ['main'],
+    properties: [],
+  },
+  async execute(ctx) {
+    const data = await ctx.helpers.getBinaryDataBuffer(0, 'data');
+    return [[{ json: { text: Buffer.from(data).toString() } }]];
+  },
+};
+
+/** outputs one item whose file (`binary.data`) is the id in its `fileId` parameter */
+const emitFile: NodeType = {
+  description: {
+    name: 'p6.emitFile',
+    displayName: 'Output a file id',
+    description: '',
+    group: ['transform'],
+    version: 1,
+    defaults: { name: 'Emit' },
+    inputs: ['main'],
+    outputs: ['main'],
+    properties: [{ displayName: 'File', name: 'fileId', type: 'string', default: '' }],
+  },
+  async execute(ctx) {
+    const id = String(ctx.getNodeParameter('fileId', 0));
+    return [[{ json: {}, binary: { data: { id, mimeType: 'text/plain', fileName: 'f.txt', data: '' } } }]];
+  },
+};
+
+const hookPackage: NodePackage = {
+  name: 'p6-binary-tests',
+  nodes: [binaryHook, readFile, emitFile],
+  credentials: [],
+};
 
 let server: TestServer;
 
@@ -195,5 +242,118 @@ describe('files of webhook lifecycle hooks', () => {
     const old = await storedFile(tenantId, 'activation');
     expect((await fetchFile(owner.client, old)).statusCode).toBe(200);
     expect((await fetchFile(member.client, old)).statusCode).toBe(403);
+  });
+});
+
+describe('files inside a run', () => {
+  /** a workflow in `projectId`: a manual trigger (its pinned item carries the file) into `next` */
+  const fileWorkflow = async (tenantId: string, projectId: string, next: WorkflowNode) =>
+    workflowIn(server, tenantId, projectId, {
+      name: 'Takes a file',
+      nodes: [node('Start', 'core.manualTrigger'), { ...next, position: [200, 0] }],
+      connections: chain('Start', next.name),
+    });
+  const fileItem = (id: string) => [{ json: {}, binary: { data: { id, mimeType: 'text/plain', data: '' } } }];
+  const runAs = async (client: TestClient, tenantId: string, workflowId: string, id: string) => {
+    const { executionId } = await client.data<{ executionId: string }>(
+      client.post(`/rest/workflows/${workflowId}/run`, { pinData: { Start: fileItem(id) } }),
+    );
+    return { executionId, row: await waitForExecution(server.ctx, tenantId, executionId) };
+  };
+
+  it('a node reads the files of its project and of shared workflows, never another project', async () => {
+    const { owner, member, alpha, inAlpha, inBeta, tenantId } = await setup('project:editor');
+    const reader = await fileWorkflow(tenantId, alpha.id, node('Read', 'p6.readFile'));
+    const sameProject = await storedFile(tenantId, await runOf(tenantId, inAlpha.id));
+    const otherProject = await storedFile(tenantId, await runOf(tenantId, inBeta.id));
+
+    const ok = await runAs(member.client, tenantId, reader.id, sameProject);
+    expect(ok.row.status).toBe('success');
+    const okData = await server.ctx.repos.executions.getData(tenantId, ok.executionId);
+    expect(outputOf(okData!.state, 'Read')).toEqual([{ text: 'file bytes' }]);
+
+    const refused = await runAs(member.client, tenantId, reader.id, otherProject);
+    expect(refused.row.status).toBe('error');
+    expect(refused.row.errorMessage).toBe('Binary data not found');
+
+    // shared into alpha, beta's workflow's runs are alpha's to read too
+    await server.ctx.repos.shares.set(tenantId, 'workflow', inBeta.id, [alpha.id]);
+    const shared = await runAs(member.client, tenantId, reader.id, otherProject);
+    expect(shared.row.status).toBe('success');
+    // the owner's run of the same workflow follows the workflow's project, not the user
+    await server.ctx.repos.shares.set(tenantId, 'workflow', inBeta.id, []);
+    expect((await runAs(owner.client, tenantId, reader.id, otherProject)).row.status).toBe('error');
+  });
+
+  it("a retry copies the files of its project's runs and none of another project", async () => {
+    const { member, alpha, inAlpha, inBeta, tenantId } = await setup('project:editor');
+    const failing = await fileWorkflow(tenantId, alpha.id, node('Fail', 'test.fail'));
+    const sameProject = await storedFile(tenantId, await runOf(tenantId, inAlpha.id));
+    const otherProject = await storedFile(tenantId, await runOf(tenantId, inBeta.id));
+
+    const retried = async (id: string) => {
+      const { executionId, row } = await runAs(member.client, tenantId, failing.id, id);
+      expect(row.status).toBe('error');
+      const retry = await member.client.data<{ executionId: string }>(
+        member.client.post(`/rest/executions/${executionId}/retry`, {}),
+      );
+      await waitForExecution(server.ctx, tenantId, retry.executionId);
+      const data = await server.ctx.repos.executions.getData(tenantId, retry.executionId);
+      const pinned = (data!.runOptions as StoredRunOptions).pinData?.Start?.[0]?.binary?.data?.id;
+      return { retryId: retry.executionId, pinned: pinned ?? '' };
+    };
+
+    const copied = await retried(sameProject);
+    expect(copied.pinned).toBe(`fs:${tenantId}/${copied.retryId}/${sameProject.split('/').pop()}`);
+    const res = await fetchFile(member.client, copied.pinned);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe('file bytes');
+
+    // not copied: the reference still names beta's run, which the member cannot read
+    const kept = await retried(otherProject);
+    expect(kept.pinned).toBe(otherProject);
+    const name = otherProject.split('/').pop();
+    expect((await fetchFile(member.client, `fs:${tenantId}/${kept.retryId}/${name}`)).statusCode).toBe(404);
+    expect((await fetchFile(member.client, otherProject)).statusCode).toBe(403);
+  });
+
+  it("a webhook answers with the last node's file of its project only", async () => {
+    const { owner, alpha, inAlpha, inBeta, tenantId } = await setup();
+    const sameProject = await storedFile(tenantId, await runOf(tenantId, inAlpha.id));
+    const otherProject = await storedFile(tenantId, await runOf(tenantId, inBeta.id));
+    const answer = async (webhookPath: string, fileId: string) => {
+      const wf = await owner.client.data<{ id: string }>(
+        owner.client.post('/rest/workflows', {
+          name: `Answers ${webhookPath}`,
+          projectId: alpha.id,
+          nodes: [
+            node(
+              'Webhook',
+              'core.webhook',
+              {
+                httpMethod: 'POST',
+                path: webhookPath,
+                responseMode: 'lastNode',
+                responseData: 'firstEntryBinary',
+              },
+              [0, 0],
+              { webhookId: webhookPath },
+            ),
+            node('Emit', 'p6.emitFile', { fileId }, [200, 0]),
+          ],
+          connections: chain('Webhook', 'Emit'),
+        }),
+      );
+      await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/activate`));
+      return server.app.inject({ method: 'POST', url: `/webhook/${owner.tenant.slug}/${webhookPath}` });
+    };
+
+    const ok = await answer('p6-own-file', sameProject);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.body).toBe('file bytes');
+    // a saved run of alpha whose last node names beta's file never answers with it
+    const refused = await answer('p6-foreign-file', otherProject);
+    expect(refused.statusCode).not.toBe(200);
+    expect(refused.body).not.toContain('file bytes');
   });
 });

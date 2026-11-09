@@ -513,7 +513,9 @@ describe('filter kinds', () => {
 
 describe('Simple Vector Store memory keys', () => {
   const list = VectorStoreInMemoryNode.methods!.listSearch!.vectorStoresSearch;
-  const asTenant = (tenantId: string) => ({ getTenantId: () => tenantId }) as never;
+  // P6-25: the list is of the project's keys; 'p1' is the project of the harness runs (`services`)
+  const asTenant = (tenantId: string, projectId = 'p1') =>
+    ({ getTenantId: () => tenantId, getProjectId: () => projectId }) as never;
   const simple = (key: unknown) =>
     node('Store', 'ai.vectorStoreInMemory', { mode: 'insert', memoryKey: key });
 
@@ -540,6 +542,8 @@ describe('Simple Vector Store memory keys', () => {
     expect((await list(asTenant('tenant-b'))).results.map((r) => r.value)).toEqual(['kb-other']);
     expect((await list(asTenant('tenant-c'))).results).toEqual([]);
     expect((await list(asTenant('tenant-b'), 'alpha')).results).toEqual([]);
+    // another project of the same tenant has none of these keys
+    expect((await list(asTenant('tenant-a', 'p2'))).results).toEqual([]);
   });
 
   it('reads a locator value and a plain string alike, and creates a new key by name', async () => {

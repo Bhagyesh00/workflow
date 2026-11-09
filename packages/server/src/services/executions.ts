@@ -24,6 +24,7 @@ import {
   WorkflowExecute,
 } from '@workflow/core';
 import {
+  type BinaryData,
   type CallerPolicy,
   type ChatChunkMeta,
   ExecutionCancelledError,
@@ -51,6 +52,7 @@ import type { PinoLogger } from '../logger';
 import { toWorkflowLogger } from '../logger';
 import { currentPeriod, effectiveLimits, executionTimeoutMs, type TenantSettings } from '../plans';
 import type { Repositories } from '../repositories';
+import { isUuid } from '../repositories/util';
 import type { MessageBus, PushService } from './bus';
 import { assertCredentialsUsable } from './credential-usable';
 import type { CredentialService } from './credentials';
@@ -328,7 +330,7 @@ export class ExecutionService {
     // bounds them and they are not billable, so a plan's concurrent limit never blocks a test run (P5-02)
     if (input.mode !== 'integrated' && input.mode !== 'evaluation')
       await this.checkLimits(tenant, input.mode);
-    // P6 S1: the credentials must be usable in the run's project (the row's, else the given one); L4 fills the check
+    // P6 S1: the credentials must be usable in the run's project (the row's, else the given one)
     const runProject = await this.runProjectOf(tenant.id, input.workflowId, input.projectId);
     if (runProject) await assertCredentialsUsable(this.deps, tenant.id, runProject, input.workflow);
 
@@ -892,7 +894,13 @@ export class ExecutionService {
       });
     } else {
       if (lastNodeOutput)
-        lastNodeOutput = await this.handOverBinaryData(tenant.id, row, lastNodeOutput, delivery);
+        lastNodeOutput = await this.handOverBinaryData(
+          tenant.id,
+          row,
+          lastNodeOutput,
+          delivery,
+          run.projectId,
+        );
       await repos.executions.delete(tenant.id, row.id);
       await this.removeBinaryData(tenant.id, row.id);
     }
@@ -937,17 +945,25 @@ export class ExecutionService {
     row: ExecutionRow,
     output: Item[][],
     delivery: Delivery,
+    /** the stored project of a run with no workflow row */
+    storedProjectId: string | undefined,
   ): Promise<Item[][]> {
     if (this.deps.config.binaryData.mode !== 'filesystem') return output;
     const waited = delivery === 'bus' || (delivery === 'local' && this.waiters.has(row.id));
     if (!waited) return output;
     // node outputs are frozen
     const copy = JSON.parse(JSON.stringify(output)) as Item[][];
+    // P6-25: only the files this run may reach are handed over
+    const reach = this.binaryReach(tenantId, {
+      executionId: row.id,
+      projectId: await this.runProjectOf(tenantId, row.workflowId, storedProjectId),
+      workflowId: row.workflowId ?? undefined,
+    });
     if (row.parentExecutionId) {
-      await this.adoptBinaryData(tenantId, row.parentExecutionId, copy);
+      await this.adoptBinaryData(tenantId, row.parentExecutionId, copy, reach);
       return copy;
     }
-    const store = this.binaryStore(tenantId);
+    const store = this.reachableStore(tenantId, reach);
     for (const item of copy.flat()) {
       for (const [key, binary] of Object.entries(item?.binary ?? {})) {
         const { id, ...inline } = binary;
@@ -975,6 +991,105 @@ export class ExecutionService {
     return config.binaryData.mode === 'filesystem'
       ? new FileSystemBinaryDataStore(config.binaryData.dir, tenantId)
       : new InlineBinaryDataStore();
+  }
+
+  /**
+   * P6-25: whether a run may reach a stored file by its id, so that a run never reaches another project's
+   * files. `fs:<tenant>/<executionId>/<file>` resolves when that execution is this run, one of its parent
+   * runs, or a run of a workflow owned by or shared into this run's project; `fs:<tenant>/activation/
+   * <workflowId>/<file>` when that workflow is this run's or is in its project. A folder run with no
+   * workflow row, `activation/<file>` and any other id do not resolve (the route serves those to owner
+   * and admin only). Answers are kept for the life of the returned check.
+   */
+  binaryReach(
+    tenantId: string,
+    run: { executionId: string; projectId?: string; workflowId?: string },
+  ): (id: string) => Promise<boolean> {
+    const { repos } = this.deps;
+    let parents: Promise<Set<string>> | undefined;
+    const parentRuns = async () => {
+      const ids = new Set<string>();
+      let id = run.executionId;
+      // the bound stops a loop in bad data
+      while (isUuid(id) && ids.size < 100) {
+        const parent = (await repos.executions.get(tenantId, id))?.parentExecutionId;
+        if (!parent || ids.has(parent)) break;
+        ids.add(parent);
+        id = parent;
+      }
+      return ids;
+    };
+    const inProject = async (workflowId: string) => {
+      if (workflowId === run.workflowId) return true;
+      if (!run.projectId) return false;
+      const workflow = await repos.workflows.get(tenantId, workflowId);
+      if (!workflow) return false;
+      if (workflow.projectId === run.projectId) return true;
+      return (await repos.shares.projectsSharingWorkflow(tenantId, workflowId)).includes(run.projectId);
+    };
+    const reachFolder = async (folder: string) => {
+      if (!isUuid(folder)) return false;
+      parents ??= parentRuns();
+      if ((await parents).has(folder)) return true;
+      const workflowId = (await repos.executions.get(tenantId, folder))?.workflowId;
+      return workflowId ? inProject(workflowId) : false;
+    };
+    const known = new Map<string, Promise<boolean>>();
+    const cached = (key: string, answer: () => Promise<boolean>) => {
+      let found = known.get(key);
+      if (!found) {
+        found = answer();
+        known.set(key, found);
+      }
+      return found;
+    };
+    return async (id) => {
+      const parts = id.startsWith('fs:') ? id.slice(3).split('/') : [];
+      if (parts[0] !== tenantId) return false;
+      if (parts.length === 3 && run.executionId && parts[1] === run.executionId) return true;
+      if (parts.length === 3) return cached(parts[1], () => reachFolder(parts[1]));
+      if (parts.length === 4 && parts[1] === 'activation' && isUuid(parts[2])) {
+        return cached(`activation/${parts[2]}`, () => inProject(parts[2]));
+      }
+      return false;
+    };
+  }
+
+  /**
+   * P6-25: the filesystem store with `getBuffer` limited to the files `reach` allows and the files this
+   * store wrote (a context with no execution writes to `activation/`)
+   */
+  private reachableStore(tenantId: string, reach: (id: string) => Promise<boolean>): BinaryDataStore {
+    const store = this.binaryStore(tenantId);
+    if (this.deps.config.binaryData.mode !== 'filesystem') return store;
+    const written = new Set<string>();
+    return {
+      store: async (data, meta) => {
+        const stored = await store.store(data, meta);
+        if (stored.id) written.add(stored.id);
+        return stored;
+      },
+      getBuffer: async (binary) => {
+        if (binary.id && !written.has(binary.id) && !(await reach(binary.id))) {
+          throw new Error('Binary data not found');
+        }
+        return store.getBuffer(binary);
+      },
+    };
+  }
+
+  /**
+   * P6-25: the bytes of a stored file that a finished run hands out (a webhook answering with the last
+   * node's file), read with that run's reach: never another project's file
+   */
+  async runBinaryBuffer(tenantId: string, executionId: string, binary: BinaryData): Promise<Uint8Array> {
+    const row = await this.deps.repos.executions.get(tenantId, executionId);
+    const reach = this.binaryReach(tenantId, {
+      executionId,
+      projectId: await this.runProjectOf(tenantId, row?.workflowId, undefined),
+      workflowId: row?.workflowId ?? undefined,
+    });
+    return this.reachableStore(tenantId, reach).getBuffer(binary);
   }
 
   async buildServices(input: {
@@ -1013,7 +1128,15 @@ export class ExecutionService {
       nodeTypes,
       credentialTypes: credentials.types,
       credentials: credentials.provider(tenant.id, input.projectId, { allow: input.allowCredentials }),
-      binaryData: this.binaryStore(tenant.id),
+      // P6-25: a node reads only the stored files of this run, its parent runs and its project
+      binaryData: this.reachableStore(
+        tenant.id,
+        this.binaryReach(tenant.id, {
+          executionId,
+          projectId: input.projectId,
+          workflowId: input.workflowId,
+        }),
+      ),
       codeRunner,
       pythonRunner,
       dataTables: dataTables.forProject(tenant.id, input.projectId, { workflowId: input.workflowId }),
@@ -1408,13 +1531,19 @@ export class ExecutionService {
     const names = new Set(definition.nodes.map((n) => n.name));
     // the retry owns copies of every binary file it references: the original may be pruned or deleted
     const retryId = randomUUID();
+    // P6-25: the retry copies only the files the original run may reach (never another project's)
+    const reach = this.binaryReach(tenantId, {
+      executionId: row.id,
+      projectId: await this.runProjectOf(tenantId, row.workflowId, runOptions.projectId),
+      workflowId: row.workflowId ?? undefined,
+    });
     const clone = <T>(value: T): T => (value === undefined ? value : JSON.parse(JSON.stringify(value)));
     const launch = async (
       input: Partial<StartExecutionInput>,
       ...owned: unknown[]
     ): Promise<StartedExecution> => {
       try {
-        for (const value of owned) await this.adoptBinaryData(tenantId, retryId, value);
+        for (const value of owned) await this.adoptBinaryData(tenantId, retryId, value, reach);
         return await this.start({
           tenantId,
           workflow: definition,
@@ -1487,10 +1616,15 @@ export class ExecutionService {
 
   /**
    * Copy the filesystem binary files that `value` references into the directory of `executionId`
-   * and point the references (mutated in place) at the copies. A file that is already gone keeps
-   * its reference.
+   * and point the references (mutated in place) at the copies. A file that is already gone, or that
+   * `reach` refuses (P6-25: another project's), keeps its reference and is not copied.
    */
-  private async adoptBinaryData(tenantId: string, executionId: string, value: unknown): Promise<void> {
+  private async adoptBinaryData(
+    tenantId: string,
+    executionId: string,
+    value: unknown,
+    reach: (id: string) => Promise<boolean>,
+  ): Promise<void> {
     const { config } = this.deps;
     if (config.binaryData.mode !== 'filesystem') return;
     const prefix = `fs:${tenantId}/`;
@@ -1500,7 +1634,7 @@ export class ExecutionService {
       const ref = node as { id?: unknown; mimeType?: unknown };
       if (typeof ref.id === 'string' && ref.id.startsWith(prefix) && typeof ref.mimeType === 'string') {
         const parts = ref.id.slice(3).split('/');
-        if (parts.length !== 3 || parts.some(unsafe)) return;
+        if (parts.length !== 3 || parts.some(unsafe) || !(await reach(ref.id))) return;
         const target = binaryDirOf(config, tenantId, executionId);
         await mkdir(target, { recursive: true });
         try {

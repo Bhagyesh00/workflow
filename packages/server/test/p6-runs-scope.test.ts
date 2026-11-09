@@ -189,6 +189,30 @@ describe('execution routes by workflow scope', () => {
     expect((await admin.client.get(`/rest/executions/${orphan}`)).statusCode).toBe(200);
   });
 
+  it('the projectId filter lists the runs of that project, through the access filter', async () => {
+    const { owner, member, alpha, beta, inAlpha, inBeta, tenantId } = await setup();
+    const gamma = await projectIn(server, tenantId, 'Gamma');
+    const inGamma = await workflowIn(server, tenantId, gamma.id, { name: 'In gamma' });
+    await addToProject(server, tenantId, beta.id, member.user.id, 'project:viewer');
+    const own = await runOf(tenantId, inAlpha.id);
+    const other = await runOf(tenantId, inBeta.id);
+    const hidden = await runOf(tenantId, inGamma.id);
+
+    const ids = async (client: typeof owner.client, projectId: string) =>
+      (
+        (await client.data(client.get(`/rest/executions?projectId=${projectId}`))) as Array<{ id: string }>
+      ).map((r) => r.id);
+    expect(await ids(member.client, alpha.id)).toEqual([own]);
+    expect(await ids(member.client, beta.id)).toEqual([other]);
+    // a project the member holds nothing in answers an empty list, as the workflows list
+    expect(await ids(member.client, gamma.id)).toEqual([]);
+    expect(await ids(owner.client, gamma.id)).toEqual([hidden]);
+    // a workflow shared into alpha brings its runs into alpha's list
+    await server.ctx.repos.shares.set(tenantId, 'workflow', inGamma.id, [alpha.id]);
+    expect(new Set(await ids(member.client, alpha.id))).toEqual(new Set([own, hidden]));
+    expect((await member.client.get('/rest/executions?projectId=nope')).statusCode).toBe(400);
+  });
+
   it('a run of another workspace is 404', async () => {
     const { owner } = await setup();
     const other = await signup(server.app);

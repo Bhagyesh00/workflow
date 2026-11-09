@@ -20,6 +20,11 @@ const STATUSES = ['new', 'running', 'success', 'error', 'canceled', 'waiting', '
 
 export const executionListQuery = z.object({
   workflowId: z.string().max(64).optional(),
+  /**
+   * P6-25: the runs of this project's workflows (owned by it or shared into it); it narrows the caller's
+   * access filter, so a project the caller holds nothing in answers an empty list (as the workflows list)
+   */
+  projectId: z.uuid().optional(),
   status: z
     .string()
     .max(200)
@@ -83,6 +88,7 @@ export async function listExecutions(
 ) {
   const rows = await ctx.repos.executions.list(tenantId, {
     filter: options.filter,
+    projectId: query.projectId,
     workflowId: query.workflowId,
     status: query.status,
     workflowVersionId: query.workflowVersionId,
