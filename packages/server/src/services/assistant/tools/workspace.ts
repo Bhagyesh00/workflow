@@ -301,6 +301,8 @@ const deleteFolder: AssistantToolDefinition<z.output<typeof deleteFolderInput>> 
     } else if (input.transferToFolderId === 'root') {
       outcome = 'Workflows and subfolders move to the top level';
     } else {
+      // the card never names a folder of a project the caller cannot read
+      await assertScope(ctx, caller, 'folder:read', { folderId: input.transferToFolderId });
       const target = await ctx.folders.get(tenantId, input.transferToFolderId);
       outcome = `Workflows and subfolders move to "${target.name}"`;
     }
@@ -342,6 +344,7 @@ const moveWorkflowToFolder: AssistantToolDefinition<z.output<typeof moveInput>> 
   grantKey: () => 'moveWorkflowToFolder',
   async approval(ctx, caller, input) {
     const name = await workflowName(ctx, caller, input.workflowId);
+    if (input.folderId) await assertScope(ctx, caller, 'folder:read', { folderId: input.folderId });
     const target = input.folderId
       ? (await ctx.folders.get(caller.tenant.id, input.folderId)).name
       : 'Top level';

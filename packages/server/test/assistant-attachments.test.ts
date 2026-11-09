@@ -185,13 +185,7 @@ type Body = { tools?: Array<{ function?: { name?: string } }> };
 const toolNames = (request: unknown) =>
   ((request as Body)?.tools ?? []).map((tool) => tool.function?.name).filter(Boolean);
 
-function chatWith(
-  h: AssistantHarness,
-  user: HarnessUser,
-  threadId: string,
-  files: Upload[],
-  message = 'Read it',
-) {
+function chatWith(user: HarnessUser, threadId: string, files: Upload[], message = 'Read it') {
   return user.client.post(`/rest/assistant/chat/${threadId}`, { message, attachments: files });
 }
 
@@ -223,7 +217,7 @@ async function turn(
   const id = threadId ?? (await h.createThread(user));
   queue(h, ...steps);
   const before = h.fake.requests.length;
-  const res = await chatWith(h, user, id, files);
+  const res = await chatWith(user, id, files);
   expect(res.statusCode, res.body).toBe(200);
   await h.waitForStatus(user, id, (s) => !s.hasActiveRun || s.isSuspended);
   return { threadId: id, requests: h.fake.requests.slice(before) };
@@ -484,7 +478,7 @@ describe('Assistant attachments (P5-74)', () => {
       { toolCalls: [parse('p9', { attachmentIndex: 0 })] },
       { text: 'Done.' },
     );
-    const res = await chatWith(h, h.owner, id, [text('after.txt', MIME.txt, 'text after the card')]);
+    const res = await chatWith(h.owner, id, [text('after.txt', MIME.txt, 'text after the card')]);
     expect(res.statusCode).toBe(200);
     const waiting = await h.waitForStatus(h.owner, id, (s) => !s.hasActiveRun && s.pending.length >= 1);
     expect(written).toEqual([]);
@@ -507,7 +501,7 @@ describe('Assistant attachments (P5-74)', () => {
   describe('limits and types answer 400 with the text', () => {
     const post = async (files: Upload[]) => {
       const id = await h.createThread(h.owner);
-      return chatWith(h, h.owner, id, files);
+      return chatWith(h.owner, id, files);
     };
     const messageOf = (res: { body: string }) =>
       (JSON.parse(res.body) as { error: { message: string } }).error.message;
@@ -557,7 +551,7 @@ describe('Assistant attachments (P5-74)', () => {
 
     it('a rejected message starts no run and stores nothing', async () => {
       const id = await h.createThread(h.owner);
-      const res = await chatWith(h, h.owner, id, [text('logo.svg', 'image/svg+xml', '<svg/>')]);
+      const res = await chatWith(h.owner, id, [text('logo.svg', 'image/svg+xml', '<svg/>')]);
       expect(res.statusCode).toBe(400);
       const status = await h.status(h.owner, id);
       expect(status.hasActiveRun).toBe(false);
@@ -630,7 +624,7 @@ describe('Assistant attachments with BINARY_DATA_MODE=inline (P5-74)', () => {
     const id = await h.createThread(h.owner);
     queue(h, { toolCalls: [parse('n1', { attachmentIndex: 0 })] }, { text: 'Read.' });
     const before = h.fake.requests.length;
-    const res = await chatWith(h, h.owner, id, [text('inline.txt', MIME.txt, content)]);
+    const res = await chatWith(h.owner, id, [text('inline.txt', MIME.txt, content)]);
     expect(res.statusCode).toBe(200);
     await h.waitForStatus(h.owner, id, 'idle');
     expect(inner(result(h.fake.requests.slice(before), 'n1')).text).toBe(content);

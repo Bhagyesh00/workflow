@@ -11,7 +11,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { AssistantConfirmation } from '@workflow/workflow';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { MISSING_SCOPE_MESSAGE } from '../src/services/access';
 import { builtInAssistantTools } from '../src/services/assistant/tools';
 import { toolAccess } from '../src/services/assistant/types';
@@ -25,6 +25,7 @@ import {
   addToProject,
   credentialIn,
   dataTableIn,
+  folderIn,
   projectIn,
   realMember,
   teamProjectOf,
@@ -411,5 +412,243 @@ describe('drafts by project', () => {
     const draft = await putDraft(member, { projectId: mine });
     const discarded = await member.client.post(`${url(draft.threadId, draft.id)}/discard`, {});
     expect(discarded.statusCode).toBe(200);
+  });
+});
+
+describe('list_executions narrowing', () => {
+  async function runOf(workflowId: string): Promise<string> {
+    const id = randomUUID();
+    await h.ctx.repos.executions.create(
+      h.tenantId,
+      {
+        id,
+        workflowId,
+        workflowName: 'Run',
+        mode: 'manual',
+        status: 'success',
+        startedAt: new Date(),
+        stoppedAt: new Date(),
+      },
+      { workflowData: { name: 'Run', nodes: [], connections: {} }, runOptions: {} },
+    );
+    return id;
+  }
+
+  it('projectId keeps the runs of workflows shared into the project; scope shared leaves only those', async () => {
+    const guest = await newMember();
+    const team = (await projectIn(h.server, h.tenantId, `Runs ${suffix()}`)).id;
+    await addToProject(h.server, h.tenantId, team, guest.userId, 'project:editor');
+    const own = await workflowIn(h.server, h.tenantId, team, { name: `Own ${suffix()}` });
+    const lent = await workflowIn(h.server, h.tenantId, theirs, { name: `Lent ${suffix()}` });
+    const hidden = await workflowIn(h.server, h.tenantId, theirs, { name: `Hidden ${suffix()}` });
+    await h.ctx.repos.shares.set(h.tenantId, 'workflow', lent.id, [team]);
+    const ownRun = await runOf(own.id);
+    const lentRun = await runOf(lent.id);
+    const hiddenRun = await runOf(hidden.id);
+
+    const inProject = await h.callTool(guest, 'list_executions', { projectId: team });
+    expect(inProject.result).toContain(ownRun);
+    expect(inProject.result).toContain(lentRun);
+    expect(inProject.result).not.toContain(hiddenRun);
+
+    const sharedOnly = await h.callTool(guest, 'list_executions', { projectId: team, scope: 'shared' });
+    expect(sharedOnly.result).toContain(lentRun);
+    expect(sharedOnly.result).not.toContain(ownRun);
+    expect(sharedOnly.result).not.toContain(hiddenRun);
+  });
+
+  it('scope shared without a project is what others shared into the personal project, for an owner too', async () => {
+    const lent = await workflowIn(h.server, h.tenantId, theirs, { name: `Personal lent ${suffix()}` });
+    const kept = await workflowIn(h.server, h.tenantId, theirs, { name: `Personal kept ${suffix()}` });
+    const lentRun = await runOf(lent.id);
+    const keptRun = await runOf(kept.id);
+    for (const user of [member, h.owner]) {
+      const personal = (await h.ctx.repos.projects.getPersonal(h.tenantId, user.userId))?.id as string;
+      await h.ctx.repos.shares.set(h.tenantId, 'workflow', lent.id, [personal]);
+      const turn = await h.callTool(user, 'list_executions', { scope: 'shared' });
+      expect(turn.result, user.role).toContain(lentRun);
+      expect(turn.result, user.role).not.toContain(keptRun);
+      await h.ctx.repos.shares.set(h.tenantId, 'workflow', lent.id, []);
+    }
+  });
+});
+
+describe('Assistant approval cards by folder scope', () => {
+  it('move_workflow_to_folder shows no folder name of a project the member cannot read', async () => {
+    const flow = await workflowIn(h.server, h.tenantId, mine, { name: `Mover ${suffix()}` });
+    const folder = await folderIn(h.server, h.tenantId, theirs, `Secret folder ${suffix()}`);
+    const turn = await h.callTool(member, 'move_workflow_to_folder', {
+      workflowId: flow.id,
+      folderId: folder.id,
+    });
+    expect(turn.status.isSuspended).toBe(false);
+    expect(turn.status.pending).toEqual([]);
+    expect(turn.result).toContain(MISSING_SCOPE_MESSAGE);
+    expect(turn.result).not.toContain(folder.name);
+    expect(JSON.stringify(h.fake.requests)).not.toContain(folder.name);
+  });
+
+  it('move_workflow_to_folder shows the name of a folder of the member project', async () => {
+    const flow = await workflowIn(h.server, h.tenantId, mine, { name: `Mover ${suffix()}` });
+    const folder = await folderIn(h.server, h.tenantId, mine, `Own folder ${suffix()}`);
+    const turn = await h.callTool(member, 'move_workflow_to_folder', {
+      workflowId: flow.id,
+      folderId: folder.id,
+    });
+    expect(turn.status.isSuspended).toBe(true);
+    const status = await h.waitForStatus(member, turn.threadId, (s) => s.pending.length > 0);
+    expect(JSON.stringify(status.pending[0])).toContain(folder.name);
+  });
+
+  it('delete_folder shows no name of a transfer folder of a project the member cannot read', async () => {
+    const doomed = await folderIn(h.server, h.tenantId, mine, `Doomed ${suffix()}`);
+    const target = await folderIn(h.server, h.tenantId, theirs, `Secret target ${suffix()}`);
+    const turn = await h.callTool(member, 'delete_folder', {
+      folderId: doomed.id,
+      transferToFolderId: target.id,
+    });
+    expect(turn.status.isSuspended).toBe(false);
+    expect(turn.status.pending).toEqual([]);
+    expect(turn.result).toContain(MISSING_SCOPE_MESSAGE);
+    expect(turn.result).not.toContain(target.name);
+    expect(await h.ctx.repos.folders.get(h.tenantId, doomed.id)).toBeTruthy();
+  });
+});
+
+describe('draft view by scope', () => {
+  const url = (threadId: string, id: string) => `/rest/assistant/threads/${threadId}/drafts/${id}`;
+  const postNode = {
+    id: randomUUID(),
+    type: 'core.httpRequest',
+    typeVersion: 1,
+    name: 'Post',
+    position: [0, 0] as [number, number],
+    parameters: {
+      method: 'POST',
+      url: 'http://127.0.0.1:9/',
+      authentication: 'genericCredentialType',
+      genericAuthType: 'httpHeaderAuth',
+    },
+  };
+  async function putDraft(user: HarnessUser, extra: Record<string, unknown>) {
+    const threadId = await h.createThread(user);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    await h.ctx.assistantDrafts.put(h.tenantId, threadId, {
+      id,
+      name: `Draft ${suffix()}`,
+      workflowId: null,
+      baseVersionId: null,
+      definition: { name: 'Draft', nodes: [postNode], connections: {}, settings: {} },
+      createdAt: now,
+      updatedAt: now,
+      status: 'open',
+      nodeCount: 1,
+      issues: [],
+      ...extra,
+    });
+    return { threadId, id };
+  }
+  const assignmentsOf = async (user: HarnessUser, draft: { threadId: string; id: string }) => {
+    const view = await user.client.data<{ assignments: Array<{ credentialId: string }> }>(
+      user.client.get(url(draft.threadId, draft.id)),
+    );
+    return view.assignments.map((a) => a.credentialId);
+  };
+
+  it('names the credentials of a project only while the member may save the draft there', async () => {
+    const guest = await newMember();
+    const team = (await projectIn(h.server, h.tenantId, `Drafts ${suffix()}`)).id;
+    await addToProject(h.server, h.tenantId, team, guest.userId, 'project:editor');
+    const credential = await credentialIn(h.server, h.tenantId, team, {
+      name: `Header ${suffix()}`,
+      type: 'httpHeaderAuth',
+      data: { name: 'x-key', value: 'header-secret-value-2' },
+    });
+    const draft = await putDraft(guest, { projectId: team });
+    expect(await assignmentsOf(guest, draft)).toEqual([credential.id]);
+
+    // the member leaves the project: the draft view stays, the credentials of the project do not show
+    expect(await h.ctx.repos.projects.relations.remove(h.tenantId, team, guest.userId)).toBe(true);
+    const later = await credentialIn(h.server, h.tenantId, team, {
+      name: `Later ${suffix()}`,
+      type: 'httpHeaderAuth',
+      data: { name: 'x-key', value: 'header-secret-value-3' },
+    });
+    const res = await guest.client.get(url(draft.threadId, draft.id));
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.assignments).toEqual([]);
+    expect(JSON.stringify(res.json())).not.toContain(credential.name);
+    expect(JSON.stringify(res.json())).not.toContain(later.id);
+  });
+
+  it('names the credentials of a saved workflow home project only to someone who may update it', async () => {
+    const guest = await newMember();
+    const team = (await projectIn(h.server, h.tenantId, `Drafts viewer ${suffix()}`)).id;
+    await addToProject(h.server, h.tenantId, team, guest.userId, 'project:viewer');
+    const credential = await credentialIn(h.server, h.tenantId, team, {
+      name: `Viewer header ${suffix()}`,
+      type: 'httpHeaderAuth',
+      data: { name: 'x-key', value: 'header-secret-value-4' },
+    });
+    const flow = await workflowIn(h.server, h.tenantId, team, { name: `Viewed ${suffix()}` });
+    const draft = await putDraft(guest, { workflowId: flow.id, baseVersionId: flow.versionId });
+    const res = await guest.client.get(url(draft.threadId, draft.id));
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.assignments).toEqual([]);
+    expect(JSON.stringify(res.json())).not.toContain(credential.id);
+
+    await addToProject(h.server, h.tenantId, team, guest.userId, 'project:editor');
+    expect(await assignmentsOf(guest, draft)).toEqual([credential.id]);
+  });
+
+  it('a lookup failure other than a missing workflow refuses the view', async () => {
+    const guest = await newMember();
+    const flow = await workflowIn(h.server, h.tenantId, theirs, { name: `Unlucky ${suffix()}` });
+    const draft = await putDraft(guest, { workflowId: flow.id, baseVersionId: flow.versionId });
+    const original = h.ctx.access.scopesForAuth.bind(h.ctx.access);
+    const spy = vi
+      .spyOn(h.ctx.access, 'scopesForAuth')
+      .mockImplementation((auth, target) =>
+        target && 'workflowId' in target
+          ? Promise.reject(new Error('lookup failed'))
+          : original(auth, target),
+      );
+    try {
+      const res = await guest.client.get(url(draft.threadId, draft.id));
+      expect(res.statusCode).toBe(500);
+      expect(JSON.stringify(res.json())).not.toContain(flow.name);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('Assistant scope split', () => {
+  const roleOf = async (scopes: string[]) => {
+    const slug = `split-${suffix()}`;
+    await h.ctx.repos.roles.create(h.tenantId, {
+      slug,
+      displayName: slug,
+      roleType: 'global',
+      scopes: scopes as never,
+    });
+    const user = await newMember();
+    await h.ctx.repos.memberships.updateRole(h.tenantId, user.userId, slug);
+    return user;
+  };
+
+  it('instanceAi:message chats, instanceAi:manage sets up, aiAssistant:manage opens neither', async () => {
+    const chatter = await roleOf(['instanceAi:message']);
+    expect((await chatter.client.get('/rest/assistant/threads')).statusCode).toBe(200);
+    expect((await chatter.client.get('/rest/assistant/settings')).statusCode).toBe(403);
+
+    const manager = await roleOf(['instanceAi:manage']);
+    expect((await manager.client.get('/rest/assistant/settings')).statusCode).toBe(200);
+    expect((await manager.client.get('/rest/assistant/threads')).statusCode).toBe(403);
+
+    const usage = await roleOf(['aiAssistant:manage']);
+    expect((await usage.client.get('/rest/assistant/threads')).statusCode).toBe(403);
+    expect((await usage.client.get('/rest/assistant/settings')).statusCode).toBe(403);
   });
 });

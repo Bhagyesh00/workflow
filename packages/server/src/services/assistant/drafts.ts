@@ -21,6 +21,7 @@ import {
   type DoctorIssue,
   diffWorkflows,
   nodeCredentialSlots,
+  type Scope,
   type WorkflowDefinition,
   type WorkflowDiff,
 } from '@workflow/workflow';
@@ -30,7 +31,7 @@ import { type AssistantStoredDraft, assistantThreads } from '../../db/schema';
 import type { AuthContext } from '../../http/auth';
 import { ApiError, parse } from '../../http/errors';
 import { workflowDataSchema } from '../../http/schemas';
-import { MISSING_SCOPE_MESSAGE } from '../access';
+import { type AccessTarget, MISSING_SCOPE_MESSAGE } from '../access';
 import { validateDefinition } from '../ai-builder/tools';
 import { assertCredentialsInTenant } from '../mcp/tools/builder/credential-check';
 import { McpToolError } from '../mcp/workflow-gate';
@@ -232,17 +233,42 @@ export class AssistantDrafts {
     return this.ctx.access.targetProject(auth, named);
   }
 
+  /** the caller's scopes on a target now; null when the target is gone (404), any other failure is thrown */
+  private async heldOn(auth: AuthContext, target: AccessTarget): Promise<ReadonlySet<Scope> | null> {
+    try {
+      return await scopesOn(this.ctx, auth, target);
+    } catch (error) {
+      if (error instanceof ApiError && error.statusCode === 404) return null;
+      throw error;
+    }
+  }
+
+  /** whether the caller may save the draft now: `workflow:update` on its workflow, else `workflow:create` in its project */
+  private async maySave(auth: AuthContext, stored: AssistantStoredDraft): Promise<boolean> {
+    if (stored.workflowId) {
+      return (await this.heldOn(auth, { workflowId: stored.workflowId }))?.has('workflow:update') ?? false;
+    }
+    try {
+      const projectId = await this.projectOf(auth, stored);
+      return (await this.heldOn(auth, { projectId }))?.has('workflow:create') ?? false;
+    } catch (error) {
+      if (error instanceof ApiError && error.statusCode === 404) return false;
+      throw error;
+    }
+  }
+
   /** the caller's draft on the caller's thread; 404 otherwise */
   async get(auth: AuthContext, threadId: string, draftId: string): Promise<AssistantDraftView> {
     const stored = await this.load(auth, threadId, draftId);
     // the saved workflow a draft changes is shown as the base: only to someone who may read it
     if (stored.workflowId) {
-      const held = await scopesOn(this.ctx, auth, { workflowId: stored.workflowId }).catch(() => null);
+      const held = await this.heldOn(auth, { workflowId: stored.workflowId });
       if (held && !held.has('workflow:read')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
     }
     const base = await this.baseOf(auth.tenant.id, stored);
+    // the credentials a project holds are named only to someone who may save the draft there now (Accept's rule)
     const assignments =
-      draftStatus(stored) === 'open'
+      draftStatus(stored) === 'open' && (await this.maySave(auth, stored))
         ? await credentialAssignments(
             this.ctx,
             auth.tenant.id,
@@ -279,7 +305,8 @@ export class AssistantDrafts {
           'workflow:create',
           typeof shown.projectId === 'string' ? shown.projectId : undefined,
         );
-    if (shown.workflowId) await assertScope(this.ctx, auth, 'workflow:update', { workflowId: shown.workflowId });
+    if (shown.workflowId)
+      await assertScope(this.ctx, auth, 'workflow:update', { workflowId: shown.workflowId });
     // one conditional update: open to accepted, only the version the person saw; a second Accept finds none
     const stored = await this.moveStatus(auth, threadId, draftId, {
       from: 'open',
@@ -336,12 +363,9 @@ export class AssistantDrafts {
       throw error;
     }
 
-    const assignments = await credentialAssignments(
-      ctx,
-      tenantId,
-      definition,
-      projectId ?? (await this.projectOf(auth, stored)),
-    );
+    // the project the draft is saved in: Accept's own for a new workflow, else the workflow's home project
+    const home = projectId ?? (await this.projectOf(auth, stored));
+    const assignments = await credentialAssignments(ctx, tenantId, definition, home);
     for (const assignment of assignments) {
       const node = definition.nodes.find((n) => n.name === assignment.nodeName);
       if (!node) continue;
@@ -391,9 +415,20 @@ export class AssistantDrafts {
         throw error;
       }
     } else {
+      // `data` is the checked draft (the same nodes as `definition`), typed as the create input
       saved = await ctx.workflows.create(
         tenantId,
-        { ...input, folderId: null, projectId } as unknown as Parameters<typeof ctx.workflows.create>[1],
+        {
+          name,
+          nodes: data.nodes,
+          connections: data.connections,
+          settings: data.settings ?? {},
+          pinData: data.pinData ?? {},
+          stickyNotes: data.stickyNotes ?? [],
+          nodeGroups: data.nodeGroups ?? [],
+          folderId: null,
+          projectId: home,
+        },
         actor,
       );
     }

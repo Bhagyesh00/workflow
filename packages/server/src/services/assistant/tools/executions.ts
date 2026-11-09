@@ -29,8 +29,8 @@ import { z } from 'zod';
 import type { ServerContext } from '../../../context';
 import type { ExecutionRow, WorkflowRow } from '../../../db/schema';
 import { ApiError, parse } from '../../../http/errors';
-import type { AccessFilter } from '../../access';
-import { executionListQuery, executionSummary, listExecutions } from '../../../routes/executions';
+import { decodeCursor, encodeCursor, page as pageOf } from '../../../http/pagination';
+import { executionListQuery, executionSummary } from '../../../routes/executions';
 import { toDefinition } from '../../workflow-model';
 import { chooseManualStartNode, type WorkflowService } from '../../workflows';
 import { previewOutput, RUN_PREVIEW, runAndCollect, triggerPinData } from '../run-helper';
@@ -41,7 +41,6 @@ import {
   type AssistantToolDefinition,
   assertScope,
   authOf,
-  type ListNarrowing,
   listNarrowing,
   listScopeInput,
   projectIdInput,
@@ -188,22 +187,6 @@ const onExecution = (input: { executionId: string }) => ({ executionId: input.ex
 /** the workflow a call names */
 const onWorkflow = (input: { workflowId: string }) => ({ workflowId: input.workflowId });
 
-/** narrows the caller's access filter to a project or to what is shared with them; never widens it */
-function narrowFilter(filter: AccessFilter, narrow: ListNarrowing): AccessFilter {
-  if (narrow.none) return { all: false, projectIds: [], workflowIds: [], credentialIds: [] };
-  if (narrow.onlySharedWithMe && !narrow.projectId) {
-    return { all: false, projectIds: [], workflowIds: filter.all ? [] : filter.workflowIds, credentialIds: [] };
-  }
-  if (!narrow.projectId) return filter;
-  if (filter.all) return { all: false, projectIds: [narrow.projectId], workflowIds: [], credentialIds: [] };
-  return {
-    all: false,
-    projectIds: filter.projectIds.filter((id) => id === narrow.projectId),
-    workflowIds: [],
-    credentialIds: [],
-  };
-}
-
 // ---------------------------------------------------------------------------------------------
 // reads
 
@@ -236,23 +219,41 @@ const listExecutionsTool: AssistantToolDefinition<{
       limit: input.limit,
       cursor: input.cursor,
     });
-    // only the runs of workflows the caller may list; `projectId` and `scope` only narrow that
+    // only the runs of workflows the caller may list; `projectId` and `scope` only narrow that, through
+    // the repository (the project's own and shared-in workflows, as list_workflows and list_credentials)
     const narrow = await listNarrowing(ctx, run, input);
-    const filter = narrowFilter(await ctx.access.listFilter(authOf(run), 'execution:list'), narrow);
-    const page = await listExecutions(ctx, run.tenant.id, query, { filter });
+    if (narrow.none) return { executions: [], nextCursor: null };
+    let projectId = narrow.projectId;
+    if (narrow.onlySharedWithMe && !projectId) {
+      // what others shared into the caller's personal project
+      projectId = (await ctx.repos.projects.getPersonal(run.tenant.id, run.user.id))?.id;
+      if (!projectId) return { executions: [], nextCursor: null };
+    }
+    const rows = await ctx.repos.executions.list(run.tenant.id, {
+      filter: await ctx.access.listFilter(authOf(run), 'execution:list'),
+      projectId,
+      onlySharedWithMe: narrow.onlySharedWithMe,
+      workflowId: query.workflowId,
+      status: query.status,
+      limit: query.limit,
+      cursor: decodeCursor(query.cursor),
+    });
+    const page = pageOf(rows, query.limit, (r) => encodeCursor(r.createdAt, r.id));
     return {
-      executions: page.data.map((e) => ({
-        id: e.id,
-        workflowId: e.workflowId,
-        workflowName: e.workflowName,
-        mode: e.mode,
-        status: e.status,
-        startedAt: e.startedAt,
-        stoppedAt: e.stoppedAt,
-        durationMs: e.durationMs,
-        ...(e.errorMessage ? { errorMessage: text(e.errorMessage) } : {}),
-        ...(e.errorNode ? { errorNode: e.errorNode } : {}),
-      })),
+      executions: page.data
+        .map((r) => executionSummary(r))
+        .map((e) => ({
+          id: e.id,
+          workflowId: e.workflowId,
+          workflowName: e.workflowName,
+          mode: e.mode,
+          status: e.status,
+          startedAt: e.startedAt,
+          stoppedAt: e.stoppedAt,
+          durationMs: e.durationMs,
+          ...(e.errorMessage ? { errorMessage: text(e.errorMessage) } : {}),
+          ...(e.errorNode ? { errorNode: e.errorNode } : {}),
+        })),
       nextCursor: page.nextCursor,
     };
   },
