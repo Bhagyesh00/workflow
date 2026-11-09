@@ -107,7 +107,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
     // no scope on the route (as n8n): `listFor` narrows the rows to the caller's `workflow:list` access filter,
     // so a member sees the projects it belongs to and a caller with nothing sees an empty list
     const auth = requireAuth(request);
-    return workflows.listFor(auth, parse(workflowListQuery, request.query));
+    // a project filter the caller holds nothing in answers an empty list, as n8n (not 403)
+    return workflows.listFor(auth, parse(workflowListQuery, request.query), { unheldProject: 'narrow' });
   });
 
   app.post('/workflows', async (request) => {

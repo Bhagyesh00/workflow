@@ -10,6 +10,7 @@ import {
   addToProject,
   chain,
   createTestServer,
+  credentialIn,
   folderIn,
   node,
   projectIn,
@@ -42,8 +43,13 @@ const basic = (name = 'Basic') => ({
 });
 
 /** an owner, a member and two team projects; the member is `role` in `alpha` and nothing in `beta` */
+let ipCounter = 0;
+/** a workspace signed up from its own IP (signup is rate limited per IP) */
+const ws = () =>
+  signup(server.app, { remoteAddress: `10.62.${Math.floor(ipCounter / 250)}.${(ipCounter++ % 250) + 1}` });
+
 async function setup(role = 'project:editor') {
-  const owner = await signup(server.app);
+  const owner = await ws();
   const member = await realMember(owner);
   const alpha = await projectIn(server, owner.tenant.id, 'Alpha');
   const beta = await projectIn(server, owner.tenant.id, 'Beta');
@@ -127,13 +133,21 @@ describe('GET /workflows', () => {
     expect(one.map((w: { id: string }) => w.id)).toEqual([inAlpha.id]);
   });
 
-  it('refuses a project filter for a project the member is not in', async () => {
+  it('a project filter for a project the member is not in, or a missing one, answers an empty list (n8n)', async () => {
     const { member, beta } = await setup();
     const res = await member.client.get(`/rest/workflows?projectId=${beta.id}`);
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error.message).toBe(FORBIDDEN);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual([]);
     const missing = await member.client.get('/rest/workflows?projectId=00000000-0000-4000-8000-000000000001');
-    expect(missing.statusCode).toBe(404);
+    expect(missing.statusCode).toBe(200);
+    expect(missing.json().data).toEqual([]);
+  });
+
+  it('a project filter for a project the member is not in still lists what is shared into its own', async () => {
+    const { owner, member, alpha, beta, inBeta } = await setup();
+    await server.ctx.repos.shares.set(owner.tenant.id, 'workflow', inBeta.id, [alpha.id]);
+    const res = await member.client.data(member.client.get(`/rest/workflows?projectId=${beta.id}`));
+    expect(res.map((w: { id: string }) => w.id)).toEqual([inBeta.id]);
   });
 
   it('the sharee mask: a workflow shared into the member project is listed, readable, not deletable', async () => {
@@ -266,6 +280,100 @@ describe('moving and running', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().data.executionId).toBeTruthy();
     expect(owner.tenant.id).toBe(member.tenant.id);
+  });
+});
+
+describe('credentials on save (P6-24, n8n preventTampering)', () => {
+  const NO_ACCESS = (node: string) =>
+    `You don't have access to the credentials in the '${node}' node. Ask the owner to share them with you.`;
+  const useNode = (credential: { id: string | null; name: string }, parameters = {}, id?: string) => ({
+    ...node('Use', 'test.useCredential', parameters, [200, 0], { credentials: { testApi: credential } }),
+    ...(id ? { id } : {}),
+  });
+
+  /** W lives in beta and is shared into alpha; the member is project:editor in alpha only */
+  async function shared() {
+    const s = await setup();
+    const { owner, alpha, beta, inBeta } = s;
+    await server.ctx.repos.shares.set(owner.tenant.id, 'workflow', inBeta.id, [alpha.id]);
+    const homeOnly = await credentialIn(server, owner.tenant.id, beta.id, { name: 'Home only' });
+    const sharedCred = await credentialIn(server, owner.tenant.id, beta.id, { name: 'Shared' });
+    await server.ctx.repos.shares.set(owner.tenant.id, 'credential', sharedCred.id, [alpha.id]);
+    return { ...s, homeOnly, sharedCred };
+  }
+  const save = (client: Awaited<ReturnType<typeof setup>>['member']['client'], id: string, body: object) =>
+    client
+      .get(`/rest/workflows/${id}`)
+      .then((res) =>
+        client.patch(`/rest/workflows/${id}`, { versionId: res.json().data.versionId, ...body }),
+      );
+
+  it('a sharee member cannot add a home-only credential, by id or by name', async () => {
+    const { member, inBeta, homeOnly } = await shared();
+    expect((await member.client.get(`/rest/credentials/${homeOnly.id}`)).statusCode).toBe(403);
+    for (const ref of [
+      { id: homeOnly.id, name: 'Home only' },
+      { id: null, name: 'Home only' },
+    ]) {
+      const res = await save(member.client, inBeta.id, {
+        nodes: [node('Start', 'core.manualTrigger'), useNode(ref)],
+      });
+      expect(res.statusCode, JSON.stringify(ref)).toBe(400);
+      expect(res.json().error.message).toBe(NO_ACCESS('Use'));
+    }
+    // nor through an id written as an expression, which the save cannot resolve
+    const expression = await save(member.client, inBeta.id, {
+      nodes: [useNode({ id: `={{ "${homeOnly.id}" }}`, name: 'x' })],
+    });
+    expect(expression.statusCode).toBe(400);
+    const stored = await server.ctx.repos.workflows.get(member.tenant.id, inBeta.id);
+    expect(JSON.stringify(stored?.nodes)).not.toContain(homeOnly.id);
+  });
+
+  it('a sharee member adds a credential shared into its project', async () => {
+    const { member, inBeta, sharedCred } = await shared();
+    const res = await save(member.client, inBeta.id, {
+      nodes: [useNode({ id: sharedCred.id, name: 'Shared' })],
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('a stored home-only ref stays, but its node keeps its stored form apart from name and position', async () => {
+    const { owner, member, inBeta, homeOnly, sharedCred } = await shared();
+    const nodeId = '11111111-1111-4111-8111-111111111111';
+    const ref = { id: homeOnly.id, name: 'Home only' };
+    const first = await save(owner.client, inBeta.id, {
+      nodes: [useNode(ref, { url: 'https://home.example' }, nodeId)],
+    });
+    expect(first.statusCode).toBe(200);
+    // unchanged ref: the save passes, the parameter change does not land, a move does
+    const moved = await save(member.client, inBeta.id, {
+      nodes: [{ ...useNode(ref, { url: 'https://member.example' }, nodeId), position: [400, 40] }],
+    });
+    expect(moved.statusCode).toBe(200);
+    const stored = (await server.ctx.repos.workflows.get(owner.tenant.id, inBeta.id))!.nodes as Array<{
+      parameters: Record<string, unknown>;
+      position: number[];
+    }>;
+    expect(stored[0].parameters.url).toBe('https://home.example');
+    expect(stored[0].position).toEqual([400, 40]);
+    // the same ref in a new node, or swapped into another slot of the stored one, is refused
+    const copied = await save(member.client, inBeta.id, {
+      nodes: [useNode(ref, {}, nodeId), { ...useNode(ref), name: 'Use 2' }],
+    });
+    expect(copied.statusCode).toBe(400);
+    expect(copied.json().error.message).toBe(NO_ACCESS('Use 2'));
+    // a stored ref the member can read is changed like any other field
+    const swapped = await save(member.client, inBeta.id, {
+      nodes: [useNode({ id: sharedCred.id, name: 'Shared' }, {}, nodeId)],
+    });
+    expect(swapped.statusCode).toBe(200);
+  });
+
+  it('the owner (global credential:read) adds any credential the project can use', async () => {
+    const { owner, inBeta, homeOnly } = await shared();
+    const res = await save(owner.client, inBeta.id, { nodes: [useNode({ id: null, name: homeOnly.name })] });
+    expect(res.statusCode).toBe(200);
   });
 });
 

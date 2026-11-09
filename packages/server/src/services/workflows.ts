@@ -87,6 +87,33 @@ async function withStoredMcpAccess(
     ? { ...rest, availableInMCP: stored.availableInMCP }
     : rest;
 }
+/**
+ * one credential slot of a node as the save guard compares it: by id, by name for a name-only ref, or an
+ * id written as an expression (resolved at run time, so the save cannot tell which credential it reaches)
+ */
+type CredentialRefUse = { slot: string; key: string } & (
+  | { id: string }
+  | { name: string }
+  | { expression: string }
+);
+
+/** the credential refs a node names */
+function credentialRefsOf(node: WorkflowNode): CredentialRefUse[] {
+  const slots = node.credentials;
+  if (!slots || typeof slots !== 'object' || Array.isArray(slots)) return [];
+  return Object.entries(slots).flatMap(([slot, ref]): CredentialRefUse[] => {
+    if (!ref || typeof ref !== 'object') return [];
+    const { id, name } = ref as { id?: unknown; name?: unknown };
+    if (typeof id === 'string' && id.trim() !== '') {
+      return [
+        id.trim().startsWith('=') ? { slot, key: `id:${id}`, expression: id } : { slot, key: `id:${id}`, id },
+      ];
+    }
+    if (typeof name === 'string' && name.trim() !== '') return [{ slot, key: `name:${name}`, name }];
+    return [];
+  });
+}
+
 type UpdateInput = z.output<typeof workflowUpdateSchema>;
 type RunInput = z.output<typeof runSchema>;
 type WorkflowData = z.output<typeof workflowDataSchema>;
@@ -237,15 +264,22 @@ export class WorkflowService {
 
   /**
    * The list of GET /workflows for a caller (P6-22): the access filter of `workflow:list`, the project filter
-   * (`projectId` needs `workflow:list` in that project; `onlySharedWithMe` reads the caller's personal
-   * project), and every row with its `homeProject`, `sharedWithProjects` and, with `includeScopes`, `scopes`.
+   * (`projectId` needs `workflow:list` in that project unless `unheldProject` is 'narrow'; `onlySharedWithMe`
+   * reads the caller's personal project), and every row with its `homeProject`, `sharedWithProjects` and,
+   * with `includeScopes`, `scopes`.
    */
-  async listFor(auth: AuthContext, query: WorkflowListQuery & { includeScopes?: boolean }) {
+  async listFor(
+    auth: AuthContext,
+    query: WorkflowListQuery & { includeScopes?: boolean },
+    options: { unheldProject?: 'forbid' | 'narrow' } = {},
+  ) {
     const { access, repos } = this.deps.context();
     const tenantId = auth.tenant.id;
     const { includeScopes, ...rest } = query;
     let projectId = rest.projectId;
-    if (projectId) {
+    // 'narrow' (GET /rest/workflows, as n8n): a project the caller is not in, or a missing one, is not
+    // refused; the access filter below leaves only what the caller can list (an empty list)
+    if (projectId && options.unheldProject !== 'narrow') {
       const held = await access.scopesForAuth(auth, { projectId });
       if (!held.has('workflow:list')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
     } else if (rest.onlySharedWithMe) {
@@ -310,6 +344,85 @@ export class WorkflowService {
     return unique;
   }
 
+  /**
+   * n8n's save guard (P6-24): a node may add or change a credential ref only to a credential the acting
+   * user can read: owned by or shared into a project where their role holds `credential:read`, a global
+   * credential, or any one with the global `credential:read`. A name-only ref stands for every row of
+   * that name the workflow's project can use (the run looks it up there); an id written as an expression
+   * counts as one the user cannot read, as n8n's unresolved ref. A stored node whose credential
+   * the user cannot read keeps its stored form apart from its name, position and disabled flag, as n8n
+   * restores it, so its parameters cannot be changed to send the credential elsewhere. `stored` is the
+   * saved nodes (none on create). Returns the nodes to save.
+   */
+  private async guardCredentialRefs(
+    tenantId: string,
+    projectId: string,
+    actor: Actor,
+    nodes: WorkflowNode[],
+    stored?: WorkflowNode[],
+  ): Promise<WorkflowNode[]> {
+    const refs = nodes.flatMap(credentialRefsOf);
+    if (!actor.userId || !refs.length) return nodes;
+    const { access } = this.deps.context();
+    const membership = await this.repos.memberships.get(tenantId, actor.userId);
+    if (membership && (await access.globalScopes(tenantId, membership.role)).has('credential:read')) {
+      return nodes;
+    }
+    type Row = { id: string; projectId: string; isGlobal: boolean };
+    const ids = refs.flatMap((ref) => ('id' in ref ? [ref.id] : []));
+    const byId = new Map((await this.repos.credentials.listByIds(tenantId, ids)).map((row) => [row.id, row]));
+    const byName = new Map<string, Row[]>();
+    const names = new Set(refs.flatMap((ref) => ('name' in ref ? [ref.name] : [])));
+    if (names.size) {
+      const sharedHere = new Set(await this.repos.shares.credentialIdsSharedTo(tenantId, [projectId]));
+      for (const row of await this.repos.credentials.list(tenantId)) {
+        if (!names.has(row.name)) continue;
+        if (row.projectId !== projectId && !row.isGlobal && !sharedHere.has(row.id)) continue;
+        byName.set(row.name, [...(byName.get(row.name) ?? []), row]);
+      }
+    }
+    const rowsOf = (ref: CredentialRefUse): Row[] => {
+      if ('name' in ref) return byName.get(ref.name) ?? [];
+      const row = 'id' in ref ? byId.get(ref.id) : undefined;
+      return row ? [row] : [];
+    };
+    const wanted = [...new Set(refs.flatMap((ref) => rowsOf(ref).map((row) => row.id)))];
+    const reach = await access.credentialUsableBy(tenantId, actor.userId, wanted);
+    // no row at all (deleted, never made): nothing to reach; the run fails the node as "not found". An
+    // expression id may reach any credential of the project at run, so only an unchanged one stays.
+    const readable = (ref: CredentialRefUse) =>
+      !('expression' in ref) && rowsOf(ref).every((row) => row.isGlobal || reach.has(row.id));
+
+    const storedById = new Map<string, WorkflowNode>();
+    for (const node of stored ?? []) if (!storedById.has(node.id)) storedById.set(node.id, node);
+    const claims = new Map<string, number>();
+    for (const node of nodes) claims.set(node.id, (claims.get(node.id) ?? 0) + 1);
+    return nodes.map((node) => {
+      const blocked = credentialRefsOf(node).filter((ref) => !readable(ref));
+      if (!blocked.length) return node;
+      // only a node proved to be the stored one keeps its ref: a repeated id proves nothing
+      const previous = claims.get(node.id) === 1 ? storedById.get(node.id) : undefined;
+      const before = previous ? credentialRefsOf(previous) : [];
+      const unchanged = blocked.every((ref) =>
+        before.some((old) => old.slot === ref.slot && old.key === ref.key),
+      );
+      if (!previous || !unchanged) {
+        throw ApiError.badRequest(
+          stored
+            ? `You don't have access to the credentials in the '${node.name}' node. Ask the owner to share them with you.`
+            : 'The workflow contains credentials that you do not have access to',
+        );
+      }
+      const { disabled: _stored, ...rest } = previous;
+      return {
+        ...rest,
+        name: node.name,
+        position: node.position,
+        ...(node.disabled !== undefined ? { disabled: node.disabled } : {}),
+      };
+    });
+  }
+
   async create(
     tenantId: string,
     input: CreateInput & { projectId: string },
@@ -327,8 +440,13 @@ export class WorkflowService {
         throw ApiError.badRequest('The folder belongs to another project.');
       }
     }
-    // P6 S1: every credential the workflow uses must be usable in its project (L4 fills the check)
-    await assertCredentialsUsable(this.deps, tenantId, projectId, input as unknown as WorkflowDefinition);
+    // P6-24: every credential the workflow uses must be one the creator can read, and usable in its project
+    await this.guardCredentialRefs(tenantId, projectId, actor, input.nodes as WorkflowNode[]);
+    await assertCredentialsUsable(this.deps, tenantId, projectId, {
+      name: input.name,
+      nodes: input.nodes as WorkflowNode[],
+      connections: input.connections as WorkflowDefinition['connections'],
+    });
     const id = randomUUID();
     const versionId = randomUUID();
     const settings: NonNullable<CreateInput['settings']> = { ...(input.settings ?? {}) };
@@ -404,13 +522,21 @@ export class WorkflowService {
     input: Omit<UpdateInput, 'versionId'> & { versionId?: string },
     actor: Actor,
     message?: string,
-    options: { publishIfActive?: boolean; keepMcpAccess?: boolean } = {},
+    options: { publishIfActive?: boolean; keepMcpAccess?: boolean; restoredNodes?: WorkflowNode[] } = {},
   ): Promise<WorkflowDTO & { activationError?: { message: string; details?: unknown } }> {
     const { versionId: expected, tagIds, versionMessage, autosaved, ...patch } = input;
     const existing = await this.get(tenantId, id);
     assertNotArchived(existing, 'update');
-    // P6 S1: a save checks the credentials it would store against the workflow's project (L4 fills the check)
+    // P6-24: a new or changed credential ref must be one the saver can read (a restore counts the restored
+    // version as stored), then every credential it would store must be usable in the workflow's project
     if (patch.nodes) {
+      patch.nodes = (await this.guardCredentialRefs(
+        tenantId,
+        existing.projectId,
+        actor,
+        patch.nodes as WorkflowNode[],
+        [...(options.restoredNodes ?? []), ...(existing.nodes as WorkflowNode[])],
+      )) as typeof patch.nodes;
       await assertCredentialsUsable(this.deps, tenantId, existing.projectId, {
         name: patch.name ?? existing.name,
         nodes: patch.nodes as WorkflowNode[],
@@ -575,6 +701,48 @@ export class WorkflowService {
   }
 
   /**
+   * A project wipe (P6-03) runs `delete` in three steps around the caller's one transaction. Before it:
+   * unpublish, stop the test listener and close an open review (triggers and third-party hooks cannot roll
+   * back, so a later failure leaves the workflow unpublished, never half deleted).
+   */
+  async prepareWipe(tenantId: string, id: string): Promise<void> {
+    const row = await this.repos.workflows.get(tenantId, id);
+    if (!row) return;
+    if (row.active) await this.deps.activeWorkflows.deactivate(tenantId, id);
+    await this.deps.activeWorkflows.stopTestTrigger(tenantId, id);
+    await this.deps.reviews.afterWorkflowDeleted(tenantId, id);
+  }
+
+  /** inside it: the rows; returns the execution ids whose binary data `finishWipe` removes after commit */
+  async wipeIn(repos: Repositories, tenantId: string, id: string, actor: Actor): Promise<string[]> {
+    const row = await repos.workflows.get(tenantId, id);
+    if (!row) return [];
+    // published after `prepareWipe`: its triggers run, so the whole wipe stops and nothing is deleted
+    if (row.active) {
+      throw ApiError.conflict(
+        "Couldn't delete the project. A workflow in it was published during the delete. Try again.",
+      );
+    }
+    const executionIds = await repos.executions.idsForWorkflow(tenantId, id);
+    await repos.favorites.removeForResource(tenantId, 'workflow', id);
+    await repos.workflows.delete(tenantId, id);
+    await repos.audit.add(tenantId, {
+      userId: actor.userId,
+      action: 'workflow.deleted',
+      resourceType: 'workflow',
+      resourceId: id,
+      ip: actor.ip,
+    });
+    return executionIds;
+  }
+
+  /** after commit: the stored binary data of the deleted runs */
+  async finishWipe(tenantId: string, executionIds: string[]): Promise<void> {
+    for (const executionId of executionIds)
+      await this.deps.executions.removeBinaryData(tenantId, executionId);
+  }
+
+  /**
    * Publish (true) or unpublish (P3-10, as n8n activate / deactivate). `body.versionId` names the
    * version to publish (default the current draft); `versionName` and `description` are stored on
    * it once it is live. An open review blocks the publish (409, ctx.reviews). A failed publish
@@ -721,8 +889,9 @@ export class WorkflowService {
       },
       actor,
       `Restored version ${versionId}`,
-      // MCP access is not part of a version: a restore keeps the current flag
-      { keepMcpAccess: true },
+      // MCP access is not part of a version: a restore keeps the current flag; the restored nodes count as
+      // stored for the credential guard, as n8n
+      { keepMcpAccess: true, restoredNodes: snapshot.nodes as WorkflowNode[] },
     );
   }
 
