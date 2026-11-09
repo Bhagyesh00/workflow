@@ -1,11 +1,12 @@
 /**
- * /rest/annotation-tags (P3-09). Every route checks access with requireRole (viewer reads, editor
- * writes; a viewer gets 403 on writes) and scopes by tenant (another tenant tag is 404).
+ * /rest/annotation-tags (P3-09). Annotation tags belong to the workspace, not to a project: every route checks
+ * a global scope (P6-25, n8n's `annotationTag:*`, held by owner, admin and member) and scopes by tenant
+ * (another tenant tag is 404).
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
-import { requireRole } from '../http/auth';
+import { requireScope } from '../http/auth';
 import { parse } from '../http/errors';
 import { idParams } from '../http/schemas';
 
@@ -20,26 +21,26 @@ export function registerAnnotationTagRoutes(app: FastifyInstance, ctx: ServerCon
   });
 
   app.get('/annotation-tags', async (request) => {
-    const auth = requireRole(request, 'viewer');
+    const auth = await requireScope(request, 'annotationTag:list');
     const { withUsageCount } = parse(listQuery, request.query);
     return { data: await annotations.listTags(auth.tenant.id, withUsageCount === 'true'), nextCursor: null };
   });
 
   app.post('/annotation-tags', async (request) => {
-    const auth = requireRole(request, 'editor');
+    const auth = await requireScope(request, 'annotationTag:create');
     const { name } = parse(annotationTagSchema, request.body);
     return { data: await annotations.createTag(auth.tenant.id, name, actor(request)) };
   });
 
   app.patch('/annotation-tags/:id', async (request) => {
-    const auth = requireRole(request, 'editor');
+    const auth = await requireScope(request, 'annotationTag:update');
     const { id } = parse(idParams, request.params);
     const { name } = parse(annotationTagSchema, request.body);
     return { data: await annotations.renameTag(auth.tenant.id, id, name, actor(request)) };
   });
 
   app.delete('/annotation-tags/:id', async (request) => {
-    const auth = requireRole(request, 'editor');
+    const auth = await requireScope(request, 'annotationTag:delete');
     const { id } = parse(idParams, request.params);
     await annotations.deleteTag(auth.tenant.id, id, actor(request));
     return { data: { ok: true } };

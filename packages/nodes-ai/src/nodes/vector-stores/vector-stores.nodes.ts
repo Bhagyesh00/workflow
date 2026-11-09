@@ -1,5 +1,5 @@
 /**
- * Vector stores: in-memory (tenant-scoped, bounded), PGVector and Qdrant here; `vectorStoreNodes` also lists
+ * Vector stores: in-memory (one set per project of a tenant, bounded per tenant), PGVector and Qdrant here; `vectorStoreNodes` also lists
  * the stores that have their own file.
  */
 import { randomUUID } from 'node:crypto';
@@ -14,7 +14,7 @@ import type {
 } from '@workflow/workflow';
 import { isResourceLocatorValue, NodeOperationError } from '@workflow/workflow';
 import { quoteTableName, sharedPostgres } from '../../shared/connections';
-import { TenantStore } from '../../shared/tenant-store';
+import { keysOfProject, projectScopedKey, TenantStore } from '../../shared/tenant-store';
 import { VectorStoreAzureAISearchNode } from './azure-ai-search';
 import { VectorStoreChromaDBNode } from './chroma';
 import { VectorStoreDatabricksNode } from './databricks';
@@ -201,11 +201,10 @@ function locatorText(raw: unknown): string {
 
 const DEFAULT_MEMORY_KEY = 'vector_store_key';
 
-/** Lists this workspace's Simple Vector Store keys, filtered by the typed text. */
+/** Lists the Simple Vector Store keys of this project, filtered by the typed text. */
 async function vectorStoresSearch(ctx: LoadOptionsContext, filter?: string): Promise<ListSearchResult> {
   const needle = (filter ?? '').trim().toLowerCase();
-  const keys = memoryStores
-    .keys(ctx.getTenantId())
+  const keys = keysOfProject(memoryStores.keys(ctx.getTenantId()), ctx.getProjectId())
     .filter((key) => !needle || key.toLowerCase().includes(needle))
     .sort((a, b) => a.localeCompare(b));
   return { results: keys.map((key) => ({ name: key, value: key })) };
@@ -231,7 +230,7 @@ export const VectorStoreInMemoryNode = createVectorStoreNode({
       type: 'resourceLocator',
       default: { __rl: true, mode: 'id', value: DEFAULT_MEMORY_KEY },
       required: true,
-      description: 'Name of the store; nodes using the same key in this workspace share documents',
+      description: 'Name of the store; nodes using the same key in this project share documents',
       modes: [
         {
           displayName: 'From List',
@@ -252,9 +251,12 @@ export const VectorStoreInMemoryNode = createVectorStoreNode({
   insertOptions: [clearStoreOption],
   methods: { listSearch: { vectorStoresSearch } },
   async open(ctx: BaseContext, itemIndex: number) {
-    const key =
+    const name =
       locatorText(ctx.getNodeParameter('memoryKey', itemIndex, DEFAULT_MEMORY_KEY)) || DEFAULT_MEMORY_KEY;
     const tenantId = ctx.getTenantId();
+    // P6-25: the run's project is part of the key, so another project's node with the same name gets its own
+    // store (a deviation from n8n, whose Simple Vector Store is instance wide)
+    const key = projectScopedKey(ctx.getProjectId(), name);
     const backend = memoryStores.getOrCreate(
       tenantId,
       key,

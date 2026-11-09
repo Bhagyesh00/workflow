@@ -1052,6 +1052,16 @@ export class ActiveWorkflowManager {
       mode,
       workflowId: workflow.id,
     });
+    if (!executionId && workflow.id) {
+      // P6-25: a context with no execution (a webhook lifecycle hook) stores its files under
+      // `activation/<workflowId>`, so GET /binary-data can check the workflow before it serves one
+      const store = services.binaryData;
+      const folder = `activation/${workflow.id}`;
+      services.binaryData = {
+        store: (data, meta) => store.store(data, { ...meta, executionId: folder }),
+        getBuffer: (binary) => store.getBuffer(binary),
+      };
+    }
     return { workflow, node, services, evaluator: this.evaluator, signal };
   }
 

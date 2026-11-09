@@ -1,10 +1,27 @@
 /**
  * Bounded in-process stores keyed by tenant. Used by the window buffer memory and the in-memory
- * vector store: one tenant can never read another tenant's keys, and size caps keep a single
+ * vector store (whose keys also carry the project, `projectScopedKey`): one tenant can never read
+ * another tenant's keys, and size caps keep a single
  * tenant from exhausting a worker's heap. Caps are on keys and, optionally, on bytes: when a
  * tenant passes its byte budget its least recently used keys are evicted (never the key being
  * written), so the newest data always survives.
  */
+
+/**
+ * P6-25: a key inside one project of a tenant (`<projectId>/<key>`, the project id URI-encoded so no project
+ * id can end where a key begins). Stores keyed this way are shared by a project, never by the whole tenant;
+ * a missing project throws, so a caller without one never lands in a shared bucket.
+ */
+export function projectScopedKey(projectId: string, key: string): string {
+  if (!projectId) throw new Error('A project id is required');
+  return `${encodeURIComponent(projectId)}/${key}`;
+}
+
+/** P6-25: the keys of one project among a tenant's `projectScopedKey` keys, without the project part */
+export function keysOfProject(keys: readonly string[], projectId: string): string[] {
+  const prefix = projectScopedKey(projectId, '');
+  return keys.filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length));
+}
 
 export interface TenantStoreOptions<T = unknown> {
   /** keys per tenant; least recently used keys are evicted */

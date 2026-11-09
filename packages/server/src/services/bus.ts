@@ -111,13 +111,17 @@ export interface PushEvent {
   type: string;
   data: unknown;
   /**
-   * P6 S1: the workflow the event is about, on the envelope (not in `data`), so the stream can drop it for a
-   * user who cannot read that workflow (the filter is L5's). Absent = the event is for the whole tenant.
+   * P6 S1: the workflow the event is about, on the envelope (not in `data`), so each stream drops it for a
+   * user who cannot read that workflow (P6-25, routes/push.ts). Absent = the event names no workflow: the
+   * stream sends it to owner and admin only, except the workspace events (`workflowReviewChanged`).
    */
   workflowId?: string;
 }
 
-/** Editor push events (SSE), always scoped to one tenant. */
+/**
+ * Editor push events (SSE), always scoped to one tenant. One channel per tenant: the per-user filter is on
+ * each stream (routes/push.ts), so a share or a move needs no new channel and every main filters alike.
+ */
 export class PushService {
   constructor(private readonly bus: MessageBus) {}
 

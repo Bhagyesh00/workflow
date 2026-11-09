@@ -1,13 +1,20 @@
-/** /rest/executions/* */
-import type { FastifyInstance } from 'fastify';
+/**
+ * /rest/executions/* and /rest/binary-data. P6-25: a run follows its workflow: the routes check
+ * `execution:*` (or `workflow:execute`) on the run, which resolves through its workflow's projects; a run
+ * with no workflow (`workflow_id` null) holds only the global scopes, so owner and admin. The list passes the
+ * caller's access filter. `PATCH /executions/:id` keeps today's editor gate until the cutover (L24).
+ */
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import type { ExecutionRow } from '../db/schema';
-import { requireRole } from '../http/auth';
+import { type AuthContext, requireAuth, requireRole, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { decodeCursor, encodeCursor, page, paginationQuery } from '../http/pagination';
 import { annotationPatchSchema, idParams } from '../http/schemas';
 import type { ExecutionAnnotationDTO } from '../repositories';
+import { isUuid } from '../repositories/util';
+import type { AccessFilter } from '../services/access';
 
 const STATUSES = ['new', 'running', 'success', 'error', 'canceled', 'waiting', 'crashed'] as const;
 
@@ -71,8 +78,11 @@ export async function listExecutions(
   ctx: ServerContext,
   tenantId: string,
   query: z.output<typeof executionListQuery>,
+  /** P6-25: the caller's access filter (`AccessService.listFilter(auth, 'execution:list')`) */
+  options: { filter?: AccessFilter } = {},
 ) {
   const rows = await ctx.repos.executions.list(tenantId, {
+    filter: options.filter,
     workflowId: query.workflowId,
     status: query.status,
     workflowVersionId: query.workflowVersionId,
@@ -125,11 +135,52 @@ const binaryQuery = z.object({
   fileName: z.string().max(255).optional(),
 });
 
+/** a part of a file id that could leave its folder */
+const unsafePart = (part: string) => !part || part === '.' || part === '..' || /[\\:]/.test(part);
+
+/**
+ * P6-25: who may read a stored file (`fs:<tenantId>/<folder>/.../<file>`, as the filesystem store names it):
+ * - `<executionId>/<file>`: `execution:read` on that run (through its workflow);
+ * - `<threadId>/<file>`: an Assistant thread attachment, its thread owner only;
+ * - `activation/<workflowId>/<file>`: a webhook lifecycle hook's file, `workflow:read` on that workflow;
+ *   `activation/<file>` (stored before files named their workflow): the global scope, owner and admin.
+ * Anything else (another workspace, a path trick, a trigger's staging folder) is 404.
+ */
+async function assertBinaryAccess(
+  ctx: ServerContext,
+  request: FastifyRequest,
+  auth: AuthContext,
+  id: string,
+): Promise<void> {
+  const notFound = () => ApiError.notFound('Binary data');
+  if (!id.startsWith('fs:')) throw notFound();
+  const parts = id.slice(3).split('/');
+  if (parts.length < 3 || parts[0] !== auth.tenant.id || parts.some(unsafePart)) throw notFound();
+  const folder = parts[1];
+  if (folder === 'activation') {
+    if (parts.length === 3) {
+      await requireScope(request, 'workflow:read');
+      return;
+    }
+    if (parts.length !== 4 || !isUuid(parts[2])) throw notFound();
+    await requireScope(request, 'workflow:read', { workflowId: parts[2] });
+    return;
+  }
+  if (parts.length !== 3 || !isUuid(folder)) throw notFound();
+  if (await ctx.repos.executions.get(auth.tenant.id, folder)) {
+    await requireScope(request, 'execution:read', { executionId: folder });
+    return;
+  }
+  if (await ctx.repos.assistantThreads.get(auth.tenant.id, auth.user.id, folder)) return;
+  throw notFound();
+}
+
 export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext): void {
-  // platform extension: binary data referenced from run data (`fs:<tenantId>/...`), tenant-checked
+  // platform extension: binary data referenced from run data (`fs:<tenantId>/...`), checked by its folder
   app.get('/binary-data', async (request, reply) => {
-    const auth = requireRole(request, 'viewer');
+    const auth = requireAuth(request);
     const query = parse(binaryQuery, request.query);
+    await assertBinaryAccess(ctx, request, auth, query.id);
     let data: Uint8Array;
     try {
       data = await ctx.executions
@@ -152,23 +203,33 @@ export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext
       .send(Buffer.from(data));
   });
 
+  /** the gate of a route on one run: sign-in, the `:id` parameter, then the scope on that run */
+  const onExecution = async (request: FastifyRequest, scope: Parameters<typeof requireScope>[1]) => {
+    requireAuth(request);
+    const { id } = parse(idParams, request.params);
+    const auth = await requireScope(request, scope, { executionId: id });
+    return { auth, id };
+  };
+
   app.get('/executions', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    return listExecutions(ctx, auth.tenant.id, parse(executionListQuery, request.query));
+    // no scope on the route (as n8n): the list shows the runs of the workflows the caller may read
+    const auth = requireAuth(request);
+    const query = parse(executionListQuery, request.query);
+    const filter = await ctx.access.listFilter(auth, 'execution:list');
+    return listExecutions(ctx, auth.tenant.id, query, { filter });
   });
 
   app.get('/executions/:id', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    const { id } = parse(idParams, request.params);
-    return { data: await getExecution(ctx, auth.tenant.id, id) };
+    const { auth, id } = await onExecution(request, 'execution:read');
+    const scopes = [...(await ctx.access.scopesForAuth(auth, { executionId: id }))].sort();
+    return { data: { ...(await getExecution(ctx, auth.tenant.id, id)), scopes } };
   });
 
-  // P3-09: tags and / or vote
+  // P3-09: tags and / or vote. Today's editor gate stays until the cutover (L24; n8n: `execution:read`)
   app.patch('/executions/:id', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    requireRole(request, 'editor');
+    const { auth, id } = await onExecution(request, 'execution:read');
     const body = parse(annotationPatchSchema, request.body);
-    if (!(await ctx.repos.executions.get(auth.tenant.id, id))) throw ApiError.notFound('Execution');
     return {
       data: await ctx.annotations.annotate(auth.tenant.id, id, body, {
         userId: auth.user.id,
@@ -178,8 +239,7 @@ export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext
   });
 
   app.post('/executions/:id/retry', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onExecution(request, 'workflow:execute');
     const body = parse(z.object({ useCurrentWorkflow: z.boolean().optional() }), request.body ?? {});
     const { executionId } = await ctx.executions.retry(auth.tenant.id, id, {
       useCurrentWorkflow: body.useCurrentWorkflow,
@@ -189,14 +249,12 @@ export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext
   });
 
   app.post('/executions/:id/stop', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onExecution(request, 'workflow:execute');
     return { data: { status: await ctx.executions.stop(auth.tenant.id, id) } };
   });
 
   app.delete('/executions/:id', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onExecution(request, 'execution:delete');
     await deleteExecution(ctx, auth.tenant.id, id);
     return { data: { ok: true } };
   });

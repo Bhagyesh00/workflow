@@ -24,6 +24,7 @@ import {
   WorkflowExecute,
 } from '@workflow/core';
 import {
+  type CallerPolicy,
   type ChatChunkMeta,
   ExecutionCancelledError,
   type ExecutionErrorShape,
@@ -100,6 +101,12 @@ export interface StoredRunOptions {
    * row reads the row's project first, so a move while queued wins; a run with neither fails.
    */
   projectId?: string;
+  /**
+   * P6-25: an inline (Workflow JSON) sub-run. Its row names the calling workflow, but its definition is not
+   * that workflow's: the static data of the caller is not written from it, and a retry "with the current
+   * workflow" keeps this definition.
+   */
+  inlineSource?: boolean;
 }
 
 export interface ExecutionOutcome {
@@ -147,6 +154,8 @@ export interface StartExecutionInput {
    * inline sub-workflow: the parent's). Stored in `StoredRunOptions.projectId`; the row's project wins.
    */
   projectId?: string;
+  /** P6-25: an inline sub-run (`StoredRunOptions.inlineSource`); `workflowId` is the calling workflow's */
+  inlineSource?: boolean;
   executionId?: string;
   retryOf?: string;
   /** retry only: the state of the failed execution; the run continues at its `failedExecuteData` */
@@ -341,6 +350,7 @@ export class ExecutionService {
       customData: input.customData,
       forceOperation: input.forceOperation,
       projectId: input.projectId,
+      inlineSource: input.inlineSource ? true : undefined,
     };
     const workflowId = input.workflowId ?? input.workflow.id ?? null;
     try {
@@ -614,15 +624,7 @@ export class ExecutionService {
     } catch (error) {
       const state = createInitialState();
       state.resultData.error = serializeError(error);
-      await this.finish(
-        tenant,
-        row,
-        definition,
-        staticBefore,
-        failedResult(state),
-        delivery,
-        options.errorChain,
-      );
+      await this.finish(tenant, row, definition, staticBefore, failedResult(state), delivery, options);
       return;
     }
 
@@ -675,7 +677,7 @@ export class ExecutionService {
         engine.state.resultData.error = serializeError(error);
         result = failedResult(engine.state);
       }
-      await this.finish(tenant, row, definition, staticBefore, result, delivery, options.errorChain, tally);
+      await this.finish(tenant, row, definition, staticBefore, result, delivery, options, tally);
     } catch (error) {
       logger.error({ err: error, tenantId, executionId }, 'Could not persist execution result');
       // the row must not stay 'running': it would hold a concurrency slot and never alert anyone
@@ -734,7 +736,7 @@ export class ExecutionService {
     const options = (data.runOptions ?? {}) as StoredRunOptions;
     const state = opts.state ?? (data.state as unknown as ExecutionState | null) ?? createInitialState();
     state.resultData.error = serializeError(new Error(message));
-    await this.startErrorWorkflow(tenantId, row, definition, state, options.errorChain).catch((e) =>
+    await this.startErrorWorkflow(tenantId, row, definition, state, options).catch((e) =>
       logger.warn({ err: e, tenantId, executionId: row.id }, 'Error workflow could not start'),
     );
   }
@@ -830,7 +832,8 @@ export class ExecutionService {
     staticBefore: string,
     result: ExecutionResult,
     delivery: Delivery,
-    errorChain?: boolean,
+    /** the stored run options: error chain, inline source, stored project */
+    run: Pick<StoredRunOptions, 'errorChain' | 'inlineSource' | 'projectId'>,
     tally?: { counted: boolean },
   ): Promise<void> {
     const { repos, push, metrics, logger } = this.deps;
@@ -850,8 +853,9 @@ export class ExecutionService {
 
     // static data written by nodes (poll cursors, counters) is persisted for production runs, BEFORE the
     // final status: a client or trigger that sees the run finished must not start from the old data. A
-    // failed write is logged and never leaves the row in 'running'.
-    if (row.mode !== 'manual' && row.workflowId) {
+    // failed write is logged and never leaves the row in 'running'. An inline sub-run's static data is not
+    // its row's workflow's (P6-25): it is never merged into the caller's.
+    if (row.mode !== 'manual' && row.workflowId && !run.inlineSource) {
       const after = definition.staticData ?? {};
       if (JSON.stringify(after) !== staticBefore) {
         await repos.staticData
@@ -906,7 +910,7 @@ export class ExecutionService {
     );
 
     if (status === 'error' || status === 'crashed') {
-      await this.startErrorWorkflow(tenant.id, row, definition, state, errorChain).catch((e) =>
+      await this.startErrorWorkflow(tenant.id, row, definition, state, run).catch((e) =>
         logger.warn({ err: e, tenantId: tenant.id, executionId: row.id }, 'Error workflow could not start'),
       );
     }
@@ -1106,22 +1110,33 @@ export class ExecutionService {
     let workflowId: string | undefined;
     // a database callee runs in its own row's project (read again at run time); an inline one in the parent's
     let projectId: string | undefined;
+    let inlineSource = false;
     if (request.source.source === 'database') {
       const row = await repos.workflows.get(tenantId, request.source.workflowId ?? '');
       if (!row) throw new Error(`Workflow "${request.source.workflowId ?? ''}" was not found`);
       assertNotArchived(row, 'call');
+      // P6-25: the caller policy compares the caller's project with the callee's (workflow tools share this door)
       assertCallerAllowed(
         row.name,
         row.settings as WorkflowDefinition['settings'],
-        request.parent.workflowId,
+        { workflowId: request.parent.workflowId, projectId: parentProjectId },
+        row.projectId,
+        this.deps.config.workflowCallerPolicyDefault,
       );
       // the callee version follows the root run's mode, through nested calls too (P3-10)
       definition = await runtimeDefinition(repos, tenantId, row, rootMode);
       workflowId = row.id;
     } else {
       if (!request.source.workflow) throw new Error('No workflow definition was given');
-      definition = { ...cloneDefinition(request.source.workflow), id: undefined };
+      // P6-25, as n8n: an inline sub-run belongs to the workflow that called it (its id on the row and the
+      // definition, any id in the JSON ignored), so the caller's project reads it; it runs in that project
+      const parentRow = request.parent.workflowId
+        ? await repos.workflows.get(tenantId, request.parent.workflowId)
+        : undefined;
+      definition = { ...cloneDefinition(request.source.workflow), id: parentRow?.id };
+      workflowId = parentRow?.id;
       projectId = parentProjectId;
+      inlineSource = true;
     }
     const workflow = new Workflow(definition, nodeTypes);
     const start = findStartNode(workflow, EXECUTE_WORKFLOW_TRIGGER);
@@ -1138,6 +1153,7 @@ export class ExecutionService {
       triggerItems: JSON.parse(JSON.stringify(items)),
       parentExecutionId: request.parent.executionId || undefined,
       projectId,
+      inlineSource,
       rootMode,
       depth: depth + 1,
       errorChain,
@@ -1198,6 +1214,14 @@ export class ExecutionService {
     const targetDefinition = await runtimeDefinition(repos, tenantId, target, 'error');
     const start = findStartNode(new Workflow(targetDefinition, nodeTypes), ERROR_TRIGGER);
     if (!start) return;
+    // P6-25, as n8n: the error workflow passes the caller policy of the failed workflow's project
+    assertCallerAllowed(
+      target.name,
+      target.settings as WorkflowDefinition['settings'],
+      { workflowId: row.id, projectId: row.projectId },
+      target.projectId,
+      this.deps.config.workflowCallerPolicyDefault,
+    );
     await this.start({
       tenantId,
       workflow: targetDefinition,
@@ -1227,12 +1251,12 @@ export class ExecutionService {
     row: ExecutionRow,
     definition: WorkflowDefinition,
     state: ExecutionState,
-    errorChain?: boolean,
+    run: Pick<StoredRunOptions, 'errorChain' | 'projectId'> = {},
   ): Promise<void> {
     const errorWorkflowId = definition.settings?.errorWorkflow;
     // a failing error workflow, or a sub-workflow it called, never starts another one: error workflows
     // naming each other (directly or through Execute Workflow) would loop
-    if (!errorWorkflowId || row.mode === 'manual' || row.mode === 'error' || errorChain) return;
+    if (!errorWorkflowId || row.mode === 'manual' || row.mode === 'error' || run.errorChain) return;
     const target = await this.deps.repos.workflows.get(tenantId, errorWorkflowId);
     if (!target) {
       this.deps.logger.warn({ tenantId, errorWorkflowId }, 'Error workflow not found');
@@ -1242,6 +1266,16 @@ export class ExecutionService {
     const targetDefinition = await runtimeDefinition(this.deps.repos, tenantId, target, 'error');
     const start = findStartNode(new Workflow(targetDefinition, this.deps.nodeTypes), ERROR_TRIGGER);
     if (!start) return;
+    // P6-25, as n8n (workflow-execution.service.ts): the error workflow passes the caller policy, the failed
+    // run's project against the error workflow's; refused, it does not start (the callers log it)
+    const callerProjectId = await this.runProjectOf(tenantId, row.workflowId, run.projectId);
+    assertCallerAllowed(
+      target.name,
+      target.settings as WorkflowDefinition['settings'],
+      { workflowId: row.workflowId ?? undefined, projectId: callerProjectId },
+      target.projectId,
+      this.deps.config.workflowCallerPolicyDefault,
+    );
     const error = state.resultData.error;
     const workflowId = row.workflowId ?? definition.id ?? null;
     const item: Item = {
@@ -1362,7 +1396,8 @@ export class ExecutionService {
     const runOptions = (data.runOptions ?? {}) as StoredRunOptions;
     // the mode of the run this retry chain started from (a retry keeps it for its sub-workflows)
     const rootMode = runOptions.rootMode ?? (row.mode as ExecutionMode);
-    if (options.useCurrentWorkflow && row.workflowId) {
+    // an inline sub-run's row names its caller: "the current workflow" would run the caller in its place
+    if (options.useCurrentWorkflow && row.workflowId && !runOptions.inlineSource) {
       const current = await repos.workflows.get(tenantId, row.workflowId);
       if (!current) throw ApiError.notFound('Workflow');
       // a retry of an editor run takes the draft, any other the published version (P3-10)
@@ -1390,6 +1425,7 @@ export class ExecutionService {
           userId: options.userId,
           // P6 S1: a run with no workflow row keeps the project it was started in
           projectId: runOptions.projectId,
+          inlineSource: runOptions.inlineSource,
           ...input,
         });
       } catch (error) {
@@ -1538,19 +1574,36 @@ export function findStartNode(workflow: Workflow, preferredType: string): Workfl
   return preferred ?? workflow.getStartNode();
 }
 
+/** P6-25: who calls a workflow (a sub-workflow call, a workflow tool or an error workflow start) */
+export interface WorkflowCaller {
+  /** the calling workflow's id (none: an unsaved run) */
+  workflowId?: string;
+  /** the project the calling run belongs to (none: it has neither a workflow row nor a stored project) */
+  projectId?: string;
+}
+
+/**
+ * The callee's caller policy (n8n's sub-workflow policy check). P6-25: a workflow with no `callerPolicy`
+ * takes `defaultPolicy` (`WORKFLOW_CALLER_POLICY_DEFAULT_OPTION`, `sameProject` unless set); an explicit `any`
+ * stays open; `sameProject` compares the caller's project with the callee's.
+ */
 export function assertCallerAllowed(
   name: string,
   settings: WorkflowDefinition['settings'],
-  callerWorkflowId: string | undefined,
+  caller: WorkflowCaller,
+  calleeProjectId: string,
+  defaultPolicy: CallerPolicy = 'sameProject',
 ): void {
-  const policy = settings?.callerPolicy ?? 'any';
+  const policy = settings?.callerPolicy ?? defaultPolicy;
+  if (policy === 'any') return;
   if (policy === 'none') {
     throw new Error(`Workflow "${name}" does not allow being called by other workflows`);
   }
-  if (
-    policy === 'allowList' &&
-    (!callerWorkflowId || !(settings?.callerIds ?? []).includes(callerWorkflowId))
-  ) {
+  if (policy === 'allowList') {
+    if (caller.workflowId && (settings?.callerIds ?? []).includes(caller.workflowId)) return;
     throw new Error(`Workflow "${name}" does not allow being called by this workflow`);
+  }
+  if (!caller.projectId || caller.projectId !== calleeProjectId) {
+    throw new Error(`Workflow "${name}" can only be called by workflows of its own project`);
   }
 }

@@ -28,7 +28,9 @@ export class AnnotationService {
 
   /**
    * Replace the execution tags and / or set its vote (null clears it). Returns the annotation, or
-   * null when it is now empty. The caller has checked the execution belongs to the tenant.
+   * null when it is now empty. The caller has checked the execution belongs to the tenant and, since
+   * P6-25, that the user holds `execution:read` on the run's workflow (PATCH /executions/:id), so this
+   * service runs no access check of its own.
    */
   async annotate(
     tenantId: string,
