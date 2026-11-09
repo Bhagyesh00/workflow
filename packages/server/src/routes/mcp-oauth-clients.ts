@@ -1,16 +1,17 @@
 /**
  * /rest/mcp/oauth* and /rest/mcp/instance-stats (P5-14): the workspace's registered OAuth clients
  * (delete revokes their tokens), the allowed redirect URIs (`http` only for loopback) and the instance
- * stats. The redirect list and the stats need `mcp:manage`; the client list is the caller's own clients
- * (`ownership=all` needs `mcp:manage`) and a delete without it removes the caller's own grant (P6-35). Shapes are the editor's (`McpRedirectUris`, `McpOAuthClient[]`,
- * `McpInstanceStats`).
+ * stats. The redirect list and the stats need `mcp:manage`; the client routes need `mcp:oauth`: the list is
+ * the caller's own clients (`ownership=all` needs `mcp:manage`) and a delete removes one user's grant, the
+ * caller's own or, with `mcp:manage`, another user's through `?userId=`; the client goes with its last
+ * consent (P6-35). Shapes are the editor's (`McpRedirectUris`, `McpOAuthClient[]`, `McpInstanceStats`).
  */
 import { eq, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import { tenants } from '../db/schema';
-import { requireAuth, requireScope } from '../http/auth';
+import { requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { tenantAllowedRedirectUris } from '../services/mcp/oauth/authorize';
 import { MCP_OAUTH_MAX_REDIRECT_URI_LENGTH, redirectUriProblem } from '../services/mcp/oauth/clients';
@@ -27,6 +28,7 @@ const redirectUrisSchema = z
   .strict();
 
 const clientListQuery = z.object({ ownership: z.enum(['own', 'all']).default('own') });
+const clientDeleteQuery = z.object({ userId: z.string().uuid().optional() });
 
 export function registerMcpOAuthClientRoutes(rest: FastifyInstance, ctx: ServerContext): void {
   const { repos } = ctx;
@@ -68,7 +70,7 @@ export function registerMcpOAuthClientRoutes(rest: FastifyInstance, ctx: ServerC
   // The list is the caller's own; `ownership=all` (every client of the workspace) needs `mcp:manage`.
   rest.get('/mcp/oauth-clients', async (request) => {
     const { ownership } = parse(clientListQuery, request.query ?? {});
-    const auth = ownership === 'all' ? await requireScope(request, 'mcp:manage') : requireAuth(request);
+    const auth = await requireScope(request, ownership === 'all' ? 'mcp:manage' : 'mcp:oauth');
     const clients =
       ownership === 'all'
         ? await repos.mcpOAuth.listClients(auth.tenant.id)
@@ -83,34 +85,33 @@ export function registerMcpOAuthClientRoutes(rest: FastifyInstance, ctx: ServerC
     };
   });
 
-  // a holder of `mcp:manage` deletes the client for every user (today's behaviour); anyone else removes
-  // only their own grant (consent and tokens) and the client stays for the others
+  // as n8n: a delete removes one user's grant (consent, codes and tokens), the caller's own by default and
+  // another user's through `?userId=` (needs `mcp:manage`). The client row goes with its last consent.
   rest.delete('/mcp/oauth-clients/:clientId', async (request) => {
-    const auth = requireAuth(request);
+    const auth = await requireScope(request, 'mcp:oauth');
     const { clientId } = request.params as { clientId: string };
-    const manage = (await ctx.access.scopesForAuth(auth)).has('mcp:manage');
-    if (manage) {
-      // tokens go first, at once; the client row then takes its consents with it
-      await repos.mcpOAuth.revokeForClient(auth.tenant.id, clientId);
-      if (!(await repos.mcpOAuth.deleteClient(auth.tenant.id, clientId)))
-        throw ApiError.notFound('OAuth client');
+    const { userId } = parse(clientDeleteQuery, request.query ?? {});
+    const target = userId ?? auth.user.id;
+    if (target !== auth.user.id) await requireScope(request, 'mcp:manage');
+    if (!(await repos.mcpOAuth.revokeForUser(auth.tenant.id, target, clientId))) {
+      throw ApiError.notFound('OAuth client');
+    }
+    const clientDeleted = await repos.mcpOAuth.deleteClientWithoutConsents(auth.tenant.id, clientId);
+    await repos.audit.add(auth.tenant.id, {
+      userId: auth.user.id,
+      action: 'mcp.oauth_grant_revoked',
+      resourceType: 'oauth_client',
+      resourceId: clientId,
+      metadata: { userId: target, clientDeleted },
+    });
+    if (clientDeleted) {
       await repos.audit.add(auth.tenant.id, {
         userId: auth.user.id,
         action: 'mcp.oauth_client_deleted',
         resourceType: 'oauth_client',
         resourceId: clientId,
       });
-      return { data: { ok: true } };
     }
-    if (!(await repos.mcpOAuth.revokeForUser(auth.tenant.id, auth.user.id, clientId))) {
-      throw ApiError.notFound('OAuth client');
-    }
-    await repos.audit.add(auth.tenant.id, {
-      userId: auth.user.id,
-      action: 'mcp.oauth_grant_revoked',
-      resourceType: 'oauth_client',
-      resourceId: clientId,
-    });
     return { data: { ok: true } };
   });
 

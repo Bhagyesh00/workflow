@@ -73,8 +73,8 @@ export const MCP_WORKFLOWS_LIST_MAX = 500;
 
 export const MCP_SETTINGS_TEXTS = {
   managedByEnv: 'MCP settings are managed by the environment and cannot be changed here',
-  toggleTarget: 'Name the workflows to change: workflowIds, folderId or allWorkflows (exactly one)',
-  projectTarget: 'projectId goes with allWorkflows',
+  toggleTarget:
+    'Name the workflows to change: workflowIds, folderId, projectId or allWorkflows (exactly one)',
 } as const;
 
 export const mcpSettingsPatchSchema = z
@@ -95,19 +95,19 @@ export const mcpToggleAccessSchema = z
     workflowIds: z.array(z.uuid()).min(1).max(MCP_TOGGLE_MAX_WORKFLOWS).optional(),
     folderId: z.uuid().optional(),
     allWorkflows: z.boolean().optional(),
-    /** with `allWorkflows`: only this project's workflows (`workflow:update` in it); else every one the caller can edit */
+    /** a target of its own as in n8n (every workflow of this project the caller can edit); with `allWorkflows` the same */
     projectId: z.uuid().optional(),
   })
   .strict()
   .refine(
     (v) =>
-      [v.workflowIds !== undefined, v.folderId !== undefined, v.allWorkflows === true].filter(Boolean)
-        .length === 1,
+      [
+        v.workflowIds !== undefined,
+        v.folderId !== undefined,
+        v.allWorkflows === true || v.projectId !== undefined,
+      ].filter(Boolean).length === 1,
     { message: MCP_SETTINGS_TEXTS.toggleTarget },
-  )
-  .refine((v) => v.projectId === undefined || v.allWorkflows === true, {
-    message: MCP_SETTINGS_TEXTS.projectTarget,
-  });
+  );
 
 function mcpSettingsOf(tenant: Pick<TenantRow, 'settings'>): NonNullable<TenantSettings['mcp']> {
   return ((tenant.settings ?? {}) as TenantSettings).mcp ?? {};

@@ -4,7 +4,7 @@
  * that digest, never the raw value. Every method but `sweepExpired` (system level, all tenants) takes
  * `tenantId` first and names it in its query with a bound value.
  */
-import { and, count, desc, eq, gt, lt } from 'drizzle-orm';
+import { and, count, desc, eq, gt, lt, notExists } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import {
   oauthAccessTokens,
@@ -105,6 +105,35 @@ export class McpOAuthRepository {
     const rows = await this.db
       .delete(oauthClients)
       .where(and(eq(oauthClients.tenantId, tenantId), eq(oauthClients.id, id)))
+      .returning({ id: oauthClients.id });
+    return rows.length > 0;
+  }
+
+  /**
+   * Deletes the client when no user consent for it is left (P6-35, n8n parity: the client goes with its
+   * last grant). One statement, so a consent saved at the same moment keeps the client. True when deleted.
+   */
+  async deleteClientWithoutConsents(tenantId: string, id: string): Promise<boolean> {
+    if (!isUuid(tenantId) || !usableKey(id)) return false;
+    const rows = await this.db
+      .delete(oauthClients)
+      .where(
+        and(
+          eq(oauthClients.tenantId, tenantId),
+          eq(oauthClients.id, id),
+          notExists(
+            this.db
+              .select({ one: oauthUserConsents.clientId })
+              .from(oauthUserConsents)
+              .where(
+                and(
+                  eq(oauthUserConsents.tenantId, oauthClients.tenantId),
+                  eq(oauthUserConsents.clientId, oauthClients.id),
+                ),
+              ),
+          ),
+        ),
+      )
       .returning({ id: oauthClients.id });
     return rows.length > 0;
   }

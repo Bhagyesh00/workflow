@@ -18,6 +18,7 @@ import {
   credentialIn,
   dataTableIn,
   folderIn,
+  memberAs,
   node,
   projectIn,
   realMember,
@@ -250,6 +251,19 @@ describe('a member reaches its own projects only', () => {
     const denied = await call(actor, 'create_workflow', { workflow: withCred, projectId: a.id });
     expect(denied.isError).toBe(true);
     expect(denied.text).toContain('does not have access to the credential');
+    // by name only: no usable row of project A holds the name, so the answer is the invalid credential, with its hint
+    const byName = await call(actor, 'create_workflow', {
+      workflow: {
+        ...withCred,
+        nodes: [
+          withCred.nodes[0],
+          { ...withCred.nodes[1], credentials: { httpHeaderAuth: { id: null, name: foreign.name } } },
+        ],
+      },
+      projectId: a.id,
+    });
+    expect(byName.isError).toBe(true);
+    expect(byName.text).toContain('uses invalid credential. Please recreate the credential.');
     expect(
       (await server.ctx.repos.workflows.list(actor.tenantId, { search: 'Uses credential', limit: 10 }))
         .length,
@@ -462,7 +476,11 @@ describe('/rest/mcp settings by scope', () => {
     // a folder of project B is not readable
     const folderB = await folderIn(server, owner.tenant.id, b.id);
     expect((await toggle({ availableInMCP: true, folderId: folderB.id })).statusCode).toBe(403);
-    expect((await toggle({ availableInMCP: true, projectId: a.id })).statusCode).toBe(400);
+    // `projectId` is a target of its own (n8n): A's workflows, already on; project B is refused
+    expect(await member.client.data(toggle({ availableInMCP: true, projectId: a.id }))).toEqual({
+      updatedCount: 0,
+    });
+    expect((await toggle({ availableInMCP: true, projectId: b.id })).statusCode).toBe(403);
     // a viewer of project A edits nothing there: the list is empty and a toggle of A's workflow is refused
     await addToProject(server, owner.tenant.id, a.id, member.user.id, 'project:viewer');
     expect(await member.client.data(member.client.get('/rest/mcp/workflows'))).toEqual([]);
@@ -549,7 +567,7 @@ describe('OAuth clients: a member sees and revokes only its own grant', () => {
     expect(all.map((c) => c.id).sort()).toEqual([mine, owners].sort());
   });
 
-  it("a member's delete removes its own grant and tokens only; another user's client is 404; mcp:manage deletes the client", async () => {
+  it("a delete removes one user's grant only (own by default); the client goes with its last consent; another user's needs mcp:manage", async () => {
     const { owner, member } = await setup();
     const shared = await registerClient(owner.tenant.id);
     const ownersOnly = await registerClient(owner.tenant.id);
@@ -560,6 +578,11 @@ describe('OAuth clients: a member sees and revokes only its own grant', () => {
     // a client the member never consented to: 404, nothing removed
     expect((await member.client.delete(`/rest/mcp/oauth-clients/${ownersOnly}`)).statusCode).toBe(404);
     expect(await mcpOAuth.getConsent(owner.tenant.id, owner.user.id, ownersOnly)).toBeDefined();
+    // another user's grant needs mcp:manage: a member is refused and nothing is removed
+    expect(
+      (await member.client.delete(`/rest/mcp/oauth-clients/${shared}?userId=${owner.user.id}`)).statusCode,
+    ).toBe(403);
+    expect(await mcpOAuth.getConsent(owner.tenant.id, owner.user.id, shared)).toBeDefined();
     // its own grant: consent and tokens go, the client and the owner's grant stay
     expect(await member.client.data(member.client.delete(`/rest/mcp/oauth-clients/${shared}`))).toEqual({
       ok: true,
@@ -571,14 +594,70 @@ describe('OAuth clients: a member sees and revokes only its own grant', () => {
     expect(await mcpOAuth.getAccessToken(owner.tenant.id, sha256(ownerToken))).toBeDefined();
     expect((await member.client.delete(`/rest/mcp/oauth-clients/${shared}`)).statusCode).toBe(404);
     expect(await member.client.data(member.client.get('/rest/mcp/oauth-clients'))).toEqual([]);
-    // the owner holds mcp:manage: the client goes for every user
+    // the owner holds mcp:manage and its own consent: its delete is its own grant too, and the last one
+    // takes the client with it
     expect(await owner.client.data(owner.client.delete(`/rest/mcp/oauth-clients/${shared}`))).toEqual({
       ok: true,
     });
-    expect(await mcpOAuth.getClient(owner.tenant.id, shared)).toBeUndefined();
     expect(await mcpOAuth.getAccessToken(owner.tenant.id, sha256(ownerToken))).toBeUndefined();
+    expect(await mcpOAuth.getClient(owner.tenant.id, shared)).toBeUndefined();
+    expect(await mcpOAuth.getClient(owner.tenant.id, ownersOnly)).toBeDefined();
     const audit = (await server.ctx.repos.audit.list(owner.tenant.id, 50)).map((r) => r.action);
     expect(audit).toEqual(expect.arrayContaining(['mcp.oauth_grant_revoked', 'mcp.oauth_client_deleted']));
+  });
+
+  it("an admin's delete never removes the client for the others; ?userId= picks another user's grant", async () => {
+    const { owner, member } = await setup();
+    const shared = await registerClient(owner.tenant.id);
+    const memberToken = await grant(owner.tenant.id, member.user.id, shared, owner.tenant.slug);
+    const ownerToken = await grant(owner.tenant.id, owner.user.id, shared, owner.tenant.slug);
+    const { mcpOAuth } = server.ctx.repos;
+    // the admin's own Revoke: its grant goes, the member's consent, token and the client stay
+    expect(await owner.client.data(owner.client.delete(`/rest/mcp/oauth-clients/${shared}`))).toEqual({
+      ok: true,
+    });
+    expect(await mcpOAuth.getAccessToken(owner.tenant.id, sha256(ownerToken))).toBeUndefined();
+    expect(await mcpOAuth.getClient(owner.tenant.id, shared)).toBeDefined();
+    expect(await mcpOAuth.getConsent(owner.tenant.id, member.user.id, shared)).toBeDefined();
+    expect(await mcpOAuth.getAccessToken(owner.tenant.id, sha256(memberToken))).toBeDefined();
+    // another user's grant through ?userId=: a user with no consent is 404, a bad id 400
+    expect(
+      (await owner.client.delete(`/rest/mcp/oauth-clients/${shared}?userId=${owner.user.id}`)).statusCode,
+    ).toBe(404);
+    expect((await owner.client.delete(`/rest/mcp/oauth-clients/${shared}?userId=nope`)).statusCode).toBe(400);
+    expect(
+      await owner.client.data(
+        owner.client.delete(`/rest/mcp/oauth-clients/${shared}?userId=${member.user.id}`),
+      ),
+    ).toEqual({ ok: true });
+    expect(await mcpOAuth.getAccessToken(owner.tenant.id, sha256(memberToken))).toBeUndefined();
+    expect(await mcpOAuth.getClient(owner.tenant.id, shared)).toBeUndefined();
+  });
+
+  it('the member routes need mcp:oauth: a workspace role without it is refused', async () => {
+    const { owner } = await setup();
+    const shared = await registerClient(owner.tenant.id);
+    const role = await owner.client.data<{ slug: string }>(
+      owner.client.post('/rest/roles', {
+        displayName: `No oauth ${randomUUID().slice(0, 6)}`,
+        roleType: 'global',
+        scopes: ['instanceAi:message'],
+      }),
+    );
+    const bare = await memberAs(owner, role.slug as never, {
+      email: `no-oauth-${randomUUID().slice(0, 8)}@example.com`,
+      remoteAddress: ADDRESS(),
+      origin: server.url,
+    });
+    await server.ctx.repos.mcpOAuth.saveConsent({
+      tenantId: owner.tenant.id,
+      userId: bare.user.id,
+      clientId: shared,
+      scope: ['workflow:read'],
+    });
+    expect((await bare.client.get('/rest/mcp/oauth-clients')).statusCode).toBe(403);
+    expect((await bare.client.delete(`/rest/mcp/oauth-clients/${shared}`)).statusCode).toBe(403);
+    expect(await server.ctx.repos.mcpOAuth.getConsent(owner.tenant.id, bare.user.id, shared)).toBeDefined();
   });
 
   it('repository: list by user and revoke by user are tenant and user bound', async () => {
@@ -594,5 +673,12 @@ describe('OAuth clients: a member sees and revokes only its own grant', () => {
     expect(await mcpOAuth.revokeForUser(one.tenant.id, two.user.id, client)).toBe(false);
     expect(await mcpOAuth.revokeForUser(one.tenant.id, one.user.id, client)).toBe(true);
     expect(await mcpOAuth.revokeForUser(one.tenant.id, one.user.id, client)).toBe(false);
+    // the client row goes only when no consent is left, and only in its own workspace
+    await mcpOAuth.saveConsent({ tenantId: one.tenant.id, userId: two.user.id, clientId: client, scope: [] });
+    expect(await mcpOAuth.deleteClientWithoutConsents(one.tenant.id, client)).toBe(false);
+    expect(await mcpOAuth.revokeForUser(one.tenant.id, two.user.id, client)).toBe(true);
+    expect(await mcpOAuth.deleteClientWithoutConsents(two.tenant.id, client)).toBe(false);
+    expect(await mcpOAuth.deleteClientWithoutConsents(one.tenant.id, client)).toBe(true);
+    expect(await mcpOAuth.getClient(one.tenant.id, client)).toBeUndefined();
   });
 });

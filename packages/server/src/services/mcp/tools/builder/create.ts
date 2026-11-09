@@ -6,7 +6,8 @@
  * it can go on with `update_workflow`, unless the client says otherwise.
  */
 import { z } from 'zod';
-import type { workflowCreateSchema } from '../../../../http/schemas';
+import { parse } from '../../../../http/errors';
+import { workflowCreateSchema } from '../../../../http/schemas';
 import { validateDefinition } from '../../../ai-builder/tools';
 import type { McpToolDefinition } from '../../types';
 import { McpToolError, mcpActor, mcpAuth, requireMcpScope } from '../../workflow-gate';
@@ -70,22 +71,19 @@ export const createWorkflowTool: McpToolDefinition<z.output<typeof createInput>>
     // the creating client's flag is on, unless it wrote one
     const settings = { ...(definition.settings ?? {}) };
     if (settings.availableInMCP === undefined) settings.availableInMCP = true;
-    const created = await ctx.workflows.create(
-      caller.tenant.id,
-      {
-        name: definition.name,
-        nodes: definition.nodes,
-        connections: definition.connections,
-        settings,
-        pinData: definition.pinData ?? {},
-        stickyNotes: definition.stickyNotes ?? [],
-        nodeGroups: definition.nodeGroups ?? [],
-        projectId,
-        folderId: input.folderId ?? null,
-        ...(input.tagIds ? { tagIds: input.tagIds } : {}),
-      } as unknown as z.output<typeof workflowCreateSchema> & { projectId: string },
-      mcpActor(caller),
-    );
+    // the same schema as POST /rest/workflows, so the create input is typed and not cast
+    const body = parse(workflowCreateSchema, {
+      name: definition.name,
+      nodes: definition.nodes,
+      connections: definition.connections,
+      settings,
+      pinData: definition.pinData ?? {},
+      stickyNotes: definition.stickyNotes ?? [],
+      nodeGroups: definition.nodeGroups ?? [],
+      folderId: input.folderId ?? null,
+      ...(input.tagIds ? { tagIds: input.tagIds } : {}),
+    });
+    const created = await ctx.workflows.create(caller.tenant.id, { ...body, projectId }, mcpActor(caller));
     return {
       workflowId: created.id,
       name: created.name,

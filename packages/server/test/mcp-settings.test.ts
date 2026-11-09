@@ -220,6 +220,18 @@ describe('workflows and toggle-access', () => {
       updatedCount: 3,
     });
     expect(await flagOf(user.tenant.id, one.id)).toBe(false);
+    // P6-35 (n8n): `projectId` is a target of its own, and it is exactly one target
+    const projectId = (await server.ctx.repos.workflows.get(user.tenant.id, one.id))!.projectId as string;
+    expect(await user.client.data(toggle({ availableInMCP: true, projectId }))).toEqual({ updatedCount: 3 });
+    expect(await flagOf(user.tenant.id, one.id)).toBe(true);
+    expect((await toggle({ availableInMCP: true, projectId, folderId: parent.id })).statusCode).toBe(400);
+    expect((await toggle({ availableInMCP: true, projectId, workflowIds: [one.id] })).statusCode).toBe(400);
+    expect(
+      [403, 404].includes((await toggle({ availableInMCP: true, projectId: randomUUID() })).statusCode),
+    ).toBe(true);
+    expect(await user.client.data(toggle({ availableInMCP: false, allWorkflows: true }))).toEqual({
+      updatedCount: 3,
+    });
 
     const tooMany = Array.from({ length: 101 }, () => randomUUID());
     expect((await toggle({ availableInMCP: true, workflowIds: tooMany })).statusCode).toBe(400);

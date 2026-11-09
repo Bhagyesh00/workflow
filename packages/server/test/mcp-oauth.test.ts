@@ -63,7 +63,7 @@ async function signup() {
 type User = Awaited<ReturnType<typeof signup>>;
 
 /** another user who is also an editor of `owner`'s workspace (their session stays on their own one) */
-async function memberOf(owner: User, role: 'editor' | 'viewer' = 'editor') {
+async function memberOf(owner: User, role: 'editor' | 'viewer' | 'member' = 'editor') {
   const other = await signup();
   await server.ctx.repos.memberships.add(owner.tenant.id, other.user.id, role);
   await server.ctx.repos.projects.ensurePersonal(
@@ -1064,7 +1064,8 @@ describe('routes', () => {
         createdAt: expect.any(String),
       },
     ]);
-    const editor = await memberOf(owner);
+    // a true `member` (the old `editor` name holds no scope since the cutover)
+    const editor = await memberOf(owner, 'member');
     await editor.client.data(editor.client.post('/rest/auth/switch-tenant', { tenantId: owner.tenant.id }));
     // P6-35: a member lists only its own clients (a consent row), ownership=all and the stats need mcp:manage,
     // and a delete without it can only remove its own grant, which this member does not have: 404
