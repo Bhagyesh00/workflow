@@ -22,11 +22,11 @@ export const archiveWorkflowTool: McpToolDefinition<z.output<typeof archiveInput
   description:
     'Archive a workflow available in MCP. A published workflow is unpublished first. An archived workflow cannot be changed or run until it is unarchived in the editor.',
   scopes: ['workflow:write'],
-  minRole: 'editor',
+  access: 'workflow:delete',
   input: archiveInput,
   annotations: { ...WRITE, destructiveHint: true, idempotentHint: true },
   async handler(ctx, caller, input) {
-    const row = await assertWorkflowForMcp(ctx, caller, input.workflowId, 'write');
+    const row = await assertWorkflowForMcp(ctx, caller, input.workflowId, 'delete');
     const archived = await ctx.workflowArchive.archive(caller.tenant.id, row.id, mcpActor(caller));
     return {
       workflowId: archived.id,
@@ -42,7 +42,7 @@ export const restoreWorkflowVersionTool: McpToolDefinition<z.output<typeof resto
   description:
     'Restore a saved version of a workflow available in MCP as its new draft. It becomes a new version; the published version keeps running until you publish_workflow.',
   scopes: ['workflow:write'],
-  minRole: 'editor',
+  access: 'workflow:update',
   input: restoreInput,
   annotations: WRITE,
   async handler(ctx, caller, input) {

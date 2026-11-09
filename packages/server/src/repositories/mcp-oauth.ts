@@ -68,6 +68,28 @@ export class McpOAuthRepository {
       .orderBy(desc(oauthClients.createdAt), desc(oauthClients.id));
   }
 
+  /**
+   * The clients this user has a consent row for (P6-35: a client is the caller's own when the caller
+   * consented to it), newest client first. Another user's consent does not count.
+   */
+  async listClientsByUser(tenantId: string, userId: string): Promise<OAuthClientRow[]> {
+    if (!isUuid(tenantId) || !isUuid(userId)) return [];
+    const rows = await this.db
+      .select({ client: oauthClients })
+      .from(oauthClients)
+      .innerJoin(
+        oauthUserConsents,
+        and(
+          eq(oauthUserConsents.tenantId, oauthClients.tenantId),
+          eq(oauthUserConsents.clientId, oauthClients.id),
+          eq(oauthUserConsents.userId, userId),
+        ),
+      )
+      .where(eq(oauthClients.tenantId, tenantId))
+      .orderBy(desc(oauthClients.createdAt), desc(oauthClients.id));
+    return rows.map((row) => row.client);
+  }
+
   async countClients(tenantId: string): Promise<number> {
     if (!isUuid(tenantId)) return 0;
     const [row] = await this.db
@@ -211,6 +233,54 @@ export class McpOAuthRepository {
       await tx
         .delete(oauthRefreshTokens)
         .where(and(eq(oauthRefreshTokens.tenantId, tenantId), eq(oauthRefreshTokens.clientId, clientId)));
+    });
+  }
+
+  /**
+   * Removes one user's grant for the client (P6-35): their consent, codes, access and refresh tokens. The
+   * client and every other user's grant stay. Returns false when the user had no consent for it.
+   */
+  async revokeForUser(tenantId: string, userId: string, clientId: string): Promise<boolean> {
+    if (!isUuid(tenantId) || !isUuid(userId) || !usableKey(clientId)) return false;
+    return this.db.transaction(async (tx) => {
+      const removed = await tx
+        .delete(oauthUserConsents)
+        .where(
+          and(
+            eq(oauthUserConsents.tenantId, tenantId),
+            eq(oauthUserConsents.userId, userId),
+            eq(oauthUserConsents.clientId, clientId),
+          ),
+        )
+        .returning({ clientId: oauthUserConsents.clientId });
+      await tx
+        .delete(oauthAuthorizationCodes)
+        .where(
+          and(
+            eq(oauthAuthorizationCodes.tenantId, tenantId),
+            eq(oauthAuthorizationCodes.userId, userId),
+            eq(oauthAuthorizationCodes.clientId, clientId),
+          ),
+        );
+      await tx
+        .delete(oauthAccessTokens)
+        .where(
+          and(
+            eq(oauthAccessTokens.tenantId, tenantId),
+            eq(oauthAccessTokens.userId, userId),
+            eq(oauthAccessTokens.clientId, clientId),
+          ),
+        );
+      await tx
+        .delete(oauthRefreshTokens)
+        .where(
+          and(
+            eq(oauthRefreshTokens.tenantId, tenantId),
+            eq(oauthRefreshTokens.userId, userId),
+            eq(oauthRefreshTokens.clientId, clientId),
+          ),
+        );
+      return removed.length > 0;
     });
   }
 

@@ -2,7 +2,8 @@
  * Bearer auth of the tenant MCP server (P5-04). `wfo_at_` tokens go to the OAuth server
  * (`verifyMcpOAuthToken`, P5-14), `wfk_` keys to `authenticateApiKey(key, 'mcp-server-api')`; a public
  * API key (audience `public-api`) is refused like an unknown key. The key or token must belong to the
- * slug's tenant, and the role is the membership's current one, so a removed member loses access at once.
+ * slug's tenant, and the role and the workspace scopes are the membership's current ones (project scopes are read on
+ * every call), so a removed member or a narrowed role takes effect at once.
  * No cookie and no session are read.
  */
 import type { ServerContext } from '../../context';
@@ -43,6 +44,7 @@ export async function authenticateMcpBearer(
       user,
       tenant,
       role: membership.role,
+      globalScopes: await ctx.access.globalScopes(tenant.id, membership.role),
       scopes: [...new Set(info.scopes.filter(isMcpScope))],
       via: 'oauth',
       clientId: info.clientId,
@@ -57,6 +59,7 @@ export async function authenticateMcpBearer(
     user: auth.user,
     tenant: auth.tenant,
     role: auth.role,
+    globalScopes: await ctx.access.globalScopes(tenant.id, auth.role),
     scopes: [...MCP_SCOPES],
     via: 'key',
     apiKeyId: auth.apiKeyId,

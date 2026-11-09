@@ -70,7 +70,7 @@ export const getWorkflowFormatReferenceTool: McpToolDefinition<z.output<typeof n
   description:
     'The JSON format of a workflow (nodes, connections, settings, pin data, groups) as create_workflow and update_workflow read it. Read it once before you build.',
   scopes: ['workflow:read', 'workflow:write'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: noInput,
   annotations: READ,
   async handler() {
@@ -82,7 +82,7 @@ export const getWorkflowBestPracticesTool: McpToolDefinition<z.output<typeof noI
   name: 'get_workflow_best_practices',
   description: 'Short rules for building workflows that validate and run. Read it before you build.',
   scopes: ['workflow:read', 'workflow:write'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: noInput,
   annotations: READ,
   async handler() {

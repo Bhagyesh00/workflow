@@ -4,9 +4,13 @@
  * an expression as the node's auth type, or a display rule that hides the slot, never skips it. A
  * node of an inline workflow (a JSON text in a `workflowJson` parameter, as Execute Workflow takes it)
  * is read as data and checked the same way. Nothing is evaluated.
+ *
+ * P6-35: with a `projectId` the same references are also checked with `assertCredentialsUsable`: a credential
+ * of another project that is not shared with it, not global, is refused with n8n's text.
  */
-import type { WorkflowDefinition } from '@workflow/workflow';
+import type { WorkflowDefinition, WorkflowNode } from '@workflow/workflow';
 import type { ServerContext } from '../../../../context';
+import { assertCredentialsUsable, InaccessibleCredentialError } from '../../../credential-usable';
 import { McpToolError } from '../../workflow-gate';
 
 /** how deep inline workflows may nest before the rest is refused */
@@ -43,12 +47,18 @@ function inlineWorkflows(value: unknown, depth: number, found: unknown[]): void 
 }
 
 /** every credential id a list of nodes refers to, inline workflows included */
-function collectCredentialIds(nodes: unknown, depth: number, ids: Set<string>): void {
+function collectCredentialIds(
+  nodes: unknown,
+  depth: number,
+  ids: Set<string>,
+  flat: WorkflowNode[] = [],
+): void {
   if (!Array.isArray(nodes)) return;
   if (depth > MAX_INLINE_DEPTH) throw new McpToolError(MCP_CREDENTIAL_TEXTS.tooDeep);
   for (const raw of nodes) {
     if (raw === null || typeof raw !== 'object') continue;
     const node = raw as { credentials?: unknown; parameters?: unknown };
+    flat.push(raw as WorkflowNode);
     if (node.credentials !== undefined && node.credentials !== null) {
       if (typeof node.credentials !== 'object' || Array.isArray(node.credentials)) {
         throw new McpToolError(MCP_CREDENTIAL_TEXTS.badReference);
@@ -67,7 +77,7 @@ function collectCredentialIds(nodes: unknown, depth: number, ids: Set<string>): 
     inlineWorkflows(node.parameters, 0, inline);
     for (const workflow of inline) {
       if (workflow !== null && typeof workflow === 'object') {
-        collectCredentialIds((workflow as { nodes?: unknown }).nodes, depth + 1, ids);
+        collectCredentialIds((workflow as { nodes?: unknown }).nodes, depth + 1, ids, flat);
       }
     }
   }
@@ -75,17 +85,29 @@ function collectCredentialIds(nodes: unknown, depth: number, ids: Set<string>): 
 
 /**
  * Throws on the first credential reference that is not a credential of `tenantId`. A reference with
- * no id is a lookup by name inside the tenant at run time and cannot reach another workspace.
+ * no id is a lookup by name inside the tenant at run time and cannot reach another workspace. With a
+ * `projectId`, every reference (the inline workflows' too) must also be usable in that project.
  */
 export async function assertCredentialsInTenant(
   ctx: ServerContext,
   tenantId: string,
   definition: WorkflowDefinition,
+  projectId?: string,
 ): Promise<void> {
   const ids = new Set<string>();
-  collectCredentialIds(definition.nodes, 0, ids);
+  const flat: WorkflowNode[] = [];
+  collectCredentialIds(definition.nodes, 0, ids, flat);
   for (const id of ids) {
     const row = await ctx.repos.credentials.get(tenantId, id);
     if (!row || row.tenantId !== tenantId) throw new McpToolError(MCP_CREDENTIAL_TEXTS.notInWorkspace(id));
+  }
+  if (!projectId || !flat.length) return;
+  try {
+    await assertCredentialsUsable(ctx, tenantId, projectId, { ...definition, nodes: flat });
+  } catch (error) {
+    if (error instanceof InaccessibleCredentialError) {
+      throw new McpToolError(`${error.message}. ${error.description}`);
+    }
+    throw error;
   }
 }

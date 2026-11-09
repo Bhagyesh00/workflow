@@ -1051,7 +1051,7 @@ describe('routes', () => {
     expect(await revoke(unknown, { token: 'x' })).toBe(404);
   });
 
-  it('lists clients, deletes one with its tokens, shows stats; admin only', async () => {
+  it('lists own clients, deletes one with its tokens, shows stats; the client-wide parts need mcp:manage', async () => {
     const owner = await signup();
     const client = await newClient(owner.tenant.slug, ['http://localhost:4444/cb']);
     const tokens = await grant(owner, client);
@@ -1066,8 +1066,11 @@ describe('routes', () => {
     ]);
     const editor = await memberOf(owner);
     await editor.client.data(editor.client.post('/rest/auth/switch-tenant', { tenantId: owner.tenant.id }));
-    expect((await editor.client.get('/rest/mcp/oauth-clients')).statusCode).toBe(403);
-    expect((await editor.client.delete(`/rest/mcp/oauth-clients/${client.client_id}`)).statusCode).toBe(403);
+    // P6-35: a member lists only its own clients (a consent row), ownership=all and the stats need mcp:manage,
+    // and a delete without it can only remove its own grant, which this member does not have: 404
+    expect(await editor.client.data(editor.client.get('/rest/mcp/oauth-clients'))).toEqual([]);
+    expect((await editor.client.get('/rest/mcp/oauth-clients?ownership=all')).statusCode).toBe(403);
+    expect((await editor.client.delete(`/rest/mcp/oauth-clients/${client.client_id}`)).statusCode).toBe(404);
     expect((await editor.client.get('/rest/mcp/instance-stats')).statusCode).toBe(403);
     // another workspace's admin sees none and cannot delete it
     const other = await signup();

@@ -142,6 +142,8 @@ export const MCP_UPDATE_TEXTS = {
 interface Session {
   ctx: ServerContext;
   caller: McpCaller;
+  /** the workflow's project: a credential must be usable in it (P6-35) */
+  projectId: string;
   draft: BuilderDraft;
   /** the workflow's tag ids, once a tag operation changed them */
   tagIds?: Set<string>;
@@ -277,7 +279,10 @@ async function apply(session: Session, step: UpdateOperation): Promise<void> {
     case 'setNodeCredential': {
       const node = findNode(session, step.name);
       const row = await session.ctx.repos.credentials.get(session.caller.tenant.id, step.credentialId);
-      if (!row)
+      if (
+        !row ||
+        !(await session.ctx.access.credentialUsable(session.caller.tenant.id, session.projectId, row))
+      )
         throw new BuilderDraftError(`Credential "${step.credentialId}" was not found in this workspace`);
       const types = session.ctx.registries.credentialTypes;
       if (row.type !== step.credentialType && !types.isA(row.type, step.credentialType)) {
@@ -400,7 +405,7 @@ export const updateWorkflowTool: McpToolDefinition<z.output<typeof updateInput>>
   name: 'update_workflow',
   description: `Change a workflow available in MCP with a list of operations, applied in order, all or none (${UPDATE_OPERATION_TYPES.length} types: ${UPDATE_OPERATION_TYPES.join(', ')}). Pass the versionId you read; a newer version refuses the update. The result is validated; when it has new errors nothing is saved and the issues are listed. A published workflow keeps running its published version until you publish_workflow.`,
   scopes: ['workflow:write'],
-  minRole: 'editor',
+  access: 'workflow:update',
   input: updateInput,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   async handler(ctx, caller, input) {
@@ -413,6 +418,7 @@ export const updateWorkflowTool: McpToolDefinition<z.output<typeof updateInput>>
     const session: Session = {
       ctx,
       caller,
+      projectId: row.projectId,
       draft: new BuilderDraft(structuredClone(original), ctx.registries.nodeTypes),
       currentTagIds: ((await ctx.repos.workflows.tagsFor(tenantId, [row.id])).get(row.id) ?? []).map(
         (t) => t.id,
@@ -429,7 +435,7 @@ export const updateWorkflowTool: McpToolDefinition<z.output<typeof updateInput>>
     }
 
     const definition = definitionOf(session);
-    await assertCredentialsInTenant(ctx, tenantId, definition);
+    await assertCredentialsInTenant(ctx, tenantId, definition, row.projectId);
     const after = await validateDefinition(ctx, tenantId, definition, row.id);
     const before = after.valid ? undefined : await validateDefinition(ctx, tenantId, original, row.id);
     const issues = refuseOnErrors(after, MCP_UPDATE_TEXTS.notValid, before);

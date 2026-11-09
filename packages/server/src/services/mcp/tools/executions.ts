@@ -9,7 +9,13 @@ import { z } from 'zod';
 import { parse } from '../../../http/errors';
 import { executionListQuery, getExecution, listExecutions } from '../../../routes/executions';
 import type { McpToolDefinition } from '../types';
-import { assertWorkflowForMcp, McpToolError, workflowsAvailableInMcp } from '../workflow-gate';
+import {
+  assertWorkflowForMcp,
+  McpToolError,
+  mcpListFilter,
+  requireMcpScope,
+  workflowsAvailableInMcp,
+} from '../workflow-gate';
 
 const STATUSES = ['new', 'running', 'success', 'error', 'canceled', 'waiting', 'crashed'] as const;
 const READ = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
@@ -81,7 +87,7 @@ const getWorkflowExecution: McpToolDefinition<{
   description:
     'Get an execution of a workflow available in MCP: status, timing and error. With includeData, also the output items of each node (filter with nodeNames; at most truncateData items per output).',
   scopes: ['execution:read'],
-  minRole: 'viewer',
+  access: 'execution:read',
   input: z.object({
     workflowId: z.uuid(),
     executionId: z.uuid(),
@@ -96,6 +102,8 @@ const getWorkflowExecution: McpToolDefinition<{
     if (!row || row.workflowId !== input.workflowId) {
       throw new McpToolError(MCP_EXECUTION_TEXTS.notFound(input.executionId));
     }
+    // the execution's own scope, on the project of its workflow (P6-35)
+    await requireMcpScope(ctx, caller, 'execution:read', { executionId: row.id });
     const execution = await getExecution(ctx, caller.tenant.id, input.executionId, false);
     if (!input.includeData) return { execution };
     const data = await ctx.repos.executions.getData(caller.tenant.id, input.executionId);
@@ -113,7 +121,7 @@ const searchWorkflowExecutions: McpToolDefinition<{
   description:
     'List executions, newest first, of one workflow available in MCP or of all of them; filter by status.',
   scopes: ['execution:read'],
-  minRole: 'viewer',
+  access: 'execution:list',
   input: z.object({
     workflowId: z.uuid().optional(),
     status: z.array(z.enum(STATUSES)).min(1).max(STATUSES.length).optional(),
@@ -129,7 +137,8 @@ const searchWorkflowExecutions: McpToolDefinition<{
       limit: input.limit,
       cursor: input.cursor,
     });
-    const page = await listExecutions(ctx, caller.tenant.id, query);
+    const filter = await mcpListFilter(ctx, caller, 'execution:list');
+    const page = await listExecutions(ctx, caller.tenant.id, query, { filter });
     const available = await workflowsAvailableInMcp(
       ctx,
       caller.tenant.id,

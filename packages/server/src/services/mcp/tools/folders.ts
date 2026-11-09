@@ -1,14 +1,15 @@
 /**
- * MCP tools: folders of the workspace (P5-04; research-B section 2, part a). A workspace is one tenant,
- * so there is no project to pick (`search_projects` and `projectId` are left out). Search needs
- * `project:read` (viewer), create and update `project:write` (editor), moving workflows `workflow:write`
- * (editor) and a workflow available in MCP for each one moved.
+ * MCP tools: folders of the caller's projects (P5-04, P6-35; research-B section 2, part a). A folder belongs
+ * to one project (`projectId` on search and create, from `search_projects`). Search lists what the caller's
+ * `folder:list` reaches, create needs `folder:create` on the project (the parent's, the named one or the
+ * caller's default), update `folder:update` on the folder, and moving workflows `workflow:update` on each
+ * workflow (available in MCP) plus `folder:read` on the target folder; the move stays inside one project.
  */
 import { z } from 'zod';
-import { parse } from '../../../http/errors';
+import { ApiError, parse } from '../../../http/errors';
 import { folderCreateSchema, folderListQuerySchema, folderUpdateSchema } from '../../folders';
 import type { McpToolDefinition } from '../types';
-import { assertWorkflowForMcp, mcpActor } from '../workflow-gate';
+import { assertWorkflowForMcp, mcpActor, mcpAuth, requireMcpScope } from '../workflow-gate';
 
 const folderId = z.uuid().describe('The id of the folder');
 const folderName = z.string().trim().min(1).max(128);
@@ -20,15 +21,17 @@ const searchInput = z.object({
     .union([z.uuid(), z.literal('root')])
     .optional()
     .describe('A folder id or "root"'),
+  projectId: z.uuid().optional().describe('Only the folders of this project (from search_projects)'),
   limit: z.number().int().min(1).max(100).default(50),
   cursor: z.string().max(512).optional(),
 });
 
 const searchFolders: McpToolDefinition<z.output<typeof searchInput>> = {
   name: 'search_folders',
-  description: 'Search the folders of the workspace by name, optionally inside one parent folder.',
+  description:
+    'Search the folders of your projects by name, optionally of one project or inside one parent folder.',
   scopes: ['project:read'],
-  minRole: 'viewer',
+  access: 'folder:list',
   input: searchInput,
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   async handler(ctx, caller, input) {
@@ -38,22 +41,42 @@ const searchFolders: McpToolDefinition<z.output<typeof searchInput>> = {
       limit: input.limit,
       cursor: input.cursor,
     });
-    return ctx.folders.list(caller.tenant.id, query);
+    return ctx.folders.listFor(mcpAuth(caller), { ...query, projectId: input.projectId });
   },
 };
 
-const createInput = z.object({ name: folderName, parentFolderId: parentFolderId.optional() });
+const createInput = z.object({
+  name: folderName,
+  parentFolderId: parentFolderId.optional(),
+  projectId: z
+    .uuid()
+    .optional()
+    .describe("The project to create it in (from search_projects); default: the parent folder's, else yours"),
+});
 
 const createFolder: McpToolDefinition<z.output<typeof createInput>> = {
   name: 'create_folder',
   description: 'Create a folder, at the top level or inside a parent folder.',
   scopes: ['project:write'],
-  minRole: 'editor',
+  access: 'folder:create',
   input: createInput,
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   async handler(ctx, caller, input) {
     const body = parse(folderCreateSchema, { name: input.name, parentFolderId: input.parentFolderId });
-    return ctx.folders.create(caller.tenant.id, body, mcpActor(caller));
+    // the project of a create: the parent's (a named project must be the same), else the named one, else the default
+    let projectId: string;
+    if (body.parentFolderId) {
+      const parent = await ctx.repos.folders.get(caller.tenant.id, body.parentFolderId);
+      if (!parent) throw ApiError.notFound('Folder');
+      if (input.projectId && input.projectId !== parent.projectId) {
+        throw ApiError.badRequest('The parent folder belongs to another project.');
+      }
+      projectId = parent.projectId;
+    } else {
+      projectId = await ctx.access.targetProject(mcpAuth(caller), input.projectId);
+    }
+    await requireMcpScope(ctx, caller, 'folder:create', { projectId });
+    return ctx.folders.create(caller.tenant.id, { ...body, projectId }, mcpActor(caller));
   },
 };
 
@@ -67,11 +90,12 @@ const updateFolder: McpToolDefinition<z.output<typeof updateInput>> = {
   name: 'update_folder',
   description: 'Rename a folder or move it under another parent (null for the top level).',
   scopes: ['project:write'],
-  minRole: 'editor',
+  access: 'folder:update',
   input: updateInput,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   async handler(ctx, caller, input) {
     const body = parse(folderUpdateSchema, { name: input.name, parentFolderId: input.parentFolderId });
+    await requireMcpScope(ctx, caller, 'folder:update', { folderId: input.folderId });
     return ctx.folders.update(caller.tenant.id, input.folderId, body, mcpActor(caller));
   },
 };
@@ -85,12 +109,13 @@ const moveWorkflowsToFolder: McpToolDefinition<z.output<typeof moveInput>> = {
   name: 'move_workflows_to_folder',
   description: 'Move workflows available in MCP into a folder (null for the top level).',
   scopes: ['workflow:write'],
-  minRole: 'editor',
+  access: 'workflow:update',
   input: moveInput,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   async handler(ctx, caller, input) {
     const ids = [...new Set(input.workflowIds)];
     for (const id of ids) await assertWorkflowForMcp(ctx, caller, id, 'write');
+    if (input.folderId) await requireMcpScope(ctx, caller, 'folder:read', { folderId: input.folderId });
     return ctx.workflowArchive.move(caller.tenant.id, ids, input.folderId, mcpActor(caller));
   },
 };

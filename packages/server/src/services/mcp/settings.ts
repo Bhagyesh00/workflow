@@ -1,8 +1,9 @@
 /**
  * MCP settings of a workspace (P5-04): access on or off (`MCP_MANAGED_BY_ENV` makes the PATCH 409 and
  * uses `MCP_ACCESS_ENABLED`), the user's own MCP key (label `MCP Server API Key`, audience
- * `mcp-server-api`, shown once on create and rotate, then `wfk_<prefix>_...`), the workflows an editor
- * can expose and the admin's `toggle-access` (`workflowIds` max 100, `folderId`, `allWorkflows`).
+ * `mcp-server-api`, shown once on create and rotate, then `wfk_<prefix>_...`), the workflows the caller can
+ * edit and `toggle-access` (`workflowIds` max 100, `folderId`, `allWorkflows`, each only on workflows the
+ * caller holds `workflow:update` on, by project: P6-35).
  * Built by routes/mcp-settings.ts from the context; the constructor does no work. Every query is
  * scoped by the caller's tenant with bound values.
  */
@@ -15,7 +16,9 @@ import type { AuthContext } from '../../http/auth';
 import { ApiError } from '../../http/errors';
 import type { TenantSettings } from '../../plans';
 import { escapeLike } from '../../repositories/executions';
+import { sharedRowConditions } from '../../repositories/shares';
 import { isUuid, now } from '../../repositories/util';
+import { MISSING_SCOPE_MESSAGE } from '../access';
 import { MCP_KEY_AUDIENCE, MCP_KEY_LABEL, mcpServerUrl } from './types';
 import { isAvailableInMcp } from './workflow-gate';
 
@@ -49,6 +52,7 @@ export interface McpToggleAccessInput {
   workflowIds?: string[];
   folderId?: string;
   allWorkflows?: boolean;
+  projectId?: string;
 }
 
 /** a row of GET /mcp/workflows (editor `McpWorkflowSummary`) */
@@ -70,6 +74,7 @@ export const MCP_WORKFLOWS_LIST_MAX = 500;
 export const MCP_SETTINGS_TEXTS = {
   managedByEnv: 'MCP settings are managed by the environment and cannot be changed here',
   toggleTarget: 'Name the workflows to change: workflowIds, folderId or allWorkflows (exactly one)',
+  projectTarget: 'projectId goes with allWorkflows',
 } as const;
 
 export const mcpSettingsPatchSchema = z
@@ -90,6 +95,8 @@ export const mcpToggleAccessSchema = z
     workflowIds: z.array(z.uuid()).min(1).max(MCP_TOGGLE_MAX_WORKFLOWS).optional(),
     folderId: z.uuid().optional(),
     allWorkflows: z.boolean().optional(),
+    /** with `allWorkflows`: only this project's workflows (`workflow:update` in it); else every one the caller can edit */
+    projectId: z.uuid().optional(),
   })
   .strict()
   .refine(
@@ -97,7 +104,10 @@ export const mcpToggleAccessSchema = z
       [v.workflowIds !== undefined, v.folderId !== undefined, v.allWorkflows === true].filter(Boolean)
         .length === 1,
     { message: MCP_SETTINGS_TEXTS.toggleTarget },
-  );
+  )
+  .refine((v) => v.projectId === undefined || v.allWorkflows === true, {
+    message: MCP_SETTINGS_TEXTS.projectTarget,
+  });
 
 function mcpSettingsOf(tenant: Pick<TenantRow, 'settings'>): NonNullable<TenantSettings['mcp']> {
   return ((tenant.settings ?? {}) as TenantSettings).mcp ?? {};
@@ -205,10 +215,34 @@ export class McpSettingsService {
     };
   }
 
-  /** the workflows the caller can edit (not archived), with their `availableInMCP` flag, newest first */
+  /**
+   * The conditions that narrow a workflows query to what the caller may edit (`workflow:update` workspace
+   * wide, in a project or through a share); null when the caller can edit nothing.
+   */
+  private async editable(auth: AuthContext): Promise<SQL[] | null> {
+    const filter = await this.ctx.access.listFilter(auth, 'workflow:update');
+    return sharedRowConditions({
+      tenantId: auth.tenant.id,
+      kind: 'workflow',
+      id: workflows.id,
+      project: workflows.projectId,
+      options: { filter },
+    });
+  }
+
+  /**
+   * The workflows the caller can edit (not archived), with their `availableInMCP` flag, newest first. A
+   * caller who can edit none (no `workflow:update` anywhere) gets n8n's 403.
+   */
   async listWorkflows(auth: AuthContext, query: unknown): Promise<McpWorkflowSummaryDTO[]> {
     const filter = mcpWorkflowsQuerySchema.parse(query ?? {});
-    const conditions: SQL[] = [eq(workflows.tenantId, auth.tenant.id), eq(workflows.isArchived, false)];
+    const access = await this.editable(auth);
+    if (access === null) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+    const conditions: SQL[] = [
+      eq(workflows.tenantId, auth.tenant.id),
+      eq(workflows.isArchived, false),
+      ...access,
+    ];
     if (filter.search) conditions.push(sql`${workflows.name} ilike ${`%${escapeLike(filter.search)}%`}`);
     if (filter.folderId === 'root') conditions.push(isNull(workflows.folderId));
     else if (filter.folderId) conditions.push(eq(workflows.folderId, filter.folderId));
@@ -236,21 +270,43 @@ export class McpSettingsService {
   }
 
   /**
-   * Sets `availableInMCP` on the named workflows, a folder's (with its subfolders) or all of the
-   * workspace's; archived workflows and other workspaces' ids are left alone. Returns how many changed.
+   * Sets `availableInMCP` on the named workflows, a folder's (with its subfolders) or all the caller can edit
+   * (of the named project, with `projectId`); archived workflows and other workspaces' ids are left alone.
+   * Every workflow needs `workflow:update` for the caller: a named one it cannot edit is a 403, a folder or
+   * `allWorkflows` changes only the ones it can. Returns how many changed.
    */
   async toggleAccess(auth: AuthContext, input: McpToggleAccessInput): Promise<{ updatedCount: number }> {
     const body = mcpToggleAccessSchema.parse(input);
     const tenantId = auth.tenant.id;
+    const access = await this.editable(auth);
     const conditions: SQL[] = [eq(workflows.tenantId, tenantId), eq(workflows.isArchived, false)];
     if (body.workflowIds) {
-      conditions.push(inArray(workflows.id, [...new Set(body.workflowIds)].filter(isUuid)));
+      const ids = [...new Set(body.workflowIds)].filter(isUuid);
+      const named = await this.ctx.database.db
+        .select({ id: workflows.id })
+        .from(workflows)
+        .where(and(eq(workflows.tenantId, tenantId), inArray(workflows.id, ids)));
+      const allowed = access
+        ? await this.ctx.database.db
+            .select({ id: workflows.id })
+            .from(workflows)
+            .where(and(eq(workflows.tenantId, tenantId), inArray(workflows.id, ids), ...access))
+        : [];
+      // a workflow of this workspace the caller cannot edit stops the whole change
+      if (allowed.length < named.length) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+      conditions.push(inArray(workflows.id, ids));
     } else if (body.folderId) {
-      const folder = await this.ctx.repos.folders.get(tenantId, body.folderId);
-      if (!folder) throw ApiError.notFound('Folder');
+      const held = await this.ctx.access.scopesForAuth(auth, { folderId: body.folderId });
+      if (!held.has('folder:read')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
       const subtree = await this.ctx.repos.folders.subtreeIds(tenantId, body.folderId);
       conditions.push(inArray(workflows.folderId, subtree.length ? subtree : [body.folderId]));
+    } else if (body.projectId) {
+      const held = await this.ctx.access.scopesForAuth(auth, { projectId: body.projectId });
+      if (!held.has('workflow:update')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+      conditions.push(eq(workflows.projectId, body.projectId));
     }
+    if (!access) return { updatedCount: await this.auditToggle(auth, body, 0) };
+    conditions.push(...access);
     const value = body.availableInMCP ? sql`'true'::jsonb` : sql`'false'::jsonb`;
     conditions.push(
       sql`coalesce(${workflows.settings} -> 'availableInMCP', 'false'::jsonb) is distinct from ${value}`,
@@ -264,16 +320,24 @@ export class McpSettingsService {
       })
       .where(and(...conditions))
       .returning({ id: workflows.id });
-    await this.ctx.repos.audit.add(tenantId, {
+    return { updatedCount: await this.auditToggle(auth, body, rows.length) };
+  }
+
+  private async auditToggle(
+    auth: AuthContext,
+    body: z.output<typeof mcpToggleAccessSchema>,
+    updatedCount: number,
+  ): Promise<number> {
+    await this.ctx.repos.audit.add(auth.tenant.id, {
       userId: auth.user.id,
       action: 'mcp.workflows_access_updated',
       resourceType: 'workflow',
       metadata: {
         availableInMCP: body.availableInMCP,
         target: body.workflowIds ? 'workflows' : body.folderId ? 'folder' : 'all',
-        updatedCount: rows.length,
+        updatedCount,
       },
     });
-    return { updatedCount: rows.length };
+    return updatedCount;
   }
 }

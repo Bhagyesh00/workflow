@@ -5,15 +5,92 @@
  * tool shares: the error a client may read (`McpToolError`), the actor of a call and the credential
  * sanitizer of node lists (only `{ id, name }` per credential slot, as n8n's MCP schemas).
  */
-import type { WorkflowNode } from '@workflow/workflow';
+import type { Scope, WorkflowNode } from '@workflow/workflow';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { ServerContext } from '../../context';
 import { type WorkflowRow, workflows } from '../../db/schema';
+import type { AuthContext } from '../../http/auth';
+import { ApiError } from '../../http/errors';
+import { type AccessFilter, type AccessTarget, MISSING_SCOPE_MESSAGE } from '../access';
 import type { Actor } from '../workflows';
 import type { McpCaller } from './types';
 
 /** what the tool does with the workflow */
-export type McpWorkflowAccess = 'details' | 'run' | 'write';
+export type McpWorkflowAccess = 'details' | 'run' | 'write' | 'publish' | 'unpublish' | 'delete';
+
+/** the scope each kind of access needs on the workflow (P6-35) */
+export const MCP_WORKFLOW_ACCESS_SCOPE: Readonly<Record<McpWorkflowAccess, Scope>> = {
+  details: 'workflow:read',
+  run: 'workflow:execute',
+  write: 'workflow:update',
+  publish: 'workflow:publish',
+  unpublish: 'workflow:unpublish',
+  delete: 'workflow:delete',
+};
+
+const authOf = new WeakMap<McpCaller, AuthContext>();
+const heldOf = new WeakMap<McpCaller, Map<Scope, Promise<boolean>>>();
+
+/**
+ * The caller as the REST layer's `AuthContext` (the membership's current role), with a scope cache that lives
+ * as long as the caller object, which is one request. Every access check of a tool goes through it.
+ */
+export function mcpAuth(caller: McpCaller): AuthContext {
+  let auth = authOf.get(caller);
+  if (!auth) {
+    auth = {
+      user: caller.user,
+      tenant: caller.tenant,
+      role: caller.role,
+      ...(caller.apiKeyId ? { apiKeyId: caller.apiKeyId } : {}),
+      scopeCache: new Map(),
+    };
+    authOf.set(caller, auth);
+  }
+  return auth;
+}
+
+/** the access filter of `scope` for the caller (`AccessService.listFilter`): narrows every list a tool answers */
+export function mcpListFilter(ctx: ServerContext, caller: McpCaller, scope: Scope): Promise<AccessFilter> {
+  return ctx.access.listFilter(mcpAuth(caller), scope);
+}
+
+/** true when the caller holds `scope` workspace wide or in at least one project (the list and call gate of a tool) */
+export function callerHoldsScope(ctx: ServerContext, caller: McpCaller, scope: Scope): Promise<boolean> {
+  let held = heldOf.get(caller);
+  if (!held) {
+    held = new Map();
+    heldOf.set(caller, held);
+  }
+  let answer = held.get(scope);
+  if (!answer) {
+    answer = (async () => {
+      if (caller.globalScopes.has(scope)) return true;
+      // a project role that holds it (also a scope that is not a row scope, such as `workflow:create`)
+      if ((await ctx.access.accessibleProjectIds(mcpAuth(caller), scope)).length > 0) return true;
+      // or a workflow or credential shared into one of the caller's projects with a role that holds it
+      const filter = await mcpListFilter(ctx, caller, scope);
+      if (filter.all) return true;
+      return filter.projectIds.length + filter.workflowIds.length + filter.credentialIds.length > 0;
+    })();
+    held.set(scope, answer);
+  }
+  return answer;
+}
+
+/**
+ * Throws n8n's 403 text unless the caller holds `scope` on `target` (a project, a table, a folder, ...);
+ * a target of another workspace or a missing one is the 404 of `AccessService.scopesFor`.
+ */
+export async function requireMcpScope(
+  ctx: ServerContext,
+  caller: McpCaller,
+  scope: Scope,
+  target?: AccessTarget,
+): Promise<void> {
+  const held = await ctx.access.scopesForAuth(mcpAuth(caller), target);
+  if (!held.has(scope)) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+}
 
 /** n8n's texts for a refused workflow */
 export const MCP_WORKFLOW_TEXTS = {
@@ -50,16 +127,20 @@ export function mcpActor(caller: McpCaller): Actor {
 
 /**
  * The caller's tenant's workflow, when `access` is allowed over MCP; throws with n8n's text
- * otherwise (not found, archived, not available in MCP). Every access needs the flag and a live workflow.
+ * otherwise (not found, archived, not available in MCP). Every access needs the flag and a live workflow,
+ * and the scope of `access` on the workflow's project (P6-35); a workflow the caller cannot reach reads as
+ * missing, in n8n's words ("not found or you don't have permission").
  */
 export async function assertWorkflowForMcp(
   ctx: ServerContext,
   caller: McpCaller,
   workflowId: string,
-  _access: McpWorkflowAccess,
+  access: McpWorkflowAccess,
 ): Promise<WorkflowRow> {
   const row = await ctx.repos.workflows.get(caller.tenant.id, workflowId);
   if (!row || row.tenantId !== caller.tenant.id) throw new McpToolError(MCP_WORKFLOW_TEXTS.notFound);
+  const held = await ctx.access.scopesForAuth(mcpAuth(caller), { workflowId: row.id });
+  if (!held.has(MCP_WORKFLOW_ACCESS_SCOPE[access])) throw new McpToolError(MCP_WORKFLOW_TEXTS.notFound);
   if (row.isArchived) throw new McpToolError(MCP_WORKFLOW_TEXTS.archived(row.id));
   if (!isAvailableInMcp(row.settings)) throw new McpToolError(MCP_WORKFLOW_TEXTS.notAvailable);
   return row;

@@ -1,7 +1,7 @@
 /**
  * P5-04 /rest/mcp settings routes: the access switch and auto expose (admin), `MCP_MANAGED_BY_ENV`
- * (409), the caller's own MCP key (shown once, masked after, rotate), the editor's workflow list and
- * the admin's toggle-access (ids max 100, folder with subfolders, all). Shapes are the editor's DTOs.
+ * (409), the caller's own MCP key (shown once, masked after, rotate), the workflow list and toggle-access
+ * (ids max 100, folder with subfolders, all; by project scope since P6-35). Shapes are the editor's DTOs.
  */
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -153,7 +153,7 @@ describe('api key', () => {
 });
 
 describe('workflows and toggle-access', () => {
-  it('editor lists the live workflows with their flag; viewer 403', async () => {
+  it('the caller lists the live workflows it can edit, with their flag', async () => {
     const user = await signup();
     const folder = await user.client.data(user.client.post('/rest/folders', { name: 'F' }));
     const a = await simple(user.client, 'Alpha report', { settings: { availableInMCP: true } });
@@ -180,11 +180,13 @@ describe('workflows and toggle-access', () => {
         (w: { id: string }) => w.id,
       ),
     ).toEqual([b.id]);
+    // P6-35: the list is the workflows the caller can edit; a user whose own project holds the workflows
+    // still lists them whatever the old workspace role says (the member cases are in p6-mcp-scope.test.ts)
     await setRole(user.tenant.id, user.user.id, 'viewer');
-    expect((await user.client.get('/rest/mcp/workflows')).statusCode).toBe(403);
+    expect((await user.client.get('/rest/mcp/workflows')).statusCode).toBe(200);
   });
 
-  it('toggle-access by ids, by folder (with subfolders) and for all; admin only; other tenants untouched', async () => {
+  it('toggle-access by ids, by folder (with subfolders) and for all; other tenants untouched', async () => {
     const user = await signup();
     const other = await signup();
     const foreign = await simple(other.client, 'Foreign');
@@ -229,9 +231,10 @@ describe('workflows and toggle-access', () => {
     const foreignFolder = await other.client.data(other.client.post('/rest/folders', { name: 'Theirs' }));
     expect((await toggle({ availableInMCP: true, folderId: foreignFolder.id })).statusCode).toBe(404);
 
+    // P6-35: no admin gate; every workflow needs `workflow:update` for the caller, who still has these
     await setRole(user.tenant.id, user.user.id, 'editor');
-    expect((await toggle({ availableInMCP: true, allWorkflows: true })).statusCode).toBe(403);
-    expect(await flagOf(user.tenant.id, one.id)).toBe(false);
+    expect((await toggle({ availableInMCP: true, allWorkflows: true })).statusCode).toBe(200);
+    expect(await flagOf(user.tenant.id, one.id)).toBe(true);
   });
 
   it('a toggle keeps its versionId and survives a stale editor save and a restore; a save that changes the flag applies it', async () => {

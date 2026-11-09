@@ -9,7 +9,7 @@ const listWorkflowTags: McpToolDefinition<z.output<typeof noInput>> = {
   name: 'list_workflow_tags',
   description: 'List the tags of the workspace, to filter search_workflows by tagId.',
   scopes: ['tag:read'],
-  minRole: 'viewer',
+  access: 'tag:list',
   input: noInput,
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   async handler(ctx, caller) {

@@ -121,7 +121,7 @@ export const validateWorkflowTool: McpToolDefinition<z.output<typeof validateWor
   description:
     'Check a workflow definition (or the draft of a workflow available in MCP) and list its issues: errors that stop a save, warnings and notes. Nothing is saved. Give "workflow" or "workflowId".',
   scopes: ['workflow:read', 'workflow:write'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: validateWorkflowInput,
   annotations: READ,
   async handler(ctx, caller, input) {
@@ -176,7 +176,7 @@ export const validateNodeConfigTool: McpToolDefinition<z.output<typeof validateN
   description:
     'Check the parameters of one node type before you put the node in a workflow: unknown or missing required parameters and options that are not allowed. Checks that need other nodes (connections, a trigger) are left out. Nothing is saved.',
   scopes: ['workflow:read', 'workflow:write'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: validateNodeInput,
   annotations: READ,
   async handler(ctx, _caller, input) {

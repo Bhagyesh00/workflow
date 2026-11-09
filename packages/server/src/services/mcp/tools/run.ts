@@ -3,8 +3,8 @@
  * (manual) or the published version (production) from a webhook, form, chat, schedule or manual trigger
  * (manual mode only), with the client's inputs as the trigger's items, and answers at once.
  * `test_workflow` runs the draft with pin data and waits up to a timeout. `prepare_workflow_pin_data`
- * says which nodes need pin data for a test. All need a workflow available in MCP; `minRole` is the REST
- * run route's (editor).
+ * says which nodes need pin data for a test. All need a workflow available in MCP and `workflow:execute` on its
+ * project (`access` is the REST run route's scope).
  */
 import { randomUUID } from 'node:crypto';
 import {
@@ -219,7 +219,7 @@ const executeWorkflow: McpToolDefinition<{
   description:
     'Start a workflow available in MCP and answer at once with the execution id (read the result with get_workflow_execution). executionMode "production" runs the published version, "manual" the current draft. Webhook, form, chat and schedule triggers are supported; a manual trigger only in manual mode.',
   scopes: ['workflow:execute'],
-  minRole: 'editor',
+  access: 'workflow:execute',
   input: z.object({
     workflowId,
     // required, no default (as n8n): a client must say whether it means a live run
@@ -270,7 +270,7 @@ const testWorkflow: McpToolDefinition<{
   description:
     'Run the current draft of a workflow available in MCP with pin data (prepare it with prepare_workflow_pin_data): pinned nodes output the given items instead of running, so no outside system is called for them. Waits for the run up to timeoutMs.',
   scopes: ['workflow:execute'],
-  minRole: 'editor',
+  access: 'workflow:execute',
   input: z.object({
     workflowId,
     pinData: z
@@ -352,7 +352,7 @@ const preparePinData: McpToolDefinition<{ workflowId: string }> = {
   description:
     'List the nodes of a workflow available in MCP that need pin data for test_workflow (its triggers and the nodes that call outside systems with credentials), with the pin data already saved for them and a template to fill.',
   scopes: ['workflow:execute'],
-  minRole: 'editor',
+  access: 'workflow:execute',
   input: z.object({ workflowId }),
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   async handler(ctx, caller, input) {

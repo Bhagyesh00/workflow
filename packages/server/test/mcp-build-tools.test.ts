@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { Client as SdkClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport as SdkStreamable } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { DataObject, WorkflowDefinition } from '@workflow/workflow';
+import type { DataObject, Scope, WorkflowDefinition } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Role } from '../src/db/schema';
 import { handleMcpRequest, listMcpTools, mcpToolDescriptor, mcpToolTable } from '../src/services/mcp/server';
@@ -37,19 +37,35 @@ afterAll(async () => {
   await server?.close();
 });
 
-/** the expected table: a scope that unlocks the tool and the role of the matching REST route */
-const EXPECTED: Record<string, { scopes: McpScope[]; minRole: Role }> = {
-  search_nodes: { scopes: ['workflow:read', 'workflow:write'], minRole: 'viewer' },
-  get_node_types: { scopes: ['workflow:read', 'workflow:write'], minRole: 'viewer' },
-  get_workflow_best_practices: { scopes: ['workflow:read', 'workflow:write'], minRole: 'viewer' },
-  get_workflow_format_reference: { scopes: ['workflow:read', 'workflow:write'], minRole: 'viewer' },
-  validate_workflow: { scopes: ['workflow:read', 'workflow:write'], minRole: 'viewer' },
-  validate_node_config: { scopes: ['workflow:read', 'workflow:write'], minRole: 'viewer' },
-  create_workflow: { scopes: ['workflow:write'], minRole: 'editor' },
-  update_workflow: { scopes: ['workflow:write'], minRole: 'editor' },
-  archive_workflow: { scopes: ['workflow:write'], minRole: 'editor' },
-  restore_workflow_version: { scopes: ['workflow:write'], minRole: 'editor' },
-  explore_node_resources: { scopes: ['credential:read'], minRole: 'editor' },
+/** the expected table: the grant scopes that unlock the tool, its `access` scope and the old role that holds it (the legacy map) */
+const EXPECTED: Record<string, { scopes: McpScope[]; access: Scope; minRole: Role }> = {
+  search_nodes: { scopes: ['workflow:read', 'workflow:write'], access: 'workflow:read', minRole: 'viewer' },
+  get_node_types: { scopes: ['workflow:read', 'workflow:write'], access: 'workflow:read', minRole: 'viewer' },
+  get_workflow_best_practices: {
+    scopes: ['workflow:read', 'workflow:write'],
+    access: 'workflow:read',
+    minRole: 'viewer',
+  },
+  get_workflow_format_reference: {
+    scopes: ['workflow:read', 'workflow:write'],
+    access: 'workflow:read',
+    minRole: 'viewer',
+  },
+  validate_workflow: {
+    scopes: ['workflow:read', 'workflow:write'],
+    access: 'workflow:read',
+    minRole: 'viewer',
+  },
+  validate_node_config: {
+    scopes: ['workflow:read', 'workflow:write'],
+    access: 'workflow:read',
+    minRole: 'viewer',
+  },
+  create_workflow: { scopes: ['workflow:write'], access: 'workflow:create', minRole: 'editor' },
+  update_workflow: { scopes: ['workflow:write'], access: 'workflow:update', minRole: 'editor' },
+  archive_workflow: { scopes: ['workflow:write'], access: 'workflow:delete', minRole: 'editor' },
+  restore_workflow_version: { scopes: ['workflow:write'], access: 'workflow:update', minRole: 'editor' },
+  explore_node_resources: { scopes: ['credential:read'], access: 'credential:read', minRole: 'editor' },
 };
 const RANK: Record<Role, number> = { member: 0, viewer: 1, editor: 2, admin: 3, owner: 4 };
 const ROLES: Role[] = ['viewer', 'editor', 'admin', 'owner'];
@@ -80,11 +96,8 @@ type User = Awaited<ReturnType<typeof signup>>;
 /** a user of `owner`'s workspace with `role` and an MCP key */
 async function member(owner: User, role: Role) {
   const other = await signup();
+  // an old-role user with no project of its own: only the role's workspace scopes count (the legacy map under test)
   await server.ctx.repos.memberships.add(owner.tenant.id, other.user.id, role);
-  await server.ctx.repos.projects.ensurePersonal(
-    owner.tenant.id,
-    (await server.ctx.repos.users.get(other.user.id))!,
-  );
   const key = (
     await server.ctx.auth.createApiKey(owner.tenant.id, other.user.id, MCP_KEY_LABEL, [], MCP_KEY_AUDIENCE)
   ).key;
@@ -96,7 +109,8 @@ async function caller(tenantId: string, userId: string, role: Role, scopes: McpS
     server.ctx.repos.users.get(userId),
     server.ctx.repos.tenants.get(tenantId),
   ]);
-  return { user: user!, tenant: tenant!, role, scopes, via: 'oauth', clientId: 'test-client' };
+  const globalScopes = await server.ctx.access.globalScopes(tenantId, role);
+  return { user: user!, tenant: tenant!, role, globalScopes, scopes, via: 'oauth', clientId: 'test-client' };
 }
 
 let rpcId = 0;
@@ -187,11 +201,12 @@ describe('tool table (drift)', () => {
     expect(new Set(tools.map((t) => t.name)).size).toBe(tools.length);
     for (const tool of tools) {
       expect(tool.scopes, tool.name).toEqual(EXPECTED[tool.name].scopes);
-      expect(tool.minRole, tool.name).toBe(EXPECTED[tool.name].minRole);
+      expect(tool.access, tool.name).toBe(EXPECTED[tool.name].access);
       expect(tool.description.length, tool.name).toBeGreaterThan(20);
       expect(mcpToolDescriptor(tool).inputSchema.type, tool.name).toBe('object');
       // a tool a viewer may call never writes; a write tool says it is not read only
-      if (tool.minRole === 'viewer') expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+      if (EXPECTED[tool.name].minRole === 'viewer')
+        expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
       if (tool.scopes.includes('workflow:write') && tool.scopes.length === 1) {
         expect(tool.annotations?.readOnlyHint, tool.name).toBe(false);
       }
@@ -208,11 +223,13 @@ describe('tool table (drift)', () => {
     }
   });
 
-  it('role matrix: a role sees the build tools whose minRole it meets', async () => {
+  it('role matrix: a role sees the build tools whose access scope it holds (a user with no project of its own)', async () => {
     const user = await signup();
+    // a user with no relation in this workspace: only the role's workspace scopes count
+    const stranger = await signup();
     for (const role of ROLES) {
-      const c = await caller(user.tenant.id, user.user.id, role, [...MCP_SCOPES]);
-      const listed = listMcpTools(c, server.ctx.config)
+      const c = await caller(user.tenant.id, stranger.user.id, role, [...MCP_SCOPES]);
+      const listed = (await listMcpTools(server.ctx, c))
         .filter((t) => MCP_BUILDER_TOOLS.includes(t))
         .map((t) => t.name)
         .sort();
@@ -227,7 +244,7 @@ describe('tool table (drift)', () => {
   it('scope matrix: workflow:read shows only the support tools, workflow:write all but explore', async () => {
     const user = await signup();
     const names = async (scopes: McpScope[]) =>
-      listMcpTools(await caller(user.tenant.id, user.user.id, 'owner', scopes), server.ctx.config)
+      (await listMcpTools(server.ctx, await caller(user.tenant.id, user.user.id, 'owner', scopes)))
         .filter((t) => MCP_BUILDER_TOOLS.includes(t))
         .map((t) => t.name)
         .sort();
@@ -249,7 +266,7 @@ describe('tool table (drift)', () => {
     const user = await signup();
     const c = await caller(user.tenant.id, user.user.id, 'owner', [...MCP_SCOPES]);
     const off = { ...server.ctx.config, mcp: { ...server.ctx.config.mcp, builderEnabled: false } };
-    const listed = listMcpTools(c, off);
+    const listed = await listMcpTools({ ...server.ctx, config: off }, c);
     for (const tool of MCP_BUILDER_TOOLS) expect(listed).not.toContain(tool);
     expect(listed.length).toBeGreaterThan(0);
     const reply = await handleMcpRequest(
@@ -1221,7 +1238,7 @@ describe('explore_node_resources', () => {
     });
     expect(refused.rpcError?.code).toBe(-32602);
     const scoped = await caller(owner.tenant.id, owner.user.id, 'owner', ['workflow:write']);
-    expect(listMcpTools(scoped, server.ctx.config).map((t) => t.name)).not.toContain(
+    expect((await listMcpTools(server.ctx, scoped)).map((t) => t.name)).not.toContain(
       'explore_node_resources',
     );
   });

@@ -1,8 +1,8 @@
 /**
  * The tenant MCP server (P5-04): stateless JSON-RPC over `POST /mcp-server/:tenantSlug/http`,
  * 2026-07-28 (`server/discover`, routing headers checked with `checkMcpRoutingHeaders`, -32020) with the
- * `initialize` fallback for 2025 clients. A tool is listed only when the caller holds one of its scopes
- * and meets `minRole`, and the call checks both again. Every call writes the audit row `mcp.tool_called`
+ * `initialize` fallback for 2025 clients. A tool is listed only when the OAuth grant holds one of its scopes
+ * and the user holds its `access` scope (workspace wide or in a project), and the call checks both again. Every call writes the audit row `mcp.tool_called`
  * (tool name, never the arguments). A refusal a client may read is an `isError` result; anything else
  * is the generic -32603 with no detail (the server is always production).
  */
@@ -34,17 +34,17 @@ import { z } from 'zod';
 import type { Config } from '../../config';
 import type { ServerContext } from '../../context';
 import { ApiError } from '../../http/errors';
-import { hasRole } from '../auth';
 import { MCP_BUILDER_TOOLS } from './tools/builder';
 import { credentialsTools } from './tools/credentials';
 import { dataTablesTools } from './tools/data-tables';
 import { executionsTools } from './tools/executions';
 import { foldersTools } from './tools/folders';
+import { projectsTools } from './tools/projects';
 import { runTools } from './tools/run';
 import { tagsTools } from './tools/tags';
 import { workflowsTools } from './tools/workflows';
 import type { McpCaller, McpToolDefinition } from './types';
-import { McpToolError } from './workflow-gate';
+import { callerHoldsScope, McpToolError } from './workflow-gate';
 
 /** every tool of the tenant server, the build tools (P5-13) last; read at call time, so a lane's list is current */
 export function mcpToolTable(): McpToolDefinition<any>[] {
@@ -56,6 +56,7 @@ export function mcpToolTable(): McpToolDefinition<any>[] {
     ...tagsTools,
     ...dataTablesTools,
     ...foldersTools,
+    ...projectsTools,
     ...MCP_BUILDER_TOOLS,
   ];
 }
@@ -86,9 +87,17 @@ const SERVER_INFO: McpServerInfo = {
   instructions: MCP_SERVER_INSTRUCTIONS,
 };
 
-/** true when the caller holds one of the tool's scopes and its role is at least the tool's `minRole` */
-export function callerCanUseTool(caller: McpCaller, tool: McpToolDefinition<any>): boolean {
-  return hasRole(caller.role, tool.minRole) && tool.scopes.some((scope) => caller.scopes.includes(scope));
+/**
+ * true when the grant holds one of the tool's scopes (the OAuth client's consent, or all of them for a key)
+ * and the user holds the tool's `access` scope, workspace wide or in at least one project (P6-35)
+ */
+export async function callerCanUseTool(
+  ctx: ServerContext,
+  caller: McpCaller,
+  tool: McpToolDefinition<any>,
+): Promise<boolean> {
+  if (!tool.scopes.some((scope) => caller.scopes.includes(scope))) return false;
+  return callerHoldsScope(ctx, caller, tool.access);
 }
 
 /** the tools of the table the server offers: no build tools when `MCP_BUILDER_ENABLED` is false */
@@ -99,9 +108,11 @@ function offeredTools(config: Config): McpToolDefinition<any>[] {
   return table.filter((tool) => !builder.has(tool));
 }
 
-/** the tools this caller may see: a scope it holds, its role at least `minRole`; no build tools when `MCP_BUILDER_ENABLED` is false */
-export function listMcpTools(caller: McpCaller, config: Config): McpToolDefinition<any>[] {
-  return offeredTools(config).filter((tool) => callerCanUseTool(caller, tool));
+/** the tools this caller may see: a grant scope and the `access` scope; no build tools when `MCP_BUILDER_ENABLED` is false */
+export async function listMcpTools(ctx: ServerContext, caller: McpCaller): Promise<McpToolDefinition<any>[]> {
+  const offered = offeredTools(ctx.config);
+  const allowed = await Promise.all(offered.map((tool) => callerCanUseTool(ctx, caller, tool)));
+  return offered.filter((_, index) => allowed[index]);
 }
 
 /** a tool's arguments as JSON Schema (an object schema, as MCP requires) */
@@ -196,8 +207,8 @@ async function callTool(
   const tool = offeredTools(ctx.config).find((t) => t.name === name);
   if (!tool)
     return { error: mcpError(message.id, MCP_ERRORS.INVALID_PARAMS, MCP_SERVER_TEXTS.toolNotFound(name)) };
-  // the list hides it already; the call checks role and scope again
-  if (!hasRole(caller.role, tool.minRole) || !tool.scopes.some((scope) => caller.scopes.includes(scope))) {
+  // the list hides it already; the call checks the grant and the user's scope again
+  if (!(await callerCanUseTool(ctx, caller, tool))) {
     return { error: mcpError(message.id, MCP_ERRORS.INVALID_PARAMS, MCP_SERVER_TEXTS.toolNotAllowed(name)) };
   }
 
@@ -264,7 +275,7 @@ export async function handleMcpRequest(
       case 'ping':
         return json(200, mcpResult(message.id, complete({})));
       case 'tools/list': {
-        const tools = listMcpTools(request.caller, ctx.config).map(mcpToolDescriptor);
+        const tools = (await listMcpTools(ctx, request.caller)).map(mcpToolDescriptor);
         return json(200, mcpResult(message.id, complete({ tools: tools as unknown as DataObject[] })));
       }
       case 'tools/call': {

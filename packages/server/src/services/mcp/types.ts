@@ -1,9 +1,11 @@
 /**
  * Shared types of the tenant MCP server (P5-04), its tools (P5-04, P5-13) and its OAuth server
- * (P5-14). A caller comes from an MCP key (audience `mcp-server-api`) or an OAuth access token;
- * a tool is listed and called only when the caller holds one of its scopes and meets its role.
+ * (P5-14). A caller comes from an MCP key (audience `mcp-server-api`) or an OAuth access token.
+ * A tool is listed and called only when the OAuth grant holds one of its `scopes` (the client's
+ * grant, a second gate) AND the user holds its `access` scope, workspace wide or in a project (P6-35);
+ * each resource a tool touches is checked again on its own project.
  */
-import type { DataObject } from '@workflow/workflow';
+import type { DataObject, Scope } from '@workflow/workflow';
 import type { z } from 'zod';
 import type { Config } from '../../config';
 import type { ServerContext } from '../../context';
@@ -35,11 +37,16 @@ export function isMcpScope(value: unknown): value is McpScope {
   return typeof value === 'string' && (MCP_SCOPES as readonly string[]).includes(value);
 }
 
-/** who calls the tenant MCP server; `role` is the membership's current role, never the token's */
+/**
+ * Who calls the tenant MCP server. `role` and `globalScopes` are the membership's current ones, read on
+ * every request, never the token's: a removed member or a narrowed role takes effect on the next call.
+ */
 export interface McpCaller {
   user: UserRow;
   tenant: TenantRow;
   role: Role;
+  /** the caller's workspace wide scopes (`AccessService.globalScopes`); project scopes are read per target */
+  globalScopes: ReadonlySet<Scope>;
   scopes: McpScope[];
   via: 'key' | 'oauth';
   /** the OAuth client, when `via` is `oauth` */
@@ -54,8 +61,11 @@ export interface McpToolDefinition<I = unknown> {
   description: string;
   /** any one of them unlocks the tool */
   scopes: McpScope[];
-  /** the role the matching REST route needs */
-  minRole: Role;
+  /**
+   * the scope the matching REST route needs: held workspace wide or in at least one project (the list
+   * and the call check this); the handler checks it again on the project of every resource it touches
+   */
+  access: Scope;
   /** the arguments; its JSON Schema is the tool's `inputSchema` */
   input: z.ZodType<I>;
   /** MCP tool annotations (`readOnlyHint`, `destructiveHint`, ...) */

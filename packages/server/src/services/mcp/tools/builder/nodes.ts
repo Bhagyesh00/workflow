@@ -34,7 +34,7 @@ export const searchNodesTool: McpToolDefinition<z.output<typeof searchInput>> = 
   description:
     'Find node types by what they do. Give several short queries at once. Returns the exact type names to use in create_workflow and update_workflow, with their latest version and whether the node is a trigger.',
   scopes: ['workflow:read', 'workflow:write'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: searchInput,
   annotations: READ,
   async handler(ctx, _caller, input) {
@@ -47,7 +47,7 @@ export const getNodeTypesTool: McpToolDefinition<z.output<typeof detailsInput>> 
   description:
     'The parameters, inputs, outputs and credential types of up to 5 node types. Read it before you add or configure a node. A name that is not a node type comes back under "unknown".',
   scopes: ['workflow:read', 'workflow:write'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: detailsInput,
   annotations: READ,
   async handler(ctx, _caller, input) {

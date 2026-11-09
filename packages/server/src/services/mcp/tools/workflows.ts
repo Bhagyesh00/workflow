@@ -1,7 +1,7 @@
 /**
  * MCP tools: search, details, versions and publishing of workflows (P5-04; research-B section 2, part a).
  * Search shows every live workflow with its `availableInMCP` flag; details, versions, diff and publishing
- * pass the workflow gate. Node lists go through `sanitizeNodeCredentials`. `minRole` is the REST route's.
+ * pass the workflow gate. Node lists go through `sanitizeNodeCredentials`. `access` is the REST route's scope (P6-35).
  */
 import { diffWorkflows, type WorkflowDefinition } from '@workflow/workflow';
 import { z } from 'zod';
@@ -14,6 +14,7 @@ import {
   isAvailableInMcp,
   McpToolError,
   mcpActor,
+  mcpAuth,
   sanitizeNodeCredentials,
   workflowsAvailableInMcp,
 } from '../workflow-gate';
@@ -62,27 +63,30 @@ const searchWorkflows: McpToolDefinition<{
   query?: string;
   active?: boolean;
   tagId?: string;
+  projectId?: string;
   limit: number;
   cursor?: string;
 }> = {
   name: 'search_workflows',
   description:
-    'Search the workspace\'s workflows by name. Each result says whether it is available in MCP ("availableInMCP"); only those can be read in detail, run or changed.',
+    'Search the workflows you can access by name, in all your projects or in one (projectId, from search_projects). Each result says whether it is available in MCP ("availableInMCP"); only those can be read in detail, run or changed.',
   scopes: ['workflow:read'],
-  minRole: 'viewer',
+  access: 'workflow:list',
   input: z.object({
     query: z.string().max(128).optional().describe('Part of the workflow name'),
     active: z.boolean().optional().describe('Only published (true) or unpublished (false) workflows'),
     tagId: z.uuid().optional(),
+    projectId: z.uuid().optional().describe('Only the workflows of this project (from search_projects)'),
     limit: z.number().int().min(1).max(200).default(50),
     cursor: z.string().max(512).optional(),
   }),
   annotations: READ,
   async handler(ctx, caller, input) {
-    const page = await ctx.workflows.list(caller.tenant.id, {
+    const page = await ctx.workflows.listFor(mcpAuth(caller), {
       search: input.query,
       active: input.active,
       tagId: input.tagId,
+      projectId: input.projectId,
       limit: input.limit,
       cursor: input.cursor,
     });
@@ -97,6 +101,7 @@ const searchWorkflows: McpToolDefinition<{
         name: w.name,
         active: w.active,
         availableInMCP: available.has(w.id),
+        projectId: w.projectId,
         folderId: w.folderId,
         tags: w.tags.map((t) => ({ id: t.id, name: t.name })),
         createdAt: w.createdAt,
@@ -112,7 +117,7 @@ const getWorkflowDetails: McpToolDefinition<{ workflowId: string }> = {
   description:
     'Get a workflow available in MCP: its nodes (credential references only), connections, settings and triggers, with how to run it.',
   scopes: ['workflow:read'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: z.object({ workflowId }),
   annotations: READ,
   async handler(ctx, caller, input) {
@@ -149,7 +154,7 @@ const getWorkflowHistory: McpToolDefinition<{ workflowId: string; limit: number;
   name: 'get_workflow_history',
   description: 'List the saved versions of a workflow available in MCP, newest first.',
   scopes: ['workflow:read'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: z.object({
     workflowId,
     limit: z.number().int().min(1).max(100).default(20),
@@ -166,7 +171,7 @@ const getWorkflowVersion: McpToolDefinition<{ workflowId: string; versionId: str
   name: 'get_workflow_version',
   description: 'Get one saved version of a workflow available in MCP (credential references only).',
   scopes: ['workflow:read'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: z.object({ workflowId, versionId: z.uuid() }),
   annotations: READ,
   async handler(ctx, caller, input) {
@@ -198,7 +203,7 @@ const getWorkflowVersionsDiff: McpToolDefinition<{
   description:
     'Compare a saved version of a workflow available in MCP with another version, the current draft or the published version: added, removed, renamed and changed nodes and connections.',
   scopes: ['workflow:read'],
-  minRole: 'viewer',
+  access: 'workflow:read',
   input: z.object({ workflowId, versionId: versionRef, compareTo: versionRef.default('current') }),
   annotations: READ,
   async handler(ctx, caller, input) {
@@ -219,7 +224,7 @@ const publishWorkflow: McpToolDefinition<{
   description:
     'Publish a workflow available in MCP (its current version, or the named saved version), so its triggers run in production.',
   scopes: ['workflow:write'],
-  minRole: 'editor',
+  access: 'workflow:publish',
   input: z.object({
     workflowId,
     versionId: z.uuid().optional(),
@@ -228,7 +233,7 @@ const publishWorkflow: McpToolDefinition<{
   }),
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   async handler(ctx, caller, input) {
-    await assertWorkflowForMcp(ctx, caller, input.workflowId, 'write');
+    await assertWorkflowForMcp(ctx, caller, input.workflowId, 'publish');
     const dto = await ctx.workflows.setActive(caller.tenant.id, input.workflowId, true, mcpActor(caller), {
       versionId: input.versionId,
       versionName: input.name,
@@ -242,11 +247,11 @@ const unpublishWorkflow: McpToolDefinition<{ workflowId: string }> = {
   name: 'unpublish_workflow',
   description: 'Unpublish a workflow available in MCP: its triggers stop running in production.',
   scopes: ['workflow:write'],
-  minRole: 'editor',
+  access: 'workflow:unpublish',
   input: z.object({ workflowId }),
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   async handler(ctx, caller, input) {
-    await assertWorkflowForMcp(ctx, caller, input.workflowId, 'write');
+    await assertWorkflowForMcp(ctx, caller, input.workflowId, 'unpublish');
     const dto = await ctx.workflows.setActive(caller.tenant.id, input.workflowId, false, mcpActor(caller));
     return { id: dto.id, active: dto.active, publishedVersionId: dto.publishedVersionId };
   },
