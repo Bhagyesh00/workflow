@@ -9,7 +9,11 @@
 import { randomUUID } from 'node:crypto';
 import type { NodePackage, NodeType, WorkflowDefinition, WorkflowNode } from '@workflow/workflow';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { SecretProvider, SecretProviderSettings, SecretProviderType } from '../src/services/secrets/types';
+import type {
+  SecretProvider,
+  SecretProviderSettings,
+  SecretProviderType,
+} from '../src/services/secrets/types';
 import {
   addToProject,
   chain,
@@ -71,7 +75,9 @@ class MemoryProvider implements SecretProvider {
 const memoryType: SecretProviderType = {
   name: 'memoryVault',
   displayName: 'Memory vault',
-  properties: [{ displayName: 'Token', name: 'token', type: 'string', default: '', typeOptions: { password: true } }],
+  properties: [
+    { displayName: 'Token', name: 'token', type: 'string', default: '', typeOptions: { password: true } },
+  ],
   create: (settings) => new MemoryProvider(settings),
 };
 
@@ -134,12 +140,16 @@ type Who = { client: World['owner']['client'] };
 const useNode = (credential: { id: string | null; name: string }) =>
   node('Use', 'test.useCredential', {}, [200, 0], { credentials: { testApi: credential } });
 
-const flow = (...nodes: WorkflowNode[]) => ({ nodes: [node('Start', 'core.manualTrigger'), ...nodes], connections: chain('Start', ...nodes.map((n) => n.name)) });
+const flow = (...nodes: WorkflowNode[]) => ({
+  nodes: [node('Start', 'core.manualTrigger'), ...nodes],
+  connections: chain('Start', ...nodes.map((n) => n.name)),
+});
 
 /** a manual run through the route; the HTTP status when the run is refused, else the finished row and detail */
 async function runAs(who: Who, tenantId: string, workflowId: string) {
   const res = await who.client.post(`/rest/workflows/${workflowId}/run`, {});
-  if (res.statusCode >= 400) return { status: res.statusCode, text: res.body, execution: undefined, detail: undefined };
+  if (res.statusCode >= 400)
+    return { status: res.statusCode, text: res.body, execution: undefined, detail: undefined };
   const { executionId } = res.json().data as { executionId: string };
   const execution = await waitForExecution(server.ctx, tenantId, executionId);
   const detail = await who.client.data(who.client.get(`/rest/executions/${executionId}`));
@@ -149,7 +159,13 @@ async function runAs(who: Who, tenantId: string, workflowId: string) {
 const outputJson = (detail: any, nodeName: string) =>
   (detail.state.resultData.runData[nodeName]?.[0]?.data?.main?.[0] ?? []).map((i: any) => i.json);
 
-const definitionOf = (row: { id: string; name: string; nodes: unknown; connections: unknown; settings: unknown }): WorkflowDefinition => ({
+const definitionOf = (row: {
+  id: string;
+  name: string;
+  nodes: unknown;
+  connections: unknown;
+  settings: unknown;
+}): WorkflowDefinition => ({
   id: row.id,
   name: row.name,
   nodes: row.nodes as WorkflowNode[],
@@ -157,7 +173,11 @@ const definitionOf = (row: { id: string; name: string; nodes: unknown; connectio
   settings: row.settings as WorkflowDefinition['settings'],
 });
 
-async function runSaved(tenantId: string, row: Parameters<typeof definitionOf>[0], mode: 'manual' | 'trigger' = 'manual') {
+async function runSaved(
+  tenantId: string,
+  row: Parameters<typeof definitionOf>[0],
+  mode: 'manual' | 'trigger' = 'manual',
+) {
   const started = await server.ctx.executions.start({
     tenantId,
     workflow: definitionOf(row),
@@ -226,8 +246,12 @@ describe('$vars', () => {
   it("a run reads its own project's value over the global one, never another project's", async () => {
     const w = await world();
     await w.owner.client.data(w.owner.client.post('/rest/variables', { key: 'REGION', value: 'global' }));
-    await w.owner.client.data(w.owner.client.post('/rest/variables', { key: 'REGION', value: 'from-a', projectId: w.a.id }));
-    await w.owner.client.data(w.owner.client.post('/rest/variables', { key: 'ONLY_B', value: 'b-only', projectId: w.b.id }));
+    await w.owner.client.data(
+      w.owner.client.post('/rest/variables', { key: 'REGION', value: 'from-a', projectId: w.a.id }),
+    );
+    await w.owner.client.data(
+      w.owner.client.post('/rest/variables', { key: 'ONLY_B', value: 'b-only', projectId: w.b.id }),
+    );
     const read = (expression: string) => flow(setNode('Read', 'value', expression));
     const inA = await workflowIn(server, w.tenantId, w.a.id, read('={{ $vars.REGION }}'));
     const inB = await workflowIn(server, w.tenantId, w.b.id, read('={{ $vars.REGION }}'));
@@ -241,7 +265,8 @@ describe('$vars', () => {
 });
 
 describe('data table node', () => {
-  const tableNode = (parameters: Record<string, unknown>) => node('Table', 'core.dataTable', parameters, [200, 0]);
+  const tableNode = (parameters: Record<string, unknown>) =>
+    node('Table', 'core.dataTable', parameters, [200, 0]);
   const getRows = (mode: 'id' | 'name', value: string) =>
     tableNode({
       resource: 'row',
@@ -273,7 +298,12 @@ describe('data table node', () => {
 });
 
 describe('vault $secrets', () => {
-  async function projectVault(w: World, projectId: string, providerKey: string, secrets: Record<string, unknown>) {
+  async function projectVault(
+    w: World,
+    projectId: string,
+    providerKey: string,
+    secrets: Record<string, unknown>,
+  ) {
     const token = `token-${randomUUID()}`;
     vaults.set(token, secrets);
     await w.owner.client.data(
@@ -330,11 +360,14 @@ describe('sub-workflows', () => {
   });
   const callerOf = (childId: string) => ({
     name: 'Parent',
-    nodes: [node('Start', 'core.manualTrigger'), node('Call', 'test.callWorkflow', { workflowId: childId }, [200, 0])],
+    nodes: [
+      node('Start', 'core.manualTrigger'),
+      node('Call', 'test.callWorkflow', { workflowId: childId }, [200, 0]),
+    ],
     connections: chain('Start', 'Call'),
   });
 
-  it("caller policy: a workflow of another project is not called by default; any opens it; the same project always passes", async () => {
+  it('caller policy: a workflow of another project is not called by default; any opens it; the same project always passes', async () => {
     const w = await world();
     const sameChild = await workflowIn(server, w.tenantId, w.a.id, child());
     const same = await workflowIn(server, w.tenantId, w.a.id, callerOf(sameChild.id));
@@ -367,7 +400,10 @@ describe('sub-workflows', () => {
             source: 'parameter',
             workflowJson: JSON.stringify({
               name: 'Inline',
-              nodes: [node('Called', 'core.executeWorkflowTrigger'), useNode({ id: credentialId, name: 'x' })],
+              nodes: [
+                node('Called', 'core.executeWorkflowTrigger'),
+                useNode({ id: credentialId, name: 'x' }),
+              ],
               connections: chain('Called', 'Use'),
             }),
           },
@@ -402,12 +438,14 @@ describe('error workflow', () => {
   const errorRuns = async (tenantId: string, id: string) =>
     (await executionsOf(server.ctx, tenantId, id)).filter((r) => r.mode === 'error');
 
-  it("a handler of the same project runs; one of another project does not, until its policy is any", async () => {
+  it('a handler of the same project runs; one of another project does not, until its policy is any', async () => {
     const w = await world();
     const own = await workflowIn(server, w.tenantId, w.a.id, handler());
     const failOwn = await workflowIn(server, w.tenantId, w.a.id, failing(own.id));
     expect((await runSaved(w.tenantId, failOwn, 'trigger')).outcome.status).toBe('error');
-    await waitFor(async () => (await errorRuns(w.tenantId, own.id)).length === 1, { message: 'the error run' });
+    await waitFor(async () => (await errorRuns(w.tenantId, own.id)).length === 1, {
+      message: 'the error run',
+    });
 
     const foreign = await workflowIn(server, w.tenantId, w.b.id, handler());
     const failForeign = await workflowIn(server, w.tenantId, w.a.id, failing(foreign.id));
@@ -421,15 +459,26 @@ describe('error workflow', () => {
     const open = await workflowIn(server, w.tenantId, w.b.id, handler({ callerPolicy: 'any' }));
     const failOpen = await workflowIn(server, w.tenantId, w.a.id, failing(open.id));
     await runSaved(w.tenantId, failOpen, 'trigger');
-    await waitFor(async () => (await errorRuns(w.tenantId, open.id)).length === 1, { message: 'the open handler run' });
+    await waitFor(async () => (await errorRuns(w.tenantId, open.id)).length === 1, {
+      message: 'the open handler run',
+    });
   });
 });
 
 describe('production webhook and poll runs', () => {
-  const hook = () => node('Webhook', 'core.webhook', { httpMethod: 'POST', path: `p6-${randomUUID().slice(0, 8)}` }, [0, 0], { webhookId: randomUUID() });
+  const hook = () =>
+    node('Webhook', 'core.webhook', { httpMethod: 'POST', path: `p6-${randomUUID().slice(0, 8)}` }, [0, 0], {
+      webhookId: randomUUID(),
+    });
 
   /** publishes A's workflow with `credential` while A may use it, then takes the share back (A "lost" it) */
-  async function publishedThenLost(w: World, trigger: WorkflowNode, credential: { id: string }, shared: boolean, takeBack = true) {
+  async function publishedThenLost(
+    w: World,
+    trigger: WorkflowNode,
+    credential: { id: string },
+    shared: boolean,
+    takeBack = true,
+  ) {
     if (shared) await repos().shares.set(w.tenantId, 'credential', credential.id, [w.a.id]);
     const wf = await w.owner.client.data<{ id: string }>(
       w.owner.client.post('/rest/workflows', {
@@ -454,7 +503,11 @@ describe('production webhook and poll runs', () => {
     const lost = await publishedThenLost(w, lostHook, foreign, true);
     const mine = await publishedThenLost(w, ownHook, own, false);
     const call = (trigger: WorkflowNode) =>
-      server.app.inject({ method: 'POST', url: `/webhook/${w.owner.tenant.slug}/${trigger.parameters.path}`, payload: {} });
+      server.app.inject({
+        method: 'POST',
+        url: `/webhook/${w.owner.tenant.slug}/${trigger.parameters.path}`,
+        payload: {},
+      });
 
     const refused = await call(lostHook);
     expect(refused.statusCode).toBe(400);
@@ -464,7 +517,9 @@ describe('production webhook and poll runs', () => {
 
     const accepted = await call(ownHook);
     expect(accepted.statusCode).toBeLessThan(300);
-    await waitFor(async () => (await executionsOf(server.ctx, w.tenantId, mine.id))[0], { message: 'the webhook run' });
+    await waitFor(async () => (await executionsOf(server.ctx, w.tenantId, mine.id))[0], {
+      message: 'the webhook run',
+    });
     const [run] = await executionsOf(server.ctx, w.tenantId, mine.id);
     expect((await waitForExecution(server.ctx, w.tenantId, run.id)).status).toBe('success');
   });
@@ -473,15 +528,20 @@ describe('production webhook and poll runs', () => {
     const w = await world();
     const foreign = await credentialIn(server, w.tenantId, w.b.id, { data: { apiKey: 'b-secret' } });
     const own = await credentialIn(server, w.tenantId, w.a.id, { data: { apiKey: 'a-key' } });
-    const poller = () => node('Poller', 'test.poll', { pollTimes: { item: [{ mode: 'everyHour', minute: 59 }] } });
+    const poller = () =>
+      node('Poller', 'test.poll', { pollTimes: { item: [{ mode: 'everyHour', minute: 59 }] } });
     const mine = await publishedThenLost(w, poller(), own, false);
-    await waitFor(async () => (await executionsOf(server.ctx, w.tenantId, mine.id)).length >= 1, { message: 'the first poll' });
+    await waitFor(async () => (await executionsOf(server.ctx, w.tenantId, mine.id)).length >= 1, {
+      message: 'the first poll',
+    });
     const [first] = await executionsOf(server.ctx, w.tenantId, mine.id);
     expect((await waitForExecution(server.ctx, w.tenantId, first.id)).status).toBe('success');
 
     const lost = await publishedThenLost(w, poller(), foreign, true, false);
     // the activation poll ran while A could use it; after the share went, the next start of its triggers is refused
-    await waitFor(async () => (await executionsOf(server.ctx, w.tenantId, lost.id)).length >= 1, { message: 'the activation poll' });
+    await waitFor(async () => (await executionsOf(server.ctx, w.tenantId, lost.id)).length >= 1, {
+      message: 'the activation poll',
+    });
     await repos().shares.set(w.tenantId, 'credential', foreign.id, []);
     const before = (await executionsOf(server.ctx, w.tenantId, lost.id)).length;
     await server.ctx.activeWorkflows.startTriggers(w.tenantId, lost.id, 'activate');
@@ -493,7 +553,12 @@ describe('production webhook and poll runs', () => {
 describe('resume and queue', () => {
   it('a move while queued runs in the new project, not the one the run was queued with', async () => {
     const w = await world();
-    const wf = await workflowIn(server, w.tenantId, w.a.id, flow(node('Probe', 'test.p6IsolationProbe', {}, [200, 0])));
+    const wf = await workflowIn(
+      server,
+      w.tenantId,
+      w.a.id,
+      flow(node('Probe', 'test.p6IsolationProbe', {}, [200, 0])),
+    );
     const row = (await repos().workflows.get(w.tenantId, wf.id))!;
     // the run was queued with project A stored; the workflow's project then moved to B
     await repos().projects.moveResources(w.tenantId, w.a.id, w.b.id);

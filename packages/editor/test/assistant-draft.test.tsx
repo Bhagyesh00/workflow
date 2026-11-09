@@ -177,7 +177,9 @@ describe('DraftCard', () => {
     const card = await loadedCard('Draft Hook poster');
     await waitFor(
       () =>
-        expect((within(card).getByRole('button', { name: 'Accept' }) as HTMLButtonElement).disabled).toBe(false),
+        expect((within(card).getByRole('button', { name: 'Accept' }) as HTMLButtonElement).disabled).toBe(
+          false,
+        ),
       WAIT,
     );
     expect((within(card).getByRole('button', { name: 'Discard' }) as HTMLButtonElement).disabled).toBe(false);

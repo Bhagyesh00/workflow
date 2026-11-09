@@ -36,7 +36,10 @@ export function registerFolderRoutes(app: FastifyInstance, ctx: ServerContext): 
     ip: request.ip,
   });
 
-  const onFolder = async (request: FastifyRequest, scope: 'folder:read' | 'folder:update' | 'folder:delete') => {
+  const onFolder = async (
+    request: FastifyRequest,
+    scope: 'folder:read' | 'folder:update' | 'folder:delete',
+  ) => {
     const { id } = parse(idParams, request.params);
     const auth = await requireScope(request, scope, { folderId: id });
     return { auth, id };

@@ -52,7 +52,11 @@ export class FavoriteService {
     for (const type of types) filters.set(type, await access.listFilter(auth, READ_SCOPE[type]));
     return rows
       .filter((r) =>
-        reaches(filters.get(r.resourceType)!, r.projectId, r.resourceType === 'workflow' ? r.resourceId : undefined),
+        reaches(
+          filters.get(r.resourceType)!,
+          r.projectId,
+          r.resourceType === 'workflow' ? r.resourceId : undefined,
+        ),
       )
       .map((r) => ({
         resourceType: r.resourceType,
@@ -63,11 +67,7 @@ export class FavoriteService {
   }
 
   /** idempotent; the resource must belong to the tenant (404 otherwise) and the caller must hold its read scope (403) */
-  async add(
-    auth: AuthContext,
-    type: FavoriteResourceType,
-    resourceId: string,
-  ): Promise<FavoriteDTO> {
+  async add(auth: AuthContext, type: FavoriteResourceType, resourceId: string): Promise<FavoriteDTO> {
     const { access, repos } = this.deps.context();
     const tenantId = auth.tenant.id;
     // the target is looked up first (another workspace's id and a non-uuid id are the 404 of `scopesFor`)

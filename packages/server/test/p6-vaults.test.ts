@@ -19,8 +19,8 @@ import type {
 import {
   addToProject,
   chain,
-  credentialIn,
   createTestServer,
+  credentialIn,
   flushRedis,
   memberAs,
   node,
@@ -106,7 +106,9 @@ beforeAll(async () => {
     res.end('{"ok":true}');
   });
   remoteUrl = await new Promise<string>((resolve) =>
-    remote.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${(remote.address() as AddressInfo).port}`)),
+    remote.listen(0, '127.0.0.1', () =>
+      resolve(`http://127.0.0.1:${(remote.address() as AddressInfo).port}`),
+    ),
   );
   server = await createTestServer({}, { secretProviderTypes: [memoryType] });
 }, 120_000);
@@ -132,7 +134,12 @@ function vaultWith(secrets: Record<string, unknown>) {
 }
 
 /** a workspace connection (no owner project), enabled */
-async function workspaceVault(owner: Owner, providerKey: string, secrets: Record<string, unknown>, projectIds?: string[]) {
+async function workspaceVault(
+  owner: Owner,
+  providerKey: string,
+  secrets: Record<string, unknown>,
+  projectIds?: string[],
+) {
   const token = vaultWith(secrets);
   const dto = await owner.client.data(
     owner.client.post(CONNECTIONS, {
@@ -147,7 +154,12 @@ async function workspaceVault(owner: Owner, providerKey: string, secrets: Record
 }
 
 /** a connection owned by `projectId`, made through the project route, enabled */
-async function projectVault(owner: Owner, projectId: string, providerKey: string, secrets: Record<string, unknown>) {
+async function projectVault(
+  owner: Owner,
+  projectId: string,
+  providerKey: string,
+  secrets: Record<string, unknown>,
+) {
   const token = vaultWith(secrets);
   const dto = await owner.client.data(
     owner.client.post(projectVaults(projectId), {
@@ -161,7 +173,13 @@ async function projectVault(owner: Owner, projectId: string, providerKey: string
 }
 
 /** what `$secrets.<key>.<name>` gives under `projectId`, or the error text */
-function read(ctx: ServerContext, tenantId: string, projectId: string | null, key: string, name: string): unknown {
+function read(
+  ctx: ServerContext,
+  tenantId: string,
+  projectId: string | null,
+  key: string,
+  name: string,
+): unknown {
   try {
     return ctx.secrets.secretsFor(tenantId, projectId)[key][name];
   } catch (error) {
@@ -319,7 +337,9 @@ describe('$secrets by the credential home project', () => {
     expect(read(server.ctx, owner.tenant.id, b.id, 'limited', 'key')).toBe(NOT_REACHABLE);
     expect(read(server.ctx, owner.tenant.id, null, 'limited', 'key')).toBe(NOT_REACHABLE);
 
-    const moved = await owner.client.data(owner.client.patch(`${CONNECTIONS}/limited`, { projectIds: [b.id] }));
+    const moved = await owner.client.data(
+      owner.client.patch(`${CONNECTIONS}/limited`, { projectIds: [b.id] }),
+    );
     expect(moved.projects.map((p: { id: string }) => p.id)).toEqual([b.id]);
     expect(read(server.ctx, owner.tenant.id, a.id, 'limited', 'key')).toBe(NOT_REACHABLE);
     expect(read(server.ctx, owner.tenant.id, b.id, 'limited', 'key')).toBe('limited-value');
@@ -367,7 +387,9 @@ describe('project routes', () => {
     expect((await owner.client.get(`${projectVaults(b.id)}/ownA`)).statusCode).toBe(404);
 
     const patched = await owner.client.data(
-      owner.client.patch(`${projectVaults(a.id)}/ownA`, { settings: { label: 'renamed', token: '__REDACTED__' } }),
+      owner.client.patch(`${projectVaults(a.id)}/ownA`, {
+        settings: { label: 'renamed', token: '__REDACTED__' },
+      }),
     );
     expect(patched.settings).toEqual({ label: 'renamed', token: '__REDACTED__' });
     expect(read(server.ctx, owner.tenant.id, a.id, 'ownA', 'key')).toBe('own-value');
@@ -478,14 +500,18 @@ describe('the externalSecrets.systemRolesEnabled switch', () => {
     await setSwitch(owner.tenant.id, true);
     expect((await admin.client.get(projectVaults(a.id))).statusCode).toBe(200);
     expect((await create(admin.client, 'onAdmin')).statusCode).toBe(200);
-    expect((await admin.client.patch(`${projectVaults(a.id)}/onAdmin`, { isEnabled: true })).statusCode).toBe(200);
+    expect((await admin.client.patch(`${projectVaults(a.id)}/onAdmin`, { isEnabled: true })).statusCode).toBe(
+      200,
+    );
     expect((await admin.client.delete(`${projectVaults(a.id)}/onAdmin`)).statusCode).toBe(200);
 
     expect((await editor.client.get(projectVaults(a.id))).statusCode).toBe(200);
     expect((await editor.client.get(`${projectVaults(a.id)}/ofA`)).statusCode).toBe(200);
     expect(await editor.client.data(editor.client.get(projectCompletions(a.id)))).toEqual({ ofA: ['key'] });
     expect((await create(editor.client, 'onEditor')).statusCode).toBe(403);
-    expect((await editor.client.patch(`${projectVaults(a.id)}/ofA`, { isEnabled: false })).statusCode).toBe(403);
+    expect((await editor.client.patch(`${projectVaults(a.id)}/ofA`, { isEnabled: false })).statusCode).toBe(
+      403,
+    );
     expect((await editor.client.delete(`${projectVaults(a.id)}/ofA`)).statusCode).toBe(403);
 
     expect((await viewer.client.get(projectVaults(a.id))).statusCode).toBe(403);
@@ -564,20 +590,28 @@ describe('assertProjectAccess', () => {
     // a disabled connection still counts: access is about the key, not the state
     await owner.client.data(owner.client.patch(`${CONNECTIONS}/onlyB`, { isEnabled: false }));
 
-    await expect(server.ctx.secrets.assertProjectAccess(tenantId, a.id, ['ofA', 'wide'])).resolves.toBeUndefined();
-    await expect(server.ctx.secrets.assertProjectAccess(tenantId, b.id, ['wide', 'onlyB'])).resolves.toBeUndefined();
+    await expect(
+      server.ctx.secrets.assertProjectAccess(tenantId, a.id, ['ofA', 'wide']),
+    ).resolves.toBeUndefined();
+    await expect(
+      server.ctx.secrets.assertProjectAccess(tenantId, b.id, ['wide', 'onlyB']),
+    ).resolves.toBeUndefined();
     await expect(server.ctx.secrets.assertProjectAccess(tenantId, b.id, [])).resolves.toBeUndefined();
     await expect(server.ctx.secrets.assertProjectAccess(tenantId, b.id, ['ofA'])).rejects.toMatchObject({
       statusCode: 400,
       message: 'The secret provider "ofA" does not exist in this project',
     });
-    await expect(server.ctx.secrets.assertProjectAccess(tenantId, a.id, ['onlyB', 'nope', 'wide'])).rejects.toMatchObject({
+    await expect(
+      server.ctx.secrets.assertProjectAccess(tenantId, a.id, ['onlyB', 'nope', 'wide']),
+    ).rejects.toMatchObject({
       statusCode: 400,
       message: 'The secret providers "nope", "onlyB" do not exist in this project',
     });
     // another workspace's keys are not this one's
     const other = await signup(server.app);
-    await expect(server.ctx.secrets.assertProjectAccess(other.tenant.id, a.id, ['wide'])).rejects.toMatchObject({
+    await expect(
+      server.ctx.secrets.assertProjectAccess(other.tenant.id, a.id, ['wide']),
+    ).rejects.toMatchObject({
       statusCode: 400,
     });
   });
@@ -586,7 +620,11 @@ describe('assertProjectAccess', () => {
 describe('access list on the reload channel', () => {
   it('an unshare on one main reaches a second main through the channel', async () => {
     await flushRedis();
-    const env = { EXECUTIONS_MODE: 'queue', REDIS_URL: TEST_REDIS, QUEUE_PREFIX: `wfvaults${randomUUID().slice(0, 6)}` };
+    const env = {
+      EXECUTIONS_MODE: 'queue',
+      REDIS_URL: TEST_REDIS,
+      QUEUE_PREFIX: `wfvaults${randomUUID().slice(0, 6)}`,
+    };
     const main = await createTestServer(env, { reset: false, secretProviderTypes: [memoryType] });
     let second: ServerContext | undefined;
     try {

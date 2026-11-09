@@ -93,7 +93,12 @@ const usageSettingsSchema = z.object({ allowSendingParameterValues: z.boolean() 
 export function registerAiRoutes(rest: FastifyInstance, ctx: ServerContext): void {
   rest.post('/ai/build', aiRouteOptions('build'), async (request, reply) => {
     const peeked = peekWorkflowId(request.body);
-    const auth = await requireAiBuilder(request, ctx, 'workflow:update', peeked ? { workflowId: peeked } : undefined);
+    const auth = await requireAiBuilder(
+      request,
+      ctx,
+      'workflow:update',
+      peeked ? { workflowId: peeked } : undefined,
+    );
     const body = parse(buildSchema, request.body);
     if (body.text.length > BUILDER_PROMPT_LIMIT) throw ApiError.badRequest(BUILDER_PROMPT_TOO_LONG);
     if (!body.text.trim() && !body.resumeData) throw ApiError.badRequest('Write what the workflow should do');

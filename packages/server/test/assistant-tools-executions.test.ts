@@ -7,9 +7,8 @@
  * `$env` (and `$vars`, `$secrets`, `$credentials`) is skipped in resolved parameters and a resolved key
  * is redacted; `run_node`'s chain, reused, mocked and tool modes say honestly what ran.
  */
-import type { AssistantConfirmation, WorkflowDefinition } from '@workflow/workflow';
+import type { AssistantConfirmation, Scope, WorkflowDefinition } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Scope } from '@workflow/workflow';
 import { FORM_FIELDS_WRAPPED, triggerPinData } from '../src/services/assistant/run-helper';
 import { runNodeGrantKey } from '../src/services/assistant/tools/executions';
 import {

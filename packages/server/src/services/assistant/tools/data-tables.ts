@@ -204,7 +204,9 @@ const createDataTable: AssistantToolDefinition<z.output<typeof createInput>> = {
   },
   async approval(ctx, caller, input) {
     // a project the call names is shown on the card (read here, not from the model's words)
-    const project = input.projectId ? await ctx.repos.projects.get(caller.tenant.id, input.projectId) : undefined;
+    const project = input.projectId
+      ? await ctx.repos.projects.get(caller.tenant.id, input.projectId)
+      : undefined;
     return {
       title: 'Create a data table',
       resourceName: input.name,

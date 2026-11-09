@@ -33,8 +33,8 @@ import {
 } from '@workflow/workflow';
 import { z } from 'zod';
 import type { ServerContext } from '../../../context';
-import { assertCredentialsUsable } from '../../credential-usable';
 import { nodeDetails, searchNodes } from '../../ai-builder/tools';
+import { assertCredentialsUsable } from '../../credential-usable';
 import { assertCredentialsInTenant } from '../../mcp/tools/builder/credential-check';
 import { McpToolError } from '../../mcp/workflow-gate';
 import { loadNodeOptions } from '../../node-options';

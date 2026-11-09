@@ -8,8 +8,8 @@
 import { and, countDistinct, eq, isNotNull } from 'drizzle-orm';
 import type { ServiceDeps } from '../context';
 import { credentialShares, credentials, projects, workflowShares, workflows } from '../db/schema';
-import { createRepositories } from '../repositories';
 import type { TenantSettings } from '../plans';
+import { createRepositories } from '../repositories';
 
 /** what exists today in personal projects (shown before a flag is turned off) */
 export interface SecurityPolicyCounts {

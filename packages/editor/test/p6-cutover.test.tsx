@@ -66,7 +66,11 @@ describe('workspace roles', () => {
       name: 'Mia',
       workspaceName: 'Other',
     });
-    backend().memberships.push({ tenantId: backend().auth().tenant.id, userId: other.user.id, role: 'member' });
+    backend().memberships.push({
+      tenantId: backend().auth().tenant.id,
+      userId: other.user.id,
+      role: 'member',
+    });
     expect((await call('PATCH', `/members/${other.user.id}`, { role: 'editor' })).status).toBe(400);
     expect((await call('PATCH', `/members/${other.user.id}`, { role: 'admin' })).status).toBe(200);
   });
@@ -151,9 +155,9 @@ describe('the rules that change on purpose', () => {
     const refused = await call('POST', `/workflows/${wf.id}/listen-test-trigger`, { nodeName: 'Start' });
     expect(refused.status).toBe(403);
     backend().setDemoRole('editor');
-    expect((await call('POST', `/workflows/${wf.id}/listen-test-trigger`, { nodeName: 'Start' })).status).toBe(
-      200,
-    );
+    expect(
+      (await call('POST', `/workflows/${wf.id}/listen-test-trigger`, { nodeName: 'Start' })).status,
+    ).toBe(200);
     expect((await call('DELETE', `/workflows/${wf.id}/listen-test-trigger`)).status).toBe(200);
   });
 

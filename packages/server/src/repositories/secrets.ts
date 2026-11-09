@@ -149,7 +149,10 @@ export class SecretConnectionRepository {
       .from(projectSecretAccess)
       .innerJoin(
         projects,
-        and(eq(projects.tenantId, projectSecretAccess.tenantId), eq(projects.id, projectSecretAccess.projectId)),
+        and(
+          eq(projects.tenantId, projectSecretAccess.tenantId),
+          eq(projects.id, projectSecretAccess.projectId),
+        ),
       )
       .where(and(eq(projectSecretAccess.tenantId, tenantId), inArray(projectSecretAccess.connectionId, ids)))
       .orderBy(asc(projects.name), asc(projects.id));
@@ -162,7 +165,10 @@ export class SecretConnectionRepository {
   async setShares(tenantId: string, connectionId: string, projectIds: string[]): Promise<void> {
     const wanted = [...new Set(projectIds)];
     await this.db.transaction(async (tx) => {
-      const scope = and(eq(projectSecretAccess.tenantId, tenantId), eq(projectSecretAccess.connectionId, connectionId));
+      const scope = and(
+        eq(projectSecretAccess.tenantId, tenantId),
+        eq(projectSecretAccess.connectionId, connectionId),
+      );
       await tx
         .delete(projectSecretAccess)
         .where(wanted.length ? and(scope, notInArray(projectSecretAccess.projectId, wanted)) : scope);

@@ -290,7 +290,9 @@ describe('delete guard', () => {
       expect(bad.statusCode, target).toBe(400);
     }
 
-    const ok = await owner.client.delete(`/rest/roles/${encodeURIComponent(role.slug)}?reassignRoleSlug=member`);
+    const ok = await owner.client.delete(
+      `/rest/roles/${encodeURIComponent(role.slug)}?reassignRoleSlug=member`,
+    );
     expect(ok.statusCode).toBe(200);
     expect((await server.ctx.repos.memberships.get(tenantId, holder.user.id))?.role).toBe('member');
     expect(await server.ctx.repos.roles.get(tenantId, role.slug)).toBeUndefined();
@@ -313,7 +315,9 @@ describe('lists', () => {
     await addToProject(server, tenantId, project.id, member.user.id, projectRole.slug);
     await server.ctx.repos.memberships.updateRole(tenantId, member.user.id, globalRole.slug);
 
-    const map = await member.client.data<Record<string, any[]>>(member.client.get('/rest/roles?withUsageCount=true'));
+    const map = await member.client.data<Record<string, any[]>>(
+      member.client.get('/rest/roles?withUsageCount=true'),
+    );
     expect(map.global.map((r) => r.slug)).toEqual(['owner', 'admin', 'member', globalRole.slug]);
     expect(map.project.map((r) => r.slug)).toEqual([
       'project:admin',
@@ -333,7 +337,9 @@ describe('lists', () => {
     const bare = await member.client.data<Record<string, any[]>>(member.client.get('/rest/roles'));
     expect(bare.global[0].usedByUsers).toBeUndefined();
 
-    const one = await member.client.data<any>(member.client.get(`/rest/roles/${encodeURIComponent(projectRole.slug)}`));
+    const one = await member.client.data<any>(
+      member.client.get(`/rest/roles/${encodeURIComponent(projectRole.slug)}`),
+    );
     expect(one).toMatchObject({ slug: projectRole.slug, systemRole: false, roleType: 'project' });
     const sys = await member.client.data<any>(member.client.get('/rest/roles/project:editor'));
     expect(sys.systemRole).toBe(true);
@@ -351,7 +357,9 @@ describe('lists', () => {
     expect((await b.client.delete(`/rest/roles/${encodeURIComponent(role.slug)}`)).statusCode).toBe(404);
     const map = await b.client.data<Record<string, any[]>>(b.client.get('/rest/roles'));
     expect(map.project.map((r) => r.slug)).not.toContain(role.slug);
-    expect((await b.client.get(`/rest/roles/${encodeURIComponent(role.slug)}/assignments`)).statusCode).toBe(404);
+    expect((await b.client.get(`/rest/roles/${encodeURIComponent(role.slug)}/assignments`)).statusCode).toBe(
+      404,
+    );
   });
 
   it('assignments list the projects using a role, limited to those the caller can list', async () => {
@@ -409,14 +417,23 @@ describe('lists', () => {
     expect(list.total).toBe(2);
     expect(list.members.map((m) => m.userId).sort()).toEqual([manager.user.id, member.user.id].sort());
     expect(list.members[0]).toEqual(
-      expect.objectContaining({ userId: expect.any(String), name: expect.any(String), email: expect.any(String), role: role.slug }),
+      expect.objectContaining({
+        userId: expect.any(String),
+        name: expect.any(String),
+        email: expect.any(String),
+        role: role.slug,
+      }),
     );
 
     const denied = await manager.client.get(`/rest/roles/${slug}/assignments/${hidden.id}/members`);
     expect(denied.statusCode).toBe(403);
     expect(denied.json().error.message).toBe(MISSING_SCOPE_MESSAGE);
-    expect((await manager.client.get(`/rest/roles/${slug}/assignments/${randomUUID()}/members`)).statusCode).toBe(404);
-    expect((await manager.client.get(`/rest/roles/${slug}/assignments/not-an-id/members`)).statusCode).toBe(404);
+    expect(
+      (await manager.client.get(`/rest/roles/${slug}/assignments/${randomUUID()}/members`)).statusCode,
+    ).toBe(404);
+    expect((await manager.client.get(`/rest/roles/${slug}/assignments/not-an-id/members`)).statusCode).toBe(
+      404,
+    );
 
     const all = await owner.client.data<{ members: any[] }>(
       owner.client.get(`/rest/roles/${slug}/assignments/${hidden.id}/members`),

@@ -229,7 +229,11 @@ export function MembersSettingsPage() {
     () =>
       (roles.data?.global ?? [])
         .filter((r) => r.slug !== 'owner')
-        .map((r) => ({ slug: r.slug, label: r.displayName, hint: r.description ?? ROLE_HINTS[r.slug] ?? '' })),
+        .map((r) => ({
+          slug: r.slug,
+          label: r.displayName,
+          hint: r.description ?? ROLE_HINTS[r.slug] ?? '',
+        })),
     [roles.data],
   );
   const roleLabel = (slug: string) =>

@@ -225,9 +225,7 @@ export function registerRoleRoutes(backend: MockBackend): void {
     const role = findCustomRole(backend, tenant.id, slug);
     if (!role) throw new HttpError(404, 'not_found', `Role "${slug}" not found`);
     requireManage(backend, role.roleType);
-    const holders = backend.memberships.filter(
-      (m) => m.tenantId === tenant.id && m.role === slug,
-    );
+    const holders = backend.memberships.filter((m) => m.tenantId === tenant.id && m.role === slug);
     const used = backend.projectRelations.some((r) => r.tenantId === tenant.id && r.role === slug);
     const reassign = query.reassignRoleSlug;
     const inUse = role.roleType === 'global' ? holders.length > 0 : used;

@@ -113,9 +113,7 @@ export class RoleRepository {
   }
 
   /** holders per role slug: workspace members with it, and users and projects holding it as a project role */
-  async usageBySlug(
-    tenantId: string,
-  ): Promise<Map<string, { users: number; projects: number }>> {
+  async usageBySlug(tenantId: string): Promise<Map<string, { users: number; projects: number }>> {
     const out = new Map<string, { users: number; projects: number }>();
     const members = await this.db
       .select({ role: memberships.role, n: count() })

@@ -426,9 +426,9 @@ describe('viewers', () => {
   it('reads, downloads and stars but cannot change anything', async () => {
     await dataTablesApi.create({ name: 'Leads', columns: [], projectId: teamId() });
     backend().setDemoRole('viewer');
-    await expect(dataTablesApi.create({ name: 'No', columns: [], projectId: teamId() })).rejects.toBeInstanceOf(
-      ApiError,
-    );
+    await expect(
+      dataTablesApi.create({ name: 'No', columns: [], projectId: teamId() }),
+    ).rejects.toBeInstanceOf(ApiError);
     const user = userEvent.setup();
     renderApp(`/projects/${teamId()}/data-tables`);
     await screen.findByRole('link', { name: 'Leads' });

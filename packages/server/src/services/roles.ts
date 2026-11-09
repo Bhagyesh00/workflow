@@ -274,10 +274,7 @@ export class RoleService {
     return row ? customRole(row) : undefined;
   }
 
-  private withUsage(
-    role: RoleDTO,
-    usage: Map<string, { users: number; projects: number }> | null,
-  ): RoleDTO {
+  private withUsage(role: RoleDTO, usage: Map<string, { users: number; projects: number }> | null): RoleDTO {
     if (!usage || (role.roleType !== 'global' && role.roleType !== 'project')) return role;
     const used = usage.get(role.slug);
     return role.roleType === 'global'
@@ -308,11 +305,7 @@ export class RoleService {
     };
   }
 
-  async get(
-    auth: AuthContext,
-    slug: string,
-    options: { withUsageCount?: boolean } = {},
-  ): Promise<RoleDTO> {
+  async get(auth: AuthContext, slug: string, options: { withUsageCount?: boolean } = {}): Promise<RoleDTO> {
     const role = await this.find(auth.tenant.id, slug);
     if (!role) throw ApiError.notFound(`Role "${slug}"`);
     const usage = options.withUsageCount ? await this.repos.roles.usageBySlug(auth.tenant.id) : null;
@@ -405,7 +398,8 @@ export class RoleService {
     }
     if (held && reassignTo) {
       if (actor && !(await this.access.scopesForAuth(actor)).has('user:changeRole')) throw missingScope();
-      const target = reassignTo === slug || reassignTo === 'owner' ? undefined : await this.find(tenantId, reassignTo);
+      const target =
+        reassignTo === slug || reassignTo === 'owner' ? undefined : await this.find(tenantId, reassignTo);
       if (target?.roleType !== 'global') {
         throw ApiError.badRequest(`Cannot reassign the members to the role "${reassignTo}"`);
       }

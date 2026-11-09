@@ -20,9 +20,9 @@ import { type AuthContext, clientIp, requireAuth, requireScope } from '../http/a
 import { ApiError, parse } from '../http/errors';
 import { paginationQuery } from '../http/pagination';
 import type { TenantSettings } from '../plans';
+import { MISSING_SCOPE_MESSAGE } from '../services/access';
 import { AI_ROUTE_RATE_LIMIT } from '../services/ai-builder/types';
 import { effectiveAssistantSettings } from '../services/assistant/settings';
-import { MISSING_SCOPE_MESSAGE } from '../services/access';
 import { type EffectiveAssistantSettings, homeScopes } from '../services/assistant/types';
 
 /** a chat body holds up to 10 files of 10 MB base64 and 16 MB in all, plus the message: 18 MB */

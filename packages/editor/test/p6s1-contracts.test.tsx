@@ -73,7 +73,9 @@ describe('demo global scopes', () => {
   it("setDemoRole('viewer') and ('editor') make a member with that project role on the team project (P6-39)", async () => {
     const team = backend().oldestTeamProject(backend().session!.tenantId);
     const relationOf = () =>
-      backend().projectRelations.find((r) => r.projectId === team.id && r.userId === backend().session!.userId);
+      backend().projectRelations.find(
+        (r) => r.projectId === team.id && r.userId === backend().session!.userId,
+      );
     for (const name of ['viewer', 'editor'] as const) {
       backend().setDemoRole(name);
       const now = await me();
@@ -81,7 +83,12 @@ describe('demo global scopes', () => {
       expect(new Set(now.globalScopes)).toEqual(new Set(GLOBAL_ROLE_SCOPES.member));
       expect(backend().memberships[0].role).toBe('member');
       expect(relationOf()?.role).toBe(`project:${name}`);
-      for (const scope of ['instanceAi:manage', 'securitySettings:manage', 'role:manage', 'project:create'] as Scope[])
+      for (const scope of [
+        'instanceAi:manage',
+        'securitySettings:manage',
+        'role:manage',
+        'project:create',
+      ] as Scope[])
         expect(now.globalScopes).not.toContain(scope);
     }
     expect(backend().projectScopes(team)).toContain('workflow:update');
@@ -101,7 +108,9 @@ describe('demo global scopes', () => {
     backend().setDemoRole('viewer');
     const team = backend().oldestTeamProject(backend().session!.tenantId);
     const mine = () =>
-      backend().projectRelations.filter((r) => r.projectId === team.id && r.userId === backend().session!.userId);
+      backend().projectRelations.filter(
+        (r) => r.projectId === team.id && r.userId === backend().session!.userId,
+      );
     expect(mine().map((r) => r.role)).toEqual(['project:viewer']);
     backend().setDemoRole('admin');
     expect(backend().memberships[0].role).toBe('admin');

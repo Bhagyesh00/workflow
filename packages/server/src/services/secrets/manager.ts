@@ -254,13 +254,18 @@ export class SecretsManager {
   ): Promise<void> {
     const { repos } = this.deps;
     const notInProject = () =>
-      new ApiError(404, 'not_found', `Connection with key "${providerKey}" not found in project "${projectId}"`);
+      new ApiError(
+        404,
+        'not_found',
+        `Connection with key "${providerKey}" not found in project "${projectId}"`,
+      );
     const row = await repos.secrets.get(tenantId, providerKey);
     if (!row) throw notInProject();
     const role =
       row.projectId === projectId
         ? OWNER_ROLE
-        : (await repos.secrets.accessFor(tenantId, row.id)).find((share) => share.projectId === projectId)?.role;
+        : (await repos.secrets.accessFor(tenantId, row.id)).find((share) => share.projectId === projectId)
+            ?.role;
     if (!role) throw notInProject();
     if (workspaceScopes.has(scope)) return;
     const granted = (RESOURCE_ROLE_SCOPES as Readonly<Record<string, ReadonlySet<Scope>>>)[role];
@@ -302,7 +307,12 @@ export class SecretsManager {
    * role (project admin: every vault scope; project editor: read and list). Read on every call, so a
    * removed member or a switch turned off takes effect at once.
    */
-  async systemRoleAllows(tenantId: string, userId: string, projectId: string, scope: Scope): Promise<boolean> {
+  async systemRoleAllows(
+    tenantId: string,
+    userId: string,
+    projectId: string,
+    scope: Scope,
+  ): Promise<boolean> {
     if (!isUuid(projectId) || !(await this.systemRolesEnabled(tenantId))) return false;
     const relation = await this.deps.repos.projects.relations.get(tenantId, projectId, userId);
     const role = relation?.role;
@@ -480,7 +490,9 @@ export class SecretsManager {
   secretsFor(tenantId: string, projectId?: string | null): SecretsObject {
     const reader = projectId ?? null;
     return createSecretsProxy(
-      this.cache.view(tenantId, (providerKey) => reaches(this.reach.get(liveId(tenantId, providerKey)), reader)),
+      this.cache.view(tenantId, (providerKey) =>
+        reaches(this.reach.get(liveId(tenantId, providerKey)), reader),
+      ),
     );
   }
 
@@ -569,11 +581,16 @@ export class SecretsManager {
       projects.set(share.connectionId, list);
     }
     return Promise.all(
-      rows.filter((row) => row.tenantId === tenantId).map((row) => this.toDTO(row, projects.get(row.id) ?? [])),
+      rows
+        .filter((row) => row.tenantId === tenantId)
+        .map((row) => this.toDTO(row, projects.get(row.id) ?? [])),
     );
   }
 
-  private async toDTO(row: SecretConnectionRow, projects: SecretConnectionProject[]): Promise<SecretConnectionDTO> {
+  private async toDTO(
+    row: SecretConnectionRow,
+    projects: SecretConnectionProject[],
+  ): Promise<SecretConnectionDTO> {
     const live = this.live.get(liveId(row.tenantId, row.providerKey));
     return {
       id: row.id,
@@ -679,7 +696,13 @@ export class SecretsManager {
     const id = liveId(row.tenantId, row.providerKey);
     try {
       const shares = await this.deps.repos.secrets.accessFor(row.tenantId, row.id);
-      this.setReach(id, { ...reachOfShares(row, shares.map((share) => share.projectId)), seq });
+      this.setReach(id, {
+        ...reachOfShares(
+          row,
+          shares.map((share) => share.projectId),
+        ),
+        seq,
+      });
     } catch (error) {
       this.setReach(id, { projectId: row.projectId ?? null, sharedWith: new Set(), tenantWide: false, seq });
       this.deps.logger.warn(
@@ -989,7 +1012,11 @@ const unique = (values: string[]): string[] => [...new Set(values)];
 /** P6-28: a row's reach from the projects it is shared with */
 function reachOfShares(row: SecretConnectionRow, sharedWith: string[]): SecretConnectionReach {
   const projectId = row.projectId ?? null;
-  return { projectId, sharedWith: new Set(sharedWith), tenantWide: projectId === null && sharedWith.length === 0 };
+  return {
+    projectId,
+    sharedWith: new Set(sharedWith),
+    tenantWide: projectId === null && sharedWith.length === 0,
+  };
 }
 
 /** P6-28: a row's reach from the shares of a listing */

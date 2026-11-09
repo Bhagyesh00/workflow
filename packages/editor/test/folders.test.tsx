@@ -24,7 +24,10 @@ async function openList(path = '/workflows', ready?: string) {
   // list still loads after the /workflows -> /home/workflows redirect (the region is read again on every try)
   if (ready)
     await waitFor(
-      () => expect(within(screen.getByRole('region', { name: 'Workflow list' })).getAllByText(ready).length).toBeGreaterThan(0),
+      () =>
+        expect(
+          within(screen.getByRole('region', { name: 'Workflow list' })).getAllByText(ready).length,
+        ).toBeGreaterThan(0),
       LONG,
     );
   return utils;

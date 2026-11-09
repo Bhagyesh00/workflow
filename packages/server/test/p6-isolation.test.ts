@@ -26,12 +26,12 @@ import {
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createMcpAuthHelper } from '../src/services/mcp/oauth/tokens';
 import { MCP_KEY_AUDIENCE, MCP_KEY_LABEL } from '../src/services/mcp/types';
-import type { SecretProvider, SecretProviderSettings, SecretProviderType } from '../src/services/secrets/types';
-import {
-  type AssistantHarness,
-  createAssistantHarness,
-  type HarnessUser,
-} from './fakes/assistant-harness';
+import type {
+  SecretProvider,
+  SecretProviderSettings,
+  SecretProviderType,
+} from '../src/services/secrets/types';
+import { type AssistantHarness, createAssistantHarness, type HarnessUser } from './fakes/assistant-harness';
 import {
   addToProject,
   chain,
@@ -94,7 +94,9 @@ class MemoryProvider implements SecretProvider {
 const memoryType: SecretProviderType = {
   name: 'memoryVault',
   displayName: 'Memory vault',
-  properties: [{ displayName: 'Token', name: 'token', type: 'string', default: '', typeOptions: { password: true } }],
+  properties: [
+    { displayName: 'Token', name: 'token', type: 'string', default: '', typeOptions: { password: true } },
+  ],
   create: (settings) => new MemoryProvider(settings),
 };
 
@@ -185,7 +187,10 @@ describe('route families, two members, two projects', () => {
       workspaceName: `Iso ${id}`,
     });
     if (res.statusCode !== 200) throw new Error(`signup failed: ${res.body}`);
-    const data = res.json().data as { user: { id: string; email: string }; tenant: { id: string; slug: string } };
+    const data = res.json().data as {
+      user: { id: string; email: string };
+      tenant: { id: string; slug: string };
+    };
     return { client, ...data };
   }
   type Owner = Awaited<ReturnType<typeof signup>>;
@@ -214,8 +219,14 @@ describe('route families, two members, two projects', () => {
       ben,
       wfA: await workflowIn(server, tenantId, a.id, flow('Alpha flow')),
       wfB: await workflowIn(server, tenantId, b.id, flow('Beta flow')),
-      credA: await credentialIn(server, tenantId, a.id, { name: 'Alpha key', data: { apiKey: 'a-secret-1' } }),
-      credB: await credentialIn(server, tenantId, b.id, { name: 'Beta key', data: { apiKey: 'b-secret-22' } }),
+      credA: await credentialIn(server, tenantId, a.id, {
+        name: 'Alpha key',
+        data: { apiKey: 'a-secret-1' },
+      }),
+      credB: await credentialIn(server, tenantId, b.id, {
+        name: 'Beta key',
+        data: { apiKey: 'b-secret-22' },
+      }),
       tableA: await dataTableIn(server, tenantId, a.id, 'alpha_table'),
       tableB: await dataTableIn(server, tenantId, b.id, 'beta_table'),
       folderA: await folderIn(server, tenantId, a.id, 'Alpha folder'),
@@ -267,7 +278,12 @@ describe('route families, two members, two projects', () => {
       expect(idsOf((await client.get(`/rest/workflows?projectId=${w.a.id}`)).json())).toEqual([w.wfA.id]);
       expect(idsOf((await client.get('/rest/workflows')).json())).toEqual([w.wfA.id]);
       expect((await client.get(`/rest/workflows/${w.wfA.id}`)).statusCode).toBe(200);
-      const made = await client.post('/rest/workflows', { name: 'Into A', projectId: w.a.id, nodes: [], connections: {} });
+      const made = await client.post('/rest/workflows', {
+        name: 'Into A',
+        projectId: w.a.id,
+        nodes: [],
+        connections: {},
+      });
       expect(made.statusCode).toBe(200);
       // the same holds the other way round
       expect((await w.ben.client.get(`/rest/workflows/${w.wfA.id}`)).statusCode).toBe(403);
@@ -280,7 +296,15 @@ describe('route families, two members, two projects', () => {
         const id = randomUUID();
         await repos().executions.create(
           w.tenantId,
-          { id, workflowId, workflowName: 'Run', mode: 'manual', status: 'error', startedAt: new Date(), stoppedAt: new Date() },
+          {
+            id,
+            workflowId,
+            workflowName: 'Run',
+            mode: 'manual',
+            status: 'error',
+            startedAt: new Date(),
+            stoppedAt: new Date(),
+          },
           { workflowData: { name: 'Run', nodes: [], connections: {} }, runOptions: {} },
         );
         return id;
@@ -311,7 +335,12 @@ describe('route families, two members, two projects', () => {
           await client.get(`/rest/credentials/${w.credB.id}`),
           await client.patch(`/rest/credentials/${w.credB.id}`, { name: 'x' }),
           await client.delete(`/rest/credentials/${w.credB.id}`),
-          await client.post('/rest/credentials', { name: 'Into B', type: 'testApi', data: {}, projectId: w.b.id }),
+          await client.post('/rest/credentials', {
+            name: 'Into B',
+            type: 'testApi',
+            data: {},
+            projectId: w.b.id,
+          }),
           await client.post('/rest/credentials/test', { id: w.credB.id, type: 'testApi', data: {} }),
           await client.post('/rest/credentials/test', { type: 'testApi', data: {}, projectId: w.b.id }),
         ],
@@ -358,14 +387,22 @@ describe('route families, two members, two projects', () => {
 
       received.length = 0;
       const refused = await w.ann.client.data(
-        w.ann.client.post('/rest/credentials/test', { type: 'testApi', projectId: w.a.id, data: data('={{ $secrets.vaultB.key }}') }),
+        w.ann.client.post('/rest/credentials/test', {
+          type: 'testApi',
+          projectId: w.a.id,
+          data: data('={{ $secrets.vaultB.key }}'),
+        }),
       );
       expect(refused.status).toBe('Error');
       expect(JSON.stringify(refused)).not.toContain('vault-of-b');
       expect(received).toEqual([]);
 
       const vars = await w.ann.client.data(
-        w.ann.client.post('/rest/credentials/test', { type: 'testApi', projectId: w.a.id, data: data('={{ $vars.p6iso }}') }),
+        w.ann.client.post('/rest/credentials/test', {
+          type: 'testApi',
+          projectId: w.a.id,
+          data: data('={{ $vars.p6iso }}'),
+        }),
       );
       expect(vars.status).toBe('OK');
       expect(received.at(-1)?.headers['x-api-key']).toBe('a-value');
@@ -390,7 +427,9 @@ describe('route families, two members, two projects', () => {
       const callback = (s: string) =>
         server.app.inject({ url: `/rest/oauth2/callback?code=abc&state=${encodeURIComponent(s)}` });
       // ben cannot even start the flow on A's credential
-      expect((await w.ben.client.get(`/rest/oauth2/authorize?credentialId=${oauth.id}`)).statusCode).toBe(403);
+      expect((await w.ben.client.get(`/rest/oauth2/authorize?credentialId=${oauth.id}`)).statusCode).toBe(
+        403,
+      );
       const kept = await callback((await state(w.ann, oauth.id))!);
       expect(kept.body).toContain('"status":"success"');
       const lost = (await state(w.ann, oauth.id))!;
@@ -485,7 +524,12 @@ describe('route families, two members, two projects', () => {
       const url = `/rest/secret-providers/projects/${w.b.id}/connections`;
       for (const res of [
         await w.ann.client.get(url),
-        await w.ann.client.post(url, { providerKey: 'x', type: 'memoryVault', settings: { token }, isEnabled: true }),
+        await w.ann.client.post(url, {
+          providerKey: 'x',
+          type: 'memoryVault',
+          settings: { token },
+          isEnabled: true,
+        }),
         await w.ann.client.get(`/rest/secret-providers/completions/secrets/project/${w.b.id}`),
       ]) {
         expect(res.statusCode).toBe(403);
@@ -871,10 +915,17 @@ describe('route families, two members, two projects', () => {
       try {
         await waitFor(async () => events.some((e) => e.event === 'connected'), { message: 'SSE connection' });
         const send = (executionId: string, workflowId: string) =>
-          server.ctx.push.send(w.tenantId, 'executionStarted', { executionId, workflowId, mode: 'manual' }, { workflowId });
+          server.ctx.push.send(
+            w.tenantId,
+            'executionStarted',
+            { executionId, workflowId, mode: 'manual' },
+            { workflowId },
+          );
         send('run-b', w.wfB.id);
         send('run-a', w.wfA.id);
-        await waitFor(async () => events.some((e) => e.data?.executionId === 'run-a'), { message: 'the event of A' });
+        await waitFor(async () => events.some((e) => e.data?.executionId === 'run-a'), {
+          message: 'the event of A',
+        });
         expect(events.some((e) => e.data?.executionId === 'run-b')).toBe(false);
       } finally {
         controller.abort();
@@ -887,14 +938,25 @@ describe('route families, two members, two projects', () => {
   describe('publish check, reviews, evaluations, form and chat sign-in', () => {
     it("publish check: A's workflow whose version names B's credential is refused for ann and for the owner", async () => {
       const w = await world();
-      const hookNode = node('Hook', 'core.webhook', { path: `p6-${randomUUID().slice(0, 8)}`, httpMethod: 'GET' }, [0, 0], {
-        webhookId: randomUUID(),
-      });
+      const hookNode = node(
+        'Hook',
+        'core.webhook',
+        { path: `p6-${randomUUID().slice(0, 8)}`, httpMethod: 'GET' },
+        [0, 0],
+        {
+          webhookId: randomUUID(),
+        },
+      );
       const created = await server.ctx.workflows.create(
         w.tenantId,
         {
           name: 'To publish',
-          nodes: [hookNode, node('Use', 'test.useCredential', {}, [200, 0], { credentials: { testApi: { id: w.credA.id, name: 'x' } } })],
+          nodes: [
+            hookNode,
+            node('Use', 'test.useCredential', {}, [200, 0], {
+              credentials: { testApi: { id: w.credA.id, name: 'x' } },
+            }),
+          ],
           connections: chain('Hook', 'Use'),
           settings: {},
           projectId: w.a.id,
@@ -915,19 +977,32 @@ describe('route families, two members, two projects', () => {
 
     it("reviews: ben cannot open a review on A's workflow, ann can; ben never sees or answers it", async () => {
       const w = await world();
-      await w.owner.client.data(w.owner.client.patch('/rest/settings', { workflowReviews: { enabled: true } }));
+      await w.owner.client.data(
+        w.owner.client.patch('/rest/settings', { workflowReviews: { enabled: true } }),
+      );
       const saved = await w.owner.client.data<{ id: string; versionId: string }>(
         w.owner.client.post('/rest/workflows', {
           name: 'Reviewed',
           projectId: w.a.id,
           nodes: [
-            node('Webhook', 'core.webhook', { httpMethod: 'POST', path: `r${randomUUID().slice(0, 8)}` }, [0, 0], { webhookId: randomUUID() }),
+            node(
+              'Webhook',
+              'core.webhook',
+              { httpMethod: 'POST', path: `r${randomUUID().slice(0, 8)}` },
+              [0, 0],
+              { webhookId: randomUUID() },
+            ),
             setNode('Set', 'greeting', 'v1'),
           ],
           connections: chain('Webhook', 'Set'),
         }),
       );
-      const body = { workflowId: saved.id, title: 'Please check', versionName: 'v1', reviewerUserIds: [w.owner.user.id] };
+      const body = {
+        workflowId: saved.id,
+        title: 'Please check',
+        versionName: 'v1',
+        reviewerUserIds: [w.owner.user.id],
+      };
       expectHidden([await w.ben.client.post('/rest/workflow-reviews', body)], 'review create');
       const opened = await w.ann.client.post('/rest/workflow-reviews', body);
       expect(opened.statusCode).toBe(200);
@@ -1059,9 +1134,15 @@ describe('route families, two members, two projects', () => {
             name: `Chat ${id}`,
             projectId,
             nodes: [
-              node('Chat', 'ai.chatTrigger', { public: true, authentication: 'n8nUserAuth', requireExecuteAccess: true }, [0, 0], {
-                webhookId: id,
-              }),
+              node(
+                'Chat',
+                'ai.chatTrigger',
+                { public: true, authentication: 'n8nUserAuth', requireExecuteAccess: true },
+                [0, 0],
+                {
+                  webhookId: id,
+                },
+              ),
             ],
             connections: {},
           }),
@@ -1070,7 +1151,9 @@ describe('route families, two members, two projects', () => {
         return `/webhook/${w.owner.tenant.slug}/${id}/chat`;
       };
       const open = async (who: Who, url: string) => {
-        const issued = await who.client.data<{ code: string }>(who.client.post('/rest/form-auth/code', { returnTo: url }));
+        const issued = await who.client.data<{ code: string }>(
+          who.client.post('/rest/form-auth/code', { returnTo: url }),
+        );
         return server.app.inject({ method: 'GET', url: `${url}?code=${issued.code}` });
       };
       const urlA = await chat(w.a.id, `chat-a-${randomUUID().slice(0, 6)}`);
@@ -1096,18 +1179,29 @@ describe('route families, two members, two projects', () => {
       return (await res.json()) as { result?: any; error?: { message: string } };
     };
     const mcpKey = async (w: World, member: TestMember) =>
-      (await server.ctx.auth.createApiKey(w.tenantId, member.user.id, MCP_KEY_LABEL, [], MCP_KEY_AUDIENCE)).key;
+      (await server.ctx.auth.createApiKey(w.tenantId, member.user.id, MCP_KEY_LABEL, [], MCP_KEY_AUDIENCE))
+        .key;
     const call = async (w: World, key: string, name: string, args: DataObject = {}) => {
       const body = await rpc(w.owner.tenant.slug, key, 'tools/call', { name, arguments: args });
       if (body.error) return { isError: true, text: body.error.message, value: undefined as any };
       const text = (body.result.content ?? []).map((p: { text?: string }) => p.text ?? '').join('');
-      return { isError: Boolean(body.result.isError), text, value: body.result.isError ? undefined : JSON.parse(text) };
+      return {
+        isError: Boolean(body.result.isError),
+        text,
+        value: body.result.isError ? undefined : JSON.parse(text),
+      };
     };
 
     it("MCP key: ann's key searches A only and cannot read, run, publish or create in B; a removed relation closes A at once", async () => {
       const w = await world();
-      await repos().workflows.update(w.tenantId, w.wfA.id, undefined, { versionId: w.wfA.versionId, settings: { availableInMCP: true } } as never);
-      await repos().workflows.update(w.tenantId, w.wfB.id, undefined, { versionId: w.wfB.versionId, settings: { availableInMCP: true } } as never);
+      await repos().workflows.update(w.tenantId, w.wfA.id, undefined, {
+        versionId: w.wfA.versionId,
+        settings: { availableInMCP: true },
+      } as never);
+      await repos().workflows.update(w.tenantId, w.wfB.id, undefined, {
+        versionId: w.wfB.versionId,
+        settings: { availableInMCP: true },
+      } as never);
       const key = await mcpKey(w, w.ann);
       const search = await call(w, key, 'search_workflows', {});
       expect(search.value.data.map((x: { id: string }) => x.id)).toEqual([w.wfA.id]);
@@ -1123,7 +1217,11 @@ describe('route families, two members, two projects', () => {
         const res = await call(w, key, name, args);
         expect(res.isError, name).toBe(true);
       }
-      const created = await call(w, key, 'create_workflow_from_code', { name: 'Into B', code: 'x', projectId: w.b.id });
+      const created = await call(w, key, 'create_workflow_from_code', {
+        name: 'Into B',
+        code: 'x',
+        projectId: w.b.id,
+      });
       expect(created.isError).toBe(true);
       expect((await repos().workflows.get(w.tenantId, w.wfB.id))?.isArchived).toBe(false);
 
@@ -1144,7 +1242,12 @@ describe('route families, two members, two projects', () => {
         grantTypes: ['authorization_code', 'refresh_token'],
         tokenEndpointAuthMethod: 'none',
       });
-      await mcpOAuth.saveConsent({ tenantId: w.tenantId, userId: w.ann.user.id, clientId, scope: ['workflow:read'] });
+      await mcpOAuth.saveConsent({
+        tenantId: w.tenantId,
+        userId: w.ann.user.id,
+        clientId,
+        scope: ['workflow:read'],
+      });
       const access = `wfo_at_${randomUUID()}`;
       const row = {
         tenantId: w.tenantId,
@@ -1158,7 +1261,9 @@ describe('route families, two members, two projects', () => {
         { ...row, tokenHash: createHash('sha256').update(access).digest('hex') },
         { ...row, tokenHash: createHash('sha256').update(`wfo_rt_${randomUUID()}`).digest('hex') },
       );
-      expect((await mcpOAuth.listClientsByUser(w.tenantId, w.ann.user.id)).map((c) => c.id)).toEqual([clientId]);
+      expect((await mcpOAuth.listClientsByUser(w.tenantId, w.ann.user.id)).map((c) => c.id)).toEqual([
+        clientId,
+      ]);
       expect(await mcpOAuth.listClientsByUser(w.tenantId, w.ben.user.id)).toEqual([]);
       expect(await mcpOAuth.revokeForUser(w.tenantId, w.ben.user.id, clientId)).toBe(false);
       // the routes: ben's list is empty and his delete is refused
@@ -1181,10 +1286,14 @@ describe('route families, two members, two projects', () => {
             name: `Trigger ${p}`,
             projectId,
             nodes: [
-              node('MCP Server Trigger', 'ai.mcpTrigger', { path: p, authentication: 'n8nOAuth2' }, [0, 0], { webhookId: randomUUID() }),
+              node('MCP Server Trigger', 'ai.mcpTrigger', { path: p, authentication: 'n8nOAuth2' }, [0, 0], {
+                webhookId: randomUUID(),
+              }),
               node('Calculator', 'ai.toolCalculator', {}, [0, 200]),
             ],
-            connections: { Calculator: { ai_tool: [[{ node: 'MCP Server Trigger', type: 'ai_tool', index: 0 }]] } },
+            connections: {
+              Calculator: { ai_tool: [[{ node: 'MCP Server Trigger', type: 'ai_tool', index: 0 }]] },
+            },
           }),
         );
         await w.owner.client.data(w.owner.client.post(`/rest/workflows/${wf.id}/activate`));
@@ -1195,7 +1304,11 @@ describe('route families, two members, two projects', () => {
         const reg = await fetch(`${server.url}/mcp-oauth/${w.owner.tenant.slug}/register`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ client_name: 'Iso client', redirect_uris: [redirectUri], token_endpoint_auth_method: 'none' }),
+          body: JSON.stringify({
+            client_name: 'Iso client',
+            redirect_uris: [redirectUri],
+            token_endpoint_auth_method: 'none',
+          }),
         });
         const { client_id: clientId } = (await reg.json()) as { client_id: string };
         const verifier = randomBytes(32).toString('base64url');
@@ -1241,7 +1354,11 @@ describe('route families, two members, two projects', () => {
             jsonrpc: '2.0',
             id: 1,
             method: 'initialize',
-            params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'raw', version: '1.0.0' } },
+            params: {
+              protocolVersion: '2025-06-18',
+              capabilities: {},
+              clientInfo: { name: 'raw', version: '1.0.0' },
+            },
           }),
         });
       const inA = await makeTrigger(w.a.id);
@@ -1272,13 +1389,18 @@ describe('route families, two members, two projects', () => {
       expect((await w.ann.client.post('/rest/ai/sessions', { workflowId: w.wfB.id })).statusCode).toBe(403);
     });
 
-    it('public API: ann\'s key lists and changes A only; B reads 403 with n8n\'s text; a key never widens the member', async () => {
+    it("public API: ann's key lists and changes A only; B reads 403 with n8n's text; a key never widens the member", async () => {
       const w = await world();
       const keyOf = async (client: TestClient) =>
         (await client.data(client.post('/rest/api-keys', { name: 'k' }))).key as string;
       const annKey = await keyOf(w.ann.client);
       const api = (key: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: unknown) =>
-        server.app.inject({ method, url: `/api/v1${url}`, headers: { 'x-api-key': key }, payload: payload as object });
+        server.app.inject({
+          method,
+          url: `/api/v1${url}`,
+          headers: { 'x-api-key': key },
+          payload: payload as object,
+        });
       const mine = (await api(annKey, 'GET', '/workflows')).json();
       expect(mine.data.map((x: { id: string }) => x.id)).toEqual([w.wfA.id]);
       expectHidden(
@@ -1316,7 +1438,13 @@ describe('Assistant, two members, two projects', () => {
 
   const newMember = async (): Promise<HarnessUser> => {
     const made = await realMember(h.owner, { remoteAddress: nextAddress() });
-    return { client: made.client, userId: made.user.id, email: made.email, role: 'member', tenantId: h.tenantId };
+    return {
+      client: made.client,
+      userId: made.user.id,
+      email: made.email,
+      role: 'member',
+      tenantId: h.tenantId,
+    };
   };
 
   beforeAll(async () => {
@@ -1356,8 +1484,14 @@ describe('Assistant, two members, two projects', () => {
   });
 
   it("test_credential: ann's call on B's credential is refused with the missing scope and never reaches the service", async () => {
-    const mine = await credentialIn(h.server, h.tenantId, a, { name: `Own ${suffix()}`, data: { apiKey: 'own-key-0001' } });
-    const theirs = await credentialIn(h.server, h.tenantId, b, { name: `Theirs ${suffix()}`, data: { apiKey: 'their-key-0002' } });
+    const mine = await credentialIn(h.server, h.tenantId, a, {
+      name: `Own ${suffix()}`,
+      data: { apiKey: 'own-key-0001' },
+    });
+    const theirs = await credentialIn(h.server, h.tenantId, b, {
+      name: `Theirs ${suffix()}`,
+      data: { apiKey: 'their-key-0002' },
+    });
     const refused = await h.callTool(ann, 'test_credential', { credentialId: theirs.id });
     expect(refused.result).toContain(FORBIDDEN);
     expect(refused.result).not.toContain('their-key-0002');
@@ -1489,4 +1623,3 @@ describe('Assistant, two members, two projects', () => {
     expect(control.body).not.toContain('v-iso-4');
   });
 });
-
