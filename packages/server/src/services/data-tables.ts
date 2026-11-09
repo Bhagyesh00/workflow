@@ -710,12 +710,21 @@ export class DataTableService {
   /** columns and rows go by foreign key, and every user's favorite of the table with them */
   async delete(tenantId: string, id: string, actor?: DataTableActor): Promise<void> {
     await this.requireTable(tenantId, id);
-    await this.deps.database.db.transaction(async (tx) => {
-      const repos = createRepositories(tx);
-      await repos.favorites.removeForResource(tenantId, 'dataTable', id);
-      await repos.dataTables.delete(tenantId, id);
-      await this.audit(repos, tenantId, actor, 'dataTable.deleted', id);
-    });
+    await this.deps.database.db.transaction((tx) =>
+      this.deleteIn(createRepositories(tx), tenantId, id, actor),
+    );
+    this.sizes.reset(tenantId);
+  }
+
+  /** the rows `delete` removes, in the caller's transaction (a project wipe); `sizesChanged` after commit */
+  async deleteIn(repos: Repositories, tenantId: string, id: string, actor?: DataTableActor): Promise<void> {
+    await repos.favorites.removeForResource(tenantId, 'dataTable', id);
+    await repos.dataTables.delete(tenantId, id);
+    await this.audit(repos, tenantId, actor, 'dataTable.deleted', id);
+  }
+
+  /** the workspace size total is read again on the next call (after `deleteIn` committed) */
+  sizesChanged(tenantId: string): void {
     this.sizes.reset(tenantId);
   }
 

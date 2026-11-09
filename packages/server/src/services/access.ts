@@ -145,6 +145,11 @@ export class AccessService {
     return set([...custom.scopes.filter(isScope), ...MANDATORY_INSTANCE_SCOPES]);
   }
 
+  /** the scopes a project role slug gives inside a project (system, custom or personalOwner) */
+  projectRoleScopes(tenantId: string, slug: string): Promise<ReadonlySet<Scope>> {
+    return new RoleScopeReader(this.repos, tenantId).scopes(slug);
+  }
+
   /**
    * A member's scopes on one target (any member, not only the caller: reviews read another user's). The
    * target is loaded first: another workspace's id or a non-uuid id is 404. A member of no project

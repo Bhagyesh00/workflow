@@ -8,15 +8,17 @@ import {
   IMPLICIT_TEAM_PROJECT_MEMBER_ROLES,
   type Scope,
 } from '@workflow/workflow';
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { ServiceDeps } from '../context';
-import type { ProjectIcon, ProjectRow } from '../db/schema';
+import type { DbOrTx } from '../db/client';
+import { type ProjectIcon, type ProjectRow, projects } from '../db/schema';
 import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { effectiveLimits, type TenantSettings } from '../plans';
-import { createRepositories } from '../repositories';
+import { createRepositories, type Repositories } from '../repositories';
 import { PERSONAL_OWNER_ROLE } from '../repositories/projects';
 import { MISSING_SCOPE_MESSAGE } from './access';
+import { RELOAD_CHANNEL } from './secrets/manager';
 
 /** GET /projects: a bare array, or `{ count, data }` when `take` or `skip` is given */
 export interface ProjectListQuery {
@@ -194,6 +196,26 @@ export class ProjectService {
     if (custom?.roleType !== 'project') throw ApiError.badRequest(`Unknown project role "${role}"`);
   }
 
+  /**
+   * A caller gives a project role only when it holds every scope of that role in the project itself (an
+   * owner holds them all), so a custom role that manages members cannot hand out a wider role.
+   */
+  private async assertRoleGrantable(
+    auth: AuthContext,
+    projectId: string,
+    roles: Iterable<string>,
+    action: string,
+  ): Promise<void> {
+    if (auth.role === 'owner') return;
+    const mine = await this.access.scopesForAuth(auth, { projectId });
+    for (const role of new Set(roles)) {
+      const given = await this.access.projectRoleScopes(auth.tenant.id, role);
+      if ([...given].some((scope) => !mine.has(scope))) {
+        throw ApiError.forbidden(`Couldn't ${action}: the role gives scopes you don't have`);
+      }
+    }
+  }
+
   private async audit(
     auth: AuthContext,
     action: string,
@@ -275,10 +297,25 @@ export class ProjectService {
     return this.detail(auth, project);
   }
 
-  /** the caller's own projects, each with the caller's role and scopes */
+  /**
+   * The caller's own projects, each with the caller's role and scopes; with the global `project:read`
+   * (owners and admins, implicit members of every team project) also the other team projects, with no
+   * role, as n8n's my-projects.
+   */
   async myProjects(auth: AuthContext): Promise<ProjectListRow[]> {
-    const mine = await this.repos.projects.listForUser(auth.tenant.id, auth.user.id);
-    return Promise.all(mine.map(({ role, ...project }) => this.row(auth, project, role)));
+    const tenantId = auth.tenant.id;
+    const mine = await this.repos.projects.listForUser(tenantId, auth.user.id);
+    const rows: Array<{ project: ProjectRow; role?: string }> = mine.map(({ role, ...project }) => ({
+      project,
+      role,
+    }));
+    if ((await this.access.scopesForAuth(auth)).has('project:read')) {
+      const related = new Set(mine.map((p) => p.id));
+      for (const project of await this.repos.projects.listAll(tenantId)) {
+        if (project.type === 'team' && !related.has(project.id)) rows.push({ project });
+      }
+    }
+    return Promise.all(rows.map(({ project, role }) => this.row(auth, project, role)));
   }
 
   /** the caller's personal project with its scopes */
@@ -316,6 +353,12 @@ export class ProjectService {
     if (project.type === 'personal') throw ApiError.badRequest("Can't add users to personal projects.");
 
     for (const role of new Set(relations.map((r) => r.role))) await this.assertAssignableRole(tenantId, role);
+    await this.assertRoleGrantable(
+      auth,
+      projectId,
+      relations.map((r) => r.role),
+      'add the member',
+    );
     const wanted = new Map<string, string>();
     for (const relation of relations) {
       if (!wanted.has(relation.userId)) wanted.set(relation.userId, relation.role);
@@ -361,6 +404,8 @@ export class ProjectService {
       throw ApiError.badRequest("Can't change the role of a project owner.");
     }
     await this.assertAssignableRole(tenantId, role);
+    // the caller must hold the member's current role too, so it cannot demote a wider role than its own
+    await this.assertRoleGrantable(auth, projectId, [relation.role, role], 'change the role');
     if (!(await this.repos.projects.relations.updateRole(tenantId, projectId, userId, role))) {
       throw ApiError.notFound('Project member');
     }
@@ -379,6 +424,7 @@ export class ProjectService {
     if (relation.role === PERSONAL_OWNER_ROLE) {
       throw ApiError.badRequest('Project owner cannot be removed from the project');
     }
+    await this.assertRoleGrantable(auth, projectId, [relation.role], 'remove the member');
     await this.repos.projects.relations.remove(tenantId, projectId, userId);
     await this.audit(auth, 'project.member.removed', projectId, { userId, role: relation.role });
   }
@@ -412,28 +458,84 @@ export class ProjectService {
           { dataTables: clashes },
         );
       }
+      let vault: string[] = [];
       await this.deps.database.db.transaction(async (tx) => {
+        await lockProject(tx, tenantId, projectId);
         const repos = createRepositories(tx);
         const moved = await repos.projects.moveResources(tenantId, projectId, target.id);
+        vault = await dropVaultConnections(repos, tenantId, projectId);
         await repos.projects.delete(tenantId, projectId);
         await this.audit(auth, 'project.deleted', projectId, { transferId: target.id, moved }, repos);
       });
+      await this.reloadVault(tenantId, vault);
       return;
     }
 
+    // the wipe is one transaction (P6-03): the rows of every workflow, table, credential and folder go
+    // with the project or none does. Unpublishing cannot roll back, so it runs first.
     const { workflows, dataTables } = this.deps.context();
     const actor = { userId: auth.user.id };
-    for (const id of contents.workflowIds) await workflows.delete(tenantId, id, actor, { force: true });
-    for (const table of contents.dataTables) await dataTables.delete(tenantId, table.id);
+    for (const id of contents.workflowIds) await workflows.prepareWipe(tenantId, id);
+    const executionIds: string[] = [];
+    let vault: string[] = [];
     await this.deps.database.db.transaction(async (tx) => {
+      // a create into the project waits for this lock and then fails, so the contents read below are all
+      await lockProject(tx, tenantId, projectId);
       const repos = createRepositories(tx);
-      for (const id of contents.credentialIds) await repos.credentials.delete(tenantId, id);
-      for (const id of contents.folderIds) {
+      const current = await repos.projects.contents(tenantId, projectId);
+      for (const id of current.workflowIds)
+        executionIds.push(...(await workflows.wipeIn(repos, tenantId, id, actor)));
+      for (const table of current.dataTables) await dataTables.deleteIn(repos, tenantId, table.id, actor);
+      for (const id of current.credentialIds) await repos.credentials.delete(tenantId, id);
+      for (const id of current.folderIds) {
         await repos.favorites.removeForResource(tenantId, 'folder', id);
         await repos.folders.delete(tenantId, id);
       }
+      vault = await dropVaultConnections(repos, tenantId, projectId);
       await repos.projects.delete(tenantId, projectId);
       await this.audit(auth, 'project.deleted', projectId, { transferId: null, wiped: true }, repos);
     });
+    await workflows.finishWipe(tenantId, executionIds);
+    dataTables.sizesChanged(tenantId);
+    await this.reloadVault(tenantId, vault);
   }
+
+  /**
+   * P6-28: every main takes the changed vault connections out at once (a deleted one is forgotten, a
+   * disabled one disconnected), through the same reload message the secrets manager sends; this main too.
+   */
+  private async reloadVault(tenantId: string, providerKeys: string[]): Promise<void> {
+    const { bus } = this.deps.context();
+    for (const providerKey of providerKeys) {
+      await bus.publish(RELOAD_CHANNEL, { tenantId, providerKey, origin: 'project-delete' }).catch(() => {});
+    }
+  }
+}
+
+/** a row lock on the project: a concurrent insert that names it (a foreign key check) waits for the commit */
+async function lockProject(tx: DbOrTx, tenantId: string, projectId: string): Promise<void> {
+  await tx
+    .select({ id: projects.id })
+    .from(projects)
+    .where(and(eq(projects.tenantId, tenantId), eq(projects.id, projectId)))
+    .for('update');
+}
+
+/**
+ * P6-28 on a project delete, as n8n: the vault connections the project owns go with it (the foreign key
+ * cascades), and a connection shared with it loses the share (cascade) and is disabled, so a connection
+ * left with no share never turns workspace wide by itself. Returns the provider keys that changed.
+ */
+async function dropVaultConnections(
+  repos: Repositories,
+  tenantId: string,
+  projectId: string,
+): Promise<string[]> {
+  const rows = await repos.secrets.list(tenantId, { projectId });
+  for (const row of rows) {
+    if (row.projectId !== projectId && row.isEnabled) {
+      await repos.secrets.update(tenantId, row.providerKey, { isEnabled: false });
+    }
+  }
+  return rows.map((row) => row.providerKey);
 }

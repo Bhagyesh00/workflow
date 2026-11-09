@@ -3,11 +3,13 @@
  * repositories; a member is a true `member` (`realMember`) that holds what its project relations give it.
  */
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { sql } from 'drizzle-orm';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   addToProject,
   createTestServer,
   credentialIn,
+  memberAs,
   projectIn,
   realMember,
   resetDatabase,
@@ -95,6 +97,37 @@ describe('visibility', () => {
     const implicit = detail.implicitMembers.find((m: { id: string }) => m.id === owner.user.id);
     expect(implicit.globalRole.slug).toBe('owner');
     expect(detail.scopes).toContain('project:manageMembers');
+  });
+
+  it('my-projects adds the team projects owners and admins reach implicitly, with no role (n8n)', async () => {
+    const owner = await ws();
+    const admin = await memberAs(owner, 'admin');
+    const member = await realMember(owner);
+    const other = await projectIn(server, owner.tenant.id, 'No relation');
+    for (const client of [owner.client, admin.client]) {
+      const mine = (await client.get('/rest/projects/my-projects')).json().data as Array<{
+        id: string;
+        role?: string;
+        scopes: string[];
+      }>;
+      const row = mine.find((p) => p.id === other.id);
+      expect(row).toBeDefined();
+      expect(row!.role).toBeUndefined();
+      expect(row!.scopes).toContain('project:manageMembers');
+    }
+    const memberMine = (await member.client.get('/rest/projects/my-projects')).json().data as Array<{
+      id: string;
+    }>;
+    expect(memberMine.map((p) => p.id)).not.toContain(other.id);
+    // another member's personal project is never added
+    const personal = await repos().projects.ensurePersonal(owner.tenant.id, {
+      id: member.user.id,
+      name: member.user.name,
+    });
+    const ownerMine = (await owner.client.get('/rest/projects/my-projects')).json().data as Array<{
+      id: string;
+    }>;
+    expect(ownerMine.map((p) => p.id)).not.toContain(personal.id);
   });
 
   it('the list answers { count, data } with take or skip, count and sharing candidates', async () => {
@@ -347,6 +380,141 @@ describe('members', () => {
   });
 });
 
+describe('a true member who is project:admin (not an owner standing in)', () => {
+  it('renames the project and adds, changes and removes members', async () => {
+    const owner = await ws();
+    const admin = await realMember(owner);
+    const other = await realMember(owner);
+    const a = await projectIn(server, owner.tenant.id, 'A');
+    await addToProject(server, owner.tenant.id, a.id, admin.user.id, 'project:admin');
+    const renamed = await admin.client.patch(`/rest/projects/${a.id}`, { name: 'Renamed' });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.json().data.name).toBe('Renamed');
+    const added = await admin.client.post(`/rest/projects/${a.id}/users`, {
+      relations: [{ userId: other.user.id, role: 'project:viewer' }],
+    });
+    expect(added.statusCode).toBe(201);
+    const changed = await admin.client.patch(`/rest/projects/${a.id}/users/${other.user.id}`, {
+      role: 'project:editor',
+    });
+    expect(changed.statusCode).toBe(200);
+    expect((await repos().projects.relations.get(owner.tenant.id, a.id, other.user.id))?.role).toBe(
+      'project:editor',
+    );
+    const removed = await admin.client.delete(`/rest/projects/${a.id}/users/${other.user.id}`);
+    expect(removed.statusCode).toBe(200);
+    expect(await repos().projects.relations.get(owner.tenant.id, a.id, other.user.id)).toBeUndefined();
+    // the same calls on a project the member only edits are refused
+    const b = await projectIn(server, owner.tenant.id, 'B');
+    await addToProject(server, owner.tenant.id, b.id, admin.user.id, 'project:editor');
+    expect((await admin.client.patch(`/rest/projects/${b.id}`, { name: 'X' })).statusCode).toBe(403);
+    expect((await admin.client.delete(`/rest/projects/${b.id}`)).statusCode).toBe(403);
+  });
+
+  it('deletes with a transfer into a project it edits, and with a wipe', async () => {
+    const owner = await ws();
+    const admin = await realMember(owner);
+    const source = await projectIn(server, owner.tenant.id, 'Source');
+    const target = await projectIn(server, owner.tenant.id, 'Target');
+    const wiped = await projectIn(server, owner.tenant.id, 'Wiped');
+    await addToProject(server, owner.tenant.id, source.id, admin.user.id, 'project:admin');
+    await addToProject(server, owner.tenant.id, wiped.id, admin.user.id, 'project:admin');
+    await addToProject(server, owner.tenant.id, target.id, admin.user.id, 'project:editor');
+    const wf = await workflowIn(server, owner.tenant.id, source.id);
+    const moved = await admin.client.delete(`/rest/projects/${source.id}?transferId=${target.id}`);
+    expect(moved.statusCode).toBe(200);
+    expect((await repos().workflows.get(owner.tenant.id, wf.id))?.projectId).toBe(target.id);
+    const gone = await workflowIn(server, owner.tenant.id, wiped.id);
+    const res = await admin.client.delete(`/rest/projects/${wiped.id}`);
+    expect(res.statusCode).toBe(200);
+    expect(await repos().projects.get(owner.tenant.id, wiped.id)).toBeUndefined();
+    expect(await repos().workflows.get(owner.tenant.id, gone.id)).toBeUndefined();
+  });
+});
+
+describe('a member manager gives only roles whose scopes it holds', () => {
+  async function managerWorld() {
+    const owner = await ws();
+    const manager = await realMember(owner);
+    const other = await realMember(owner);
+    const a = await projectIn(server, owner.tenant.id, 'A');
+    await repos().roles.create(owner.tenant.id, {
+      slug: 'project:manager',
+      displayName: 'Manager',
+      roleType: 'project',
+      scopes: ['project:read', 'project:manageMembers'],
+    });
+    await addToProject(server, owner.tenant.id, a.id, manager.user.id, 'project:manager');
+    return { owner, manager, other, a };
+  }
+
+  it('cannot change its own relation to project:admin', async () => {
+    const { owner, manager, a } = await managerWorld();
+    const res = await manager.client.patch(`/rest/projects/${a.id}/users/${manager.user.id}`, {
+      role: 'project:admin',
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.message).toBe("Couldn't change the role: the role gives scopes you don't have");
+    expect((await repos().projects.relations.get(owner.tenant.id, a.id, manager.user.id))?.role).toBe(
+      'project:manager',
+    );
+  });
+
+  it('cannot add a user with a role that gives scopes it lacks', async () => {
+    const { owner, manager, other, a } = await managerWorld();
+    const res = await manager.client.post(`/rest/projects/${a.id}/users`, {
+      relations: [{ userId: other.user.id, role: 'project:editor' }],
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.message).toBe("Couldn't add the member: the role gives scopes you don't have");
+    expect(await repos().projects.relations.get(owner.tenant.id, a.id, other.user.id)).toBeUndefined();
+  });
+
+  it('cannot change or remove a member whose role holds scopes it lacks', async () => {
+    const { owner, manager, other, a } = await managerWorld();
+    await addToProject(server, owner.tenant.id, a.id, other.user.id, 'project:admin');
+    const changed = await manager.client.patch(`/rest/projects/${a.id}/users/${other.user.id}`, {
+      role: 'project:manager',
+    });
+    expect(changed.statusCode).toBe(403);
+    expect(changed.json().error.message).toBe(
+      "Couldn't change the role: the role gives scopes you don't have",
+    );
+    const removed = await manager.client.delete(`/rest/projects/${a.id}/users/${other.user.id}`);
+    expect(removed.statusCode).toBe(403);
+    expect(removed.json().error.message).toBe(
+      "Couldn't remove the member: the role gives scopes you don't have",
+    );
+    expect((await repos().projects.relations.get(owner.tenant.id, a.id, other.user.id))?.role).toBe(
+      'project:admin',
+    );
+  });
+
+  it('still changes and removes a member whose role it holds', async () => {
+    const { owner, manager, other, a } = await managerWorld();
+    await addToProject(server, owner.tenant.id, a.id, other.user.id, 'project:manager');
+    const removed = await manager.client.delete(`/rest/projects/${a.id}/users/${other.user.id}`);
+    expect(removed.statusCode).toBe(200);
+    expect(await repos().projects.relations.get(owner.tenant.id, a.id, other.user.id)).toBeUndefined();
+  });
+
+  it('a project:admin still changes another member to project:editor', async () => {
+    const owner = await ws();
+    const admin = await realMember(owner);
+    const other = await realMember(owner);
+    const a = await projectIn(server, owner.tenant.id, 'A');
+    await addToProject(server, owner.tenant.id, a.id, admin.user.id, 'project:admin');
+    await addToProject(server, owner.tenant.id, a.id, other.user.id, 'project:viewer');
+    const res = await admin.client.patch(`/rest/projects/${a.id}/users/${other.user.id}`, {
+      role: 'project:editor',
+    });
+    expect(res.statusCode).toBe(200);
+    expect((await repos().projects.relations.get(owner.tenant.id, a.id, other.user.id))?.role).toBe(
+      'project:editor',
+    );
+  });
+});
+
 describe('delete', () => {
   async function filled(owner: Awaited<ReturnType<typeof signup>>, name: string) {
     const project = await projectIn(server, owner.tenant.id, name);
@@ -432,6 +600,100 @@ describe('delete', () => {
     expect(res.statusCode).toBe(409);
     expect(res.json().error.message).toContain('orders');
     expect(await repos().projects.get(owner.tenant.id, source.id)).toBeTruthy();
+  });
+
+  it('wipes in one transaction: a failure on the last rows keeps every workflow and table', async () => {
+    const owner = await ws();
+    const admin = await realMember(owner);
+    const source = await filled(owner, 'Source');
+    await addToProject(server, owner.tenant.id, source.project.id, admin.user.id, 'project:admin');
+    const { db } = server.ctx.database;
+    // the folder delete, the last step before the project row, fails
+    await db.execute(
+      sql.raw(`create or replace function zz_p6_fail_folder() returns trigger language plpgsql as $$
+        begin if old.id = '${source.folder.id}' then raise exception 'zz folder delete failed'; end if; return old; end $$`),
+    );
+    await db.execute(
+      sql.raw(
+        'create trigger zz_p6_fail_folder before delete on folders for each row execute function zz_p6_fail_folder()',
+      ),
+    );
+    try {
+      const res = await admin.client.delete(`/rest/projects/${source.project.id}`);
+      expect(res.statusCode).toBe(500);
+    } finally {
+      await db.execute(sql.raw('drop trigger if exists zz_p6_fail_folder on folders'));
+      await db.execute(sql.raw('drop function if exists zz_p6_fail_folder()'));
+    }
+    expect(await repos().projects.get(owner.tenant.id, source.project.id)).toBeTruthy();
+    expect(await repos().workflows.get(owner.tenant.id, source.wf.id)).toBeTruthy();
+    expect(await repos().dataTables.get(owner.tenant.id, source.table.id)).toBeTruthy();
+    expect(await repos().credentials.get(owner.tenant.id, source.cred.id)).toBeTruthy();
+  });
+
+  it('a workflow created in the project after the delete read its contents goes with the wipe', async () => {
+    const owner = await ws();
+    const admin = await realMember(owner);
+    const source = await filled(owner, 'Source');
+    await addToProject(server, owner.tenant.id, source.project.id, admin.user.id, 'project:admin');
+    let late: { id: string } | undefined;
+    const { workflows } = server.ctx;
+    const prepare = workflows.prepareWipe.bind(workflows);
+    const spy = vi.spyOn(workflows, 'prepareWipe').mockImplementation(async (tenantId, id) => {
+      late ??= await workflowIn(server, owner.tenant.id, source.project.id, { name: 'Late' });
+      return prepare(tenantId, id);
+    });
+    try {
+      const res = await admin.client.delete(`/rest/projects/${source.project.id}`);
+      expect(res.statusCode).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(late).toBeDefined();
+    expect(await repos().workflows.get(owner.tenant.id, late!.id)).toBeUndefined();
+    expect(await repos().projects.get(owner.tenant.id, source.project.id)).toBeUndefined();
+  });
+
+  it('vault connections: an owned one goes, one shared with the project is disabled, every main hears it', async () => {
+    const owner = await ws();
+    const admin = await realMember(owner);
+    const b = await projectIn(server, owner.tenant.id, 'B');
+    const c = await projectIn(server, owner.tenant.id, 'C');
+    await addToProject(server, owner.tenant.id, b.id, admin.user.id, 'project:admin');
+    await addToProject(server, owner.tenant.id, c.id, admin.user.id, 'project:editor');
+    const tenantId = owner.tenant.id;
+    const connection = (providerKey: string, projectId: string | null) =>
+      repos().secrets.create(tenantId, {
+        id: randomUUID(),
+        providerKey,
+        type: 'awsSecretsManager',
+        settingsEnc: 'x',
+        isEnabled: true,
+        createdBy: null,
+        projectId,
+      });
+    const prod = await connection('prod', null);
+    await repos().secrets.setShares(tenantId, prod.id, [b.id]);
+    await connection('bOwn', b.id);
+    const untouched = await connection('elsewhere', null);
+    await repos().secrets.setShares(tenantId, untouched.id, [c.id]);
+    const heard: string[] = [];
+    const stop = await server.ctx.bus.subscribe('secrets:reload', (message) => {
+      heard.push(String((message as { providerKey?: string }).providerKey));
+    });
+    try {
+      // a transfer delete drops the vault the same way (as n8n)
+      const res = await admin.client.delete(`/rest/projects/${b.id}?transferId=${c.id}`);
+      expect(res.statusCode).toBe(200);
+      await vi.waitFor(() => expect([...heard].sort()).toEqual(['bOwn', 'prod']));
+    } finally {
+      stop();
+    }
+    expect(await repos().secrets.get(tenantId, 'bOwn')).toBeUndefined();
+    expect((await repos().secrets.get(tenantId, 'prod'))?.isEnabled).toBe(false);
+    // left with no share and disabled: no project reads its values
+    expect(await repos().secrets.accessFor(tenantId, prod.id)).toEqual([]);
+    expect((await repos().secrets.get(tenantId, 'elsewhere'))?.isEnabled).toBe(true);
   });
 
   it('refuses another workspace project with 404', async () => {
