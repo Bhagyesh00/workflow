@@ -29,6 +29,9 @@ export const ROLE_RANK: Readonly<Record<SystemRole | LegacyRole, number>> = {
   owner: 4,
 };
 
+/** the words a workspace role can be besides a custom global slug */
+const MEMBER_ROLES: ReadonlySet<string> = new Set(['owner', 'admin', 'member', 'editor', 'viewer']);
+
 function rankOf(role: Role): number {
   return Object.hasOwn(ROLE_RANK, role) ? ROLE_RANK[role as SystemRole | LegacyRole] : 0;
 }
@@ -233,7 +236,18 @@ export class AuthService {
   // -------------------------------------------------------------------------------------------
   // invitations
 
+  /**
+   * P6-31: a role a member may hold in a workspace: a system role, an old one (`editor`, `viewer`, until the
+   * cutover) or the slug of one of the workspace's custom roles of type global. Anything else is a 400.
+   */
+  async assertMemberRole(tenantId: string, role: string): Promise<void> {
+    if (MEMBER_ROLES.has(role)) return;
+    const custom = await this.repos.roles.get(tenantId, role);
+    if (custom?.roleType !== 'global') throw ApiError.badRequest(`Unknown role "${role}"`);
+  }
+
   async invite(tenantId: string, inviter: { id: string; role: Role }, email: string, role: Role) {
+    await this.assertMemberRole(tenantId, role);
     if (role === 'owner' && inviter.role !== 'owner')
       throw ApiError.forbidden('Only owners can invite owners');
     const existing = await this.repos.users.getByEmail(email);

@@ -153,6 +153,19 @@ export class MembershipRepository {
     return rows.length > 0;
   }
 
+  /**
+   * Counts the workspace's owners and locks their rows until the transaction ends, so two removals or
+   * role changes cannot both take the last owner away (P6-31). Call it inside a transaction.
+   */
+  async lockOwners(tenantId: string): Promise<number> {
+    const rows = await this.db
+      .select({ userId: memberships.userId })
+      .from(memberships)
+      .where(and(eq(memberships.tenantId, tenantId), eq(memberships.role, 'owner')))
+      .for('update');
+    return rows.length;
+  }
+
   async countOwners(tenantId: string): Promise<number> {
     const [row] = await this.db
       .select({ n: count() })
@@ -337,6 +350,15 @@ export class ApiKeyRepository {
       .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId), eq(apiKeys.audience, audience)))
       .returning({ id: apiKeys.id });
     return rows.length > 0;
+  }
+
+  /** P6-31: deletes every key of the user in the workspace, whatever its audience (the member was removed) */
+  async deleteAllForUser(tenantId: string, userId: string): Promise<number> {
+    const rows = await this.db
+      .delete(apiKeys)
+      .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId)))
+      .returning({ id: apiKeys.id });
+    return rows.length;
   }
 
   /** lookup by sha256(key); the hash is the capability. The row holds `audience`: the caller checks it */
