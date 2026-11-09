@@ -50,8 +50,8 @@ function ViolationList({ title, items }: { title: string; items: string[] }) {
       <p className="font-semibold text-ink">{title}</p>
       <ul className="list-disc pl-5 text-ink-2">
         {items.map((text, i) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: messages can repeat
-          <li key={i}>{text}</li>
+          // messages can repeat: the key is the text plus its count so far
+          <li key={`${text}:${items.slice(0, i).filter((t) => t === text).length}`}>{text}</li>
         ))}
       </ul>
     </div>
