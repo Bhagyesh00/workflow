@@ -463,7 +463,9 @@ export class MockBackend {
   scopesOfUserIn(project: StoredProject, userId: string, role?: Role): Scope[] {
     const workspaceRole =
       role ?? this.memberships.find((m) => m.tenantId === project.tenantId && m.userId === userId)?.role;
-    const scopes = new Set(workspaceRole === undefined ? [] : this.globalScopesOf(workspaceRole, project.tenantId));
+    const scopes = new Set(
+      workspaceRole === undefined ? [] : this.globalScopesOf(workspaceRole, project.tenantId),
+    );
     const relation = this.projectRelations.find((r) => r.projectId === project.id && r.userId === userId);
     if (relation) {
       const slug = relation.role;
@@ -1233,7 +1235,7 @@ export class MockBackend {
       this.auth();
       // P6-27: a call names the saved workflow or the project whose credentials it may use
       const named = (value: unknown) => typeof value === 'string' && value !== '';
-      if (body.kind !== 'resourceMapping' && !named(body.workflowId) && !named(body.projectId))
+      if (!named(body.workflowId) && !named(body.projectId))
         throw new HttpError(400, 'bad_request', 'workflowId or projectId is required');
       if (named(body.projectId)) this.targetProject(body.projectId);
       const node = body.node as WorkflowNode;
@@ -1285,7 +1287,9 @@ export class MockBackend {
     // P3-13: the server fetches the URL; the demo answers fixtures set with setUrlFixture
     this.on('POST', '/workflows/from-url', ({ body }) => {
       // `workflow:create` in the body's project, else the caller's personal project (as the server's createTarget)
-      this.requireScope('workflow:create', { scopes: this.projectScopes(this.targetProject(body.projectId)) });
+      this.requireScope('workflow:create', {
+        scopes: this.projectScopes(this.targetProject(body.projectId)),
+      });
       const url = typeof body.url === 'string' ? body.url : '';
       if (!/^https?:\/\/.+/i.test(url) || url.length > 2048)
         throw new HttpError(400, 'invalid_url', 'Enter a URL that starts with http:// or https://');

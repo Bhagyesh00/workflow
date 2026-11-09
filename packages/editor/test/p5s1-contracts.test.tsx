@@ -5,7 +5,7 @@
 import { waitFor } from '@testing-library/react';
 import type { Connections, ConnectionType, NodeTypeDescription, WorkflowNode } from '@workflow/workflow';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { nodeTypesApi, workflowsApi } from '../src/api/endpoints';
+import { nodeTypesApi, projectsApi, workflowsApi } from '../src/api/endpoints';
 import type { PushEvent, RunWorkflowBody } from '../src/api/types';
 import { demoNodeTypes, demoResourceMapping } from '../src/demo/fixtures';
 import { buildCatalog } from '../src/lib/node-catalog';
@@ -167,12 +167,15 @@ describe('ai.agent ports', () => {
 
 describe('demo.resourceMapper', () => {
   const mapper = describeOf('demo.resourceMapper');
-  const load = (parameters: Record<string, unknown>, method = 'getMappingFields') => {
+  // P6-27: a call names a project (the caller's personal one here), like the editor's useOptionsScope
+  const load = async (parameters: Record<string, unknown>, method = 'getMappingFields') => {
+    const projectId = (await projectsApi.personal().catch(() => undefined))?.id;
     const body = {
       nodeType: mapper.name,
       method,
       kind: 'resourceMapping' as const,
       node: nodeOf('Mapper', mapper.name, parameters),
+      projectId,
     };
     return nodeTypesApi.resourceMapping(body);
   };

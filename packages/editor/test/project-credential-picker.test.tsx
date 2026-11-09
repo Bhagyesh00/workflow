@@ -9,7 +9,7 @@ import type { NodeTypeDescription, WorkflowNode } from '@workflow/workflow';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { nodeTypesApi } from '../src/api/endpoints';
 import { NodeCredentials } from '../src/components/credentials/NodeCredentials';
-import { kitchenSink } from '../src/demo/fixtures';
+import { demoNodeTypes, kitchenSink } from '../src/demo/fixtures';
 import type { MockBackend } from '../src/demo/mock-backend';
 import { demoShares } from '../src/demo/mock-sharing';
 import { useOpenWorkflowStore } from '../src/features/editor/open-resources';
@@ -138,6 +138,22 @@ describe('node credential picker', () => {
     expect(optionNames(select)).not.toContain('Beta key');
   });
 
+  it('an unsaved workflow on /workflow/new lists the personal project’s credentials and lets a member create one', async () => {
+    const { demo } = setup();
+    const personal = demo.personalProject(demo.auth().tenant.id, demo.auth().user.id);
+    credential(demo, 'My own key', personal.id);
+    demo.setDemoRole('member');
+    // no open workflow and no project page: the workflow will be saved in the personal project
+    withProviders(
+      <NodeCredentials node={node} description={description} readOnly={false} onChange={() => {}} />,
+    );
+    const select = await screen.findByRole('combobox', {}, LONG);
+    await waitFor(() => expect(optionNames(select)).toContain('My own key'), LONG);
+    expect(optionNames(select)).toContain('+ Create new credential');
+    expect(optionNames(select)).not.toContain('Alpha key');
+    expect(optionNames(select)).not.toContain('Beta key');
+  });
+
   async function asMemberIn(role: string) {
     const { demo, alpha } = setup();
     demo.projectRelations.push({
@@ -201,6 +217,28 @@ describe('option and list calls', () => {
     renderParameters(kitchenSink, { parameters: { resource: 'deal' } });
     await waitFor(() => expect(spy).toHaveBeenCalled(), LONG);
     expect(spy.mock.calls[0][0]).toMatchObject({ projectId: personal.id });
+  });
+
+  it('a resource mapper call on an unsaved workflow names the personal project, and the demo refuses one with no id', async () => {
+    const demo = signedIn();
+    const personal = demo.personalProject(demo.auth().tenant.id, demo.auth().user.id);
+    const spy = vi.spyOn(nodeTypesApi, 'resourceMapping');
+    const mapper = demoNodeTypes.find((d) => d.name === 'demo.resourceMapper')!;
+    renderParameters(mapper, {
+      parameters: {
+        table: 'contacts',
+        columns: { mappingMode: 'defineBelow', value: null, matchingColumns: [], schema: [] },
+      },
+    });
+    await waitFor(() => expect(spy).toHaveBeenCalled(), LONG);
+    expect(spy.mock.calls[0][0]).toMatchObject({ projectId: personal.id });
+    expect(spy.mock.calls[0][0].workflowId).toBeUndefined();
+    const refused = await backend().handle({
+      method: 'POST',
+      path: '/node-types/options',
+      body: { nodeType: mapper.name, method: 'getMappingFields', kind: 'resourceMapping', node: {} },
+    });
+    expect(refused.status).toBe(400);
   });
 
   it('the demo refuses a call that names neither a workflow nor a project, and an unknown project', async () => {

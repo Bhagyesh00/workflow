@@ -72,7 +72,8 @@ export function registerReviewRoutes(backend: MockBackend): void {
     return publisher(tenant.id, me.id, workflowId ?? undefined);
   };
   /** an admin of reviews holds the global `workflow:move` (as the server's `ADMIN_SCOPE`, P6-39: no rank) */
-  const isAdmin = (role: Role) => backend.globalScopesOf(role, backend.auth().tenant.id).includes('workflow:move');
+  const isAdmin = (role: Role) =>
+    backend.globalScopesOf(role, backend.auth().tenant.id).includes('workflow:move');
 
   const emit = (_r: StoredReview) =>
     backend.emit({ type: 'workflowReviewChanged', data: { workflowId: '', requestId: '' } });
@@ -216,7 +217,7 @@ export function registerReviewRoutes(backend: MockBackend): void {
   backend.on('GET', '/workflow-reviews/:id', ({ params }) => dto(readable(params[0]).r));
 
   backend.on('POST', '/workflow-reviews/:id/update-version', ({ params, body }) => {
-    const { user: me, tenant, role } = backend.auth();
+    const { user: me, tenant } = backend.auth();
     // any member who can publish the workflow may move it (n8n); others get 404 (non-participant) or 403
     const asked = store(backend).requests.find((x) => x.id === params[0] && x.tenantId === tenant.id);
     if (!mayPublish(asked?.workflowId)) {
