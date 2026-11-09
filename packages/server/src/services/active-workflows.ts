@@ -493,7 +493,7 @@ export class ActiveWorkflowManager {
     const issues = await this.validate(tenantId, definition, workflowId);
     if (issues.length)
       throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', issues);
-    // P6 S1: every credential the version uses must be usable in the workflow's project (L4 fills the check)
+    // P6 S1: every credential the version uses must be usable in the workflow's project
     await assertCredentialsUsable(this.deps, tenantId, row.projectId, definition);
 
     if (!row.active) {
