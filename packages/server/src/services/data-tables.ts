@@ -1,7 +1,8 @@
 /**
- * Data tables (P4-03). `forTenant` is what nodes get (`helpers.dataTables`), the other methods are
- * what the REST and public routes call, so the rules are the same for all of them. Every method is
- * scoped to the tenant: another tenant's table answers n8n's not-found text.
+ * Data tables (P4-03, P6-23). `forProject` is what nodes get (`helpers.dataTables`): only the run's
+ * project, by id and by name. The other methods are what the REST and public routes call, so the rules
+ * are the same for all of them. Every method is scoped to the tenant: another tenant's table answers
+ * n8n's not-found text. A table belongs to one project and is never shared; names are unique per project.
  */
 import {
   DATA_TABLE_COLUMN_NAME_MAX,
@@ -30,15 +31,24 @@ import {
   type DataTableRowInput,
   type DataTableRowResult,
   type DataTableRowsQuery,
+  type Scope,
 } from '@workflow/workflow';
 import { dataTableUploadLimitBytes } from '../config';
 import type { ServiceDeps } from '../context';
-import type { DataTableColumnRow, DataTableRowRow, DataTableRow as DataTableTableRow } from '../db/schema';
+import type {
+  DataTableColumnRow,
+  DataTableRowRow,
+  DataTableRow as DataTableTableRow,
+  ProjectRow,
+} from '../db/schema';
+import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { dataTableQuotaBytes, effectiveLimits, type TenantSettings } from '../plans';
 import { createRepositories, type Repositories } from '../repositories';
 import type { DataTableRepository } from '../repositories/data-tables';
+import type { AccessListOptions } from '../repositories/shares';
 import { isUniqueViolation, now } from '../repositories/util';
+import { MISSING_SCOPE_MESSAGE } from './access';
 import {
   buildCsv,
   CSV_TOO_LARGE_MESSAGE,
@@ -147,6 +157,35 @@ function emptyDryRow(columns: DataTableColumnRow[], state: 'before' | 'after'): 
   return out as unknown as DataTableDryRunRow;
 }
 
+/** a project as a table row names it */
+export interface DataTableProjectRef {
+  id: string;
+  name: string;
+  type: ProjectRow['type'];
+  icon: ProjectRow['icon'];
+}
+
+/** what a table carries once the caller is known: its project and (with `includeScopes`) the caller's scopes there */
+export interface DataTableAccessFields {
+  projectId: string;
+  homeProject: DataTableProjectRef | null;
+  sharedWithProjects: DataTableProjectRef[];
+  scopes?: Scope[];
+}
+
+/** a table as the REST routes answer it: the table, and (when the caller is known) its project and scopes */
+export type DataTableForCaller = DataTableInfo & Partial<DataTableAccessFields>;
+
+/**
+ * What the REST list adds: with `caller` the rows narrow to the caller's `dataTable:listProject` access
+ * (a named project needs that scope there) and carry their project; `includeScopes` adds the scopes.
+ * Without `caller` (the public API, MCP, Assistant) the list is the whole workspace until their lanes pass one.
+ */
+export interface DataTableListForQuery {
+  caller?: AuthContext;
+  includeScopes?: boolean;
+}
+
 /** who did it, for the audit rows */
 export interface DataTableActor {
   userId?: string;
@@ -160,6 +199,11 @@ export interface DataTableCreateInput {
   columns: DataTableCreateColumn[];
   /** P6 S1: the project the route resolved; absent: the workspace's default (L24 makes it required) */
   projectId?: string;
+  /**
+   * the signed-in caller (the REST route): the project is then resolved for it (`targetProject`), it must
+   * hold `dataTable:create` there, and the answer carries the access fields
+   */
+  caller?: AuthContext;
   /** CSV text whose rows go in with the new table (columns then come from it) */
   csv?: string;
   hasHeaders?: boolean;
@@ -304,76 +348,95 @@ export interface DataTableRowMethods {
   clear(tenantId: string, id: string, actor?: DataTableActor): Promise<{ deletedCount: number }>;
 }
 
-/** What a node sees: one tenant's tables. Row writes leave no audit rows; a workflow can write many. */
-class TenantDataTableAccess implements DataTableAccess {
+/**
+ * What a node sees: the tables of the run's project, by id and by name (a table of another project is not
+ * found). Row writes leave no audit rows; a workflow can write many.
+ */
+class ProjectDataTableAccess implements DataTableAccess {
   private readonly actor: DataTableActor;
 
   constructor(
     readonly service: DataTableService,
     readonly tenantId: string,
+    readonly projectId: string,
     readonly workflowId: string | undefined,
   ) {
     this.actor = { workflowId };
   }
 
+  /** every operation by id passes here first: a table of another project answers the not-found text */
+  private async own(id: string): Promise<string> {
+    await this.service.requireInProject(this.tenantId, this.projectId, id);
+    return id;
+  }
+
   listTables(query: DataTableListQuery = {}): Promise<DataTablePage<DataTableInfo>> {
-    return this.service.list(this.tenantId, query);
+    return this.service.list(this.tenantId, { ...query, projectId: this.projectId });
   }
   getTable(ref: { id: string } | { name: string }): Promise<DataTableInfo | null> {
-    return this.service.find(this.tenantId, ref);
+    return this.service.find(this.tenantId, ref, this.projectId);
   }
   async createTable(input: {
     name: string;
     columns: DataTableColumnInput[];
     reuseExisting?: boolean;
   }): Promise<DataTableInfo> {
-    const { reuseExisting, ...create } = input;
+    const { reuseExisting, ...rest } = input;
+    const create = { ...rest, projectId: this.projectId };
     if (!reuseExisting) return this.service.create(this.tenantId, create, this.actor);
     const name = tableName(input.name);
-    const existing = await this.service.find(this.tenantId, { name });
+    const existing = await this.service.find(this.tenantId, { name }, this.projectId);
     if (existing) return existing;
     try {
       return await this.service.create(this.tenantId, create, this.actor);
     } catch (error) {
       // another run made it just now
       const taken = error instanceof ApiError && error.statusCode === 409;
-      const raced = taken ? await this.service.find(this.tenantId, { name }) : null;
+      const raced = taken ? await this.service.find(this.tenantId, { name }, this.projectId) : null;
       if (raced) return raced;
       throw error;
     }
   }
-  renameTable(id: string, name: string): Promise<DataTableInfo> {
-    return this.service.patch(this.tenantId, id, { name }, this.actor);
+  async renameTable(id: string, name: string): Promise<DataTableInfo> {
+    return this.service.patch(this.tenantId, await this.own(id), { name }, this.actor);
   }
-  deleteTable(id: string): Promise<void> {
-    return this.service.delete(this.tenantId, id, this.actor);
+  async deleteTable(id: string): Promise<void> {
+    return this.service.delete(this.tenantId, await this.own(id), this.actor);
   }
-  clearTable(id: string): Promise<{ deletedCount: number }> {
-    return this.service.rows.clear(this.tenantId, id, this.actor);
+  async clearTable(id: string): Promise<{ deletedCount: number }> {
+    return this.service.rows.clear(this.tenantId, await this.own(id), this.actor);
   }
-  listColumns(id: string): Promise<DataTableColumn[]> {
-    return this.service.columns.list(this.tenantId, id);
+  async listColumns(id: string): Promise<DataTableColumn[]> {
+    return this.service.columns.list(this.tenantId, await this.own(id));
   }
   /** P5-02: a new last column (the Evaluation node's outputs write-back); the REST rules and caps apply */
-  addColumn(id: string, column: DataTableColumnInput): Promise<DataTableColumn> {
-    return this.service.columns.add(this.tenantId, id, { name: column.name, type: column.type }, this.actor);
+  async addColumn(id: string, column: DataTableColumnInput): Promise<DataTableColumn> {
+    return this.service.columns.add(
+      this.tenantId,
+      await this.own(id),
+      { name: column.name, type: column.type },
+      this.actor,
+    );
   }
-  insertRows<T extends DataTableInsertReturnType>(
+  async insertRows<T extends DataTableInsertReturnType>(
     id: string,
     rows: DataTableRowInput[],
     returnType: T,
   ): Promise<DataTableInsertResult<T>> {
-    return this.service.rows.insert(this.tenantId, id, rows, returnType);
+    return this.service.rows.insert(this.tenantId, await this.own(id), rows, returnType);
   }
-  getRows(id: string, query: DataTableRowsQuery = {}): Promise<DataTablePage<DataTableRow>> {
-    return this.service.rows.list(this.tenantId, id, query);
+  async getRows(id: string, query: DataTableRowsQuery = {}): Promise<DataTablePage<DataTableRow>> {
+    return this.service.rows.list(this.tenantId, await this.own(id), query);
   }
   async updateRows(
     id: string,
     change: DataTableChange,
     options: DataTableDryRunOption = {},
   ): Promise<DataTableRowResult[]> {
-    const rows = await this.service.rows.update(this.tenantId, id, change, { ...options, returnData: true });
+    const rows = await this.service.rows.update(this.tenantId, await this.own(id), change, {
+      ...options,
+      returnData: true,
+    });
     return rows === true ? [] : rows;
   }
   async upsertRow(
@@ -381,7 +444,10 @@ class TenantDataTableAccess implements DataTableAccess {
     change: DataTableChange,
     options: DataTableDryRunOption = {},
   ): Promise<DataTableRowResult[]> {
-    const rows = await this.service.rows.upsert(this.tenantId, id, change, { ...options, returnData: true });
+    const rows = await this.service.rows.upsert(this.tenantId, await this.own(id), change, {
+      ...options,
+      returnData: true,
+    });
     return rows === true ? [] : rows;
   }
   async deleteRows(
@@ -389,11 +455,14 @@ class TenantDataTableAccess implements DataTableAccess {
     filter: DataTableFilter,
     options: DataTableDryRunOption = {},
   ): Promise<DataTableRowResult[]> {
-    const rows = await this.service.rows.delete(this.tenantId, id, filter, { ...options, returnData: true });
+    const rows = await this.service.rows.delete(this.tenantId, await this.own(id), filter, {
+      ...options,
+      returnData: true,
+    });
     return rows === true ? [] : rows;
   }
-  rowsExist(id: string, filter: DataTableFilter): Promise<boolean> {
-    return this.service.rowsExist(this.tenantId, id, filter);
+  async rowsExist(id: string, filter: DataTableFilter): Promise<boolean> {
+    return this.service.rowsExist(this.tenantId, await this.own(id), filter);
   }
 }
 
@@ -403,20 +472,35 @@ export class DataTableService {
   constructor(readonly deps: ServiceDeps) {}
 
   /**
-   * the access nodes use; `workflowId` is the running workflow. P6 S1: `projectId` is the run's project;
-   * until L3 the access stays tenant wide.
+   * the access nodes use; `workflowId` is the running workflow, `projectId` the run's project: the access
+   * reaches that project's tables only, by id and by name, and creates in it.
    */
   forProject(tenantId: string, projectId: string, options: { workflowId?: string } = {}): DataTableAccess {
-    // stub (L3): the access is not narrowed to the project yet
-    void projectId;
-    return new TenantDataTableAccess(this, tenantId, options.workflowId);
+    return new ProjectDataTableAccess(this, tenantId, projectId, options.workflowId);
   }
 
   // ---- tables ----
 
-  async list(tenantId: string, query: DataTableListQuery): Promise<DataTablePage<DataTableInfo>> {
+  /** the access options narrow to a project or to the caller's rows (absent: the whole workspace, for system callers) */
+  async list(
+    tenantId: string,
+    query: DataTableListQuery & AccessListOptions & DataTableListForQuery,
+  ): Promise<DataTablePage<DataTableForCaller>> {
     const { repos } = this.deps;
+    const { caller } = query;
+    let filter = query.filter;
+    if (caller) {
+      const { access } = this.deps.context();
+      if (query.projectId) {
+        const held = await access.scopesForAuth(caller, { projectId: query.projectId });
+        if (!held.has('dataTable:listProject')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+      }
+      filter = await access.listFilter(caller, 'dataTable:listProject');
+    }
     const { count, rows } = await repos.dataTables.list(tenantId, {
+      filter,
+      projectId: query.projectId,
+      onlySharedWithMe: query.onlySharedWithMe,
       name: query.name,
       sortBy: query.sortBy,
       take: Math.min(query.take ?? DATA_TABLE_ROWS_TAKE_MAX, DATA_TABLE_ROWS_TAKE_MAX),
@@ -426,33 +510,117 @@ export class DataTableService {
       tenantId,
       rows.map((row) => row.id),
     );
+    const fields = caller ? await this.accessFields(caller, rows, query.includeScopes === true) : undefined;
     return {
       count,
-      data: rows.map((row) =>
-        toInfo(
+      data: rows.map((row) => ({
+        ...toInfo(
           row,
           columns.filter((column) => column.tableId === row.id),
         ),
-      ),
+        ...fields?.get(row.id),
+      })),
     };
   }
 
-  async get(tenantId: string, id: string): Promise<DataTableInfo> {
+  /** with `caller` the answer carries the table's project and the caller's scopes there */
+  async get(tenantId: string, id: string, caller?: AuthContext): Promise<DataTableForCaller> {
     const row = await this.requireTable(tenantId, id);
-    return toInfo(row, await this.deps.repos.dataTables.listColumns(tenantId, id));
+    return this.forCaller(
+      caller,
+      row,
+      toInfo(row, await this.deps.repos.dataTables.listColumns(tenantId, id)),
+    );
   }
 
-  /** by id or exact name; null when the tenant has no such table */
-  async find(tenantId: string, ref: { id: string } | { name: string }): Promise<DataTableInfo | null> {
+  /**
+   * by id or exact name; null when there is no such table. With `projectId` only that project's tables
+   * count (a name is unique per project, so a name needs the project; without it a name finds nothing).
+   */
+  async find(
+    tenantId: string,
+    ref: { id: string } | { name: string },
+    projectId?: string,
+  ): Promise<DataTableInfo | null> {
     const { dataTables } = this.deps.repos;
-    const row =
-      'id' in ref ? await dataTables.get(tenantId, ref.id) : await dataTables.getByName(tenantId, ref.name);
+    let row: DataTableTableRow | undefined;
+    if ('id' in ref) {
+      row = await dataTables.get(tenantId, ref.id);
+      if (row && projectId !== undefined && row.projectId !== projectId) row = undefined;
+    } else {
+      row = projectId === undefined ? undefined : await dataTables.getByName(tenantId, projectId, ref.name);
+    }
     return row ? toInfo(row, await dataTables.listColumns(tenantId, row.id)) : null;
+  }
+
+  /** the table when it belongs to `projectId`, else n8n's not-found text (the node access calls this) */
+  async requireInProject(tenantId: string, projectId: string, id: string): Promise<DataTableTableRow> {
+    const row = await this.requireTable(tenantId, id);
+    if (row.projectId !== projectId) throw tableNotFound(id);
+    return row;
+  }
+
+  // ---- the caller's view (REST) ----
+
+  /** the table plus its project and the caller's scopes there; the table as it is when no caller is known */
+  private async forCaller(
+    caller: AuthContext | undefined,
+    row: DataTableTableRow,
+    info: DataTableInfo,
+  ): Promise<DataTableForCaller> {
+    if (!caller) return info;
+    const fields = await this.accessFields(caller, [row], true);
+    return { ...info, ...fields.get(row.id) };
+  }
+
+  /** `projectId`, `homeProject` and (with `includeScopes`) the caller's `scopes` of each table; a table's scopes are its project's */
+  private async accessFields(
+    auth: AuthContext,
+    rows: DataTableTableRow[],
+    includeScopes: boolean,
+  ): Promise<Map<string, DataTableAccessFields>> {
+    const { access } = this.deps.context();
+    const result = new Map<string, DataTableAccessFields>();
+    if (!rows.length) return result;
+    const refs = new Map<string, DataTableProjectRef>();
+    for (const p of await this.deps.repos.projects.listAll(auth.tenant.id)) {
+      refs.set(p.id, { id: p.id, name: p.name, type: p.type, icon: p.icon ?? null });
+    }
+    const scopes = new Map<string, Scope[]>();
+    if (includeScopes) {
+      for (const projectId of new Set(rows.map((row) => row.projectId))) {
+        scopes.set(projectId, [...(await access.scopesForAuth(auth, { projectId }))].sort());
+      }
+    }
+    for (const row of rows) {
+      result.set(row.id, {
+        projectId: row.projectId,
+        homeProject: refs.get(row.projectId) ?? null,
+        sharedWithProjects: [],
+        ...(includeScopes ? { scopes: scopes.get(row.projectId) } : {}),
+      });
+    }
+    return result;
   }
 
   async create(
     tenantId: string,
     input: DataTableCreateInput,
+    actor?: DataTableActor,
+  ): Promise<DataTableForCaller> {
+    const { caller, ...rest } = input;
+    if (!caller) return this.insertTable(tenantId, rest, actor);
+    const { access } = this.deps.context();
+    const projectId = await access.targetProject(caller, rest.projectId);
+    const held = await access.scopesForAuth(caller, { projectId });
+    if (!held.has('dataTable:create')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+    const made = await this.insertTable(tenantId, { ...rest, projectId }, actor);
+    return this.forCaller(caller, await this.requireTable(tenantId, made.id), made);
+  }
+
+  private async insertTable(
+    tenantId: string,
+    input: Omit<DataTableCreateInput, 'caller'>,
     actor?: DataTableActor,
   ): Promise<DataTableInfo> {
     const name = tableName(input.name);
@@ -472,7 +640,7 @@ export class DataTableService {
     try {
       const made = await this.deps.database.db.transaction(async (tx) => {
         const repos = createRepositories(tx);
-        if (await repos.dataTables.getByName(tenantId, name)) {
+        if (await repos.dataTables.getByName(tenantId, projectId, name)) {
           throw ApiError.conflict(DATA_TABLE_ERRORS.tableNameExists(name));
         }
         const table = await repos.dataTables.create(tenantId, projectId, name);
@@ -507,6 +675,17 @@ export class DataTableService {
   }
 
   async patch(
+    tenantId: string,
+    id: string,
+    input: DataTablePatchInput,
+    actor?: DataTableActor,
+    caller?: AuthContext,
+  ): Promise<DataTableForCaller> {
+    const renamed = await this.rename(tenantId, id, input, actor);
+    return this.forCaller(caller, await this.requireTable(tenantId, id), renamed);
+  }
+
+  private async rename(
     tenantId: string,
     id: string,
     input: DataTablePatchInput,
@@ -1006,8 +1185,15 @@ export class DataTableService {
 
   // ---- limits and use ----
 
-  async limits(tenantId: string): Promise<DataTableLimits> {
+  /**
+   * the totals are the workspace's (n8n's limits are instance wide); with `caller` the table list holds
+   * only the tables of the caller's projects, so nobody sees the names of another project's tables
+   */
+  async limits(tenantId: string, caller?: AuthContext): Promise<DataTableLimits> {
     const { config, repos } = this.deps;
+    const visible = caller
+      ? await this.deps.context().access.listFilter(caller, 'dataTable:listProject')
+      : undefined;
     const [maxBytes, tables] = await Promise.all([
       this.quotaBytes(tenantId),
       repos.dataTables.tableSizes(tenantId),
@@ -1020,14 +1206,28 @@ export class DataTableService {
       warningBytes: warnAt,
       quotaStatus: quotaStatus(totalBytes, warnAt, maxBytes),
       uploadMaxFileSize: dataTableUploadLimitBytes(config, maxBytes - totalBytes),
-      dataTables: Object.fromEntries(tables.map((table) => [table.id, table])),
+      dataTables: Object.fromEntries(
+        tables
+          .filter((table) => !visible || visible.all || visible.projectIds.includes(table.projectId))
+          .map(({ id, name, sizeBytes }) => [id, { id, name, sizeBytes }]),
+      ),
     };
   }
 
-  async dependencies(tenantId: string, id: string): Promise<DataTableDependency[]> {
+  /** with `caller`, a workflow the caller cannot list (`workflow:list`) is left out */
+  async dependencies(tenantId: string, id: string, caller?: AuthContext): Promise<DataTableDependency[]> {
     const table = await this.requireTable(tenantId, id);
+    const visible = caller ? await this.deps.context().access.listFilter(caller, 'workflow:list') : undefined;
     const workflows = await this.deps.repos.dataTables.dependentWorkflows(tenantId, table);
-    return workflows.map((workflow) => ({ type: 'workflow', ...workflow }));
+    return workflows
+      .filter(
+        (workflow) =>
+          !visible ||
+          visible.all ||
+          visible.projectIds.includes(workflow.projectId) ||
+          visible.workflowIds.includes(workflow.id),
+      )
+      .map((workflow) => ({ type: 'workflow', id: workflow.id, name: workflow.name }));
   }
 
   // ---- shared checks ----

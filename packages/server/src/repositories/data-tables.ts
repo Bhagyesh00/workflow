@@ -55,12 +55,19 @@ export class DataTableRepository {
     return row;
   }
 
-  /** exact name */
-  async getByName(tenantId: string, name: string): Promise<DataTableRow | undefined> {
+  /** exact name, inside one project (names are unique per project, not per workspace) */
+  async getByName(tenantId: string, projectId: string, name: string): Promise<DataTableRow | undefined> {
+    if (!isUuid(projectId)) return undefined;
     const [row] = await this.db
       .select()
       .from(dataTables)
-      .where(and(eq(dataTables.tenantId, tenantId), eq(dataTables.name, name)));
+      .where(
+        and(
+          eq(dataTables.tenantId, tenantId),
+          eq(dataTables.projectId, projectId),
+          eq(dataTables.name, name),
+        ),
+      );
     return row;
   }
 
@@ -384,11 +391,14 @@ export class DataTableRepository {
   }
 
   /** every table of the workspace with its size */
-  async tableSizes(tenantId: string): Promise<Array<{ id: string; name: string; sizeBytes: number }>> {
+  async tableSizes(
+    tenantId: string,
+  ): Promise<Array<{ id: string; name: string; projectId: string; sizeBytes: number }>> {
     const rows = await this.db
       .select({
         id: dataTables.id,
         name: dataTables.name,
+        projectId: dataTables.projectId,
         sizeBytes: sql<string>`coalesce(sum(${dataTableRows.sizeBytes}), 0)`,
       })
       .from(dataTables)
@@ -397,7 +407,7 @@ export class DataTableRepository {
         and(eq(dataTableRows.tenantId, dataTables.tenantId), eq(dataTableRows.tableId, dataTables.id)),
       )
       .where(eq(dataTables.tenantId, tenantId))
-      .groupBy(dataTables.id, dataTables.name);
+      .groupBy(dataTables.id, dataTables.name, dataTables.projectId);
     return rows.map((row) => ({ ...row, sizeBytes: Number(row.sizeBytes) }));
   }
 
@@ -405,13 +415,13 @@ export class DataTableRepository {
   async dependentWorkflows(
     tenantId: string,
     table: { id: string; name: string },
-  ): Promise<Array<{ id: string; name: string }>> {
+  ): Promise<Array<{ id: string; name: string; projectId: string }>> {
     const types = sql.join(
       DATA_TABLE_NODE_TYPES.map((type) => sql`${type}`),
       sql`, `,
     );
     return this.db
-      .select({ id: workflows.id, name: workflows.name })
+      .select({ id: workflows.id, name: workflows.name, projectId: workflows.projectId })
       .from(workflows)
       .where(
         and(

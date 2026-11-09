@@ -1,6 +1,8 @@
 /**
- * /rest/data-tables (P4-03), n8n's REST list without the project segment, with offset paging. Viewer
- * reads, editor and above write. The public routes reuse the schemas here.
+ * /rest/data-tables (P4-03, P6-23), n8n's REST list without the project segment, with offset paging.
+ * Every route checks a `dataTable:*` scope on the table (a create on the project): another tenant's
+ * table is 404, a table of a project the caller has no scope in is 403. Rows carry their project and the
+ * caller's `scopes`. The public routes reuse the schemas here.
  */
 import {
   DATA_TABLE_COLUMN_NAME_MAX,
@@ -13,7 +15,7 @@ import {
 } from '@workflow/workflow';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { requireRole } from '../http/auth';
+import { requireAuth, requireScope } from '../http/auth';
 import { errorBody, handleError, parse } from '../http/errors';
 import { idParams } from '../http/schemas';
 import { CSV_TOO_LARGE_MESSAGE } from '../services/data-table-csv';
@@ -82,9 +84,32 @@ const take = z.coerce
   .default(10)
   .transform((value) => Math.min(value, DATA_TABLE_ROWS_TAKE_MAX));
 
+/** n8n also puts the project and the scopes switch inside `filter`; the top-level params win */
+const listFilter = jsonQuery(
+  z.object({
+    name: z.string().max(DATA_TABLE_NAME_MAX).optional(),
+    projectId: z.uuid().optional(),
+    onlySharedWithMe: z.boolean().optional(),
+    includeScopes: z.boolean().optional(),
+  }),
+);
 const listQuery = z
-  .object({ skip, take, sortBy: dataTableListSort.optional(), filter: dataTableListFilter.optional() })
-  .transform(({ filter, ...rest }) => ({ ...rest, name: filter?.name }));
+  .object({
+    skip,
+    take,
+    sortBy: dataTableListSort.optional(),
+    filter: listFilter.optional(),
+    projectId: z.uuid().optional(),
+    onlySharedWithMe: z.stringbool().optional(),
+    includeScopes: z.stringbool().optional(),
+  })
+  .transform(({ filter, projectId, onlySharedWithMe, includeScopes, ...rest }) => ({
+    ...rest,
+    name: filter?.name,
+    projectId: projectId ?? filter?.projectId,
+    onlySharedWithMe: onlySharedWithMe ?? filter?.onlySharedWithMe,
+    includeScopes: includeScopes ?? filter?.includeScopes,
+  }));
 
 const rowsQuery = z.object({
   skip,
@@ -113,6 +138,8 @@ const createBody = z.object({
   /** size is held by the upload limit in the service, so a big file gets n8n's text */
   csv: z.string().optional(),
   hasHeaders: z.boolean().optional(),
+  /** the project the table goes to; absent: the workspace's default project */
+  projectId: z.uuid().nullish(),
 });
 const patchBody = z.object({ name: dataTableNameSchema });
 const columnParams = idParams.extend({ columnId: z.uuid() });
@@ -141,7 +168,13 @@ export const dataTableDeleteQuery = z.object({
   returnData: z.stringbool().default(false),
 });
 const downloadQuery = z.object({ includeSystemColumns: z.stringbool().default(true) });
-const csvPreviewBody = z.object({ csv: z.string(), hasHeaders: z.boolean().optional() });
+const csvPreviewBody = z.object({
+  csv: z.string(),
+  hasHeaders: z.boolean().optional(),
+  projectId: z.uuid().nullish(),
+});
+/** the project a create route names (the gate reads it before the body is parsed) */
+const projectPeek = z.object({ projectId: z.uuid().nullish() });
 const csvImportBody = z.object({ csv: z.string() });
 
 /**
@@ -157,6 +190,15 @@ const csvRoute = {
   },
 };
 
+type TableScope =
+  | 'dataTable:read'
+  | 'dataTable:update'
+  | 'dataTable:delete'
+  | 'dataTable:readColumn'
+  | 'dataTable:writeColumn'
+  | 'dataTable:readRow'
+  | 'dataTable:writeRow';
+
 export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables: DataTableService }): void {
   const { dataTables } = deps;
   const actor = (request: FastifyRequest): DataTableActor => ({
@@ -164,96 +206,112 @@ export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables
     ip: request.ip,
   });
 
+  /** the scope on the table (its project's role, or a global scope), then the id */
+  const onTable = async (request: FastifyRequest, scope: TableScope) => {
+    const { id } = parse(idParams, request.params);
+    const auth = await requireScope(request, scope, { dataTableId: id });
+    return { auth, id };
+  };
+
+  /**
+   * `dataTable:create` on the project the body names; without one the workspace scope decides, and the
+   * service then resolves the default project for the caller and checks the scope there too
+   */
+  const onCreate = async (request: FastifyRequest) => {
+    const peek = projectPeek.safeParse(request.body ?? {});
+    const projectId = peek.success ? peek.data.projectId : undefined;
+    return requireScope(request, 'dataTable:create', projectId ? { projectId } : undefined);
+  };
+
   app.get('/data-tables', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    return { data: await dataTables.list(auth.tenant.id, parse(listQuery, request.query)) };
-  });
-
-  app.get('/data-tables/limits', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    return { data: await dataTables.limits(auth.tenant.id) };
-  });
-
-  app.post('/data-tables', csvRoute, async (request) => {
-    const auth = requireRole(request, 'editor');
-    return { data: await dataTables.create(auth.tenant.id, parse(createBody, request.body), actor(request)) };
-  });
-
-  app.post('/data-tables/csv/preview', csvRoute, async (request) => {
-    const auth = requireRole(request, 'editor');
-    return { data: await dataTables.csvPreview(auth.tenant.id, parse(csvPreviewBody, request.body)) };
-  });
-
-  app.get('/data-tables/:id', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    const { id } = parse(idParams, request.params);
-    return { data: await dataTables.get(auth.tenant.id, id) };
-  });
-
-  app.patch('/data-tables/:id', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    // no scope on the route (as n8n): `listFor` narrows the rows to the caller's `dataTable:listProject` filter
+    const auth = requireAuth(request);
     return {
-      data: await dataTables.patch(auth.tenant.id, id, parse(patchBody, request.body), actor(request)),
+      data: await dataTables.list(auth.tenant.id, { ...parse(listQuery, request.query), caller: auth }),
     };
   });
 
+  app.get('/data-tables/limits', async (request) => {
+    const auth = await requireScope(request, 'dataTable:list');
+    // the totals are the workspace's; the table list holds the caller's tables only
+    return { data: await dataTables.limits(auth.tenant.id, auth) };
+  });
+
+  app.post('/data-tables', csvRoute, async (request) => {
+    const auth = await onCreate(request);
+    const { projectId, ...body } = parse(createBody, request.body);
+    const input = { ...body, projectId: projectId ?? undefined, caller: auth };
+    return { data: await dataTables.create(auth.tenant.id, input, actor(request)) };
+  });
+
+  app.post('/data-tables/csv/preview', csvRoute, async (request) => {
+    const auth = await onCreate(request);
+    const { projectId: _named, ...body } = parse(csvPreviewBody, request.body);
+    return { data: await dataTables.csvPreview(auth.tenant.id, body) };
+  });
+
+  app.get('/data-tables/:id', async (request) => {
+    const { auth, id } = await onTable(request, 'dataTable:read');
+    return { data: await dataTables.get(auth.tenant.id, id, auth) };
+  });
+
+  app.patch('/data-tables/:id', async (request) => {
+    const { auth, id } = await onTable(request, 'dataTable:update');
+    const body = parse(patchBody, request.body);
+    return { data: await dataTables.patch(auth.tenant.id, id, body, actor(request), auth) };
+  });
+
   app.delete('/data-tables/:id', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:delete');
     await dataTables.delete(auth.tenant.id, id, actor(request));
     return { data: { ok: true } };
   });
 
   app.get('/data-tables/:id/dependencies', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    const { id } = parse(idParams, request.params);
-    return { data: await dataTables.dependencies(auth.tenant.id, id) };
+    const { auth, id } = await onTable(request, 'dataTable:read');
+    // a workflow the caller cannot list is left out
+    return { data: await dataTables.dependencies(auth.tenant.id, id, auth) };
   });
 
   app.get('/data-tables/:id/columns', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:readColumn');
     return { data: await dataTables.columns.list(auth.tenant.id, id) };
   });
 
   app.post('/data-tables/:id/columns', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeColumn');
     const body = parse(dataTableColumnAddBody, request.body);
     return { data: await dataTables.columns.add(auth.tenant.id, id, body, actor(request)) };
   });
 
   app.delete('/data-tables/:id/columns/:columnId', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id, columnId } = parse(columnParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeColumn');
+    const { columnId } = parse(columnParams, request.params);
     await dataTables.columns.delete(auth.tenant.id, id, columnId, actor(request));
     return { data: { ok: true } };
   });
 
   app.patch('/data-tables/:id/columns/:columnId/move', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id, columnId } = parse(columnParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeColumn');
+    const { columnId } = parse(columnParams, request.params);
     const body = parse(columnMoveBody, request.body);
     return { data: await dataTables.columns.move(auth.tenant.id, id, columnId, body, actor(request)) };
   });
 
   app.patch('/data-tables/:id/columns/:columnId/rename', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id, columnId } = parse(columnParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeColumn');
+    const { columnId } = parse(columnParams, request.params);
     const body = parse(columnRenameBody, request.body);
     return { data: await dataTables.columns.rename(auth.tenant.id, id, columnId, body, actor(request)) };
   });
 
   app.get('/data-tables/:id/rows', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:readRow');
     return { data: await dataTables.rows.list(auth.tenant.id, id, parse(rowsQuery, request.query)) };
   });
 
   app.post('/data-tables/:id/insert', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeRow');
     const body = parse(dataTableInsertBody, request.body);
     return {
       data: await dataTables.rows.insert(auth.tenant.id, id, body.data, body.returnType, actor(request)),
@@ -261,8 +319,7 @@ export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables
   });
 
   app.post('/data-tables/:id/upsert', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeRow');
     const { dryRun, returnData, ...change } = parse(dataTableChangeBody, request.body);
     return {
       data: await dataTables.rows.upsert(auth.tenant.id, id, change, { dryRun, returnData }, actor(request)),
@@ -270,8 +327,7 @@ export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables
   });
 
   app.patch('/data-tables/:id/rows', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeRow');
     const { dryRun, returnData, ...change } = parse(dataTableChangeBody, request.body);
     return {
       data: await dataTables.rows.update(auth.tenant.id, id, change, { dryRun, returnData }, actor(request)),
@@ -279,8 +335,7 @@ export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables
   });
 
   app.delete('/data-tables/:id/rows', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeRow');
     const { filter, dryRun, returnData } = parse(dataTableDeleteQuery, request.query);
     return {
       data: await dataTables.rows.delete(auth.tenant.id, id, filter, { dryRun, returnData }, actor(request)),
@@ -288,20 +343,17 @@ export function registerDataTableRoutes(app: FastifyInstance, deps: { dataTables
   });
 
   app.delete('/data-tables/:id/rows/clear', async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeRow');
     return { data: await dataTables.rows.clear(auth.tenant.id, id, actor(request)) };
   });
 
   app.get('/data-tables/:id/download-csv', async (request) => {
-    const auth = requireRole(request, 'viewer');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:readRow');
     return { data: await dataTables.downloadCsv(auth.tenant.id, id, parse(downloadQuery, request.query)) };
   });
 
   app.post('/data-tables/:id/import-csv', csvRoute, async (request) => {
-    const auth = requireRole(request, 'editor');
-    const { id } = parse(idParams, request.params);
+    const { auth, id } = await onTable(request, 'dataTable:writeRow');
     const body = parse(csvImportBody, request.body);
     return { data: await dataTables.importCsv(auth.tenant.id, id, body, actor(request)) };
   });
