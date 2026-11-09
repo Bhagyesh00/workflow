@@ -460,7 +460,14 @@ async function customChecks(row: RouteMatrixRow, scope: Scope): Promise<string[]
     const status = await call(row, 'viewer', caller);
     if (may && status === 403) wrong.push(`${label}: 403, expected allowed`);
     if (may && status === 401) wrong.push(`${label}: 401, expected signed in`);
-    if (!may && status !== 403) wrong.push(`${label}: ${status}, expected 403`);
+    // the test-runs routes first load the workflow: a caller who cannot read it gets its 404 (as n8n)
+    const refusal =
+      !may &&
+      row.file === 'evaluations.ts' &&
+      !(await expectedScopes(row, caller.userId)).has('workflow:read')
+        ? 404
+        : 403;
+    if (!may && status !== refusal) wrong.push(`${label}: ${status}, expected ${refusal}`);
     if (status >= 200 && status < 300 && row.method !== 'GET' && row.method !== 'OPTIONS')
       await ensureFixtures();
   };

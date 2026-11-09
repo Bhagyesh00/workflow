@@ -508,7 +508,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'dataTable:create',
     target: 'dataTable',
     legacyMin: 'editor',
-    check: 'global',
+    check: 'personal',
   },
   {
     file: 'data-tables.ts',
@@ -653,7 +653,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'dataTable:create',
     target: 'dataTable',
     legacyMin: 'editor',
-    check: 'global',
+    check: 'personal',
   },
   {
     file: 'data-tables.ts',
@@ -901,9 +901,8 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'mcp-oauth-clients.ts',
     method: 'GET',
     path: '/rest/mcp/oauth-clients',
-    scope: null,
-    target: 'oauthClient',
-    access: 'auth',
+    scope: 'mcp:oauth',
+    target: 'tenant',
     legacyMin: 'admin',
     change: 'CHANGE: today admin only, after any member lists its own clients',
   },
@@ -911,12 +910,11 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'mcp-oauth-clients.ts',
     method: 'DELETE',
     path: '/rest/mcp/oauth-clients/:clientId',
-    scope: null,
-    target: 'oauthClient',
-    access: 'auth',
+    scope: 'mcp:oauth',
+    target: 'tenant',
     legacyMin: 'admin',
     change:
-      'CHANGE: today admin only and deletes the client for all users; after a member revokes its own grant (owner question 2)',
+      "CHANGE: today admin only and deletes the client for all users; after mcp:oauth, and a delete removes only one user's grant (the client goes with its last consent)",
   },
   {
     file: 'mcp-oauth-clients.ts',
@@ -1935,6 +1933,20 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
   {
     file: 'secret-connections.ts',
     method: 'GET',
+    path: '/rest/external-secrets/settings',
+    scope: 'externalSecretsProvider:read',
+    target: 'tenant',
+  },
+  {
+    file: 'secret-connections.ts',
+    method: 'POST',
+    path: '/rest/external-secrets/settings',
+    scope: 'externalSecretsProvider:update',
+    target: 'tenant',
+  },
+  {
+    file: 'secret-connections.ts',
+    method: 'GET',
     path: '/rest/secret-providers/completions/secrets',
     scope: 'externalSecret:list',
     target: 'secretConnection',
@@ -2111,7 +2123,8 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'none',
     access: 'auth',
     legacyMin: 'editor',
-    change: "No gate on the route: `loadNodeOptions` checks the body's workflow (or the personal project)",
+    change:
+      "No gate on the route: `loadNodeOptions` checks the body's workflow or project (400 with neither)",
   },
   {
     file: 'settings.ts',

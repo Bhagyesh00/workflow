@@ -83,6 +83,10 @@ const testFakeAccess = {
     if (role === 'editor' || role === 'viewer') return TEST_ROLE_SCOPES[role];
     return new Set();
   },
+  /** a create with no project goes to the project of every row here (the real service: the personal project) */
+  async targetProject(_auth: AuthContext, projectId?: string | null): Promise<string> {
+    return projectId ?? PROJECT;
+  },
 } as unknown as AccessService;
 
 async function build(register: (rest: FastifyInstance) => void): Promise<FastifyInstance> {

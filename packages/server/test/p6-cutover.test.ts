@@ -38,9 +38,17 @@ beforeEach(async () => {
 });
 
 const MIGRATION = path.resolve(__dirname, '..', 'migrations', '0024_roles_cutover.sql');
+const OWNERSHIP = path.resolve(__dirname, '..', 'migrations', '0022_project_ownership.sql');
 
-/** runs migration 0024's statements on the test database (what `db-migrate` did to the stored rows) */
+/**
+ * runs migration 0022's personal owner backfill, then migration 0024's statements, on the test database (what
+ * `db-migrate` did to the stored rows)
+ */
 async function backfill(): Promise<void> {
+  const ownership = readFileSync(OWNERSHIP, 'utf8')
+    .split('--> statement-breakpoint')
+    .find((statement) => statement.includes('project:personalOwner'));
+  if (ownership) await server.ctx.database.pool.query(ownership);
   const sql = readFileSync(MIGRATION, 'utf8');
   for (const statement of sql.split('--> statement-breakpoint')) {
     if (statement.trim()) await server.ctx.database.pool.query(statement);
@@ -58,7 +66,11 @@ async function oldMember(
     passwordHash: 'unused',
   });
   await server.ctx.repos.memberships.add(tenantId, user.id, role);
-  await server.ctx.repos.projects.ensurePersonal(tenantId, user);
+  // the personal project as migration 0022 found it: the row only, its owner relation comes from the backfill
+  await server.ctx.database.pool.query(
+    "insert into projects (tenant_id, name, type, owner_user_id, creator_id) values ($1, $2, 'personal', $3, $3)",
+    [tenantId, user.name, user.id],
+  );
   const client = new TestClient(server.app, ORIGIN);
   client.cookie = `wf_session=${await server.ctx.auth.createSession(user.id, tenantId, { ip: '127.0.0.1' })}`;
   return { id: user.id, client };
@@ -98,6 +110,9 @@ describe('stored old roles after migration 0024', () => {
     const viewer = await oldMember(owner.tenant.id, 'viewer');
     await backfill();
     const personal = (await server.ctx.repos.projects.getPersonal(owner.tenant.id, viewer.id))!;
+    expect(
+      (await server.ctx.repos.projects.relations.get(owner.tenant.id, personal.id, viewer.id))?.role,
+    ).toBe('project:personalOwner');
     const made = await viewer.client.data<{ id: string }>(
       viewer.client.post('/rest/workflows', { name: 'Mine', ...manual() }),
     );
