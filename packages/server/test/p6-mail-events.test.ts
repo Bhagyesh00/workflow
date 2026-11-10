@@ -56,6 +56,12 @@ beforeEach(async () => {
   smtp.messages.length = 0;
 });
 
+/** a real member; the invite mail it caused (L4) is cleared, so the tests count only the mails they cause */
+const memberOf = async (owner: Parameters<typeof realMember>[0]) => {
+  const member = await realMember(owner);
+  smtp.messages.length = 0;
+  return member;
+};
 const suffix = () => randomUUID().slice(0, 8);
 const mailsTo = (email: string) => smtp.messages.filter((m) => m.to.join(' ').includes(email));
 /** the mails come after the write returns; the fake has them once the route answered */
@@ -70,8 +76,8 @@ describe('share mails', () => {
     const tenantId = owner.tenant.id;
     const home = await projectIn(server, tenantId, `Home ${suffix()}`);
     const away = await projectIn(server, tenantId, `Away ${suffix()}`);
-    const member = await realMember(owner);
-    const other = await realMember(owner);
+    const member = await memberOf(owner);
+    const other = await memberOf(owner);
     await addToProject(server, tenantId, away.id, member.user.id, 'project:editor');
     await addToProject(server, tenantId, away.id, other.user.id, 'project:viewer');
     // the actor is in the sharee project too, and gets no mail
@@ -114,7 +120,7 @@ describe('share mails', () => {
 
   it('adding people to a project mails the added people once and not the actor', async () => {
     const { owner, tenantId, home } = await setup();
-    const added = await realMember(owner);
+    const added = await memberOf(owner);
     const res = await owner.client.post(`/rest/projects/${home.id}/users`, {
       relations: [
         { userId: added.user.id, role: 'project:editor' },
@@ -146,7 +152,7 @@ describe('share mails', () => {
       const owner = await signup(broken.app);
       const home = await projectIn(broken, owner.tenant.id, `Home ${suffix()}`);
       const away = await projectIn(broken, owner.tenant.id, `Away ${suffix()}`);
-      const member = await realMember(owner);
+      const member = await memberOf(owner);
       await addToProject(broken, owner.tenant.id, away.id, member.user.id, 'project:editor');
       const workflow = await workflowIn(broken, owner.tenant.id, home.id);
       const res = await owner.client.put(`/rest/workflows/${workflow.id}/share`, { shareWithIds: [away.id] });
@@ -162,7 +168,7 @@ describe('share mails', () => {
     const owner = await signup(plain.app);
     const home = await projectIn(plain, owner.tenant.id, `Home ${suffix()}`);
     const away = await projectIn(plain, owner.tenant.id, `Away ${suffix()}`);
-    const member = await realMember(owner);
+    const member = await memberOf(owner);
     await addToProject(plain, owner.tenant.id, away.id, member.user.id, 'project:editor');
     const workflow = await workflowIn(plain, owner.tenant.id, home.id);
     const res = await owner.client.put(`/rest/workflows/${workflow.id}/share`, { shareWithIds: [away.id] });
@@ -174,7 +180,7 @@ describe('share mails', () => {
 describe('first production failure mail', () => {
   it('goes to the owner of the personal project of the workflow, once, even when two failures race', async () => {
     const owner = await signup(server.app);
-    const member = await realMember(owner);
+    const member = await memberOf(owner);
     const personal = await server.ctx.repos.projects.ensurePersonal(owner.tenant.id, {
       id: member.user.id,
       name: member.user.name,
@@ -253,7 +259,7 @@ describe('MCP client revoked mail', () => {
 
   it('an admin revoking a member grant mails the member once with the client name', async () => {
     const owner = await signup(server.app);
-    const member = await realMember(owner);
+    const member = await memberOf(owner);
     const clientId = await grant(owner.tenant.id, member.user.id, 'Desk assistant');
     const res = await owner.client.delete(`/rest/mcp/oauth-clients/${clientId}?userId=${member.user.id}`);
     expect(res.statusCode).toBe(200);
@@ -274,7 +280,7 @@ describe('MCP client revoked mail', () => {
 
   it('a refused revoke (unknown client) sends nothing', async () => {
     const owner = await signup(server.app);
-    const member = await realMember(owner);
+    const member = await memberOf(owner);
     const res = await owner.client.delete(
       `/rest/mcp/oauth-clients/client-${randomUUID()}?userId=${member.user.id}`,
     );
