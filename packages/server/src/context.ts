@@ -377,7 +377,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const variables = new VariableService(serviceDeps);
   const roles = new RoleService(serviceDeps);
   const securitySettings = new SecuritySettingsService(serviceDeps);
-  // P6 S2: C0 stubs whose per request methods throw until their lane; the PASSES seams keep today's behaviour
+  // P6 S2: the identity services (mail, MFA, passwords, members, API keys, SSO, provisioning, LDAP, SCIM, private credentials, JWE, credential gate)
   const mailer = new Mailer(serviceDeps);
   const mfa = new MfaService(serviceDeps);
   const passwords = new PasswordService(serviceDeps);
@@ -410,8 +410,11 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   auth.useSignInSteps({
     passwordTenants: (user, tenants, workspace) => ssoLogin.passwordTenants(user, tenants, workspace),
     directoryLogin: (input, meta) => ldap.loginWithDirectory(input, meta),
-    directorySignIn: (match, meta) =>
-      ssoLogin.signIn(match.tenant, match.profile, meta, { authMethod: 'ldap' }),
+    directorySignIn: (match, meta, options) =>
+      ssoLogin.signIn(match.tenant, match.profile, meta, {
+        authMethod: 'ldap',
+        mfaVerified: options?.mfaVerified ?? false,
+      }),
     mfaStep: (user, input) => mfa.verifyLoginStep(user, input),
     assertInviteAcceptable: (tenantId) => ssoLogin.assertInviteAcceptable(tenantId),
     assertSessionEntry: (authContext, tenantId) => ssoLogin.assertSessionEntry(authContext, tenantId),

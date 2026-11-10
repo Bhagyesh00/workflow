@@ -4,8 +4,8 @@
  * finds the identity by (workspace, provider type, provider id), links a current member or pending
  * invitation of this workspace by a verified email, or creates the user just in time only when the email has
  * no account anywhere (Q-A2); the provisioning (`ctx.provisioning.resolve`) may block before any write. The
- * session carries its `authMethod` and `mfaVerified: true` (the identity provider did the second step, as
- * n8n). The fence: a session that signed in with SSO cannot enter another workspace (and services/auth.ts
+ * session carries its `authMethod`; a SAML or OIDC session is `mfaVerified: true` (the identity provider did
+ * the second step, as n8n), an LDAP one only when the MFA step passed (a bind is only a password). The fence: a session that signed in with SSO cannot enter another workspace (and services/auth.ts
  * `assertGlobalAccountChange` keeps it from changing the account); a password session into a SAML or OIDC
  * workspace needs the owner or the member's manual login flag, into an LDAP workspace the owner.
  */
@@ -23,6 +23,7 @@ import {
   type SessionMeta,
   type Tenants,
 } from '../auth';
+import { isMfaEnforced, MFA_ENROLLMENT_REQUIRED_MESSAGE } from '../mfa-gate';
 import { isSsoMethod } from './settings';
 
 /** a person an identity provider (or the directory) vouched for, in one workspace's terms */
@@ -41,6 +42,8 @@ export interface SsoProfile {
 
 export interface SsoSignInOptions {
   authMethod: Exclude<SessionAuthMethod, 'password'>;
+  /** the session passed the second step; default true for SAML and OIDC, false for LDAP */
+  mfaVerified?: boolean;
 }
 
 /** 403 `sso_required`: a password sign-in or session entry the workspace's SSO does not let in */
@@ -66,6 +69,8 @@ export const SSO_INVITES_BLOCKED_MESSAGE =
   'SSO is enabled, so users are managed by the Identity Provider and cannot be added through invites';
 const SSO_INVITE_ACCEPT_MESSAGE =
   'This workspace signs in with single sign-on. Use SSO to accept the invitation.';
+const LDAP_INVITE_ACCEPT_MESSAGE =
+  'This workspace signs in with LDAP. Sign in with your LDAP user name and password to accept the invitation.';
 const SSO_ENTRY_FENCED_MESSAGE =
   'This session signed in with single sign-on to another workspace. Sign in to this workspace to open it.';
 
@@ -237,7 +242,7 @@ export class SsoLoginService {
     await repos.users.touchLogin(user.id);
     const token = await ctx.auth.createSession(user.id, tenant.id, meta, {
       authMethod: method,
-      mfaVerified: true,
+      mfaVerified: options.mfaVerified ?? method !== 'ldap',
     });
     await repos.audit.add(tenant.id, {
       userId: user.id,
@@ -300,7 +305,9 @@ export class SsoLoginService {
   /**
    * A session entering `tenantId` (switch, MCP consent, form code). Its own workspace passes; a session that
    * signed in with SSO or LDAP stays there (403 `sso_session_fenced`); a password session needs the rule of
-   * `passwordMayEnter` (403 `sso_required`); not a member is the 404 of an unknown workspace.
+   * `passwordMayEnter` (403 `sso_required`); not a member is the 404 of an unknown workspace. A session that
+   * did not pass the MFA step cannot enter a workspace that enforces MFA (401 `mfa_enrollment_required`, the
+   * gate's answer there): the gate only checks the session's own workspace.
    */
   async assertSessionEntry(auth: AuthContext, tenantId: string): Promise<void> {
     if (auth.tenant.id === tenantId) return;
@@ -310,13 +317,25 @@ export class SsoLoginService {
     const [rule] = await this.deps.repos.sso.signInRules(auth.user.id, tenantId);
     if (!rule) throw ApiError.notFound('Workspace');
     if (!passwordMayEnter(rule)) throw new ApiError(403, 'sso_required', SSO_REQUIRED_MESSAGE);
+    if (auth.mfaVerified) return;
+    const target = await this.deps.repos.tenants.get(tenantId);
+    if (target && isMfaEnforced(target, this.deps.config.mfaEnabled)) {
+      throw new ApiError(401, 'mfa_enrollment_required', MFA_ENROLLMENT_REQUIRED_MESSAGE);
+    }
   }
 
-  /** before an invitation is accepted by password: under SAML or OIDC the invitee signs in with SSO */
+  /**
+   * before an invitation is accepted by password: under SAML, OIDC or LDAP the invitee signs in with that
+   * method (n8n refuses invite links under any SSO method; the sign-in takes the pending invitation)
+   */
   async assertInviteAcceptable(tenantId: string): Promise<void> {
-    if (await this.deps.context().ssoSettings.isSsoActive(tenantId)) {
-      throw new ApiError(403, 'sso_required', SSO_INVITE_ACCEPT_MESSAGE);
-    }
+    const method = await this.deps.context().ssoSettings.activeMethod(tenantId);
+    if (method === 'email') return;
+    throw new ApiError(
+      403,
+      'sso_required',
+      method === 'ldap' ? LDAP_INVITE_ACCEPT_MESSAGE : SSO_INVITE_ACCEPT_MESSAGE,
+    );
   }
 
   /** before anyone is invited: refused under SAML or OIDC unless SCIM is on (n8n user.service.ts:535-545) */

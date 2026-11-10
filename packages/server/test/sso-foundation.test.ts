@@ -1,6 +1,7 @@
 /**
  * P6-01 (L6): the SSO foundation. Password sign-in under SAML, OIDC and LDAP (owner and the manual login
- * flag), the sign-in method and its rules, the public sign-in options, invitations under SSO, another
+ * flag), the sign-in method and its rules (each method's own scope, LDAP's required fields), the public
+ * sign-in options, invitations under SSO and LDAP (no password accept), another
  * workspace's settings, row-level security, `signIn`'s account rules (Q-A2, each branch), the JIT user's
  * personal project and `safeSsoRedirect`.
  */
@@ -36,6 +37,16 @@ const OIDC_CONFIG = {
   oidc: { clientId: 'client-1', discoveryEndpoint: 'https://idp.test/.well-known/openid-configuration' },
 };
 const LDAP_CONFIG = { ldap: { connectionUrl: 'ldap.test', loginLabel: 'Directory' } };
+/** what an LDAP sign-in cannot work without */
+const LDAP_RUNNABLE = {
+  ldap: {
+    connectionUrl: 'ldap.test',
+    baseDn: 'dc=example,dc=test',
+    emailAttribute: 'mail',
+    loginIdAttribute: 'uid',
+    ldapIdAttribute: 'entryUUID',
+  },
+};
 
 beforeAll(async () => {
   await flushRedis();
@@ -214,6 +225,35 @@ describe('invitations under SSO', () => {
       (await o.client.post('/rest/members/invite', { email: newEmail(), role: 'member' })).statusCode,
     ).toBe(200);
   });
+
+  it('an invitation in an LDAP workspace is refused by password, for a new and an existing account', async () => {
+    const o = await owner();
+    const email = newEmail();
+    const fresh = await o.client.data<{ token: string }>(
+      o.client.post('/rest/members/invite', { email, role: 'member' }),
+    );
+    const elsewhere = await owner();
+    const existing = await o.client.data<{ token: string }>(
+      o.client.post('/rest/members/invite', { email: elsewhere.user.email, role: 'member' }),
+    );
+    await ssoOn(server, o.tenant.id, 'ldap', LDAP_CONFIG);
+    for (const token of [fresh.token, existing.token]) {
+      const client = new TestClient(server.app, ORIGIN, nextAddress());
+      const accept = await client.post(`/rest/invitations/${token}/accept`, {
+        name: 'Invitee',
+        password: 'Passw0rd!',
+      });
+      expect(accept.statusCode).toBe(403);
+      expect(accept.json().error).toMatchObject({ code: 'sso_required' });
+      expect(accept.json().error.message).toMatch(/LDAP/);
+      expect(client.cookie).toBeUndefined();
+    }
+    expect(await server.ctx.repos.users.getByEmail(email)).toBeUndefined();
+    expect(await server.ctx.repos.memberships.get(o.tenant.id, elsewhere.user.id)).toBeFalsy();
+    expect((await server.ctx.repos.invitations.listPending(o.tenant.id)).map((p) => p.email).sort()).toEqual(
+      [email, elsewhere.user.email.toLowerCase()].sort(),
+    );
+  });
 });
 
 describe('the sign-in method', () => {
@@ -248,6 +288,46 @@ describe('the sign-in method', () => {
       { from: 'saml', to: 'email' },
       { from: 'email', to: 'oidc' },
     ]);
+  });
+
+  it('LDAP turns on only with the fields a sign-in needs', async () => {
+    const o = await owner();
+    await ssoOn(server, o.tenant.id, 'email', { ldap: { connectionUrl: 'ldap.test' } });
+    const missing = await o.client.put('/rest/sso/method', { method: 'ldap' });
+    expect(missing.statusCode).toBe(400);
+    expect(missing.json().error).toMatchObject({ code: 'sso_config_missing' });
+    expect(await server.ctx.ssoSettings.activeMethod(o.tenant.id)).toBe('email');
+    await ssoOn(server, o.tenant.id, 'email', LDAP_RUNNABLE);
+    expect(await o.client.data(o.client.put('/rest/sso/method', { method: 'ldap' }))).toEqual({
+      method: 'ldap',
+    });
+  });
+
+  it('changing the method needs the scope of the method turned on, or of the one turned off', async () => {
+    const o = await owner();
+    await server.ctx.repos.roles.create(o.tenant.id, {
+      slug: 'global:directory',
+      displayName: 'Directory admin',
+      roleType: 'global',
+      scopes: ['ldap:manage'],
+    });
+    const d = await memberOf(o);
+    await o.client.data(o.client.patch(`/rest/members/${d.user.id}`, { role: 'global:directory' }));
+    await ssoOn(server, o.tenant.id, 'email', { ...OIDC_CONFIG, ...LDAP_RUNNABLE });
+    expect(await d.client.data(d.client.get('/rest/sso/method'))).toEqual({ method: 'email' });
+    const oidcOn = await d.client.put('/rest/sso/method', { method: 'oidc' });
+    expect(oidcOn.statusCode).toBe(403);
+    expect(await server.ctx.ssoSettings.activeMethod(o.tenant.id)).toBe('email');
+    expect(await d.client.data(d.client.put('/rest/sso/method', { method: 'ldap' }))).toEqual({
+      method: 'ldap',
+    });
+    expect(await d.client.data(d.client.put('/rest/sso/method', { method: 'email' }))).toEqual({
+      method: 'email',
+    });
+    await o.client.data(o.client.put('/rest/sso/method', { method: 'oidc' }));
+    const oidcOff = await d.client.put('/rest/sso/method', { method: 'email' });
+    expect(oidcOff.statusCode).toBe(403);
+    expect(await server.ctx.ssoSettings.activeMethod(o.tenant.id)).toBe('oidc');
   });
 
   it('turning SSO off turns SCIM off and keeps the rest of its settings', async () => {

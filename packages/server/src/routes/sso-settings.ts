@@ -2,8 +2,10 @@
  * /rest/auth/sso-options, /rest/sso/method and /rest/members/:userId/sso-settings (P6-01, L6).
  * `sso-options` is public (the sign-in page asks it before anyone signs in) and rate limited; it answers the
  * workspace's method, the button's label and whether the page goes straight to the identity provider
- * (`SSO_REDIRECT_LOGIN_TO_SSO`), and `email` for an unknown slug. The method needs any of `saml:manage`,
- * `oidc:manage`, `ldap:manage`; a member's manual login flag needs `user:update`.
+ * (`SSO_REDIRECT_LOGIN_TO_SSO`), and `email` for an unknown slug. Reading the method needs any of
+ * `saml:manage`, `oidc:manage`, `ldap:manage`; changing it needs the scope of the method turned on, or of the
+ * current method when turning it off (as each protocol's own toggle); a member's manual login flag needs
+ * `user:update`.
  */
 import type { Scope } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -16,6 +18,11 @@ import type { SsoMethod } from '../repositories/sso';
 import { isSsoMethod } from '../services/sso/settings';
 
 const MANAGE_SSO: readonly Scope[] = ['saml:manage', 'oidc:manage', 'ldap:manage'];
+const MANAGE_SCOPE: Readonly<Record<Exclude<SsoMethod, 'email'>, Scope>> = {
+  saml: 'saml:manage',
+  oidc: 'oidc:manage',
+  ldap: 'ldap:manage',
+};
 const userParams = z.object({ userId: z.uuid() });
 const optionsQuery = z.object({ workspace: z.string().trim().max(64).optional() });
 const methodBody = z.object({ method: z.enum(['email', 'saml', 'oidc', 'ldap']) });
@@ -75,6 +82,9 @@ export function registerSsoSettingsRoutes(app: FastifyInstance, ctx: ServerConte
   app.put('/sso/method', async (request) => {
     const auth = await requireAnyScope(request, MANAGE_SSO);
     const { method } = parse(methodBody, request.body);
+    // the scope of the method this turns on, or of the one it turns off
+    const changed = method === 'email' ? await ctx.ssoSettings.activeMethod(auth.tenant.id) : method;
+    if (changed !== 'email') await requireScope(request, MANAGE_SCOPE[changed]);
     await ctx.ssoSettings.setMethod(auth, method);
     return { data: { method: await ctx.ssoSettings.activeMethod(auth.tenant.id) } };
   });

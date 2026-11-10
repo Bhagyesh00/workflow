@@ -29,9 +29,13 @@ export function isSsoMethod(method: SsoMethod): method is 'saml' | 'oidc' {
 
 const filled = (value: unknown): boolean => typeof value === 'string' && value.trim().length > 0;
 
+/** what an LDAP sign-in cannot work without (as `REQUIRED_TO_RUN` in services/sso/ldap.ts) */
+const LDAP_REQUIRED = ['connectionUrl', 'baseDn', 'emailAttribute', 'loginIdAttribute', 'ldapIdAttribute'];
+
 /**
  * whether the workspace saved what the method needs to sign anyone in: the identity provider's metadata
- * (SAML, XML or URL), the client and discovery endpoint (OIDC), the directory URL (LDAP)
+ * (SAML, XML or URL), the client and discovery endpoint (OIDC), the directory URL, base DN and the email,
+ * login ID and LDAP ID attributes (LDAP)
  */
 export function hasSavedConfig(row: TenantAuthSettingsRow | undefined, method: SsoMethod): boolean {
   if (method === 'email') return true;
@@ -40,7 +44,8 @@ export function hasSavedConfig(row: TenantAuthSettingsRow | undefined, method: S
     return filled(row.samlMetadata) || filled(row.saml?.metadata) || filled(row.saml?.metadataUrl);
   }
   if (method === 'oidc') return filled(row.oidc?.clientId) && filled(row.oidc?.discoveryEndpoint);
-  return filled(row.ldap?.connectionUrl);
+  const ldap = row.ldap;
+  return !!ldap && LDAP_REQUIRED.every((key) => filled(ldap[key]));
 }
 
 export class SsoSettingsService {
