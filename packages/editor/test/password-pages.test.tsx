@@ -275,6 +275,8 @@ describe('Members: copy reset link', () => {
       name: 'Mia Member',
       workspaceName: 'Mia Space',
     });
+    // only a member of this workspace (an account in another one resets its own password)
+    backend().memberships = backend().memberships.filter((m) => m.userId !== member.user.id);
     backend().signIn('owner@example.com');
     addMembership(member.user.id, 'member');
     renderApp('/settings/members');
@@ -294,5 +296,26 @@ describe('Members: copy reset link', () => {
     backend().setDemoRole('member');
     const member = await call('GET', `/members/${ownerId}/password-reset-link`);
     expect(member.status).toBe(403);
+  });
+
+  it('the demo refuses an account that also belongs to another workspace, and the row says why', async () => {
+    const user = userEvent.setup();
+    signedIn();
+    const member = backend().createAccount({
+      email: 'max@example.com',
+      password: 'member-pass-1',
+      name: 'Max Member',
+      workspaceName: 'Max Space',
+    });
+    backend().signIn('owner@example.com');
+    addMembership(member.user.id, 'member');
+    const refused = await call('GET', `/members/${member.user.id}/password-reset-link`);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error?.message).toMatch(/also belongs to other workspaces/);
+    renderApp('/settings/members');
+    await user.click(
+      await screen.findByRole('button', { name: 'Copy password reset link for Max Member' }, T),
+    );
+    expect(await screen.findByText(/also belongs to other workspaces/, undefined, T)).toBeTruthy();
   });
 });

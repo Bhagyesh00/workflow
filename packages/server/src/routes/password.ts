@@ -85,9 +85,20 @@ export function registerPasswordRoutes(app: FastifyInstance, ctx: ServerContext)
     const { email } = parse(forgotSchema, request.body);
     const limit = await perEmail(request);
     if (!limit.isAllowed && limit.isExceeded) throw ApiError.tooMany('Too many requests, please try again later');
-    const deliver = await passwords.forgotPassword(email, meta(request));
-    // the mail goes after the reply, so the answer's timing does not tell a real address from an unknown one
-    reply.raw.once('finish', () => void deliver());
+    // the mail goes after the reply, so the answer's timing does not tell a real address from an unknown one;
+    // a client that leaves during the wait gets no 'finish', only 'close', and its mail still goes (once)
+    let deliver: (() => Promise<void>) | undefined;
+    let replyDone = false;
+    const send = () => {
+      replyDone = true;
+      const go = deliver;
+      deliver = undefined;
+      if (go) void go();
+    };
+    reply.raw.once('finish', send);
+    reply.raw.once('close', send);
+    deliver = await passwords.forgotPassword(email, meta(request));
+    if (replyDone) send();
     return { data: { ok: true } };
   });
 

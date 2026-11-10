@@ -34,8 +34,9 @@ describe('redactUrl', () => {
     expect(redactUrl(`/form-waiting/e1/sig?code=${CODE}`)).toBe('/form-waiting/[redacted]?code=[redacted]');
   });
 
-  it('leaves the query of a plain webhook as it was', () => {
-    expect(redactUrl('/webhook/acme/orders?code=42')).toBe('/webhook/acme/orders?code=42');
+  it('hides the code of a plain webhook too (P6-19: the browser sign-in comes back with it)', () => {
+    expect(redactUrl('/webhook/acme/orders?code=42&x=1')).toBe('/webhook/acme/orders?code=[redacted]&x=1');
+    expect(redactUrl('/webhook/acme/orders?x=1')).toBe('/webhook/acme/orders?x=1');
   });
 });
 

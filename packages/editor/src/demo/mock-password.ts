@@ -212,6 +212,18 @@ export function registerPasswordRoutes(backend: MockBackend): void {
         "An owner's password cannot be reset by a link from the members list",
       );
     }
+    // the password is global: an account in another workspace resets its own (as the server)
+    if (
+      backend.memberships.some(
+        (m) => m.userId === userId && m.tenantId !== tenant.id && m.status !== 'pending',
+      )
+    ) {
+      throw new HttpError(
+        403,
+        'forbidden',
+        "Couldn't make a reset link: this account also belongs to other workspaces. The person can use Forgot password on the sign-in page.",
+      );
+    }
     const token = issue(user.id, 'password_reset');
     return { link: `${origin()}/reset-password?token=${token}` };
   });

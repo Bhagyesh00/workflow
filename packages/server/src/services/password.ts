@@ -27,6 +27,8 @@ export const MANAGED_ACCOUNT_MESSAGE =
 export const EMAIL_IN_USE_MESSAGE = 'This email address is already in use';
 export const MFA_REQUIRED_MESSAGE = 'If MFA enabled, mfaCode is required.';
 export const INVALID_MFA_TOKEN_MESSAGE = 'Invalid MFA token.';
+export const OTHER_WORKSPACES_RESET_MESSAGE =
+  "Couldn't make a reset link: this account also belongs to other workspaces. The person can use Forgot password on the sign-in page.";
 
 export interface ResetPasswordInput {
   token: string;
@@ -220,7 +222,10 @@ export class PasswordService {
 
   /** PATCH /auth/me: the account's name; refused for an SSO session and for an account its identity provider manages */
   async updateProfile(auth: AuthContext, input: ProfileInput): Promise<UserRow> {
-    this.ctx.auth.assertGlobalAccountChange(auth);
+    // a fenced (SSO) session may name a person who has no other workspace (SAML onboarding)
+    if ((await this.deps.repos.sso.otherMembershipCount(auth.user.id, auth.tenant.id)) > 0) {
+      this.ctx.auth.assertGlobalAccountChange(auth);
+    }
     this.assertNotManaged(auth.user);
     const name = input.name.trim();
     if (!name) throw ApiError.badRequest('Name is required');
@@ -296,7 +301,11 @@ export class PasswordService {
     }
   }
 
-  /** GET /members/:userId/password-reset-link: an admin copies a reset link; an owner's is refused */
+  /**
+   * GET /members/:userId/password-reset-link: an admin copies a reset link; an owner's is refused, and so is
+   * the link of an account that also belongs to another workspace (the password is global, so the link
+   * would hand this workspace's admin the person's access everywhere else).
+   */
   async resetLink(auth: AuthContext, userId: string): Promise<{ link: string }> {
     const { repos } = this.deps;
     const member = await repos.memberships.get(auth.tenant.id, userId);
@@ -304,6 +313,9 @@ export class PasswordService {
     if (!member || !user) throw ApiError.notFound('Member');
     if (member.role === 'owner') {
       throw ApiError.forbidden("An owner's password cannot be reset by a link from the members list");
+    }
+    if ((await repos.sso.otherMembershipCount(user.id, auth.tenant.id)) > 0) {
+      throw ApiError.forbidden(OTHER_WORKSPACES_RESET_MESSAGE);
     }
     await this.assertPasswordSignIn(user.id);
     const token = await this.issue(user.id, 'password_reset');

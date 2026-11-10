@@ -4,18 +4,24 @@
  * body and timing) and mails only a real user, after the reply; limits are 3 a minute per email and 20 in 5
  * minutes per IP; a reset ends every session; an SSO session cannot change the account; an SSO-only user
  * is refused and a user with SSO in one workspace and a password in another is not; an admin copies a
- * link and an owner's is refused; no log line holds a token. Mail goes to the SMTP fake.
+ * link, and an owner's or that of an account in another workspace is refused; no log line holds a token.
+ * Mail goes to the SMTP fake.
  */
 import { createHash } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { Writable } from 'node:stream';
 import { totp } from '@workflow/nodes-base';
 import { eq } from 'drizzle-orm';
-import { pino } from 'pino';
+import Fastify, { type FastifyBaseLogger } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { userTokens } from '../src/db/schema';
-import { redactUrl } from '../src/logger';
+import { createLogger, redactUrl } from '../src/logger';
+import { OTHER_WORKSPACES_RESET_MESSAGE } from '../src/services/password';
 import { startSmtpServer } from './fakes/smtp';
 import {
   createTestServer,
+  memberAs,
   ORIGIN,
   realMember,
   sessionFor,
@@ -256,6 +262,37 @@ describe('forgot password', () => {
     }
   });
 
+  it('still mails the link when the client leaves during the wait', async () => {
+    const o = await owner();
+    server.ctx.passwords.jitterMs = { min: 400, max: 400 };
+    try {
+      await server.app.listen({ port: 0, host: '127.0.0.1' });
+      const { port } = server.app.server.address() as AddressInfo;
+      const body = JSON.stringify({ email: o.user.email });
+      await new Promise<void>((resolve) => {
+        const req = httpRequest({
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: '/rest/auth/forgot-password',
+          headers: {
+            'content-type': 'application/json',
+            origin: ORIGIN,
+            'content-length': Buffer.byteLength(body),
+          },
+        });
+        req.on('error', () => resolve());
+        req.on('close', () => resolve());
+        req.end(body);
+        // the client goes away before the answer
+        setTimeout(() => req.destroy(), 100);
+      });
+      await tokenMailedTo(o.user.email);
+    } finally {
+      server.ctx.passwords.jitterMs = { min: 0, max: 0 };
+    }
+  });
+
   it('is refused without mail, with n8n text', async () => {
     const o = await signup(noMail.app, { projects: 'real', remoteAddress: nextIp() });
     const res = await new TestClient(noMail.app, ORIGIN, nextIp()).post('/rest/auth/forgot-password', {
@@ -357,17 +394,30 @@ describe('PATCH /auth/me/password and /auth/me', () => {
     expect((await change(o.client, { ...body, mfaCode: codeAt(secret, 2) })).statusCode).toBe(200);
   });
 
-  it('refuses a fenced (SSO) session on name and password', async () => {
+  it('refuses a fenced (SSO) session on the password; the name only when the person has another workspace', async () => {
     const o = await owner();
     const saml = await sessionFor(server, o.tenant.id, o.user.id, { authMethod: 'saml', mfaVerified: true });
     const pw = await change(saml.client, { currentPassword: o.password, newPassword: 'NewPassw0rd!' });
     expect(pw.statusCode).toBe(403);
     expect(pw.json().error.code).toBe('sso_session_fenced');
-    const name = await saml.client.patch('/rest/auth/me', { name: 'Changed' });
+    // one workspace only: the SAML session may set the name (onboarding)
+    const named = await saml.client.patch('/rest/auth/me', { name: 'Named' });
+    expect(named.statusCode).toBe(200);
+    expect((await server.ctx.repos.users.get(o.user.id))?.name).toBe('Named');
+    expect((await login(o.user.email, o.password)).statusCode).toBe(200);
+
+    // a person with a second workspace: the name is global, so the fenced session is refused
+    const two = await owner();
+    const other = await owner();
+    await server.ctx.repos.memberships.add(other.tenant.id, two.user.id, 'member');
+    const fenced = await sessionFor(server, two.tenant.id, two.user.id, {
+      authMethod: 'saml',
+      mfaVerified: true,
+    });
+    const name = await fenced.client.patch('/rest/auth/me', { name: 'Changed' });
     expect(name.statusCode).toBe(403);
     expect(name.json().error.code).toBe('sso_session_fenced');
-    expect((await login(o.user.email, o.password)).statusCode).toBe(200);
-    expect((await server.ctx.repos.users.get(o.user.id))?.name).not.toBe('Changed');
+    expect((await server.ctx.repos.users.get(two.user.id))?.name).not.toBe('Changed');
   });
 
   it('changes the name; a SCIM managed account is refused; no session is 401', async () => {
@@ -407,6 +457,31 @@ describe('admin reset link', () => {
     const other = await stranger.client.get(`/rest/members/${m.user.id}/password-reset-link`);
     expect(other.statusCode).toBe(404);
   });
+
+  it('refuses the link of an account that also belongs to another workspace, as a member or its owner', async () => {
+    const a = await owner();
+    const admin = await memberAs(a, 'admin', { remoteAddress: nextIp() });
+    const victim = await realMember(a, { remoteAddress: nextIp() });
+    const b = await owner();
+    const linkOf = (client: TestClient) => client.get(`/rest/members/${victim.user.id}/password-reset-link`);
+    const tokens = async () =>
+      (await server.ctx.database.db.select().from(userTokens).where(eq(userTokens.userId, victim.user.id)))
+        .length;
+
+    for (const role of ['member', 'owner'] as const) {
+      await server.ctx.repos.memberships.add(b.tenant.id, victim.user.id, role);
+      for (const caller of [a, admin]) {
+        const res = await linkOf(caller.client);
+        expect(res.statusCode).toBe(403);
+        expect(res.json().error.message).toBe(OTHER_WORKSPACES_RESET_MESSAGE);
+        expect(res.body).not.toContain('token=');
+      }
+      expect(await tokens()).toBe(0);
+      await server.ctx.repos.memberships.remove(b.tenant.id, victim.user.id);
+    }
+    // back to one workspace: the admin's link works again
+    expect((await linkOf(admin.client)).statusCode).toBe(200);
+  });
 });
 
 describe('logs', () => {
@@ -425,14 +500,38 @@ describe('logs', () => {
     );
   });
 
-  it('a request log line for the reset page holds no token', () => {
+  it("the server logger's request lines drop the reset, email change, OIDC callback and SAML ACS queries", async () => {
     const lines: string[] = [];
-    const logger = pino(
-      { level: 'info', serializers: { req: (r: { url: string }) => ({ url: redactUrl(r.url) }) } },
-      { write: (line: string) => void lines.push(line) },
+    const logger = createLogger(
+      'info',
+      {},
+      new Writable({
+        write(chunk, _encoding, done) {
+          lines.push(String(chunk));
+          done();
+        },
+      }),
     );
-    logger.info({ req: { url: '/reset-password?token=abc123secret' } }, 'incoming request');
-    expect(lines.join('')).toContain('/reset-password');
-    expect(lines.join('')).not.toContain('abc123secret');
+    // Fastify's own 'incoming request' line, written through the app's logger as app.ts builds it
+    const app = Fastify({ loggerInstance: logger as unknown as FastifyBaseLogger });
+    app.all('/*', async () => ({ ok: true }));
+    const SECRET = 'abc123secret';
+    const urls = [
+      `/reset-password?token=${SECRET}`,
+      `/confirm-email-change?token=${SECRET}`,
+      `/rest/sso/oidc/acme/callback?code=${SECRET}&state=${SECRET}`,
+      `/rest/sso/saml/acme/acs?SAMLResponse=${SECRET}&RelayState=${SECRET}`,
+    ];
+    try {
+      for (const url of urls) expect((await app.inject({ method: 'GET', url })).statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+    const incoming = lines.filter((line) => line.includes('incoming request'));
+    expect(incoming).toHaveLength(urls.length);
+    for (const path of ['/reset-password"', '/confirm-email-change"', '/callback"', '/acs"']) {
+      expect(incoming.some((line) => line.includes(path))).toBe(true);
+    }
+    expect(lines.join('')).not.toContain(SECRET);
   });
 });
