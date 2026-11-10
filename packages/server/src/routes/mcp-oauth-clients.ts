@@ -93,6 +93,8 @@ export function registerMcpOAuthClientRoutes(rest: FastifyInstance, ctx: ServerC
     const { userId } = parse(clientDeleteQuery, request.query ?? {});
     const target = userId ?? auth.user.id;
     if (target !== auth.user.id) await requireScope(request, 'mcp:manage');
+    // read before the revoke: the client row goes with its last consent, and the mail names it
+    const client = await repos.mcpOAuth.getClient(auth.tenant.id, clientId);
     if (!(await repos.mcpOAuth.revokeForUser(auth.tenant.id, target, clientId))) {
       throw ApiError.notFound('OAuth client');
     }
@@ -111,6 +113,24 @@ export function registerMcpOAuthClientRoutes(rest: FastifyInstance, ctx: ServerC
         resourceType: 'oauth_client',
         resourceId: clientId,
       });
+    }
+    // P6-17: the owner of the grant is told when someone else revoked it; a mail that fails does not undo it
+    if (target !== auth.user.id && client && ctx.mailer.isConfigured()) {
+      try {
+        const owner = await repos.users.get(target);
+        if (owner) {
+          await ctx.mailer.sendMcpClientRevoked(owner.email, {
+            workspaceName: auth.tenant.name,
+            clientName: client.name,
+            revokedBy: auth.user.name,
+          });
+        }
+      } catch (error) {
+        ctx.logger.warn(
+          { err: error, tenantId: auth.tenant.id, userId: target },
+          'MCP client revoked mail failed',
+        );
+      }
     }
     return { data: { ok: true } };
   });

@@ -4,14 +4,51 @@
  * when any workflow of the workspace has an error workflow; to the owner of the workflow's personal
  * project, else the workspace owner. services/executions.ts `finish` calls it (C0) on a failed run that is
  * not manual, without waiting; it never throws.
- * Stub from C0: it PASSES (sends nothing) until L1.
  */
+import { and, eq, sql } from 'drizzle-orm';
 import type { ServiceDeps } from '../context';
+import { workflows } from '../db/schema';
 
 export async function maybeSendFirstFailure(
-  _deps: ServiceDeps,
-  _tenantId: string,
-  _workflowId: string,
+  deps: ServiceDeps,
+  tenantId: string,
+  workflowId: string,
 ): Promise<void> {
-  // stub (L1): PASSES, no mail
+  try {
+    const mailer = deps.context().mailer;
+    if (!mailer.isConfigured()) return;
+    // a workspace that handles failures itself needs no hint: any workflow with an error workflow skips it
+    const [withHandler] = await deps.database.db
+      .select({ id: workflows.id })
+      .from(workflows)
+      .where(
+        and(
+          eq(workflows.tenantId, tenantId),
+          sql`coalesce(${workflows.settings} ->> 'errorWorkflow', '') <> ''`,
+        ),
+      )
+      .limit(1);
+    if (withHandler) return;
+    const workflow = await deps.repos.workflows.get(tenantId, workflowId);
+    if (!workflow) return;
+    // one UPDATE decides which of two parallel failures sends
+    if (!(await deps.repos.tenants.markFirstProductionFailure(tenantId))) return;
+    const active = (await deps.repos.memberships.listForTenant(tenantId)).filter((m) => !m.disabledAt);
+    const project = await deps.repos.projects.get(tenantId, workflow.projectId);
+    const personalOwner =
+      project?.type === 'personal' && project.ownerUserId
+        ? active.find((m) => m.userId === project.ownerUserId)
+        : undefined;
+    const recipient = personalOwner ?? active.find((m) => m.role === 'owner');
+    if (!recipient) return;
+    const tenant = await deps.repos.tenants.get(tenantId);
+    if (!tenant) return;
+    await mailer.sendFirstProductionFailure(recipient.email, {
+      workspaceName: tenant.name,
+      workflowName: workflow.name,
+      workflowUrl: `${deps.config.baseUrl.replace(/\/+$/, '')}/workflow/${workflow.id}`,
+    });
+  } catch (error) {
+    deps.logger.warn({ err: error, tenantId, workflowId }, 'First failure mail could not be sent');
+  }
 }

@@ -15,6 +15,8 @@ export interface SmtpCredentials extends DataObject {
   secure?: boolean;
   disableStartTls?: boolean;
   hostName?: string;
+  /** an OAuth2 access token for `user` (XOAUTH2): the caller fetched it on a guarded client */
+  accessToken?: string;
 }
 
 export async function createSmtpTransport(
@@ -39,7 +41,11 @@ export async function createSmtpTransport(
     secure: creds.secure !== false,
     ignoreTLS: creds.secure === false && Boolean(creds.disableStartTls),
     name: creds.hostName ? String(creds.hostName) : undefined,
-    auth: creds.user ? { user: String(creds.user), pass: String(creds.password ?? '') } : undefined,
+    auth: creds.accessToken
+      ? { type: 'OAuth2', user: String(creds.user ?? ''), accessToken: String(creds.accessToken) }
+      : creds.user
+        ? { user: String(creds.user), pass: String(creds.password ?? '') }
+        : undefined,
     tls: { rejectUnauthorized: !options.allowUnauthorizedCerts },
     connectionTimeout: 30_000,
     greetingTimeout: 30_000,
