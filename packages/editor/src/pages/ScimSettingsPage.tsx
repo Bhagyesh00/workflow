@@ -87,6 +87,8 @@ export function ScimSettingsPage() {
     onError: (error) => toast.error('Could not save the removal settings', errorMessage(error)),
   });
   const mint = useMutation({
+    // the shown secret leaves the mutation cache once its dialog closes
+    gcTime: 0,
     mutationFn: scimApi.createToken,
     onSuccess: async (result) => {
       setCreated(result.token);
@@ -94,6 +96,11 @@ export function ScimSettingsPage() {
     },
     onError: (error) => toast.error('Could not create the token', errorMessage(error)),
   });
+
+  const closeCreated = () => {
+    setCreated(null);
+    mint.reset();
+  };
 
   if (me.isLoading) return <PageLoader />;
   if (!allowed) return <Callout>Only admins can manage SCIM provisioning.</Callout>;
@@ -310,12 +317,12 @@ export function ScimSettingsPage() {
 
       <Dialog
         open={created !== null}
-        onClose={() => setCreated(null)}
+        onClose={closeCreated}
         title="Copy your SCIM token"
         description="This is the only time the token is shown. Put it into your identity provider now."
         size="sm"
         footer={
-          <Button variant="primary" onClick={() => setCreated(null)}>
+          <Button variant="primary" onClick={closeCreated}>
             I copied it
           </Button>
         }

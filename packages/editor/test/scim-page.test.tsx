@@ -90,7 +90,7 @@ describe('the SCIM page', () => {
   it('creates a token shown once, then shows only its last four; rotate asks first; revoke removes it', async () => {
     setup();
     ssoMethodIs('saml');
-    renderApp('/settings/scim');
+    const { queryClient } = renderApp('/settings/scim');
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Create token' }, T));
     const dialog = await screen.findByRole('dialog', { name: 'Copy your SCIM token' }, T);
@@ -98,6 +98,15 @@ describe('the SCIM page', () => {
     expect(token).toMatch(/^wfs_scim_[A-Za-z0-9_-]{43}$/);
     await user.click(within(dialog).getByRole('button', { name: 'I copied it' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Copy your SCIM token' })).toBeNull());
+    // the token leaves the mutation cache too
+    const cached = () =>
+      JSON.stringify(
+        queryClient
+          .getMutationCache()
+          .getAll()
+          .map((m) => m.state.data),
+      );
+    await waitFor(() => expect(cached()).not.toContain(token), T);
     await waitFor(() => expect(screen.getByTestId('scim-token-state').textContent).toContain(token.slice(-4)), T);
     // the page and the server's config never show the token again
     expect(document.body.textContent).not.toContain(token);
