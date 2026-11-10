@@ -183,6 +183,7 @@ export class MfaService {
         ? await this.acceptTotp(user.id, row.secretEnc, code, SIGN_IN_WINDOW)
         : await this.acceptRecovery(user.id, recovery as string);
     if (!ok) throw invalidMfa();
+    // also takes `mfa_verified` from the user's password and LDAP sessions (UserMfaRepository.delete)
     await this.deps.repos.userMfa.delete(user.id);
   }
 
@@ -200,10 +201,10 @@ export class MfaService {
 
   /**
    * The sign-in step: MFA on and no code is 401 `mfa_required`, a wrong code 401 `invalid_mfa`; the session
-   * gets `mfaVerified: true` after a good code. MFA off for the user (or for the server): the sign-in as before.
+   * gets `mfaVerified: true` after a good code. MFA off for the user: the sign-in as before. `MFA_ENABLED`
+   * off does not skip the step for a user who has MFA on (it only refuses a new setup).
    */
   async verifyLoginStep(user: UserRow, input: LoginInput): Promise<{ mfaVerified: boolean }> {
-    if (!this.deps.config.mfaEnabled) return { mfaVerified: false };
     const row = await this.deps.repos.userMfa.get(user.id);
     if (!row?.enabledAt) return { mfaVerified: false };
     const code = input.mfaCode?.trim() || undefined;
@@ -229,7 +230,7 @@ export class MfaService {
       : this.acceptRecovery(user.id, text);
   }
 
-  /** the CLI `mfa:disable --email`: clears the user's MFA row; false when there was none */
+  /** the CLI `mfa:disable --email`: clears the user's MFA row and the verified mark of their password sessions */
   async disableByEmail(email: string): Promise<boolean> {
     const user = await this.deps.repos.users.getByEmail(email.trim());
     if (!user) return false;

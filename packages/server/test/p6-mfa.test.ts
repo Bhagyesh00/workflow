@@ -7,12 +7,23 @@
  */
 import { createHash } from 'node:crypto';
 import { totp } from '@workflow/nodes-base';
+import type { FastifyRequest } from 'fastify';
 import { pino } from 'pino';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MFA_DISABLE_USAGE, mfaDisableCommand } from '../src/commands/mfa-disable';
 import type { ServerContext } from '../src/context';
+import type { TenantRow } from '../src/db/schema';
 import { base32Encode, hashRecoveryCode } from '../src/services/mfa';
-import { createTestServer, ORIGIN, sessionFor, signup, TestClient, type TestServer } from './helpers';
+import { assertMfaSatisfied, isMfaEnforced } from '../src/services/mfa-gate';
+import {
+  createTestServer,
+  ORIGIN,
+  realMember,
+  sessionFor,
+  signup,
+  TestClient,
+  type TestServer,
+} from './helpers';
 
 let server: TestServer;
 let off: TestServer;
@@ -135,6 +146,53 @@ describe('setup', () => {
     const settings = await o.client.data(o.client.get('/rest/settings'));
     expect(settings.features.mfa).toBe(false);
     expect((await o.client.post('/rest/auth/mfa/enable', { mfaCode: '123456' })).statusCode).toBe(400);
+  });
+
+  it('MFA_ENABLED off still asks an enrolled user for the code, and the session is verified', async () => {
+    const o = await owner();
+    const setup = await enableMfa(o);
+    const body = { email: o.user.email, password: o.password };
+    const c = new TestClient(off.app, ORIGIN, nextIp());
+    const none = await c.post('/rest/auth/login', body);
+    expect(none.statusCode).toBe(401);
+    expect(none.json().error.code).toBe('mfa_required');
+    expect(c.cookie).toBeUndefined();
+    const ok = await c.post('/rest/auth/login', { ...body, mfaCode: codeAt(setup.secret, -1) });
+    expect(ok.statusCode).toBe(200);
+    expect(await off.ctx.repos.sessions.get(await sessionIdOf(c))).toMatchObject({ mfaVerified: true });
+  });
+
+  it('MFA_ENABLED off turns an enforcing workspace into a plain one, so nobody is locked out', async () => {
+    const o = await owner();
+    await enableMfa(o);
+    expect((await o.client.post('/rest/settings/mfa-enforce', { enforce: true })).statusCode).toBe(200);
+    const m = await realMember(o);
+    expect((await m.client.get('/rest/workflows')).statusCode).toBe(401);
+    // the same member and the owner on the server with MFA off, on sessions that never passed the step
+    for (const userId of [m.user.id, o.user.id]) {
+      const s = await sessionFor(off, o.tenant.id, userId, { mfaVerified: false });
+      expect((await s.client.get('/rest/workflows')).statusCode).toBe(200);
+    }
+    const admin = await sessionFor(off, o.tenant.id, o.user.id, { mfaVerified: false });
+    expect((await admin.client.post('/rest/settings/mfa-enforce', { enforce: false })).statusCode).toBe(200);
+  });
+
+  it('the gate reads the server switch: off, an enforcing workspace lets an unverified session through', async () => {
+    const tenant = { settings: { mfa: { enforced: true } } } as unknown as TenantRow;
+    const request = { url: '/rest/workflows', method: 'GET' } as FastifyRequest;
+    const session = {
+      id: 's',
+      userId: 'u',
+      tenantId: 't',
+      authMethod: 'password' as const,
+      mfaVerified: false,
+    };
+    expect(isMfaEnforced(tenant)).toBe(true);
+    expect(isMfaEnforced(tenant, false)).toBe(false);
+    await expect(assertMfaSatisfied(request, tenant, session, true)).rejects.toMatchObject({
+      code: 'mfa_enrollment_required',
+    });
+    await expect(assertMfaSatisfied(request, tenant, session, false)).resolves.toBeUndefined();
   });
 
   it('needs a session', async () => {
@@ -390,8 +448,11 @@ describe('mfa:disable command', () => {
     const lines: string[] = [];
     const logger = pino({ level: 'info' }, { write: (line: string) => void lines.push(line) });
     const ctx = { mfa: server.ctx.mfa, logger } as unknown as ServerContext;
+    const before = await sessionFor(server, o.tenant.id, o.user.id, { mfaVerified: true });
     await mfaDisableCommand(ctx, ['--email', o.user.email.toUpperCase()]);
     expect(await server.ctx.repos.userMfa.get(o.user.id)).toBeUndefined();
+    // the user's verified password sessions are verified no more
+    expect((await server.ctx.repos.sessions.get(before.sessionId))?.mfaVerified).toBe(false);
     await mfaDisableCommand(ctx, [`--email=nobody-${o.user.id}@example.com`]);
     expect(lines).toHaveLength(2);
     expect(lines.join('\n')).not.toContain(o.user.email);

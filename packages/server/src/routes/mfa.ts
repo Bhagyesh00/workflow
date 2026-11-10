@@ -1,7 +1,8 @@
 /**
  * /rest/auth/mfa/* and /rest/settings/mfa-enforce (P6-18, L2). Setup, enable, disable and verify need a
  * session (the caller's own account) and, except verify, a password session (`assertGlobalAccountChange`);
- * enforcing MFA for the workspace needs `user:enforceMfa`. The gate that blocks an unverified session of an
+ * enforcing MFA for the workspace needs `user:enforceMfa`, MFA on for the caller and a session that passed the
+ * MFA step (turning it off needs only the scope). The gate that blocks an unverified session of an
  * enforcing workspace is services/mfa-gate.ts, run by `loadSession`.
  */
 import type { FastifyInstance } from 'fastify';
@@ -84,6 +85,8 @@ export function registerMfaRoutes(app: FastifyInstance, ctx: ServerContext): voi
         throw ApiError.badRequest('Two-factor sign-in is turned off on this server');
       }
       if (!(await mfa.isEnabled(auth.user.id))) throw ApiError.badRequest(MFA_BEFORE_ENFORCE_MESSAGE);
+      // as n8n: the enforcer's own session must have passed the MFA step (a key call has no session: refused)
+      if (auth.mfaVerified !== true) throw ApiError.badRequest(MFA_BEFORE_ENFORCE_MESSAGE);
     }
     const tenant = await repos.tenants.get(auth.tenant.id);
     if (!tenant) throw ApiError.notFound('Workspace');

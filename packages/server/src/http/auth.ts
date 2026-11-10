@@ -94,8 +94,8 @@ export async function loadSession(
   ]);
   // a disabled membership is not found by `get` (P6-02, P6-12): the session is refused like an unknown one
   if (!user || !tenant || !membership) return;
-  // P6-18: an enforced MFA the session has not passed answers 401 (stub L2: passes)
-  await assertMfaSatisfied(request, tenant, session);
+  // P6-18: an enforced MFA the session has not passed answers 401
+  await assertMfaSatisfied(request, tenant, session, config.mfaEnabled);
   request.auth = {
     user,
     tenant,

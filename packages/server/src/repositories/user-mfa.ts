@@ -3,9 +3,9 @@
  * The secret is a CredentialCipher payload; recovery codes are SHA-256 hex. Every state change is one
  * conditional statement, so two requests at once cannot both win.
  */
-import { and, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
-import { type UserMfaRow, userMfa } from '../db/schema';
+import { sessions, type UserMfaRow, userMfa } from '../db/schema';
 import { isUuid } from './util';
 
 export class UserMfaRepository {
@@ -53,14 +53,25 @@ export class UserMfaRepository {
     return rows.length > 0;
   }
 
-  /** deletes the row (disable, `mfa:disable`); false when there was none */
+  /**
+   * deletes the row (disable, `mfa:disable`); false when there was none. In the same transaction the user's
+   * password and LDAP sessions lose `mfa_verified`, so a workspace that enforces MFA blocks them at once (SAML
+   * and OIDC sessions stay verified: the identity provider did the second step).
+   */
   async delete(userId: string): Promise<boolean> {
     if (!isUuid(userId)) return false;
-    const rows = await this.db
-      .delete(userMfa)
-      .where(eq(userMfa.userId, userId))
-      .returning({ userId: userMfa.userId });
-    return rows.length > 0;
+    return this.db.transaction(async (tx) => {
+      const rows = await tx
+        .delete(userMfa)
+        .where(eq(userMfa.userId, userId))
+        .returning({ userId: userMfa.userId });
+      if (!rows.length) return false;
+      await tx
+        .update(sessions)
+        .set({ mfaVerified: false })
+        .where(and(eq(sessions.userId, userId), inArray(sessions.authMethod, ['password', 'ldap'])));
+      return true;
+    });
   }
 
   /** the `last_step` guard: stores `step` only when it is greater than the stored one, in one UPDATE */

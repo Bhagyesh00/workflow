@@ -7,6 +7,7 @@
  */
 import { totp } from '@workflow/nodes-base';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { MFA_BEFORE_ENFORCE_MESSAGE } from '../src/routes/mfa';
 import {
   createTestServer,
   ORIGIN,
@@ -102,6 +103,21 @@ describe('POST /settings/mfa-enforce', () => {
     expect((await enforce(new TestClient(server.app, ORIGIN))).statusCode).toBe(401);
   });
 
+  it("turning it on needs the enforcer's session to have passed the MFA step; turning it off does not", async () => {
+    const o = await owner();
+    await enableMfa(o.client);
+    // the same owner on a password session that never passed the step (MFA was turned on elsewhere)
+    const unverified = await sessionFor(server, o.tenant.id, o.user.id, { mfaVerified: false });
+    const refused = await enforce(unverified.client);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.message).toBe(MFA_BEFORE_ENFORCE_MESSAGE);
+    expect((await o.client.data(o.client.get('/rest/settings'))).mfa).toEqual({ enforced: false });
+    // turning it off is not checked
+    expect(await unverified.client.data(enforce(unverified.client, false))).toEqual({ enforced: false });
+    // the session that turned MFA on passed the step
+    expect(await o.client.data(enforce(o.client))).toEqual({ enforced: true });
+  });
+
   it('a body without a boolean is 400', async () => {
     const o = await owner();
     await enableMfa(o.client);
@@ -167,6 +183,33 @@ describe('the gate', () => {
     const ok = await later.client.post('/rest/auth/mfa/verify', { mfaCode: codeAt(setup.secret, 1) });
     expect(ok.statusCode).toBe(200);
     expect((await later.client.get('/rest/workflows')).statusCode).toBe(200);
+  });
+
+  it('a member who turns MFA off is blocked again at once, on every password and LDAP session', async () => {
+    const { member } = await enforcedWorkspace();
+    const setup = await enableMfa(member.client);
+    expect((await member.client.get('/rest/workflows')).statusCode).toBe(200);
+    const tid = member.tenant.id;
+    const uid = member.user.id;
+    const ldap = await sessionFor(server, tid, uid, { authMethod: 'ldap', mfaVerified: true });
+    const saml = await sessionFor(server, tid, uid, { authMethod: 'saml', mfaVerified: true });
+    expect((await ldap.client.get('/rest/workflows')).statusCode).toBe(200);
+    const off = await member.client.post('/rest/auth/mfa/disable', { mfaCode: codeAt(setup.secret, 1) });
+    expect(off.statusCode).toBe(200);
+    const blocked = await member.client.get('/rest/workflows');
+    expect(blocked.statusCode).toBe(401);
+    expect(blocked.json().error).toMatchObject(NOT_ENROLLED);
+    expect((await ldap.client.get('/rest/workflows')).statusCode).toBe(401);
+    // the identity provider did the second step of an SSO session
+    expect((await saml.client.get('/rest/workflows')).statusCode).toBe(200);
+  });
+
+  it("mfa:disable --email blocks the user's verified sessions in an enforcing workspace too", async () => {
+    const { member } = await enforcedWorkspace();
+    await enableMfa(member.client);
+    expect((await member.client.get('/rest/workflows')).statusCode).toBe(200);
+    expect(await server.ctx.mfa.disableByEmail(member.user.email)).toBe(true);
+    expect((await member.client.get('/rest/workflows')).statusCode).toBe(401);
   });
 
   it('turning it off lets the blocked member in again', async () => {
