@@ -19,14 +19,17 @@ import { AssistantThreadRepository } from './assistant-threads';
 import { BuilderSessionRepository } from './builder-sessions';
 import { CredentialEntryRepository } from './credential-entries';
 import { DataTableRepository } from './data-tables';
+import { DependencyRepository } from './dependencies';
 import { ExecutionRepository } from './executions';
 import { FavoriteRepository } from './favorites';
 import { FolderRepository } from './folders';
+import { InsightsRepository } from './insights';
 import { JweKeyRepository } from './jwe-keys';
 import { LdapHistoryRepository } from './ldap-history';
 import { McpOAuthRepository } from './mcp-oauth';
 import { MembersListRepository } from './members-list';
 import { ProjectRepository } from './projects';
+import { PublicIdempotencyRepository } from './public-idempotency';
 import { PublishHistoryRepository } from './publish-history';
 import {
   AuditRepository,
@@ -42,10 +45,12 @@ import { RoleRepository } from './roles';
 import { ScheduleSlotRepository } from './schedule-slots';
 import { ScimRepository } from './scim';
 import { SecretConnectionRepository } from './secrets';
+import { SecurityAuditRepository } from './security-audit';
 import { ShareRepository } from './shares';
 import { SsoRepository } from './sso';
 import { StaticDataRepository } from './static-data';
 import { TestRunRepository } from './test-runs';
+import { TypePolicyRepository } from './type-policies';
 import { UserMfaRepository } from './user-mfa';
 import { UserTokenRepository } from './user-tokens';
 import { TagRepository, WorkflowRepository, WorkflowVersionRepository } from './workflows';
@@ -118,6 +123,16 @@ export interface Repositories {
   credentialEntries: CredentialEntryRepository;
   /** P6-16 (S2 L15): OAuth JWE keys */
   jweKeys: JweKeyRepository;
+  /** P6-48 (S3 L1): type policy scopes, documents and attachments */
+  typePolicies: TypePolicyRepository;
+  /** P6-05 (S3 L11): insights metadata and periods */
+  insights: InsightsRepository;
+  /** P6-82 (S3 L15): the public API's Idempotency-Key rows */
+  publicIdempotency: PublicIdempotencyRepository;
+  /** P6-54 (S3 L9): the security audit's reads */
+  securityAudit: SecurityAuditRepository;
+  /** P6-86 (S3 L18): the dependency reads */
+  dependencies: DependencyRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -165,6 +180,11 @@ export function createRepositories(db: DbOrTx): Repositories {
     scim: new ScimRepository(db),
     credentialEntries: new CredentialEntryRepository(db),
     jweKeys: new JweKeyRepository(db),
+    typePolicies: new TypePolicyRepository(db),
+    insights: new InsightsRepository(db),
+    publicIdempotency: new PublicIdempotencyRepository(db),
+    securityAudit: new SecurityAuditRepository(db),
+    dependencies: new DependencyRepository(db),
   };
 }
 

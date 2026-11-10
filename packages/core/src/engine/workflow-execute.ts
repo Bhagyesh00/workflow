@@ -64,7 +64,9 @@ import {
   createSubWorkflowCaller,
   createToolParameterReader,
   getResolvedParameters,
+  mergeSubWorkflowReport,
   setCustomData,
+  subWorkflowReportOf,
 } from './node-context';
 import type { ExecutionServices } from './services';
 import { runToolExecutor, toolRootOf } from './tool-executor';
@@ -904,6 +906,11 @@ export class WorkflowExecute {
       setMetadata: (data) => {
         Object.assign(this.nodeMetadata, data);
       },
+      // P6 S3 (C0): a union, not Object.assign: two sub-workflow calls of one node both count, and the
+      // error task keeps it too (`taskMetadata`)
+      reportSubWorkflow: (report) => {
+        mergeSubWorkflowReport(this.nodeMetadata, report);
+      },
       suspendForTool: (suspension, checkpoint) => {
         const limit = this.services.limits?.maxCheckpointBytes ?? MAX_CHECKPOINT_BYTES;
         const size = Buffer.byteLength(JSON.stringify(checkpoint));
@@ -971,8 +978,8 @@ export class WorkflowExecute {
       contextDeps: (node, exec, runIndex, signal) => this.contextDeps(node, exec, runIndex, signal),
       supplySubNodes: (parent, parentType, type, itemIndex, exec, signal, closeFunctions) =>
         this.supplySubNodes(parent, parentType, type, itemIndex, exec, signal, closeFunctions),
-      logSubNodeRun: (sub, parent, type, input, output, error) =>
-        this.logSubNodeRun(sub, parent, type, input, output, error),
+      logSubNodeRun: (sub, parent, type, input, output, error, metadata) =>
+        this.logSubNodeRun(sub, parent, type, input, output, error, metadata),
     };
   }
 
@@ -1103,7 +1110,10 @@ export class WorkflowExecute {
     return {
       ...base,
       runCode: createCodeRunnerCall(deps, base),
-      executeWorkflow: createSubWorkflowCaller(deps),
+      // P6 S3 (C0): a sub-node's sub-workflow counts on the task of the node that owns it (the running node)
+      executeWorkflow: createSubWorkflowCaller(deps, (report) =>
+        mergeSubWorkflowReport(this.nodeMetadata, report),
+      ),
       getInputData: (inputIndex = 0) => (parentExec.data.main?.[inputIndex] ?? []) as Item[],
       getInputConnectionData: (subType2, itemIndex) =>
         this.supplySubNodes(sub, subType, subType2, itemIndex, exec, signal, closeFunctions),
@@ -1127,8 +1137,11 @@ export class WorkflowExecute {
     input: DataObject,
     output: DataObject,
     error?: unknown,
+    /** P6 S3 (C0): the call's sub-workflow report keys (a tool that called a sub-workflow); copied */
+    metadata?: DataObject,
   ): void {
     const runs = (this.state.resultData.runData[sub.name] ??= []);
+    const reported = metadata ? subWorkflowReportOf(metadata) : undefined;
     const task: TaskData = {
       startTime: Date.now(),
       executionTime: 0,
@@ -1137,6 +1150,7 @@ export class WorkflowExecute {
       data: { [type]: [[{ json: output }]] },
       error: error ? serializeError(error, sub.name) : undefined,
       source: [{ previousNode: parent.name }],
+      ...(reported ? { metadata: JSON.parse(JSON.stringify(reported)) } : {}),
     };
     runs.push(deepFreeze(task));
     const subRunIndex = runs.length - 1;

@@ -36,6 +36,7 @@ import {
   jsonb,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -1617,6 +1618,188 @@ export const oauthJweKeys = pgTable(
   (t) => [primaryKey({ columns: [t.tenantId, t.kid] })],
 );
 
+/**
+ * P6-48: where a node or credential type policy applies. One workspace scope per kind (`project_id` null, may
+ * `delegate` to the project scopes) and at most one per kind and project (never `delegate`). `version` grows on
+ * every change of the scope or of a policy attached to it, so a snapshot cache knows when to reload.
+ */
+export const typePolicyScopes = pgTable(
+  'type_policy_scopes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    kind: text('kind').$type<'node' | 'credential'>().notNull(),
+    projectId: uuid('project_id'),
+    defaultAction: text('default_action').$type<'allow' | 'deny' | 'delegate'>().notNull(),
+    version: integer('version').notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique('type_policy_scopes_tenant_id_unique').on(t.tenantId, t.id),
+    uniqueIndex('type_policy_scopes_tenant_kind_workspace_idx')
+      .on(t.tenantId, t.kind)
+      .where(sql`${t.projectId} is null`),
+    uniqueIndex('type_policy_scopes_tenant_kind_project_idx')
+      .on(t.tenantId, t.kind, t.projectId)
+      .where(sql`${t.projectId} is not null`),
+    foreignKey({
+      name: 'type_policy_scopes_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }).onDelete('cascade'),
+    check('type_policy_scopes_kind_check', sql`${t.kind} in ('node', 'credential')`),
+    check(
+      'type_policy_scopes_default_action_check',
+      sql`${t.defaultAction} in ('allow', 'deny', 'delegate')`,
+    ),
+    check(
+      'type_policy_scopes_project_delegate_check',
+      sql`${t.projectId} is null or ${t.defaultAction} <> 'delegate'`,
+    ),
+  ],
+);
+
+/** P6-48: a named node or credential type policy of a workspace; `rules` is its ordered rule list */
+export const typePolicies = pgTable(
+  'type_policies',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    kind: text('kind').$type<'node' | 'credential'>().notNull(),
+    name: varchar('name', { length: 255 }).notNull(),
+    description: varchar('description', { length: 512 }),
+    rules: jsonb('rules').$type<unknown[]>().notNull().default([]),
+    version: integer('version').notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique('type_policies_tenant_id_unique').on(t.tenantId, t.id),
+    unique('type_policies_tenant_kind_name_unique').on(t.tenantId, t.kind, t.name),
+    check('type_policies_kind_check', sql`${t.kind} in ('node', 'credential')`),
+  ],
+);
+
+/**
+ * P6-48: a policy attached to a scope, in `priority` order; a floor attachment (`is_floor`) applies whatever the
+ * scope delegates. Both ends inside the tenant. The policy key is NO ACTION on purpose (deleting an attached
+ * policy is the service's check, the key its backstop) and DEFERRABLE INITIALLY DEFERRED, written by hand in
+ * 0032 (drizzle has no option for it): checked at commit, so a tenant delete that cascades through scopes and
+ * policies in one statement passes, while an attached policy's delete is still refused when it commits.
+ */
+export const typePolicyAttachments = pgTable(
+  'type_policy_attachments',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    scopeId: uuid('scope_id').notNull(),
+    policyId: uuid('policy_id').notNull(),
+    priority: integer('priority').notNull(),
+    isFloor: boolean('is_floor').notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.scopeId, t.policyId] }),
+    unique('type_policy_attachments_scope_floor_priority_unique').on(t.scopeId, t.isFloor, t.priority),
+    foreignKey({
+      name: 'type_policy_attachments_scope_fk',
+      columns: [t.tenantId, t.scopeId],
+      foreignColumns: [typePolicyScopes.tenantId, typePolicyScopes.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'type_policy_attachments_policy_fk',
+      columns: [t.tenantId, t.policyId],
+      foreignColumns: [typePolicies.tenantId, typePolicies.id],
+    }),
+    index('type_policy_attachments_tenant_policy_idx').on(t.tenantId, t.policyId),
+  ],
+);
+
+/**
+ * P6-05: the workflow and project an insights row counts for, with their names kept for after a delete. The
+ * workflow and project keys are plain set-null keys on purpose (a composite key's set null would clear
+ * `tenant_id` too), so a deleted workflow's numbers stay in the totals with `workflow_id` null.
+ */
+export const insightsMetadata = pgTable(
+  'insights_metadata',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    workflowId: uuid('workflow_id').references(() => workflows.id, { onDelete: 'set null' }),
+    workflowName: varchar('workflow_name', { length: 128 }).notNull(),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    projectName: varchar('project_name', { length: 255 }),
+  },
+  (t) => [
+    unique('insights_metadata_tenant_id_unique').on(t.tenantId, t.id),
+    unique('insights_metadata_tenant_workflow_unique').on(t.tenantId, t.workflowId),
+  ],
+);
+
+/**
+ * P6-05: one insights number per workflow, type and period. `type`: 0 time saved (minutes), 1 runtime (ms),
+ * 2 success, 3 failure; `period_unit`: 0 hour, 1 day, 2 week (as n8n). Rows roll up from hours to days to weeks.
+ */
+export const insightsByPeriod = pgTable(
+  'insights_by_period',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    metaId: bigint('meta_id', { mode: 'number' }).notNull(),
+    type: smallint('type').$type<0 | 1 | 2 | 3>().notNull(),
+    periodUnit: smallint('period_unit').$type<0 | 1 | 2>().notNull(),
+    periodStart: timestamp('period_start', { withTimezone: true }).notNull(),
+    value: bigint('value', { mode: 'number' }).notNull(),
+  },
+  (t) => [
+    unique('insights_by_period_unique').on(t.tenantId, t.metaId, t.type, t.periodUnit, t.periodStart),
+    index('insights_by_period_tenant_unit_start_idx').on(t.tenantId, t.periodUnit, t.periodStart),
+    foreignKey({
+      name: 'insights_by_period_meta_fk',
+      columns: [t.tenantId, t.metaId],
+      foreignColumns: [insightsMetadata.tenantId, insightsMetadata.id],
+    }).onDelete('cascade'),
+    check('insights_by_period_type_check', sql`${t.type} between 0 and 3`),
+    check('insights_by_period_unit_check', sql`${t.periodUnit} between 0 and 2`),
+  ],
+);
+
+/**
+ * P6-82: one public API `Idempotency-Key` per workspace, user and key. `fingerprint` is a hash of the method,
+ * path and body, so a replay with another body is refused. The stored answer `response_enc` is a
+ * CredentialCipher payload (binding `idempotency:<userId>:<key>`), because some answers carry one-time links.
+ */
+export const publicApiIdempotency = pgTable(
+  'public_api_idempotency',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    key: varchar('key', { length: 128 }).notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    status: text('status').$type<'in_progress' | 'done'>().notNull(),
+    statusCode: integer('status_code'),
+    responseEnc: text('response_enc'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.userId, t.key] }),
+    index('public_api_idempotency_created_idx').on(t.createdAt),
+    check('public_api_idempotency_status_check', sql`${t.status} in ('in_progress', 'done')`),
+  ],
+);
+
 export type { LegacyRole, Role, SystemRole } from './role-types';
 
 export type TenantRow = typeof tenants.$inferSelect;
@@ -1659,3 +1842,9 @@ export type AuthProviderSyncHistoryRow = typeof authProviderSyncHistory.$inferSe
 export type ScimTokenRow = typeof scimTokens.$inferSelect;
 export type CredentialUserEntryRow = typeof credentialUserEntries.$inferSelect;
 export type OAuthJweKeyRow = typeof oauthJweKeys.$inferSelect;
+export type TypePolicyScopeRow = typeof typePolicyScopes.$inferSelect;
+export type TypePolicyRow = typeof typePolicies.$inferSelect;
+export type TypePolicyAttachmentRow = typeof typePolicyAttachments.$inferSelect;
+export type InsightsMetadataRow = typeof insightsMetadata.$inferSelect;
+export type InsightsByPeriodRow = typeof insightsByPeriod.$inferSelect;
+export type PublicApiIdempotencyRow = typeof publicApiIdempotency.$inferSelect;

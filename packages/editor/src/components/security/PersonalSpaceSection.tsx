@@ -13,7 +13,10 @@ import { confirmDialog } from '../ui/Dialog';
 import { Switch } from '../ui/Field';
 import { Callout, Spinner } from '../ui/misc';
 
-type Flag = keyof SecurityPolicyPatch;
+/** The on/off switches of the patch (P6-53 added the object-valued `redaction`, which is not a switch) */
+type Flag = {
+  [K in keyof SecurityPolicyPatch]-?: NonNullable<SecurityPolicyPatch[K]> extends boolean ? K : never;
+}[keyof SecurityPolicyPatch];
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 

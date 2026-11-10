@@ -15,6 +15,24 @@ import { annotationPatchSchema, idParams } from '../http/schemas';
 import type { ExecutionAnnotationDTO } from '../repositories';
 import { isUuid } from '../repositories/util';
 import type { AccessFilter } from '../services/access';
+import { type ExecutionViewer, redactExecution, redactSummaries } from '../services/redaction/read';
+
+/**
+ * P6-53 (S3): `?redactExecutionData=false` asks to reveal a redacted run (the reveal rules apply); `true` or
+ * absent reads it as the policy shows it
+ */
+const redactExecutionDataParam = z
+  .enum(['true', 'false'])
+  .optional()
+  .transform((v) => (v === undefined ? undefined : v === 'true'));
+
+const executionReadQuery = z.object({ redactExecutionData: redactExecutionDataParam });
+
+/** the viewer of a read: the signed-in user (a session or an API key) in its workspace */
+export const viewerOf = (auth: Pick<AuthContext, 'tenant' | 'user'>): ExecutionViewer => ({
+  tenantId: auth.tenant.id,
+  userId: auth.user.id,
+});
 
 const STATUSES = ['new', 'running', 'success', 'error', 'canceled', 'waiting', 'crashed'] as const;
 
@@ -83,11 +101,13 @@ export function executionSummary(row: ExecutionRow, annotation: ExecutionAnnotat
 
 export async function listExecutions(
   ctx: ServerContext,
-  tenantId: string,
+  /** P6-53 (S3): who reads the page; the rows go through `redactSummaries` */
+  viewer: ExecutionViewer,
   query: z.output<typeof executionListQuery>,
   /** P6-25: the caller's access filter (`AccessService.listFilter(auth, 'execution:list')`) */
   options: { filter?: AccessFilter } = {},
 ) {
+  const { tenantId } = viewer;
   const rows = await ctx.repos.executions.list(tenantId, {
     filter: options.filter,
     projectId: query.projectId,
@@ -108,19 +128,45 @@ export async function listExecutions(
     tenantId,
     data.map((r) => r.id),
   );
-  return { data: data.map((r) => executionSummary(r, annotations.get(r.id) ?? null)), nextCursor };
+  const summaries = data.map((r) => executionSummary(r, annotations.get(r.id) ?? null));
+  // P6-53 (S3): one `redactionFacts` query per page (L8); a redacted row's `errorMessage` is blank
+  return { data: await redactSummaries(ctx.serviceDeps, viewer, summaries), nextCursor };
 }
 
-export async function getExecution(ctx: ServerContext, tenantId: string, id: string, includeData = true) {
-  const row = await ctx.repos.executions.get(tenantId, id);
-  if (!row) throw ApiError.notFound('Execution');
-  const annotation = (await ctx.repos.annotations.forExecutions(tenantId, [row.id])).get(row.id) ?? null;
-  if (!includeData) return executionSummary(row, annotation);
-  const data = await ctx.repos.executions.getData(tenantId, id);
+/**
+ * One run for one viewer. P6-53 (S3): the row and its data go through `redactExecution`; a redacted read
+ * carries `redactionInfo` (and `redactedError`), `reveal` (`?redactExecutionData=false`) applies the reveal
+ * rules. A tool never passes `reveal`.
+ */
+export async function getExecution(
+  ctx: ServerContext,
+  viewer: ExecutionViewer,
+  id: string,
+  options: { includeData?: boolean; reveal?: boolean } = {},
+) {
+  const { tenantId } = viewer;
+  const includeData = options.includeData ?? true;
+  const stored = await ctx.repos.executions.get(tenantId, id);
+  if (!stored) throw ApiError.notFound('Execution');
+  const annotation =
+    (await ctx.repos.annotations.forExecutions(tenantId, [stored.id])).get(stored.id) ?? null;
+  const read = await redactExecution(
+    ctx.serviceDeps,
+    viewer,
+    stored,
+    includeData ? await ctx.repos.executions.getData(tenantId, id) : undefined,
+    { reveal: options.reveal },
+  );
+  const redaction = {
+    ...(read.redactionInfo ? { redactionInfo: read.redactionInfo } : {}),
+    ...(read.redactedError !== undefined ? { redactedError: read.redactedError } : {}),
+  };
+  if (!includeData) return { ...executionSummary(read.row, annotation), ...redaction };
   return {
-    ...executionSummary(row, annotation),
-    workflowData: data?.workflowData ?? null,
-    state: data?.state ?? null,
+    ...executionSummary(read.row, annotation),
+    workflowData: read.data?.workflowData ?? null,
+    state: read.data?.state ?? null,
+    ...redaction,
   };
 }
 
@@ -141,6 +187,8 @@ const binaryQuery = z.object({
   action: z.enum(['view', 'download']).default('view'),
   mimeType: z.string().max(255).optional(),
   fileName: z.string().max(255).optional(),
+  /** P6-53 (S3): `false` asks to reveal the file of a redacted run (the reveal rules apply) */
+  redactExecutionData: redactExecutionDataParam,
 });
 
 /** a part of a file id that could leave its folder */
@@ -159,6 +207,8 @@ async function assertBinaryAccess(
   request: FastifyRequest,
   auth: AuthContext,
   id: string,
+  /** P6-53 (S3): `?redactExecutionData=false` */
+  reveal = false,
 ): Promise<void> {
   const notFound = () => ApiError.notFound('Binary data');
   if (!id.startsWith('fs:')) throw notFound();
@@ -175,8 +225,20 @@ async function assertBinaryAccess(
     return;
   }
   if (parts.length !== 3 || !isUuid(folder)) throw notFound();
-  if (await ctx.repos.executions.get(auth.tenant.id, folder)) {
+  const run = await ctx.repos.executions.get(auth.tenant.id, folder);
+  if (run) {
     await requireScope(request, 'execution:read', { executionId: folder });
+    // P6-53 (S3): a run's file follows its data: the same decision as `redactExecution` (no data loaded; L8
+    // judges the run's `redactionFacts` against the viewer). Redacted for this viewer: 403; with reveal, the
+    // reveal rules apply (`redactExecution` refuses or reveals).
+    const read = await redactExecution(ctx.serviceDeps, viewerOf(auth), run, undefined, { reveal });
+    if (read.redactionInfo?.isRedacted) {
+      throw new ApiError(
+        403,
+        'EXECUTION_REVEAL_FORBIDDEN',
+        "Couldn't read the file: the data of this execution is redacted",
+      );
+    }
     return;
   }
   if (await ctx.repos.assistantThreads.get(auth.tenant.id, auth.user.id, folder)) return;
@@ -188,7 +250,7 @@ export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext
   app.get('/binary-data', async (request, reply) => {
     const auth = requireAuth(request);
     const query = parse(binaryQuery, request.query);
-    await assertBinaryAccess(ctx, request, auth, query.id);
+    await assertBinaryAccess(ctx, request, auth, query.id, query.redactExecutionData === false);
     let data: Uint8Array;
     try {
       data = await ctx.executions
@@ -224,13 +286,15 @@ export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext
     const auth = requireAuth(request);
     const query = parse(executionListQuery, request.query);
     const filter = await ctx.access.listFilter(auth, 'execution:list');
-    return listExecutions(ctx, auth.tenant.id, query, { filter });
+    return listExecutions(ctx, viewerOf(auth), query, { filter });
   });
 
   app.get('/executions/:id', async (request) => {
     const { auth, id } = await onExecution(request, 'execution:read');
+    const { redactExecutionData } = parse(executionReadQuery, request.query ?? {});
     const scopes = [...(await ctx.access.scopesForAuth(auth, { executionId: id }))].sort();
-    return { data: { ...(await getExecution(ctx, auth.tenant.id, id)), scopes } };
+    const execution = await getExecution(ctx, viewerOf(auth), id, { reveal: redactExecutionData === false });
+    return { data: { ...execution, scopes } };
   });
 
   // P3-09: tags and / or vote; n8n's `execution:read` on the run (P6-39)

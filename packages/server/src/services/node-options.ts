@@ -26,6 +26,7 @@ import { decodeCursor, encodeCursor } from '../http/pagination';
 import { nodeSchema } from '../http/schemas';
 import { isUuid } from '../repositories/util';
 import { MISSING_SCOPE_MESSAGE } from './access';
+import { checkSingleNode } from './type-policies/enforce';
 
 export const nodeOptionsSchema = z.object({
   nodeType: z.string().min(1),
@@ -111,6 +112,13 @@ export async function loadNodeOptions(
     { id: body.workflowId, name: 'options', nodes: [node], connections: {} },
     registries.nodeTypes,
   );
+  // P6-04 (S3): the type policy judges the node type and its credential types before any decrypt
+  await checkSingleNode(ctx.serviceDeps, {
+    tenantId: auth.tenant.id,
+    projectId,
+    nodeType: body.nodeType,
+    credentialTypes: Object.keys(node.credentials ?? {}),
+  });
   const services = await ctx.executions.buildServices({
     tenant: auth.tenant,
     executionId: '',

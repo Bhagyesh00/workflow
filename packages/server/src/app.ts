@@ -17,13 +17,17 @@ import { registerAssistantMcpRoutes } from './routes/assistant-mcp';
 import { registerAssistantSettingsRoutes } from './routes/assistant-settings';
 import { registerAuthRoutes } from './routes/auth';
 import { registerChatWidgetRoutes } from './routes/chat-widget';
+import { registerCollaborationRoutes } from './routes/collaboration';
 import { registerCredentialRoutes } from './routes/credentials';
 import { registerDataTableRoutes } from './routes/data-tables';
+import { registerDependencyRoutes } from './routes/dependencies';
 import { registerEvaluationRoutes } from './routes/evaluations';
+import { registerExecutionBulkRoutes } from './routes/execution-bulk';
 import { registerExecutionRoutes } from './routes/executions';
 import { registerFavoriteRoutes } from './routes/favorites';
 import { registerFolderRoutes } from './routes/folders';
 import { registerFormAuthRoutes } from './routes/form-auth';
+import { registerInsightsRoutes } from './routes/insights';
 import { registerJwksRoutes } from './routes/jwks';
 import { registerLdapRoutes } from './routes/ldap';
 import { registerMcpConsentRoutes } from './routes/mcp-consent';
@@ -37,6 +41,7 @@ import { registerPasswordRoutes } from './routes/password';
 import { registerProjectRoutes } from './routes/projects';
 import { publicApiPlugin } from './routes/public-api';
 import { registerPushRoutes } from './routes/push';
+import { registerRateLimitSettingsRoutes } from './routes/rate-limit-settings';
 import { registerResourceRoutes } from './routes/resources';
 import { registerRoleRoutes } from './routes/roles';
 import { scimPlugin } from './routes/scim';
@@ -52,6 +57,8 @@ import { registerSamlRestRoutes } from './routes/sso-saml';
 import { registerSsoSettingsRoutes } from './routes/sso-settings';
 import { registerEditor, registerHealthRoutes } from './routes/system';
 import { registerTransferRoutes } from './routes/transfer';
+import { registerTypePolicyRoutes } from './routes/type-policies';
+import { registerProjectTypePolicyRoutes } from './routes/type-policies-project';
 import { webhookPlugin } from './routes/webhooks';
 import { registerWorkflowReviewRoutes } from './routes/workflow-reviews';
 import { registerWorkflowRoutes } from './routes/workflows';
@@ -162,7 +169,8 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
         reply
           .status(204)
           .header('access-control-allow-methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS')
-          .header('access-control-allow-headers', `content-type, ${TENANT_HEADER}`)
+          // P6-81: `push-ref` names the editor tab (the collaboration client id) on presence and write access calls
+          .header('access-control-allow-headers', `content-type, ${TENANT_HEADER}, push-ref`)
           .header('access-control-max-age', '600')
           .send(),
       );
@@ -214,6 +222,15 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerProvisioningRoutes(rest, ctx);
       registerLdapRoutes(rest, ctx);
       registerScimSettingsRoutes(rest, ctx);
+      // Phase 6 S3: node and credential type policies (P6-49, P6-51), insights (P6-05), collaboration (P6-81),
+      // bulk run actions (P6-85), dependencies (P6-86), public API rate limit settings (P6-83)
+      registerTypePolicyRoutes(rest, ctx);
+      registerProjectTypePolicyRoutes(rest, ctx);
+      registerInsightsRoutes(rest, ctx);
+      registerCollaborationRoutes(rest, ctx);
+      registerExecutionBulkRoutes(rest, ctx);
+      registerDependencyRoutes(rest, ctx);
+      registerRateLimitSettingsRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );

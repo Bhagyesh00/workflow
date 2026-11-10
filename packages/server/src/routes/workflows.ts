@@ -16,6 +16,7 @@ import {
   workflowDataSchema,
   workflowUpdateSchema,
 } from '../http/schemas';
+import type { WorkflowWriteAction } from '../services/collaboration';
 
 /** "a,b,c" -> ['a', 'b', 'c'] (empty parts dropped) */
 const commaList = (item: z.ZodString, max: number) =>
@@ -51,6 +52,8 @@ export const workflowListQuery = z.object({
   nodeTypes: commaList(z.string().min(1).max(256), 20),
   /** P3-01 command bar: also match tag names */
   matchTags: z.stringbool().optional(),
+  /** P6-49 (S3): only workflows using a node type the type policy blocks */
+  executionBlockedBy: z.enum(['restrictedNode']).optional(),
   ...paginationQuery,
 });
 
@@ -91,6 +94,16 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
     const auth = await requireScope(request, scope, { workflowId: id });
     return { auth, id, versionId };
   };
+  /**
+   * P6 S3 (L14): the write lock of the seven editor write routes, after the gate; the tab's `push-ref` names
+   * the holder. The public API and the services do not pass here, so a public write skips the lock, as n8n.
+   */
+  const assertWritable = (
+    request: FastifyRequest,
+    auth: AuthContext,
+    id: string,
+    action: WorkflowWriteAction,
+  ) => ctx.collaboration.assertWritable(auth.user, request.headers['push-ref'], id, action);
   /** the project a create goes to (`targetProject`: the body's, else the default) with `workflow:create` in it */
   const createTarget = async (request: FastifyRequest): Promise<{ auth: AuthContext; projectId: string }> => {
     const signedIn = requireAuth(request);
@@ -137,6 +150,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
 
   app.patch('/workflows/:id', async (request) => {
     const { auth, id } = await onWorkflow(request, 'workflow:update');
+    await assertWritable(request, auth, id, 'save');
     const body = parse(workflowUpdateSchema, request.body);
     const updated = await workflows.update(auth.tenant.id, id, body, actor(request));
     return { data: await workflows.dtoFor(auth, updated) };
@@ -144,6 +158,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
 
   app.delete('/workflows/:id', async (request) => {
     const { auth, id } = await onWorkflow(request, 'workflow:delete');
+    await assertWritable(request, auth, id, 'delete');
     await workflows.delete(auth.tenant.id, id, actor(request));
     return { data: { ok: true } };
   });
@@ -181,17 +196,20 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
 
   app.post('/workflows/:id/archive', async (request) => {
     const { auth, id } = await onWorkflow(request, 'workflow:delete');
+    await assertWritable(request, auth, id, 'archive');
     return { data: await ctx.workflowArchive.archive(auth.tenant.id, id, actor(request)) };
   });
 
   app.post('/workflows/:id/unarchive', async (request) => {
     const { auth, id } = await onWorkflow(request, 'workflow:delete');
+    await assertWritable(request, auth, id, 'unarchive');
     return { data: await ctx.workflowArchive.unarchive(auth.tenant.id, id, actor(request)) };
   });
 
   // publish (P3-10): an empty body publishes the current version
   app.post('/workflows/:id/activate', async (request) => {
     const { auth, id } = await onWorkflow(request, 'workflow:publish');
+    await assertWritable(request, auth, id, 'publish');
     const body = parse(publishSchema, request.body ?? {});
     return { data: await workflows.setActive(auth.tenant.id, id, true, actor(request), body) };
   });
@@ -206,6 +224,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
 
   app.post('/workflows/:id/deactivate', async (request) => {
     const { auth, id } = await onWorkflow(request, 'workflow:unpublish');
+    await assertWritable(request, auth, id, 'unpublish');
     return { data: await workflows.setActive(auth.tenant.id, id, false, actor(request)) };
   });
 
@@ -302,6 +321,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
 
   app.post('/workflows/:id/versions/:versionId/restore', async (request) => {
     const { auth, id, versionId } = await onVersion(request, 'workflow:update');
+    await assertWritable(request, auth, id, 'save');
     return { data: await workflows.restoreVersion(auth.tenant.id, id, versionId, actor(request)) };
   });
 }

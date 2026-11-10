@@ -11,7 +11,7 @@ import type {
   ResourceMapperFields,
   WorkflowDefinition,
 } from '@workflow/workflow';
-import type { ProjectIcon } from '../api/types';
+import type { AvailableType, ProjectIcon } from '../api/types';
 
 const manualTrigger: NodeTypeDescription = {
   name: 'core.manualTrigger',
@@ -1332,6 +1332,47 @@ const executionData: NodeTypeDescription = {
   ],
 };
 
+// P6-56 (C0): nodes-base core.timeSaved, the same description (the demo's simulator passes its input through)
+const timeSaved: NodeTypeDescription = {
+  name: 'core.timeSaved',
+  displayName: 'Track Time Saved',
+  description: 'Adds the minutes this path saves to the time saved shown in Insights',
+  icon: 'lucide:timer',
+  group: ['organization'],
+  version: 1,
+  defaults: { name: 'Time Saved' },
+  inputs: ['main'],
+  outputs: ['main'],
+  categories: ['Core', 'Flow'],
+  alias: ['time saved', 'insights', 'minutes saved', 'roi', 'track time'],
+  properties: [
+    {
+      displayName: 'Calculation Mode',
+      name: 'mode',
+      type: 'options',
+      default: 'once',
+      noDataExpression: true,
+      options: [
+        {
+          name: 'Once For All Items',
+          value: 'once',
+          description: 'Counts the minutes once, whatever the item count',
+        },
+        { name: 'Per Item', value: 'perItem', description: 'Counts the minutes once for each input item' },
+      ],
+    },
+    {
+      displayName: 'Minutes Saved',
+      name: 'minutesSaved',
+      type: 'number',
+      default: 0,
+      required: true,
+      description: 'Minutes of manual work this path saves',
+      typeOptions: { minValue: 0, numberPrecision: 0 },
+    },
+  ],
+};
+
 const chatTrigger: NodeTypeDescription = {
   name: 'ai.chatTrigger',
   displayName: 'Chat Trigger',
@@ -1878,6 +1919,7 @@ export const demoNodeTypes: NodeTypeDescription[] = [
   evaluationTrigger,
   evaluation,
   executionData,
+  timeSaved,
   chatTrigger,
   chat,
   mcpTrigger,
@@ -1885,6 +1927,12 @@ export const demoNodeTypes: NodeTypeDescription[] = [
   resourceMapperDemo,
   kitchenSink,
 ];
+
+/**
+ * P6-50 (C0): the demo's `/projects/:projectId/available-types` rows that differ from "every type is available":
+ * empty, so no type is blocked. mock-type-policies.ts (L5) answers from the policies it keeps.
+ */
+export const demoAvailableTypes: readonly AvailableType[] = [];
 
 export const demoCredentialTypes: CredentialTypeDescription[] = [
   {

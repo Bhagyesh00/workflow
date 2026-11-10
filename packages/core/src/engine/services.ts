@@ -23,6 +23,7 @@ import type {
   NodeCredentialRef,
   NodeType,
   RunCodeOptions,
+  SubWorkflowReport,
   TaskData,
   WebhookResponse,
 } from '@workflow/workflow';
@@ -109,6 +110,31 @@ export interface SubWorkflowRequest {
   parent: { executionId: string; workflowId?: string; nodeName: string; tenantId: string };
 }
 
+/** P6 S3 (C0): the property a failed sub-workflow's error carries its report on (n8n: attachSubWorkflowRedaction) */
+const SUB_WORKFLOW_REPORT = 'subWorkflowReport';
+
+/**
+ * P6 S3 (C0): attaches what a failed child reports (its credentials, its redaction) to the error the caller
+ * throws. `createSubWorkflowCaller` takes it off again, so it never lands in the caller's `taskData.error`.
+ */
+export function attachSubWorkflowReport<E extends Error>(error: E, report: SubWorkflowReport): E {
+  Object.defineProperty(error, SUB_WORKFLOW_REPORT, {
+    value: report,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  return error;
+}
+
+/** P6 S3 (C0): the report a failed sub-workflow's error carries, removed from the error; undefined when none */
+export function takeSubWorkflowReport(error: unknown): SubWorkflowReport | undefined {
+  if (!error || typeof error !== 'object' || !Object.hasOwn(error, SUB_WORKFLOW_REPORT)) return undefined;
+  const report = (error as Record<string, unknown>)[SUB_WORKFLOW_REPORT] as SubWorkflowReport | undefined;
+  delete (error as Record<string, unknown>)[SUB_WORKFLOW_REPORT];
+  return report;
+}
+
 export interface ExecutionLimits {
   expressionTimeoutMs: number;
   expressionMaxSteps: number;
@@ -151,7 +177,13 @@ export interface ExecutionServices {
   limits?: Partial<ExecutionLimits>;
   /** instance size caps for nodes (`helpers.getInstanceLimits()`); unset fields use the defaults */
   nodeLimits?: Partial<InstanceLimits>;
-  executeSubWorkflow?(request: SubWorkflowRequest): Promise<{ executionId: string; data: Item[][] | null }>;
+  /**
+   * P6 S3 (C0): a child that ran to its end also returns its `report` (credentials it used, its redaction);
+   * a detached call returns none. A failed child throws with the report attached (`attachSubWorkflowReport`).
+   */
+  executeSubWorkflow?(
+    request: SubWorkflowRequest,
+  ): Promise<{ executionId: string; data: Item[][] | null; report?: SubWorkflowReport }>;
   /** the data tables of `tenantId` (`helpers.dataTables`) */
   dataTables?: DataTableAccess;
   /** user auth for forms (`getFormAuth()` on the webhook context) */

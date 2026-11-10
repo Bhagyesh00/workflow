@@ -46,6 +46,7 @@ const secondMain = async () => {
     logger: server.ctx.logger,
     bus: server.ctx.bus,
     leadership: notLeader,
+    serviceDeps: server.ctx.serviceDeps,
   });
   await activeWorkflows.init();
   const workflows = new WorkflowService({

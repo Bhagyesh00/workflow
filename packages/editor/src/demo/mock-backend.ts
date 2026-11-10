@@ -15,6 +15,7 @@ import {
   MANDATORY_INSTANCE_SCOPES,
   PROJECT_ROLE_SCOPES,
   personalOwnerScopes,
+  type RedactionFloor,
   type RunData,
   resolveNodeParameters,
   type Scope,
@@ -67,11 +68,15 @@ import { registerAssistantDraftRoutes } from './mock-assistant-drafts';
 import { registerAssistantMcpRoutes } from './mock-assistant-mcp';
 import { registerAssistantSettingsRoutes } from './mock-assistant-settings';
 import { registerChatRoutes } from './mock-chat';
+import { registerCollaborationRoutes } from './mock-collaboration';
 import { registerDataTableRoutes, searchDataTables } from './mock-data-tables';
+import { registerDependencyRoutes } from './mock-dependencies';
 import { DEMO_EVALUATION_CONCURRENCY_LIMIT, registerEvaluationRoutes } from './mock-evaluations';
+import { registerExecutionBulkRoutes } from './mock-execution-bulk';
 import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
 import { registerFormAuthRoutes } from './mock-form-auth';
 import { copy, HttpError, now, page } from './mock-http';
+import { registerInsightsRoutes } from './mock-insights';
 import { registerLdapRoutes } from './mock-ldap';
 import { registerMcpRoutes } from './mock-mcp';
 import { registerMemberRoutes } from './mock-members';
@@ -81,6 +86,8 @@ import { registerPrivateCredentialRoutes } from './mock-private-credentials';
 import { registerProjectRoutes, visibleProjects } from './mock-projects';
 import { registerProvisioningRoutes, setDemoProvisioningConfig } from './mock-provisioning';
 import { registerPublishRoutes } from './mock-publish';
+import { registerRateLimitRoutes } from './mock-rate-limits';
+import { redactDemoExecution, registerRedactionRoutes } from './mock-redaction';
 import { registerReviewRoutes } from './mock-reviews';
 import { findCustomRole, registerRoleRoutes } from './mock-roles';
 import { registerScimRoutes } from './mock-scim';
@@ -94,6 +101,7 @@ import {
   demoHookUrl,
   registerTriggerListenRoutes,
 } from './mock-triggers';
+import { registerTypePolicyRoutes, restrictedDemoTypes } from './mock-type-policies';
 import { type SimulationInput, type SimulationResult, simulateExecution } from './simulator';
 
 /** body field `agentRequest` of POST /workflows/:id/run (P5-76 Test a tool) */
@@ -174,7 +182,12 @@ interface StoredTenantSettings {
   workflowReviews: { enabled: boolean };
   /** P6-33: the personal space policy (POST /settings/security), both on by default */
   securityPolicy: { personalSpacePublishing: boolean; personalSpaceSharing: boolean };
+  /** P6-53 (C0): the workspace's redaction floor (POST /settings/security `redaction`), `off` by default */
+  redaction: { floor: RedactionFloor };
 }
+
+/** P6-53: the floors POST /settings/security takes */
+const REDACTION_FLOORS: readonly RedactionFloor[] = ['off', 'production', 'all'];
 
 /** P6-03: a workspace membership of the demo; `role` is the workspace role (owner, admin, member or a custom global slug) */
 export interface DemoMembership {
@@ -266,6 +279,8 @@ export interface MockBackendOptions {
   aiBuilder?: AiBuilderFeature;
   /** P5-67: `features.assistant` of GET /settings; on and with a model when left out */
   assistant?: AssistantFeature;
+  /** P6-84: `limits.activeWorkflows` of GET /settings (the plan's limit); null (no limit) when left out */
+  activeWorkflowsLimit?: number | null;
 }
 
 type Handler = (ctx: {
@@ -365,6 +380,14 @@ export class MockBackend {
     registerLdapRoutes(this);
     registerScimRoutes(this);
     registerPrivateCredentialRoutes(this);
+    // Phase 6 S3 (C0): one file per lane, each 501 until its lane fills it
+    registerTypePolicyRoutes(this);
+    registerRedactionRoutes(this);
+    registerInsightsRoutes(this);
+    registerCollaborationRoutes(this);
+    registerRateLimitRoutes(this);
+    registerExecutionBulkRoutes(this);
+    registerDependencyRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -919,6 +942,7 @@ export class MockBackend {
       settings = {
         workflowReviews: { enabled: false },
         securityPolicy: { personalSpacePublishing: true, personalSpaceSharing: true },
+        redaction: { floor: 'off' },
       };
       this.tenantSettings.set(tenantId, settings);
     }
@@ -943,7 +967,29 @@ export class MockBackend {
       publishedPersonalWorkflowsCount: workflows.filter((w) => w.publishedVersionId !== null).length,
       sharedPersonalWorkflowsCount: workflows.filter((w) => sharedWorkflows.has(w.id)).length,
       sharedPersonalCredentialsCount: credentials.filter((c) => sharedCredentials.has(c.id)).length,
+      // P6-53 (C0): the workspace's redaction floor
+      redaction: copy(this.settingsOf(tenantId).redaction),
     };
+  }
+
+  /** P6-53: the workspace's redaction floor (`/settings/security` `redaction.floor`; mock-redaction.ts reads it) */
+  redactionFloorOf(tenantId: string): RedactionFloor {
+    return this.settingsOf(tenantId).redaction.floor;
+  }
+
+  /**
+   * P6-84: GET /settings `usage` of the signed-in workspace, as the server's: this month's executions and their
+   * run time, and the published (active) workflows counted against `limits.activeWorkflows`.
+   */
+  private usageOf(tenantId: string): NonNullable<Settings['usage']> {
+    const period = new Date().toISOString().slice(0, 7);
+    const runs = this.executions.filter((e) => e.tenantId === tenantId && e.startedAt.startsWith(period));
+    const executionMs = runs.reduce(
+      (sum, e) => sum + (e.stoppedAt ? Math.max(0, Date.parse(e.stoppedAt) - Date.parse(e.startedAt)) : 0),
+      0,
+    );
+    const activeWorkflows = this.workflows.filter((w) => w.tenantId === tenantId && w.active).length;
+    return { period, executions: runs.length, executionMs, activeWorkflows };
   }
 
   validateForActivation(wf: StoredWorkflow) {
@@ -1315,7 +1361,8 @@ export class MockBackend {
         baseUrl: typeof window === 'undefined' ? 'http://localhost' : window.location.origin,
         webhookBaseUrl: typeof window === 'undefined' ? 'http://localhost' : window.location.origin,
         timezone: 'Europe/Berlin',
-        limits: { executionTimeoutMax: 3600 },
+        // P6-84: the plan's active workflow limit (null: no limit), as the server's `limits`
+        limits: { executionTimeoutMax: 3600, activeWorkflows: this.options.activeWorkflowsLimit ?? null },
         features: {
           demo: true,
           aiBuilder: copy(this.options.aiBuilder ?? DEMO_AI_BUILDER),
@@ -1336,6 +1383,13 @@ export class MockBackend {
           : {}),
         // P6-18 (C0): whether the workspace enforces two-factor sign-in
         mfa: { enforced: this.session ? this.mfaEnforcedTenants.has(this.session.tenantId) : false },
+        // P6-84 (usage, sent only when signed in, as the server) and P6-53 (the redaction floor)
+        ...(this.session
+          ? {
+              usage: this.usageOf(this.session.tenantId),
+              redactionFloor: this.redactionFloorOf(this.session.tenantId),
+            }
+          : {}),
       }),
     );
     // P6-33 (L12 owns the server route; FULL in the demo): the personal space policy and its counts
@@ -1346,6 +1400,11 @@ export class MockBackend {
     this.on('POST', '/settings/security', ({ body }) => {
       const { tenant } = this.requireScope('securitySettings:manage');
       const policy = this.settingsOf(tenant.id).securityPolicy;
+      // P6-53 (C0): `redaction: { floor }`, checked before anything is kept
+      const floor =
+        body.redaction === undefined ? undefined : (body.redaction as { floor?: unknown } | null)?.floor;
+      if (body.redaction !== undefined && !REDACTION_FLOORS.includes(floor as RedactionFloor))
+        throw new HttpError(400, 'invalid_body', 'redaction.floor must be off, production or all');
       for (const key of ['personalSpacePublishing', 'personalSpaceSharing'] as const) {
         if (body[key] === undefined) continue;
         if (typeof body[key] !== 'boolean')
@@ -1353,6 +1412,7 @@ export class MockBackend {
         // turning a flag off does not undo what is published or shared already (P6-33)
         policy[key] = body[key];
       }
+      if (floor !== undefined) this.settingsOf(tenant.id).redaction = { floor: floor as RedactionFloor };
       return this.securityPolicy(tenant.id);
     });
     this.on('PATCH', '/settings', ({ body }) => {
@@ -1422,10 +1482,17 @@ export class MockBackend {
         this.workflows.filter((w) => w.tenantId === tenant.id),
         query,
       );
+      // P6-50 (C0): `executionBlockedBy=restrictedNode` keeps the workflows holding a node type the policy of the
+      // workspace or of the workflow's project blocks (mock-type-policies.ts; none until L5)
+      const blocked = (w: StoredWorkflow) => {
+        const restricted = new Set(restrictedDemoTypes(this, tenant.id, w.projectId, 'node'));
+        return w.nodes.some((n) => restricted.has(n.type));
+      };
       const list = scoped
         .filter((w) => !search || matches(w))
         .filter((w) => !query.tagId || w.tags.some((t) => t.id === query.tagId))
         .filter((w) => query.active === undefined || String(w.active) === query.active)
+        .filter((w) => query.executionBlockedBy !== 'restrictedNode' || blocked(w))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .map((w) => this.workflowSummary(w));
       return { __list: true, ...page(list, query) };
@@ -1664,11 +1731,16 @@ export class MockBackend {
         .map(summary);
       return { __list: true, ...page(list, query) };
     });
-    this.on('GET', '/executions/:id', ({ params }) => {
+    this.on('GET', '/executions/:id', ({ params, query }) => {
       const e = execution(params[0]);
       // the caller's scopes come from the execution's workflow (its project)
       const scopes = this.rowScopes(this.workflows.find((w) => w.id === e.workflowId) ?? {});
-      return { ...summary(e), workflowData: copy(e.workflowData), state: copy(e.state), scopes };
+      // P6-53 (C0): redacted for the caller by mock-redaction.ts (a pass-through until L8)
+      return redactDemoExecution(
+        { ...summary(e), workflowData: copy(e.workflowData), state: copy(e.state), scopes },
+        query,
+        this,
+      );
     });
     this.on('POST', '/executions/:id/retry', ({ params, body }) => {
       const e = execution(params[0]);

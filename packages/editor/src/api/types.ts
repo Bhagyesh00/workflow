@@ -24,6 +24,7 @@ import type {
   Item,
   NodeProperty,
   NodeTypeDescription,
+  RedactionFloor,
   RunData,
   Scope,
   StickyNote,
@@ -107,6 +108,11 @@ export interface Settings {
   ai?: TenantAiSettings;
   /** P6-33: the personal space policy (absent flags are on) */
   securityPolicy?: { personalSpacePublishing?: boolean; personalSpaceSharing?: boolean };
+  /** this month's usage, sent only when signed in; P6-84 adds `activeWorkflows` (the limit is
+   *  `limits.activeWorkflows`, null or absent = unlimited) */
+  usage?: { period: string; executions: number; executionMs: number; activeWorkflows?: number };
+  /** P6-53: the workspace's redaction floor (a workflow policy cannot be weaker; absent = 'off') */
+  redactionFloor?: RedactionFloor;
 }
 
 /** body of PATCH /settings (admin) */
@@ -362,12 +368,16 @@ export interface SecurityPolicy {
   publishedPersonalWorkflowsCount: number;
   sharedPersonalWorkflowsCount: number;
   sharedPersonalCredentialsCount: number;
+  /** P6-53: the workspace's redaction floor */
+  redaction: { floor: RedactionFloor };
 }
 
 /** POST /settings/security */
 export interface SecurityPolicyPatch {
   personalSpacePublishing?: boolean;
   personalSpaceSharing?: boolean;
+  /** P6-53 */
+  redaction?: { floor: RedactionFloor };
 }
 
 /** DELETE /members/:userId (P6-31): the removed member's personal work moves to a project or is deleted */
@@ -672,6 +682,10 @@ export interface ExecutionDetail extends ExecutionSummary {
   state: ExecutionState;
   /** P6-25: the caller's scopes on the execution's workflow */
   scopes?: Scope[];
+  /** P6-53: absent when nothing was redacted; with `isRedacted` the items are cleared */
+  redactionInfo?: RedactionInfo;
+  /** P6-53: what is left of a redacted run's error (the run error moves here from `state`) */
+  redactedError?: ExecutionErrorShape | null;
 }
 
 export interface CredentialSummary extends ProjectOwnedFields {
@@ -928,6 +942,14 @@ export interface PushEventMap {
   testWebhookReceived: { workflowId: string; executionId: string };
   /** P3-19: a review request of this workflow changed (created, decided, commented, closed) */
   workflowReviewChanged: { workflowId: string; requestId: string };
+  /** P6-81: who has the workflow open changed */
+  collaboratorsChanged: { workflowId: string; collaborators: Collaborator[] };
+  /** P6-81: a tab took the write lock (`clientId` is that tab's `push-ref`) */
+  writeAccessAcquired: { workflowId: string; userId: string; clientId: string };
+  /** P6-81: the write lock was released, expired or taken over */
+  writeAccessReleased: { workflowId: string };
+  /** P6-81: someone saved the workflow */
+  workflowUpdated: { workflowId: string; userId: string };
   ping: Record<string, unknown>;
 }
 
@@ -945,6 +967,10 @@ export const PUSH_EVENT_TYPES: PushEventType[] = [
   'consoleMessage',
   'testWebhookReceived',
   'workflowReviewChanged',
+  'collaboratorsChanged',
+  'writeAccessAcquired',
+  'writeAccessReleased',
+  'workflowUpdated',
   'ping',
 ];
 
@@ -1738,3 +1764,263 @@ export interface ScimTransferTarget {
   name: string;
   type: 'team' | 'personal';
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phase 6 S3: type policies (P6-48..P6-51), redaction (P6-53), insights (P6-05, P6-57), collaboration
+// (P6-81), rate limits (P6-83), dependencies (P6-86)
+// ---------------------------------------------------------------------------------------------
+
+/** P6-48: a policy covers node types or credential types (one store for both) */
+export type TypePolicyKind = 'node' | 'credential';
+
+/** P6-48: what a rule or a scope default does; a project scope never delegates */
+export type TypePolicyAction = 'allow' | 'deny' | 'delegate';
+
+/** P6-48: which types a rule matches; `extends` is for credential policies only */
+export interface TypePolicySelector {
+  /** a type name; a node rule also matches the type's tool variants */
+  name?: string;
+  /** a package name, e.g. `@workflow/nodes-ai` */
+  package?: string;
+  /** credential types extending this one (oAuth2Api covers googleOAuth2Api) */
+  extends?: string;
+}
+
+export interface TypePolicyRule {
+  id: string;
+  action: TypePolicyAction;
+  selector: TypePolicySelector;
+  description?: string | null;
+}
+
+/** P6-48: a document of ordered rules (first match wins) */
+export interface TypePolicyDocument {
+  id: string;
+  kind: TypePolicyKind;
+  name: string;
+  description?: string | null;
+  rules: TypePolicyRule[];
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** P6-48: a document attached to a scope; floors are judged first, then the rest, by priority */
+export interface TypePolicyAttachment {
+  policyId: string;
+  priority: number;
+  isFloor: boolean;
+}
+
+/** P6-48: the workspace scope (`projectId` null, n8n's instance scope) or one project's */
+export interface TypePolicyScope {
+  id: string;
+  kind: TypePolicyKind;
+  projectId: string | null;
+  defaultAction: TypePolicyAction;
+  /** 0 until the first write; a write sends the version it read (a stale one gets 409) */
+  version: number;
+  attachments: TypePolicyAttachment[];
+}
+
+/** P6-49: one row of GET /projects/:projectId/available-types (or /available-credential-types) */
+export interface AvailableType {
+  type: string;
+  available: boolean;
+  /** only on an unavailable row */
+  reason?: string;
+  /** which scope blocked it (a project denial never names the project) */
+  scope?: 'workspace' | 'project';
+  /** the workspace delegates this type, so a project admin may allow it */
+  optInAvailable?: boolean;
+}
+
+/**
+ * P6-04: one blocked type in a 403 `policy_violation` answer (`details.violations`). S1's
+ * `PolicyViolation` is the transfer preview's row, a different shape.
+ */
+export interface TypePolicyViolation {
+  kind: 'node-type-unavailable' | 'credential-type-unavailable';
+  type: string;
+  scope: 'workspace' | 'project';
+  matchedRuleId: string | null;
+  optInAvailable: boolean;
+  nodeName?: string;
+}
+
+/** P6-49: GET /workflows/:id/sub-workflows/:subId/policy-check (404 hides a workflow the caller cannot see) */
+export interface SubWorkflowPolicyCheck {
+  allowed: boolean;
+  violations: TypePolicyViolation[];
+}
+
+/** P6-53: why a run's data is hidden and whether the caller may reveal it */
+export interface RedactionInfo {
+  isRedacted: boolean;
+  /** e.g. `workflow_redaction_policy`, `sub_workflow_redaction_policy`, `credential_access` */
+  reason: string;
+  /** the caller holds `execution:reveal` and may use every credential the run touched */
+  canReveal: boolean;
+}
+
+/** P6-57: the five summary tiles and chart types (`/insights/:insightType`, default `total`) */
+export type InsightsSummaryType = 'total' | 'failed' | 'failureRate' | 'timeSaved' | 'averageRunTime';
+
+export interface InsightsMetric {
+  value: number;
+  unit: 'count' | 'ratio' | 'minute' | 'millisecond';
+  /** current minus the previous period of the same length; null when that period had no runs */
+  deviation: number | null;
+}
+
+/** P6-05: GET /insights/summary */
+export type InsightsSummary = Record<InsightsSummaryType, InsightsMetric>;
+
+/** P6-05: the query of every insights read; no `startDate` = the last 7 days, no `endDate` = now */
+export interface InsightsQuery {
+  startDate?: string;
+  endDate?: string;
+  projectId?: string;
+  /** IANA zone for the bucket and day boundaries */
+  timeZone?: string;
+}
+
+export type InsightsByWorkflowSortField =
+  | 'total'
+  | 'succeeded'
+  | 'failed'
+  | 'failureRate'
+  | 'timeSaved'
+  | 'runTime'
+  | 'averageRunTime'
+  | 'workflowName';
+
+export interface InsightsByWorkflowQuery extends InsightsQuery {
+  skip?: number;
+  /** 1..100, default 10 */
+  take?: number;
+  /** `<field>:asc` or `<field>:desc`, default `total:desc` */
+  sortBy?: `${InsightsByWorkflowSortField}:${'asc' | 'desc'}`;
+}
+
+/** P6-05: one row of GET /insights/by-workflow */
+export interface InsightsByWorkflowRow {
+  /** null when the workflow was deleted */
+  workflowId: string | null;
+  workflowName: string;
+  /** the caller may open the workflow (the table links it only then) */
+  hasReadAccess: boolean;
+  projectId: string | null;
+  projectName: string | null;
+  total: number;
+  succeeded: number;
+  failed: number;
+  failureRate: number;
+  runTime: number;
+  averageRunTime: number;
+  timeSaved: number;
+}
+
+/** P6-05: GET /insights/by-workflow (inside the usual `{ data }` envelope) */
+export interface InsightsByWorkflowPage {
+  count: number;
+  data: InsightsByWorkflowRow[];
+}
+
+/** P6-05: one bucket of GET /insights/by-time (`/by-time/time-saved` sends only `timeSaved`) */
+export interface InsightsByTimeRow {
+  /** ISO start of the bucket */
+  date: string;
+  values: Partial<Record<InsightsSummaryType | 'succeeded', number>>;
+}
+
+export type InsightsDateRangeKey = 'day' | 'week' | '2weeks' | 'month' | 'quarter' | '6months' | 'year';
+export type InsightsGranularity = 'hour' | 'day' | 'week';
+
+/** P6-05: GET /insights/settings (every range is open to owner and admin; no licence limits) */
+export interface InsightsSettings {
+  summary: boolean;
+  dashboard: boolean;
+  dateRanges: Array<{ key: InsightsDateRangeKey; licensed: boolean; granularity: InsightsGranularity }>;
+  /** the first day with data, null when there is none */
+  earliestDataDate: string | null;
+}
+
+/** P6-86: what a dependency count or detail is about */
+export type DependencyResourceKind = 'workflow' | 'credential' | 'dataTable';
+
+/** P6-86: how one resource uses another (n8n's keys, `agentUsage` left out) */
+export type DependencyKey =
+  | 'credentialId'
+  | 'dataTableId'
+  | 'errorWorkflow'
+  | 'errorWorkflowParent'
+  | 'workflowCall'
+  | 'workflowParent';
+
+/** P6-86: counts per key for one resource (a missing key is 0); rows the caller cannot read are not counted */
+export type DependencyCounts = Partial<Record<DependencyKey, number>>;
+
+/** P6-86: body of POST /workflow-dependencies/counts and /details (100 ids at most) */
+export interface DependencyQueryBody {
+  resourceType: DependencyResourceKind;
+  resourceIds: string[];
+}
+
+/** P6-86: one related resource the caller may read */
+export interface DependencyDetail {
+  key: DependencyKey;
+  /** the related resource */
+  id: string;
+  name: string;
+  resourceType: DependencyResourceKind;
+  projectId: string | null;
+  /** a related workflow is published */
+  active?: boolean;
+}
+
+/** P6-86: GET /workflow-dependencies/projects/:projectId/folders/:folderId (the folder's whole tree) */
+export interface FolderDependencies {
+  /** workflows in the tree that other resources use, each with what uses it */
+  workflows: Array<{ id: string; name: string; dependencies: DependencyDetail[] }>;
+}
+
+/** P6-83: the workspace's public API rate limits per API key; 0 = no limit; windows in seconds */
+export interface RateLimitSettings {
+  enabled: boolean;
+  globalReadLimit: number;
+  globalReadWindow: number;
+  globalWriteLimit: number;
+  globalWriteWindow: number;
+  endpointReadLimit: number;
+  endpointReadWindow: number;
+  endpointWriteLimit: number;
+  endpointWriteWindow: number;
+}
+
+/** P6-81: someone with the workflow open */
+export interface Collaborator {
+  userId: string;
+  name: string;
+  email: string;
+  /** ISO time of the last heartbeat (gone after 15 minutes without one) */
+  lastSeen: string;
+}
+
+/** P6-81: who may write the workflow now (expires 2 minutes after the last heartbeat) */
+export interface WriteLock {
+  userId: string;
+  /** the holding tab's `push-ref` */
+  clientId: string;
+  name: string;
+  expiresAt: string;
+}
+
+/** P6-81: the answer of POST /workflows/:id/presence and /write-access */
+export interface CollaborationState {
+  collaborators: Collaborator[];
+  writeLock: WriteLock | null;
+}
+
+export type PresenceAction = 'open' | 'heartbeat' | 'close';
+export type WriteAccessAction = 'request' | 'force' | 'release' | 'heartbeat';

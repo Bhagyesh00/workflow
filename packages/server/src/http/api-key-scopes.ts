@@ -90,6 +90,10 @@ export const API_KEY_SCOPES = [
   'roleMappingRule:delete',
   'roleMappingRule:list',
   'roleMappingRule:update',
+  // P6-49, P6-05: node and credential type policies and insights on the public API (appended last)
+  'nodeTypePolicy:manage',
+  'credentialTypePolicy:manage',
+  'insights:read',
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

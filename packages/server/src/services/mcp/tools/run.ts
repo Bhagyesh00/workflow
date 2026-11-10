@@ -18,6 +18,7 @@ import { z } from 'zod';
 import type { ServerContext } from '../../../context';
 import { ApiError } from '../../../http/errors';
 import { loadPublishedDefinition } from '../../published-workflow';
+import { redactSummaries } from '../../redaction/read';
 import { toDefinition } from '../../workflow-model';
 import type { McpCaller, McpToolDefinition } from '../types';
 import { assertWorkflowForMcp, McpToolError, sanitizeNodeCredentials } from '../workflow-gate';
@@ -337,7 +338,13 @@ const testWorkflow: McpToolDefinition<{
       }),
     ]);
     clearTimeout(timer);
-    const execution = await ctx.repos.executions.get(caller.tenant.id, executionId);
+    const stored = await ctx.repos.executions.get(caller.tenant.id, executionId);
+    // P6-53 (S3): the run's error text follows its redaction for this caller (a blanked `errorMessage` is absent)
+    const [execution] = stored
+      ? await redactSummaries(ctx.serviceDeps, { tenantId: caller.tenant.id, userId: caller.user.id }, [
+          stored,
+        ])
+      : [];
     return {
       executionId,
       status: execution?.status ?? 'running',

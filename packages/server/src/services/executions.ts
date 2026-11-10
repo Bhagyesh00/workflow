@@ -10,6 +10,7 @@ import { createHmac, hkdfSync, randomUUID, timingSafeEqual } from 'node:crypto';
 import { copyFile, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import {
+  attachSubWorkflowReport,
   type BinaryDataStore,
   type CodeRunner,
   createInitialState,
@@ -36,7 +37,13 @@ import {
   ExecutionTimeoutError,
   type FormAuthHelper,
   type Item,
+  mergeChannels,
+  nodeCredentialIds,
+  type RedactionChannels,
   type RunData,
+  reportedChannels,
+  reportedCredentialIds,
+  type SubWorkflowReport,
   serializeError,
   sortByPosition,
   type WebhookResponse,
@@ -58,10 +65,19 @@ import type { MessageBus, PushService } from './bus';
 import { assertCredentialsUsable } from './credential-usable';
 import type { CredentialService } from './credentials';
 import type { DataTableService } from './data-tables';
+import { assertNoDeprecatedNodes } from './deprecated-nodes';
 import { maybeSendFirstFailure } from './first-failure-mail';
+import { insightRunOf } from './insights/rules';
 import type { Metrics } from './metrics';
 import { runtimeDefinition } from './published-workflow';
 import type { ExecutionJob, ExecutionQueue } from './queue';
+import {
+  pushableError,
+  pushableTaskData,
+  type RedactionSnapshot,
+  snapshotRedaction,
+} from './redaction/policy';
+import { checkSingleNode, evaluateWorkflow } from './type-policies/enforce';
 import { cloneDefinition } from './workflow-model';
 import { assertNotArchived } from './workflow-rules';
 
@@ -116,6 +132,11 @@ export interface StoredRunOptions {
    * workflow" keeps this definition.
    */
   inlineSource?: boolean;
+  /**
+   * P6 S3 (C0): the redaction snapshot taken at start (`snapshotRedaction`, L8): the channels this run
+   * redacts and why. Absent = nothing redacted.
+   */
+  redaction?: RedactionChannels & { reason?: string };
 }
 
 export interface ExecutionOutcome {
@@ -124,6 +145,13 @@ export interface ExecutionOutcome {
   error?: ExecutionErrorShape;
   lastNodeExecuted?: string;
   lastNodeOutput?: Item[][] | null;
+  /**
+   * P6 S3 (C0): the run's own channels (its snapshot) and those its sub-workflows reported, filled by
+   * `finish`. A caller merges them into its task metadata (`SubWorkflowReport`).
+   */
+  redaction?: { own: RedactionChannels; fromSubWorkflows: RedactionChannels };
+  /** P6 S3 (C0): credential ids the run's nodes reference, plus those its sub-workflows reported */
+  usedCredentialIds?: string[];
 }
 
 export interface ExecutionObserver {
@@ -165,6 +193,8 @@ export interface StartExecutionInput {
   projectId?: string;
   /** P6-25: an inline sub-run (`StoredRunOptions.inlineSource`); `workflowId` is the calling workflow's */
   inlineSource?: boolean;
+  /** P6 S3 (C0): a sub-run: the parent's snapshot channels, which the child's snapshot never goes below (L8) */
+  parentRedaction?: RedactionChannels;
   executionId?: string;
   retryOf?: string;
   /** retry only: the state of the failed execution; the run continues at its `failedExecuteData` */
@@ -215,9 +245,10 @@ export interface ExecutionServiceDeps {
   queue?: ExecutionQueue;
   /**
    * P6 S2 (C0): the whole context, read lazily, for the credential gate (L16), the OAuth JWE hook (L15) and
-   * the first production failure mail (L1). Absent in a hand-built service: none of the three runs.
+   * the first production failure mail (L1). P6 S3 (C0): required; the policy check at start, the redaction
+   * snapshot and the insights record pass it (`this.deps.serviceDeps`).
    */
-  serviceDeps?: ServiceDeps;
+  serviceDeps: ServiceDeps;
 }
 
 /** binary data of one execution lives in `<dir>/<tenantId>/<executionId>` */
@@ -369,6 +400,14 @@ export class ExecutionService {
       projectId: input.projectId,
       inlineSource: input.inlineSource ? true : undefined,
     };
+    // P6 S3 (C0): the redaction channels are fixed at start (L8); stored with the run, so a resume and a
+    // worker read the same snapshot
+    runOptions.redaction = await snapshotRedaction(
+      this.deps.serviceDeps,
+      tenant,
+      input.workflow,
+      input.parentRedaction,
+    );
     const workflowId = input.workflowId ?? input.workflow.id ?? null;
     try {
       await repos.executions.create(
@@ -619,6 +658,13 @@ export class ExecutionService {
       workflow = new Workflow(definition, nodeTypes);
       const projectId = await this.runProjectOf(tenant.id, row.workflowId, options.projectId);
       if (!projectId) throw new WorkflowOperationError('The project of this execution could not be found');
+      // P6 S3 (C0): the type policy at start (L2); every run passes here (sub-runs, retries, resumes). A
+      // violation fails the execution with its text, as any error before the engine starts
+      await evaluateWorkflow(this.deps.serviceDeps, 'workflowStart', {
+        tenantId: tenant.id,
+        projectId,
+        workflow: definition,
+      });
       const services = await this.buildServices({
         tenant,
         executionId,
@@ -631,7 +677,8 @@ export class ExecutionService {
         endUserId: options.endUserId,
         startNode: options.startNode,
         workflow: definition,
-        hooks: this.hooks(tenant.id, row, definition, delivery),
+        redaction: options.redaction,
+        hooks: this.hooks(tenant.id, row, definition, delivery, options.redaction),
         signal,
       });
       engine = new WorkflowExecute(
@@ -715,6 +762,7 @@ export class ExecutionService {
         await this.afterCrash(tenantId, row, message, {
           durationMs: tally.counted ? undefined : durationMs,
           state: engine.state,
+          counted: tally.counted,
         }).catch((e) =>
           logger.warn({ err: e, tenantId, executionId }, 'Crashed execution could not be closed'),
         );
@@ -736,7 +784,8 @@ export class ExecutionService {
     tenantId: string,
     row: ExecutionRow,
     message: string,
-    opts: { durationMs?: number; state?: ExecutionState } = {},
+    /** `counted`: finish() already recorded the run (usage, metrics, insights): the crash adds no failure */
+    opts: { durationMs?: number; state?: ExecutionState; counted?: boolean } = {},
   ): Promise<void> {
     const { repos, push, metrics, logger } = this.deps;
     push.send(
@@ -753,12 +802,37 @@ export class ExecutionService {
     const data = await repos.executions.getData(tenantId, row.id);
     if (!data) return;
     const definition = data.workflowData as unknown as WorkflowDefinition;
+    // P6 S3 (C0): a crash finish() did not count is one failure in insights (L11)
+    if (!opts.counted) this.recordInsight(row, definition, 'crashed', undefined, opts.durationMs ?? 0);
     const options = (data.runOptions ?? {}) as StoredRunOptions;
     const state = opts.state ?? (data.state as unknown as ExecutionState | null) ?? createInitialState();
     state.resultData.error = serializeError(new Error(message));
     await this.startErrorWorkflow(tenantId, row, definition, state, options).catch((e) =>
       logger.warn({ err: e, tenantId, executionId: row.id }, 'Error workflow could not start'),
     );
+  }
+
+  /**
+   * P6 S3 (C0): hands one finished run to the insights buffer (L11). Never awaited and never throws: a
+   * failure here is logged and the run's result stands.
+   */
+  private recordInsight(
+    row: ExecutionRow,
+    definition: WorkflowDefinition,
+    status: ExecutionStatus,
+    runData: RunData | undefined,
+    durationMs: number,
+  ): void {
+    try {
+      this.deps.serviceDeps
+        .context()
+        .insights.record(insightRunOf(row, definition, { status, runData }, durationMs));
+    } catch (e) {
+      this.deps.logger.warn(
+        { err: e, tenantId: row.tenantId, executionId: row.id },
+        'Insights could not record the execution',
+      );
+    }
   }
 
   /** regular-mode startup: close the executions a previous process left running and alert about them */
@@ -789,6 +863,8 @@ export class ExecutionService {
     row: ExecutionRow,
     definition: WorkflowDefinition,
     delivery: Delivery,
+    /** P6 S3 (C0): the run's redaction snapshot (`StoredRunOptions.redaction`) */
+    snapshot?: RedactionSnapshot,
   ): ExecutionHooks {
     const { push, repos } = this.deps;
     const manual = row.mode === 'manual';
@@ -797,11 +873,25 @@ export class ExecutionService {
     const about = { workflowId: row.workflowId ?? definition.id ?? undefined };
     // node runs that sent a chunk, by `<node>:<run>`, with the meta of their last chunk: their end is announced
     const chunked = new Map<string, ChatChunkMeta>();
+    // P6 S3 (C0): the run's effective channels: the snapshot, raised by what its sub-workflows report (the
+    // whole run data once, a resume included, then each task). Channels only go up
+    let channels: RedactionSnapshot | undefined = snapshot;
+    let seeded = false;
+    const raise = (runData: RunData) => {
+      const reported = reportedChannels(runData);
+      if (!reported.production && !reported.manual) return;
+      const base = { production: channels?.production === true, manual: channels?.manual === true };
+      channels = { ...channels, ...mergeChannels(base, reported) };
+    };
     return {
       nodeExecuteBefore: (nodeName) => {
         if (manual) push.send(tenantId, 'nodeExecuteBefore', { executionId, nodeName }, about);
       },
       nodeExecuteAfter: async (nodeName, runIndex, taskData, state) => {
+        if (!seeded) {
+          seeded = true;
+          raise(state.resultData.runData);
+        } else raise({ [nodeName]: [taskData] });
         const ended = chunked.get(`${nodeName}:${runIndex}`);
         if (ended) {
           chunked.delete(`${nodeName}:${runIndex}`);
@@ -812,8 +902,16 @@ export class ExecutionService {
               .catch(() => {});
           }
         }
-        if (manual)
-          push.send(tenantId, 'nodeExecuteAfter', { executionId, nodeName, runIndex, taskData }, about);
+        if (manual) {
+          // P6 S3 (C0): a redacted manual run pushes no item data (L8)
+          const pushed = pushableTaskData(channels, taskData, state);
+          push.send(
+            tenantId,
+            'nodeExecuteAfter',
+            { executionId, nodeName, runIndex, taskData: pushed },
+            about,
+          );
+        }
         if (definition.settings?.saveExecutionProgress) {
           // progress is best effort: a failed write must not fail the node that just ran
           await repos.executions.saveState(tenantId, executionId, state).catch((e) => {
@@ -839,6 +937,8 @@ export class ExecutionService {
         }
       },
       sendMessageToUI: (nodeName, args) => {
+        // P6 S3 (C0): a console message carries node data: none once the manual channel is redacted
+        if (channels?.manual) return;
         push.send(tenantId, 'consoleMessage', { executionId, nodeName, args }, about);
       },
     };
@@ -852,8 +952,8 @@ export class ExecutionService {
     staticBefore: string,
     result: ExecutionResult,
     delivery: Delivery,
-    /** the stored run options: error chain, inline source, stored project */
-    run: Pick<StoredRunOptions, 'errorChain' | 'inlineSource' | 'projectId'>,
+    /** the stored run options: error chain, inline source, stored project, redaction snapshot */
+    run: Pick<StoredRunOptions, 'errorChain' | 'inlineSource' | 'projectId' | 'redaction'>,
     tally?: { counted: boolean },
   ): Promise<void> {
     const { repos, push, metrics, logger } = this.deps;
@@ -899,6 +999,8 @@ export class ExecutionService {
       await repos.usage.increment(tenant.id, currentPeriod(), 0, durationMs);
       metrics.recordExecution(status, row.mode, durationMs);
       if (tally) tally.counted = true;
+      // P6 S3 (C0): insights (L11), buffered: no await, a failure only logs
+      this.recordInsight(row, definition, status, state.resultData.runData, durationMs);
     }
     if (keep) {
       await repos.executions.saveState(tenant.id, row.id, state);
@@ -923,6 +1025,8 @@ export class ExecutionService {
       await this.removeBinaryData(tenant.id, row.id);
     }
 
+    // P6 S3 (C0): the pushed error of a redacted run carries no node data (L8)
+    const pushedError = pushableError(run.redaction, error, state);
     push.send(
       tenant.id,
       'executionFinished',
@@ -930,7 +1034,7 @@ export class ExecutionService {
         executionId: row.id,
         workflowId: row.workflowId,
         status,
-        ...(error ? { error: { message: error.message, node: error.node } } : {}),
+        ...(pushedError ? { error: { message: pushedError.message, node: pushedError.node } } : {}),
       },
       { workflowId: row.workflowId ?? undefined },
     );
@@ -952,6 +1056,11 @@ export class ExecutionService {
       }
     }
 
+    // P6 S3 (C0): what a caller merges into its task (a sub-run's report), from the snapshot and the run data
+    const runData = state.resultData.runData;
+    const usedCredentialIds = [
+      ...new Set([...nodeCredentialIds(definition.nodes), ...reportedCredentialIds(runData)]),
+    ].sort();
     this.emitFinished(
       {
         executionId: row.id,
@@ -959,6 +1068,11 @@ export class ExecutionService {
         error,
         lastNodeExecuted: state.resultData.lastNodeExecuted,
         lastNodeOutput,
+        redaction: {
+          own: { production: run.redaction?.production === true, manual: run.redaction?.manual === true },
+          fromSubWorkflows: reportedChannels(runData),
+        },
+        usedCredentialIds,
       },
       delivery,
     );
@@ -1140,6 +1254,8 @@ export class ExecutionService {
     startNode?: string;
     /** P6-87 (C0): the definition that runs; with it the services carry the credential gate */
     workflow?: WorkflowDefinition;
+    /** P6 S3 (C0): the run's redaction snapshot; a sub-workflow's snapshot starts from it (`parentRedaction`) */
+    redaction?: RedactionChannels;
     hooks?: ExecutionHooks;
     /** aborts when the execution is stopped or times out; sub-workflows it waits for are canceled then */
     signal?: AbortSignal;
@@ -1212,6 +1328,7 @@ export class ExecutionService {
           input.signal,
           input.rootMode ?? input.mode,
           input.endUserId,
+          input.redaction,
         ),
     };
   }
@@ -1238,6 +1355,14 @@ export class ExecutionService {
     // P6 S1: the operation runs in the project of the workflow row the definition was loaded from
     const projectId = await this.runProjectOf(tenant.id, definition.id, undefined);
     if (!projectId) throw ApiError.notFound('Workflow');
+    // P6 S3 (C0): this node runs with credentials outside `run`: the type policy checks it first (L2)
+    const node = definition.nodes.find((candidate) => candidate.name === nodeName);
+    await checkSingleNode(this.deps.serviceDeps, {
+      tenantId: tenant.id,
+      projectId,
+      nodeType: node?.type ?? '',
+      credentialTypes: Object.keys(node?.credentials ?? {}),
+    });
     const services = await this.buildServices({
       tenant,
       executionId: '',
@@ -1275,7 +1400,9 @@ export class ExecutionService {
     rootMode?: ExecutionMode,
     /** P6-15 (C0): a sub-run acts for the parent's person */
     endUserId?: string,
-  ): Promise<{ executionId: string; data: Item[][] | null }> {
+    /** P6 S3 (C0): the parent's snapshot channels; the child's snapshot starts from them (L8) */
+    parentRedaction?: RedactionChannels,
+  ): Promise<{ executionId: string; data: Item[][] | null; report?: SubWorkflowReport }> {
     if (depth >= MAX_SUB_WORKFLOW_DEPTH) {
       throw new Error(`Sub-workflows can be nested at most ${MAX_SUB_WORKFLOW_DEPTH} levels deep`);
     }
@@ -1309,6 +1436,8 @@ export class ExecutionService {
         ? await repos.workflows.get(tenantId, request.parent.workflowId)
         : undefined;
       definition = { ...cloneDefinition(request.source.workflow), id: parentRow?.id };
+      // P6 S3 (C0): an inline definition was never saved, so no save check saw its deprecated nodes (L7)
+      await assertNoDeprecatedNodes(this.deps.serviceDeps, definition.nodes);
       workflowId = parentRow?.id;
       projectId = parentProjectId;
       inlineSource = true;
@@ -1333,15 +1462,22 @@ export class ExecutionService {
       depth: depth + 1,
       errorChain,
       endUserId,
+      parentRedaction,
       inline: !detached,
       wait: !detached,
     });
+    // a detached call reports nothing (as n8n)
     if (detached || !finished) return { executionId, data: [request.items] };
     const outcome = await this.awaitSubWorkflow(executionId, finished, signal);
+    const report = subWorkflowReport(outcome, definition);
     if (outcome.status === 'error' || outcome.status === 'crashed' || outcome.status === 'canceled') {
-      throw new Error(outcome.error?.message ?? `Sub-workflow execution ${executionId} failed`);
+      // a failed child still raises its caller (n8n: attachSubWorkflowRedaction)
+      throw attachSubWorkflowReport(
+        new Error(outcome.error?.message ?? `Sub-workflow execution ${executionId} failed`),
+        report,
+      );
     }
-    return { executionId, data: outcome.lastNodeOutput ?? null };
+    return { executionId, data: outcome.lastNodeOutput ?? null, report };
   }
 
   /** the outcome of a sub-workflow; when the parent is stopped or times out first, the child is canceled */
@@ -1755,6 +1891,28 @@ function decodeResponse(response: EncodedResponse): WebhookResponse {
 function failedResult(state: ExecutionState): ExecutionResult {
   const now = Date.now();
   return { status: 'error', state, startedAt: now, stoppedAt: now, lastNodeOutput: null };
+}
+
+/**
+ * P6 S3 (C0): what a sub-run reports to the node that called it: the credentials it used (its outcome's,
+ * else its nodes'), and the channels the caller inherits: what its own sub-workflows reported, plus its own
+ * snapshot unless the callee sets `redactCallerExecutions: false` (n8n's `includeOwn`). Absent channels
+ * when none is on.
+ */
+function subWorkflowReport(
+  outcome: ExecutionOutcome,
+  callee: Pick<WorkflowDefinition, 'nodes' | 'settings'>,
+): SubWorkflowReport {
+  const usedCredentialIds = outcome.usedCredentialIds ?? nodeCredentialIds(callee.nodes);
+  const redaction = outcome.redaction;
+  const channels = redaction
+    ? callee.settings?.redactCallerExecutions === false
+      ? mergeChannels(redaction.fromSubWorkflows)
+      : mergeChannels(redaction.own, redaction.fromSubWorkflows)
+    : undefined;
+  return channels && (channels.production || channels.manual)
+    ? { usedCredentialIds, subWorkflowRedaction: channels }
+    : { usedCredentialIds };
 }
 
 /** the node of `preferredType`, otherwise the first trigger, otherwise the engine's choice */

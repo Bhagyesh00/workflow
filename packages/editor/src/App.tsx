@@ -11,6 +11,7 @@ import {
   useParams,
 } from 'react-router';
 import { RouterProvider } from 'react-router/dom';
+import { DependencyDialogsHost } from './components/dependencies/DependencyDialogsHost';
 import { ProjectDialogsHost } from './components/projects/ProjectDialogsHost';
 import { ProjectVariablesTab } from './components/projects/ProjectVariablesTab';
 import { AppShell } from './components/shell/AppShell';
@@ -27,6 +28,7 @@ import { FormSignInPage } from './pages/auth/FormSignInPage';
 import { ResetPasswordPage } from './pages/auth/ResetPasswordPage';
 import { NotFoundPage, RouteErrorPage } from './pages/ErrorPages';
 import { InboxPage } from './pages/InboxPage';
+import { InsightsPage } from './pages/InsightsPage';
 import { LdapSettingsPage } from './pages/LdapSettingsPage';
 import {
   ProjectLayout,
@@ -51,6 +53,7 @@ import { AuthenticationSettingsPage } from './pages/sso/AuthenticationSettingsPa
 import { RoleProvisioningPanel } from './pages/sso/RoleProvisioningPanel';
 import { SamlOnboardingPage } from './pages/sso/SamlOnboardingPage';
 import { SsoSettingsPage } from './pages/sso/SsoSettingsPage';
+import { UsagePage } from './pages/UsagePage';
 import { useUiStore } from './stores/ui-store';
 
 // the canvas, node details view and code editors load on demand
@@ -141,12 +144,13 @@ function roleEditorRoutes(roleType: RoleKind): RouteObject[] {
   ];
 }
 
-/** the signed-in layout plus the Share and Move dialogs, mounted once (P6-44) */
+/** the signed-in layout plus the Share and Move dialogs (P6-44) and the dependency dialogs (P6-86), mounted once */
 function ShellRoot() {
   return (
     <>
       <AppShell />
       <ProjectDialogsHost />
+      <DependencyDialogsHost />
     </>
   );
 }
@@ -256,6 +260,8 @@ export const routes: RouteObject[] = [
       },
       { path: 'inbox', element: <InboxPage /> },
       { path: 'inbox/:reviewId', element: <ReviewDetailPage /> },
+      // P6-57: `insights:list`; the page gates itself and reads `:insightType` (default total)
+      { path: 'insights/:insightType?', element: <InsightsPage /> },
       {
         path: 'executions/:id',
         element: (
@@ -279,6 +285,8 @@ export const routes: RouteObject[] = [
           { index: true, element: <Navigate to="/settings/account" replace /> },
           { path: 'account', element: <AccountSettingsPage /> },
           { path: 'members', element: <MembersSettingsPage /> },
+          // P6-84: every signed-in user, as n8n
+          { path: 'usage', element: <UsagePage /> },
           // P6-46: roles (`role:manage`) and the role editors
           { path: 'roles', element: <RolesPage /> },
           { path: 'project-roles', children: roleEditorRoutes('project') },

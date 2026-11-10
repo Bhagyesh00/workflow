@@ -332,6 +332,7 @@ describe('a start another main asked for', () => {
       logger: server.ctx.logger,
       bus: server.ctx.bus,
       leadership: notLeader,
+      serviceDeps: server.ctx.serviceDeps,
       triggerStartTimeoutMs,
     });
   /** the leader of the test server measures the wait with the same setting as the asker */

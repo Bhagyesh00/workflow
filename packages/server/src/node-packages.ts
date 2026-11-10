@@ -5,6 +5,7 @@
 import { type CredentialTypes, type NodeTypes, registriesFromPackages } from '@workflow/core';
 import { nodesBasePackage } from '@workflow/nodes-base';
 import type { NodePackage } from '@workflow/workflow';
+import type { Config } from './config';
 
 const OPTIONAL_PACKAGES = ['@workflow/nodes-ai'];
 
@@ -48,6 +49,10 @@ export interface Registries {
   credentialTypes: CredentialTypes;
 }
 
-export function buildRegistries(packages: NodePackage[]): Registries {
+/**
+ * P6-47 (L3): `lists` is `config.nodes` (NODES_EXCLUDE, NODES_INCLUDE); C0 added the parameter and ignores it
+ * until L3 applies it (an empty `include` means every type).
+ */
+export function buildRegistries(packages: NodePackage[], _lists?: Config['nodes']): Registries {
   return registriesFromPackages(packages);
 }

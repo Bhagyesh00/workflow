@@ -108,6 +108,7 @@ import {
   RespondToWebhookNode,
   SetNode,
 } from './nodes/core/simple.nodes';
+import { TimeSavedNode } from './nodes/core/TimeSaved.node';
 import { TotpNode } from './nodes/core/Totp.node';
 import { WebhookNode } from './nodes/core/Webhook.node';
 import { GraphqlNode, RssFeedReadNode } from './nodes/core/web.nodes';
@@ -164,6 +165,7 @@ export const coreNodes: NodeType[] = [
   EvaluationTriggerNode,
   EvaluationNode,
   ExecutionDataNode,
+  TimeSavedNode,
 ];
 
 export const appNodes: NodeType[] = [

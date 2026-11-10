@@ -11,7 +11,7 @@ export interface ApiKeyScopesFieldProps {
   disabled?: boolean;
 }
 
-/** n8n's public API scopes, by resource (the server's API_KEY_SCOPES, same order) */
+/** n8n's public API scopes, by resource (the server's API_KEY_SCOPES; S3's groups appended last in both) */
 const GROUPS: Array<{ resource: string; label: string; scopes: string[] }> = [
   {
     resource: 'workflow',
@@ -61,6 +61,10 @@ const GROUPS: Array<{ resource: string; label: string; scopes: string[] }> = [
     label: 'Role mapping rules',
     scopes: ['list', 'create', 'update', 'delete'],
   },
+  // P6-49, P6-05: appended last here and in the server's API_KEY_SCOPES
+  { resource: 'nodeTypePolicy', label: 'Node type policies', scopes: ['manage'] },
+  { resource: 'credentialTypePolicy', label: 'Credential type policies', scopes: ['manage'] },
+  { resource: 'insights', label: 'Insights', scopes: ['read'] },
 ];
 
 const withScopes = GROUPS.map((group) => ({

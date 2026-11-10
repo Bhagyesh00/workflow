@@ -11,7 +11,7 @@
 import { z } from 'zod';
 import type { ServerContext } from '../../../context';
 import { ApiError } from '../../../http/errors';
-import { deleteExecution, executionListQuery, listExecutions } from '../../../routes/executions';
+import { deleteExecution, executionListQuery, listExecutions, viewerOf } from '../../../routes/executions';
 import { createTag, tagDTO } from '../../../routes/resources';
 import { MISSING_SCOPE_MESSAGE } from '../../access';
 import { folderCreateSchema, folderDeleteSchema, folderListQuerySchema } from '../../folders';
@@ -41,7 +41,8 @@ const PAGE = 250;
 /** pages looked at per call (1000 executions); `more` tells the model to call again */
 const PAGES_MAX = 4;
 
-async function findTestExecutions(ctx: ServerContext, tenantId: string, workflowId: string) {
+/** P6-53 (S3): `caller` is the viewer of the listed runs (the list goes through `redactSummaries`) */
+async function findTestExecutions(ctx: ServerContext, caller: AssistantCaller, workflowId: string) {
   const ids: string[] = [];
   let skippedActive = 0;
   let cursor: string | undefined;
@@ -49,7 +50,7 @@ async function findTestExecutions(ctx: ServerContext, tenantId: string, workflow
   for (let pageNo = 0; pageNo < PAGES_MAX; pageNo++) {
     const found = await listExecutions(
       ctx,
-      tenantId,
+      viewerOf(caller),
       executionListQuery.parse({ workflowId, limit: PAGE, ...(cursor ? { cursor } : {}) }),
     );
     for (const row of found.data) {
@@ -171,7 +172,7 @@ const cleanupTestExecutions: AssistantToolDefinition<z.output<typeof cleanupInpu
   grantKey: (input) => `cleanupTestExecutions:${input.workflowId}`,
   async approval(ctx, caller, input) {
     const name = await workflowName(ctx, caller, input.workflowId);
-    const found = await findTestExecutions(ctx, caller.tenant.id, input.workflowId);
+    const found = await findTestExecutions(ctx, caller, input.workflowId);
     return {
       title: 'Delete test executions',
       resourceName: name,
@@ -187,7 +188,7 @@ const cleanupTestExecutions: AssistantToolDefinition<z.output<typeof cleanupInpu
   async handler(ctx, run, input) {
     const tenantId = run.tenant.id;
     await ctx.workflows.get(tenantId, input.workflowId);
-    const found = await findTestExecutions(ctx, tenantId, input.workflowId);
+    const found = await findTestExecutions(ctx, run, input.workflowId);
     let deleted = 0;
     for (const id of found.ids) {
       if (run.signal.aborted) break;

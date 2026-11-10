@@ -4,9 +4,11 @@ import type { CallerPolicy, WorkflowSettings } from '@workflow/workflow';
 import { useEffect, useMemo, useState } from 'react';
 import { workflowsApi } from '../../api/endpoints';
 import { useSettings } from '../../api/queries';
+import { RedactionSettingsFields } from '../redaction/RedactionSettingsFields';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { FormField, Select, Switch, TextInput } from '../ui/Field';
+import { TimeSavedFields } from './TimeSavedFields';
 
 function timezones(): string[] {
   try {
@@ -177,6 +179,8 @@ export function WorkflowSettingsModal({
             />
           </div>
         </fieldset>
+        {/* P6-53 (L8): redact production runs, manual runs and callers' copies */}
+        <RedactionSettingsFields draft={draft} set={set} />
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-sm font-semibold">Available in MCP</p>
@@ -227,6 +231,8 @@ export function WorkflowSettingsModal({
             )}
           </FormField>
         )}
+        {/* P6-56 (L12): time saved per run, fixed or from Track Time Saved nodes */}
+        <TimeSavedFields draft={draft} set={set} />
       </div>
     </Dialog>
   );

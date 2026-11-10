@@ -20,16 +20,21 @@ import {
 } from '../http/schemas';
 import type { AccessTarget } from '../services/access';
 import { createCredential, deleteCredential } from './credentials';
-import { deleteExecution, executionListQuery, getExecution, listExecutions } from './executions';
+import { deleteExecution, executionListQuery, getExecution, listExecutions, viewerOf } from './executions';
+import { PUBLIC_AUDIT_ROUTES } from './public-audit';
 import { PUBLIC_DATA_TABLE_ROUTES } from './public-data-tables';
+import { PUBLIC_DEPENDENCY_ROUTES } from './public-dependencies';
 import { PUBLIC_EVALUATION_ROUTES } from './public-evaluations';
 import { PUBLIC_FOLDER_ROUTES } from './public-folders';
+import { PUBLIC_INSIGHTS_ROUTES } from './public-insights';
 import { PUBLIC_LDAP_ROUTES } from './public-ldap';
 import { PUBLIC_PROJECT_ROUTES } from './public-projects';
+import { PUBLIC_RATE_LIMIT_ROUTES } from './public-rate-limits';
 import { PUBLIC_ROLE_MAPPING_ROUTES } from './public-role-mapping';
 import { PUBLIC_ROLE_ROUTES } from './public-roles';
 import { PUBLIC_SECURITY_POLICY_ROUTES } from './public-security-policy';
 import { PUBLIC_SSO_ROUTES } from './public-sso';
+import { PUBLIC_TYPE_POLICY_ROUTES } from './public-type-policies';
 import { PUBLIC_USER_ROUTES } from './public-users';
 import { createTag, projectVariableDTO, renameTag, tagDTO } from './resources';
 
@@ -322,7 +327,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     list: true,
     // an execution is listed when its workflow is (`execution:list` access filter)
     handler: async (ctx, { auth, query }) =>
-      listExecutions(ctx, auth.tenant.id, query, {
+      listExecutions(ctx, viewerOf(auth), query, {
         filter: await ctx.access.listFilter(auth, 'execution:list'),
       }),
   },
@@ -337,7 +342,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     query: executionGetQuery,
     response: 'Execution',
     handler: async (ctx, { auth, params, query }) => ({
-      data: await getExecution(ctx, auth.tenant.id, params.id, query.includeData),
+      data: await getExecution(ctx, viewerOf(auth), params.id, { includeData: query.includeData }),
     }),
   },
   {
@@ -581,6 +586,12 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
   ...PUBLIC_ROLE_MAPPING_ROUTES,
   ...PUBLIC_LDAP_ROUTES,
   ...PUBLIC_SSO_ROUTES,
+  // P6 S3: type policies (P6-49), insights (P6-05), security audit (P6-54), dependencies, rate limits
+  ...PUBLIC_TYPE_POLICY_ROUTES,
+  ...PUBLIC_INSIGHTS_ROUTES,
+  ...PUBLIC_AUDIT_ROUTES,
+  ...PUBLIC_DEPENDENCY_ROUTES,
+  ...PUBLIC_RATE_LIMIT_ROUTES,
 ];
 
 /** JSON schema of credential data from the type's properties */
@@ -983,6 +994,79 @@ const COMPONENTS: Record<string, unknown> = {
       outputs: { type: ['object', 'null'] },
     },
   },
+  // P6 S3 (C0c2): the answers of the S3 public rows; the lanes that fill the rows fill these schemas
+  /** P6-49 (L4): a node or credential type policy scope, the workspace's or one project's */
+  TypePolicyScope: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      kind: { enum: ['node', 'credential'] },
+      projectId: { type: ['string', 'null'], format: 'uuid', description: 'Null for the workspace scope' },
+      defaultAction: { enum: ['allow', 'deny'] },
+      version: { type: 'integer' },
+      attachments: { type: 'array', items: ref('TypePolicyAttachment') },
+    },
+  },
+  /** P6-49 (L4): a policy document, its rules in order */
+  TypePolicyDocument: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      kind: { enum: ['node', 'credential'] },
+      name: { type: 'string' },
+      description: { type: 'string' },
+      rules: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            action: { enum: ['allow', 'deny', 'delegate'] },
+            selector: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                package: { type: 'string' },
+                extends: { type: 'string' },
+              },
+            },
+            description: { type: 'string' },
+          },
+        },
+      },
+      version: { type: 'integer' },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+  /** P6-49 (L4): a policy attached to a scope; a lower priority is checked first */
+  TypePolicyAttachment: {
+    type: 'object',
+    properties: {
+      policyId: { type: 'string', format: 'uuid' },
+      priority: { type: 'integer' },
+      isFloor: { type: 'boolean' },
+    },
+  },
+  /** P6-05 (L11): each metric with its value, unit and deviation against the same length before (null when empty) */
+  InsightsSummary: {
+    type: 'object',
+    additionalProperties: {
+      type: 'object',
+      properties: {
+        value: { type: 'number' },
+        unit: { enum: ['count', 'ratio', 'minute', 'millisecond'] },
+        deviation: { type: ['number', 'null'] },
+      },
+    },
+    description: 'Keys total, failed, failureRate, timeSaved, averageRunTime',
+  },
+  /** P6-54 (L9): the security audit report, one entry per category with risks */
+  SecurityAuditReport: { type: 'object', additionalProperties: true },
+  /** P6-86 (L18): what a resource uses and what uses it, paged; rows the caller cannot read are left out */
+  DependencyList: { type: 'object', additionalProperties: true },
+  /** P6-83 (L15): the workspace's public API limits and windows; 0 means no limit */
+  RateLimitSettings: { type: 'object', additionalProperties: true },
 };
 
 export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown> {

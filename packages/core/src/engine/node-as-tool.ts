@@ -40,6 +40,7 @@ import {
   createBaseContext,
   createExecuteContext,
   getResolvedParameters,
+  mergeSubWorkflowReport,
 } from './node-context';
 import type { ExecutionServices } from './services';
 
@@ -83,6 +84,8 @@ export interface ToolRunHost {
     input: DataObject,
     output: DataObject,
     error?: Error,
+    /** P6 S3 (C0): the call's sub-workflow report (`usedCredentialIds`, `subWorkflowRedaction`) for its task */
+    metadata?: DataObject,
   ): void;
 }
 
@@ -222,6 +225,8 @@ export function createNodeAsTool(
     toolCallId: string,
     callSignal: AbortSignal,
     runIndex: number,
+    /** P6 S3 (C0): the call's sub-workflow reports, a union over its attempts; the tool's task metadata */
+    report: DataObject,
   ): Promise<{ result: string; response: DataObject }> => {
     const merged: Item = {
       json: { ...parentItems[itemIndex]?.json, ...args, toolCallId },
@@ -265,6 +270,9 @@ export function createNodeAsTool(
       },
       setMetadata: (data) => {
         Object.assign(metadata, data);
+      },
+      reportSubWorkflow: (reported) => {
+        mergeSubWorkflowReport(report, reported);
       },
     });
     const ctx: ExecuteContext = {
@@ -317,8 +325,8 @@ export function createNodeAsTool(
     }
   };
 
-  const logFailure = (args: DataObject, error: unknown) =>
-    host.logSubNodeRun(tool, parent, 'ai_tool', args, {}, error as Error);
+  const logFailure = (args: DataObject, error: unknown, report?: DataObject) =>
+    host.logSubNodeRun(tool, parent, 'ai_tool', args, {}, error as Error, report);
 
   let running = 0;
   return {
@@ -344,21 +352,23 @@ export function createNodeAsTool(
         ? Math.min(Math.max(tool.maxTries ?? DEFAULT_TRIES, MIN_TRIES), MAX_TRIES)
         : 1;
       const wait = Math.min(Math.max(tool.waitBetweenTries ?? DEFAULT_WAIT_MS, 0), MAX_WAIT_MS);
+      // P6 S3 (C0): what the sub-workflows of every attempt report; a failed call keeps it too
+      const report: DataObject = {};
       try {
         for (let attempt = 1; ; attempt++) {
           try {
-            const { result, response } = await call(args, toolCallId, callSignal, runIndex);
-            host.logSubNodeRun(tool, parent, 'ai_tool', args, response);
+            const { result, response } = await call(args, toolCallId, callSignal, runIndex, report);
+            host.logSubNodeRun(tool, parent, 'ai_tool', args, response, undefined, report);
             return result;
           } catch (error) {
             if (isToolSuspension(error)) throw error;
             if (attempt >= maxTries || error instanceof QuotaExceededError) {
-              logFailure(args, error);
+              logFailure(args, error, report);
               throw error;
             }
             // an abort during the wait ends the call with the error it was retrying
             await sleep(wait, callSignal).catch(() => {
-              logFailure(args, error);
+              logFailure(args, error, report);
               throw error;
             });
           }

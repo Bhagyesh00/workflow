@@ -29,6 +29,7 @@ import {
   type Item,
   isResourceLocatorValue,
   type Logger,
+  mergeChannels,
   NodeApiError,
   type NodeCredentialRef,
   type NodeExecutionHint,
@@ -37,8 +38,10 @@ import {
   type NodeParameters,
   type NodeType,
   type PollContext,
+  type RedactionChannels,
   resolveNodeParameters,
   type ScheduleSlotStore,
+  type SubWorkflowReport,
   type ToolResumeData,
   type ToolSuspension,
   type TriggerContext,
@@ -56,7 +59,7 @@ import {
   oauth2Request,
 } from '../credentials/authentication';
 import { HttpError, SsrfBlockedError } from '../http/http-client';
-import type { ExecutionServices } from './services';
+import { type ExecutionServices, takeSubWorkflowReport } from './services';
 
 const MIME_BY_EXT: Record<string, string> = {
   json: 'application/json',
@@ -476,6 +479,8 @@ export interface ExecuteContextCallbacks {
   addExecutionHints(hints: NodeExecutionHint[]): void;
   /** receives what the node passes to setMetadata during this run */
   setMetadata?(data: DataObject): void;
+  /** P6 S3 (C0): receives what each sub-workflow the node calls reports (union it, never overwrite) */
+  reportSubWorkflow?(report: SubWorkflowReport): void;
   /** receives a tool's wait and the agent's checkpoint */
   suspendForTool?(suspension: ToolSuspension, checkpoint: DataObject): void;
   /** the checkpoint and the answer when the run resumes after a tool's wait */
@@ -493,25 +498,74 @@ export function createToolParameterReader(
     createBaseContext({ ...deps, extraVariables: fromAiVariables(args) }).getNodeParameter(name, itemIndex);
 }
 
-/** `executeWorkflow` shared by execute and supply-data contexts */
-export function createSubWorkflowCaller(deps: ContextDeps): ExecuteContext['executeWorkflow'] {
+/**
+ * `executeWorkflow` shared by execute and supply-data contexts. P6 S3 (C0): `report` receives what the child
+ * reports (from its result, or from its error, where it is taken off), after the call ends either way; the
+ * node gets `{ executionId, data }` only.
+ */
+export function createSubWorkflowCaller(
+  deps: ContextDeps,
+  report?: (report: SubWorkflowReport) => void,
+): ExecuteContext['executeWorkflow'] {
   const { services, node } = deps;
   return async (source, items, options) => {
     if (!services.executeSubWorkflow) {
       throw new NodeOperationError(node, 'Sub-workflow execution is not available in this environment');
     }
-    return services.executeSubWorkflow({
-      source,
-      items,
-      options,
-      parent: {
-        executionId: services.executionId,
-        workflowId: deps.workflow.id,
-        nodeName: node.name,
-        tenantId: services.tenantId,
-      },
-    });
+    let received: SubWorkflowReport | undefined;
+    try {
+      const result = await services.executeSubWorkflow({
+        source,
+        items,
+        options,
+        parent: {
+          executionId: services.executionId,
+          workflowId: deps.workflow.id,
+          nodeName: node.name,
+          tenantId: services.tenantId,
+        },
+      });
+      received = result.report;
+      return { executionId: result.executionId, data: result.data };
+    } catch (error) {
+      received = takeSubWorkflowReport(error);
+      throw error;
+    } finally {
+      if (received && report) report(received);
+    }
   };
+}
+
+/**
+ * P6 S3 (C0): unions a sub-workflow report into task metadata, so two calls from one task both count:
+ * `usedCredentialIds` as a sorted set, `subWorkflowRedaction` through `mergeChannels`. A key is written only
+ * when it carries something (no ids, no channel on: the metadata stays as it was).
+ */
+export function mergeSubWorkflowReport(metadata: DataObject, report: SubWorkflowReport): void {
+  const before = Array.isArray(metadata.usedCredentialIds) ? (metadata.usedCredentialIds as unknown[]) : [];
+  const ids = new Set<string>();
+  for (const id of [...before, ...(report.usedCredentialIds ?? [])]) {
+    if (typeof id === 'string' && id) ids.add(id);
+  }
+  if (ids.size) metadata.usedCredentialIds = [...ids].sort();
+  const reported = report.subWorkflowRedaction;
+  if (reported && (reported.production || reported.manual)) {
+    const current = metadata.subWorkflowRedaction as Partial<RedactionChannels> | undefined;
+    metadata.subWorkflowRedaction = {
+      ...mergeChannels(
+        { production: current?.production === true, manual: current?.manual === true },
+        reported,
+      ),
+    };
+  }
+}
+
+/** P6 S3 (C0): the sub-workflow report keys of task metadata (for a sub-node task); undefined when none */
+export function subWorkflowReportOf(metadata: DataObject): DataObject | undefined {
+  const out: DataObject = {};
+  if (metadata.usedCredentialIds !== undefined) out.usedCredentialIds = metadata.usedCredentialIds;
+  if (metadata.subWorkflowRedaction !== undefined) out.subWorkflowRedaction = metadata.subWorkflowRedaction;
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** what a Python run says when the instance has no Python runner */
@@ -598,7 +652,7 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
     getInputConnectionData: (type, itemIndex) => callbacks.getInputConnectionData(type, itemIndex),
     continueOnFail: () => callbacks.continueOnFail(),
     getRunIndex: () => deps.runIndex ?? 0,
-    executeWorkflow: createSubWorkflowCaller(deps),
+    executeWorkflow: createSubWorkflowCaller(deps, (report) => callbacks.reportSubWorkflow?.(report)),
     async putExecutionToWait(waitTill: Date) {
       callbacks.putExecutionToWait(waitTill);
     },

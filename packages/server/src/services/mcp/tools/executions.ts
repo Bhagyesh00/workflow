@@ -7,7 +7,8 @@
 import type { DataObject } from '@workflow/workflow';
 import { z } from 'zod';
 import { parse } from '../../../http/errors';
-import { executionListQuery, getExecution, listExecutions } from '../../../routes/executions';
+import { executionListQuery, getExecution, listExecutions, viewerOf } from '../../../routes/executions';
+import { redactExecution } from '../../redaction/read';
 import type { McpToolDefinition } from '../types';
 import {
   assertWorkflowForMcp,
@@ -104,10 +105,17 @@ const getWorkflowExecution: McpToolDefinition<{
     }
     // the execution's own scope, on the project of its workflow (P6-35)
     await requireMcpScope(ctx, caller, 'execution:read', { executionId: row.id });
-    const execution = await getExecution(ctx, caller.tenant.id, input.executionId, false);
+    // P6-53 (S3): the row and the run data go through the redaction of this caller (a tool never reveals)
+    const viewer = viewerOf(caller);
+    const execution = await getExecution(ctx, viewer, input.executionId, { includeData: false });
     if (!input.includeData) return { execution };
-    const data = await ctx.repos.executions.getData(caller.tenant.id, input.executionId);
-    return { execution, data: runDataView(data?.state, input.nodeNames, input.truncateData) };
+    const read = await redactExecution(
+      ctx.serviceDeps,
+      viewer,
+      row,
+      await ctx.repos.executions.getData(caller.tenant.id, input.executionId),
+    );
+    return { execution, data: runDataView(read.data?.state, input.nodeNames, input.truncateData) };
   },
 };
 
@@ -138,7 +146,7 @@ const searchWorkflowExecutions: McpToolDefinition<{
       cursor: input.cursor,
     });
     const filter = await mcpListFilter(ctx, caller, 'execution:list');
-    const page = await listExecutions(ctx, caller.tenant.id, query, { filter });
+    const page = await listExecutions(ctx, viewerOf(caller), query, { filter });
     const available = await workflowsAvailableInMcp(
       ctx,
       caller.tenant.id,

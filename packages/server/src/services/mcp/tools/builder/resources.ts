@@ -15,6 +15,7 @@ import {
   type WorkflowNode,
 } from '@workflow/workflow';
 import { z } from 'zod';
+import { checkSingleNode } from '../../../type-policies/enforce';
 import type { McpToolDefinition } from '../../types';
 import {
   McpToolError,
@@ -101,6 +102,13 @@ export const exploreNodeResourcesTool: McpToolDefinition<z.output<typeof explore
       { name: 'explore', nodes: [node], connections: {} },
       projectId,
     );
+    // P6-04 (S3): the type policy judges the node type and its credential types before any decrypt
+    await checkSingleNode(ctx.serviceDeps, {
+      tenantId,
+      projectId,
+      nodeType: node.type,
+      credentialTypes: Object.keys(node.credentials ?? {}),
+    });
 
     const workflow = new Workflow(
       { name: 'options', nodes: [node], connections: {} },

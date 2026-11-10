@@ -23,9 +23,11 @@ import { AssistantSettingsService } from './services/assistant/settings';
 import type { AssistantToolDefinition } from './services/assistant/types';
 import { AuthService } from './services/auth';
 import { MemoryBus, type MessageBus, PushService, RedisBus } from './services/bus';
+import { CollaborationService } from './services/collaboration';
 import { CredentialGateService } from './services/credential-gate';
 import { CredentialService } from './services/credentials';
 import { DataTableService } from './services/data-tables';
+import { DependencyService } from './services/dependencies';
 import { EvaluationService } from './services/evaluations';
 import { ExecutionService } from './services/executions';
 import { FavoriteService } from './services/favorites';
@@ -33,6 +35,8 @@ import { FolderService } from './services/folders';
 import { FormAuthService } from './services/form-auth';
 import { FormTokenService } from './services/form-tokens';
 import { HistoryCompactionService } from './services/history-compaction';
+import { InsightsCollector } from './services/insights/collector';
+import { InsightsCompaction } from './services/insights/compaction';
 import { Mailer } from './services/mailer';
 import { Pruner, WaitTracker } from './services/maintenance';
 import { createMcpAuthHelper } from './services/mcp/oauth/tokens';
@@ -47,6 +51,7 @@ import { OAuth2Service } from './services/oauth2';
 import { PasswordService } from './services/password';
 import { PrivateCredentialService } from './services/private-credentials';
 import { ProjectService } from './services/projects';
+import { RateLimitSettingsService } from './services/public-api-rate-limit';
 import { PublishHistoryService } from './services/publish-history';
 import { ExecutionQueue, type Leadership, RedisLeader, SingleLeader } from './services/queue';
 import { RoleService } from './services/roles';
@@ -67,6 +72,9 @@ import {
   type TestWebhookStore,
 } from './services/test-webhooks';
 import { TransferService } from './services/transfer';
+import { buildPackageIndex } from './services/type-policies/package-index';
+import { PolicySnapshots } from './services/type-policies/snapshot';
+import { TypePolicyStore } from './services/type-policies/store';
 import { VariableService } from './services/variables';
 import { WebhookService } from './services/webhooks';
 import { WorkflowArchiveService } from './services/workflow-archive';
@@ -185,6 +193,25 @@ export interface ServerContext {
   /** P6-87 (L16): the credential gate of signed-in triggers */
   credentialGate: CredentialGateService;
   /**
+   * P6 S3 (C0): the lazy deps every service gets, and the first argument routes, MCP and Assistant tools pass
+   * to the policy, redaction and deprecated-node checks (`ctx.serviceDeps`)
+   */
+  serviceDeps: ServiceDeps;
+  /** P6-48 (S3 L1): the type policy store */
+  typePolicies: TypePolicyStore;
+  /** P6-48 (S3 L1): every tenant's policies in memory; every role starts and stops it */
+  policySnapshots: PolicySnapshots;
+  /** P6-05 (S3 L11): the insights buffer; every role starts and stops it, `close` flushes it */
+  insights: InsightsCollector;
+  /** P6-05 (S3 L11): compaction and prune, leader only */
+  insightsCompaction: InsightsCompaction;
+  /** P6-81 (S3 L14): presence and the write lock */
+  collaboration: CollaborationService;
+  /** P6-86 (S3 L18): dependency counts and details */
+  dependencies: DependencyService;
+  /** P6-83 (S3 L15): the public API rate limit setting */
+  rateLimitSettings: RateLimitSettingsService;
+  /**
    * P6-09, P6-10: plain http to an identity provider (`ContextOptions.allowInsecureIdp`, tests only; never
    * read from the environment). Services read `this.deps.context().allowInsecureIdp`.
    */
@@ -294,7 +321,11 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const database = createDatabase(config.databaseUrl);
   if (options.migrate !== false) await runMigrations(database.pool);
   const repos = createRepositories(database.db);
-  const registries = buildRegistries(options.nodePackages ?? (await loadNodePackages()));
+  const nodePackages = options.nodePackages ?? (await loadNodePackages());
+  // P6-47 (L3): NODES_EXCLUDE, NODES_INCLUDE
+  const registries = buildRegistries(nodePackages, config.nodes);
+  // P6-48 (L1): which package each type comes from (the `package` selector)
+  const packageIndex = buildPackageIndex(nodePackages);
   const cipher = new CredentialCipher(config.encryptionKeys);
   const http =
     options.http ??
@@ -393,6 +424,14 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const privateCredentials = new PrivateCredentialService(serviceDeps);
   const oauthJwe = new OAuthJweService(serviceDeps);
   const credentialGate = new CredentialGateService(serviceDeps);
+  // P6 S3: governance and insights (C0 stubs: constructors pass; start, stop and flush pass)
+  const typePolicies = new TypePolicyStore(serviceDeps);
+  const policySnapshots = new PolicySnapshots(serviceDeps, packageIndex);
+  const insights = new InsightsCollector(serviceDeps);
+  const insightsCompaction = new InsightsCompaction(serviceDeps);
+  const collaboration = new CollaborationService(serviceDeps);
+  const dependencies = new DependencyService(serviceDeps);
+  const rateLimitSettings = new RateLimitSettingsService(serviceDeps);
   let assistantTimers: AssistantTimers | undefined;
   const stopAssistantTimers = async () => {
     const timers = assistantTimers;
@@ -405,6 +444,8 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     activeWorkflows: async () => (await repos.workflows.listActiveAcrossTenants()).length,
   });
   const credentials = new CredentialService(repos, cipher, registries.credentialTypes);
+  // P6 S3: until this runs, a credential create fails closed
+  credentials.setPolicyDeps(serviceDeps);
   const auth = new AuthService(config, database, repos);
   // P6-01, P6-12, P6-18: the sign-in steps the SSO, LDAP and MFA services own
   auth.useSignInSteps({
@@ -451,6 +492,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     bus,
     leadership,
     privateCredentials,
+    serviceDeps,
   });
   const webhooks = new WebhookService({
     config,
@@ -553,6 +595,14 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     privateCredentials,
     oauthJwe,
     credentialGate,
+    serviceDeps,
+    typePolicies,
+    policySnapshots,
+    insights,
+    insightsCompaction,
+    collaboration,
+    dependencies,
+    rateLimitSettings,
     allowInsecureIdp: options.allowInsecureIdp === true,
 
     async startMain() {
@@ -560,6 +610,9 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       started = true;
       // triggers and resumed runs resolve credentials: the secrets must be loaded first
       await secrets.start();
+      // P6 S3: runs check the type policies and record insights from the first one on
+      await policySnapshots.start();
+      insights.start();
       await executions.init();
       await evaluations.init();
       await activeWorkflows.init();
@@ -580,6 +633,8 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
           waitTracker.start();
           pruner.start();
           historyCompaction.start();
+          // P6-05: insights compaction and prune
+          insightsCompaction.start();
           // P6-12: LDAP syncs of the workspaces that are due
           ldap.startSweep();
           // P5-67: stale runs and expired cards every 30 s (one run now); thread TTL pruning
@@ -594,6 +649,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
           waitTracker.stop();
           pruner.stop();
           historyCompaction.stop();
+          await insightsCompaction.stop();
           ldap.stopSweep();
           await stopAssistantTimers();
           await activeWorkflows.stopAll();
@@ -606,6 +662,9 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       if (!started) {
         started = true;
         await secrets.start();
+        // P6 S3: workers check the type policies and record insights too
+        await policySnapshots.start();
+        insights.start();
         await executions.init();
       }
       queue.startWorker((job, meta) => executions.runQueued(job, meta), config.queue.concurrency);
@@ -618,6 +677,7 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       waitTracker.stop();
       pruner.stop();
       historyCompaction.stop();
+      await insightsCompaction.stop().catch(() => {});
       ldap.stopSweep();
       await stopAssistantTimers();
       await leadership.stop().catch(() => {});
@@ -629,6 +689,10 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       await mcpTrigger.close().catch(() => {});
       await mcpSessions.close().catch(() => {});
       await executions.close().catch(() => {});
+      // P6-05: the runs have ended: write what the buffer holds, then stop it
+      await insights.flush().catch(() => {});
+      await insights.stop().catch(() => {});
+      await policySnapshots.stop().catch(() => {});
       await testWebhooks.close().catch(() => {});
       await secrets.stop().catch(() => {});
       await bus.close().catch(() => {});

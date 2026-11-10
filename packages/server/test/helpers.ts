@@ -39,6 +39,7 @@ import type { AiRuntime } from '../src/services/ai-builder/runtime';
 import type { AssistantToolDefinition } from '../src/services/assistant/types';
 import { type SessionAuthMethod, sha256 } from '../src/services/auth';
 import type { SecretProviderType } from '../src/services/secrets/types';
+import type { PolicyDocument, PolicyKind } from '../src/services/type-policies/types';
 
 export const BASE_URL = 'http://localhost:5678';
 export const ORIGIN = 'http://localhost:5678';
@@ -360,6 +361,12 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'type_policy_attachments',
+  'type_policy_scopes',
+  'type_policies',
+  'insights_by_period',
+  'insights_metadata',
+  'public_api_idempotency',
   'credential_user_entries',
   'role_mapping_rule_projects',
   'role_mapping_rules',
@@ -801,6 +808,39 @@ export async function addToProject(
   if (!(await relations.add(tenantId, projectId, userId, role))) {
     await relations.updateRole(tenantId, projectId, userId, role);
   }
+}
+
+/**
+ * P6 S3 (C0g): denies one node or credential type `type` in the workspace scope (`projectId` unset) or in a
+ * project's scope, through `ctx.typePolicies` (no route): a new document with one deny rule on the type name,
+ * attached last (after the scope's attachments, not a floor) with the version the scope reads. Answers the
+ * document. Throws until L1 fills the store; only L1's dependents call it.
+ */
+export async function policyDeny(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  kind: PolicyKind,
+  type: string,
+  projectId?: string,
+): Promise<PolicyDocument> {
+  const store = server.ctx.typePolicies;
+  const { policy } = await store.createPolicy(tenantId, kind, {
+    name: `deny ${type} ${randomUUID().slice(0, 8)}`,
+    rules: [{ id: randomUUID(), action: 'deny', selector: { name: type } }],
+  });
+  const scope = await store.getScope(tenantId, kind, projectId ?? null);
+  const priority = scope.attachments.reduce((max, a) => Math.max(max, a.priority + 1), 0);
+  await store.putScope(
+    tenantId,
+    kind,
+    projectId ?? null,
+    {
+      defaultAction: scope.defaultAction,
+      attachments: [...scope.attachments, { policyId: policy.id, priority, isFloor: false }],
+    },
+    scope.version,
+  );
+  return policy;
 }
 
 /** a saved workflow owned by `projectId`, made through the repository */

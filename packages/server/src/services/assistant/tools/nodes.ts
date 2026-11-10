@@ -35,9 +35,11 @@ import { z } from 'zod';
 import type { ServerContext } from '../../../context';
 import { nodeDetails, searchNodes } from '../../ai-builder/tools';
 import { assertCredentialsUsable } from '../../credential-usable';
+import { assertNoDeprecatedNodes } from '../../deprecated-nodes';
 import { assertCredentialsInTenant } from '../../mcp/tools/builder/credential-check';
 import { McpToolError } from '../../mcp/workflow-gate';
 import { loadNodeOptions } from '../../node-options';
+import { checkSingleNode } from '../../type-policies/enforce';
 import { approvalPreview } from '../approvals';
 import { previewOutput, runAndCollect } from '../run-helper';
 import {
@@ -562,6 +564,20 @@ export function parameterFacts(parameters: Record<string, unknown>): AssistantAp
   return facts;
 }
 
+/**
+ * P6 S3: the type policy (P6-04: the node type and its credential types) and the deprecated nodes (P6-52) judge
+ * the node before the approval card and again before the run, so before any decrypt
+ */
+async function assertNodeAllowed(ctx: ServerContext, run: AssistantRunScope, prepared: PreparedNode) {
+  await checkSingleNode(ctx.serviceDeps, {
+    tenantId: run.tenant.id,
+    projectId: prepared.projectId,
+    nodeType: prepared.node.type,
+    credentialTypes: Object.keys(prepared.node.credentials ?? {}),
+  });
+  await assertNoDeprecatedNodes(ctx.serviceDeps, [prepared.node]);
+}
+
 const executeNodeTool: AssistantToolDefinition<ExecuteNodeInput> = {
   name: 'execute_node',
   description:
@@ -573,6 +589,7 @@ const executeNodeTool: AssistantToolDefinition<ExecuteNodeInput> = {
   // the card (or a thread grant) comes from `suspendFor`, so the grant uses the node's defaults
   async suspendFor(ctx, run, input) {
     const prepared = await prepareNode(ctx, run, input);
+    await assertNodeAllowed(ctx, run, prepared);
     const { grantKey, label } = executeNodeScope(prepared.nodeType, input.config.parameters);
     if (grantKey) {
       const thread = await ctx.repos.assistantThreads.get(run.tenant.id, run.user.id, run.threadId);
@@ -592,6 +609,7 @@ const executeNodeTool: AssistantToolDefinition<ExecuteNodeInput> = {
   },
   async handler(ctx, run, input) {
     const prepared = await prepareNode(ctx, run, input);
+    await assertNodeAllowed(ctx, run, prepared);
     const timeoutMs = Math.min(input.timeoutMs ?? EXECUTE_NODE_MAX_MS, EXECUTE_NODE_MAX_MS);
     const items: Item[] = (input.input?.length ? input.input : [{ json: {} }]).map((item) => ({
       json: item.json as DataObject,

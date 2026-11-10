@@ -5,6 +5,7 @@
  * The workflow JSON shape (nodes keyed by name in `connections`) is intentionally close to the
  * de-facto format used by node-graph automation tools so that imported workflows map cleanly.
  */
+import type { RedactionPolicy } from './redaction';
 import type { ToolSuspensionState } from './tool-suspension';
 
 // ---------------------------------------------------------------------------------------------
@@ -164,6 +165,14 @@ export interface WorkflowSettings {
   callerIds?: string[];
   /** the workspace MCP server may list, read and run this workflow (n8n's `availableInMCP`) */
   availableInMCP?: boolean;
+  /** time saved per run: `fixed` uses `timeSavedPerExecution`, `dynamic` sums the Track Time Saved nodes (P6-56) */
+  timeSavedMode?: 'fixed' | 'dynamic';
+  /** minutes saved per production run when `timeSavedMode` is `fixed` (or unset) */
+  timeSavedPerExecution?: number;
+  /** which runs' data is redacted at read (P6-53); never weaker than the workspace floor */
+  redactionPolicy?: RedactionPolicy;
+  /** false: a caller does not inherit this workflow's own redaction (deeper sub-workflows still pass up) */
+  redactCallerExecutions?: boolean;
 }
 
 export interface WorkflowDefinition {
@@ -488,6 +497,10 @@ export interface NodeTypeDescription {
   alias?: string[];
   /** hide from node creator (internal / deprecated) */
   hidden?: boolean;
+  /** deprecated: saved workflows keep running, but a save or import may not add it (P6-04h) */
+  deprecated?: boolean;
+  /** type name of the node that replaces a deprecated one */
+  replacedBy?: string;
   /** max instances per workflow */
   maxNodes?: number;
   /** may be attached to an AI agent as a tool; `replacements` overrides parts of the tool variant's description */

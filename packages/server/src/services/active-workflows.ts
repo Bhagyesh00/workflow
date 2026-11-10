@@ -34,6 +34,7 @@ import {
 } from '@workflow/workflow';
 import { Cron } from 'croner';
 import type { Config } from '../config';
+import type { ServiceDeps } from '../context';
 import type { Database } from '../db/client';
 import type { TenantRow, WorkflowRow } from '../db/schema';
 import { ApiError } from '../http/errors';
@@ -48,6 +49,8 @@ import { loadPublishedDefinition, publishedDefinition } from './published-workfl
 import type { Leadership } from './queue';
 import { TEST_TRIGGER_TTL_MS, TEST_WEBHOOK_TTL_MS } from './test-webhooks';
 import { closeBounded, TriggerRetryQueue } from './trigger-retry';
+import { evaluateWorkflow } from './type-policies/enforce';
+import { PolicyViolationError } from './type-policies/errors';
 import { hookUrl, type NodeWebhook, nodeWebhooks, workflowWebhooks } from './webhook-paths';
 import { assertNotArchived } from './workflow-rules';
 
@@ -210,6 +213,11 @@ export interface ActiveWorkflowDeps {
   testTriggerTtlMs?: number;
   /** P6-15 (C0): the publish check of private credentials (context.ts passes it; a hand-built manager skips it) */
   privateCredentials?: Pick<PrivateCredentialService, 'assertPublishable'>;
+  /**
+   * P6 S3 (C0): the whole context, read lazily: the publish and startup policy checks pass it
+   * (`this.deps.serviceDeps`). A hand-built manager passes `server.ctx.serviceDeps`.
+   */
+  serviceDeps: ServiceDeps;
 }
 
 export class ActiveWorkflowManager {
@@ -496,6 +504,12 @@ export class ActiveWorkflowManager {
     const issues = await this.validate(tenantId, definition, workflowId);
     if (issues.length)
       throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', issues);
+    // P6-04 (S3): the type policy judges the whole version at publish (and republish)
+    await evaluateWorkflow(this.deps.serviceDeps, 'workflowPublish', {
+      tenantId,
+      projectId: row.projectId,
+      workflow: definition,
+    });
     // P6 S1: every credential the version uses must be usable in the workflow's project
     await assertCredentialsUsable(this.deps, tenantId, row.projectId, definition);
     // P6-15: a workflow with a private credential publishes only when every enabled trigger knows the person
@@ -1155,6 +1169,16 @@ export class ActiveWorkflowManager {
       await this.startWorkflowTriggers(tenantId, workflowId, mode);
       this.activationErrors.delete(workflowId);
     } catch (error) {
+      // P6-04 (S3): a start-up (or its retry) the type policy refuses logs and leaves the workflow unstarted,
+      // with no retry; a check that failed (503) goes the retry way below
+      if (mode === 'init' && error instanceof PolicyViolationError) {
+        this.deps.logger.warn(
+          { tenantId, workflowId, code: error.code },
+          'The type policy blocks this published workflow, its triggers were not started',
+        );
+        this.activationErrors.set(workflowId, error.message);
+        return;
+      }
       if (typeof rethrow === 'function' ? rethrow() : rethrow) throw error;
       this.triggerFailed(tenantId, workflowId, toError(error));
     }
@@ -1230,6 +1254,15 @@ export class ActiveWorkflowManager {
     if (!tenant) return;
     const definition = await loadPublishedDefinition(repos, tenantId, row);
     if (!definition) return;
+    // P6-04 (S3): at start-up (`init`, also a retry) the type policy judges the published version as a publish
+    // does; a refusal leaves the workflow unstarted (startTriggersNow)
+    if (mode === 'init') {
+      await evaluateWorkflow(this.deps.serviceDeps, 'workflowPublish', {
+        tenantId,
+        projectId: row.projectId,
+        workflow: definition,
+      });
+    }
     const workflow = new Workflow(definition, nodeTypes);
     const entry: RunningTriggers = {
       tenantId,

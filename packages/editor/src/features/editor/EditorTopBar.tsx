@@ -24,6 +24,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { useAiBuilderFeature } from '../../api/queries';
 import type { PublishBody } from '../../api/types';
+import { CollaboratorsPane } from '../../components/collaboration/CollaboratorsPane';
 import { Button, IconButton } from '../../components/ui/Button';
 import { cx } from '../../components/ui/cx';
 import { Dialog } from '../../components/ui/Dialog';
@@ -172,6 +173,8 @@ export function EditorTopBar({
           </button>
         )}
       </div>
+      {/* P6-81 (L14): who else has this workflow open */}
+      {meta.id && <CollaboratorsPane workflowId={meta.id} />}
       <span className={cx('hidden text-xs md:inline', dirty ? 'text-warn' : 'text-ink-3')} aria-live="polite">
         {saving ? 'Saving…' : dirty ? 'Unsaved changes' : meta.id ? 'Saved' : 'Not saved yet'}
       </span>

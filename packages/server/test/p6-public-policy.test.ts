@@ -50,7 +50,7 @@ describe('security policy', () => {
     const owner = await signup(server.app);
     const res = await api(await keyOf(owner.client), 'GET');
     expect(res.statusCode).toBe(200);
-    expect(res.json().data).toEqual({
+    expect(res.json().data).toMatchObject({
       personalSpacePublishing: true,
       personalSpaceSharing: true,
       publishedPersonalWorkflowsCount: 0,

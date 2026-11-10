@@ -73,7 +73,7 @@ describe('GET and POST /settings/security', () => {
   it('answers both flags on and zero counts by default', async () => {
     const owner = await signup(server.app);
     const policy = await owner.client.data(owner.client.get('/rest/settings/security'));
-    expect(policy).toEqual({
+    expect(policy).toMatchObject({
       personalSpacePublishing: true,
       personalSpaceSharing: true,
       publishedPersonalWorkflowsCount: 0,

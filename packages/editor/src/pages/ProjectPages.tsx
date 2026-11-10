@@ -10,6 +10,7 @@ import { lazy, Suspense, useEffect } from 'react';
 import { Outlet } from 'react-router';
 import { errorMessage, isApiError } from '../api/client';
 import { useProject } from '../api/queries';
+import { InsightsSummaryStrip } from '../components/insights/InsightsSummaryStrip';
 import { ProjectHeader } from '../components/projects/ProjectHeader';
 import { ProjectTabs } from '../components/projects/ProjectTabs';
 import { EmptyState, PageLoader } from '../components/ui/misc';
@@ -57,6 +58,8 @@ export function ProjectLayout({ kind, projectId }: ProjectLayoutProps) {
   return (
     <>
       <ProjectHeader kind={kind} projectId={projectId} />
+      {/* P6-57 (L13): the workspace's last 7 days, on the Overview only (as n8n) */}
+      {kind === 'home' && <InsightsSummaryStrip />}
       <ProjectTabs kind={kind} projectId={projectId} />
       <Outlet />
     </>

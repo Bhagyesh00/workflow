@@ -57,6 +57,11 @@ export interface WorkflowListFilter extends AccessListOptions {
   active?: boolean;
   /** a folder id, 'root' (no folder) or omitted (every folder) */
   folderId?: string;
+  /**
+   * P6-49 (S3): only workflows with a node of one of these types (`executionBlockedBy=restrictedNode`);
+   * an empty list matches none. Type only from C0: L4 writes the query (ignored until then).
+   */
+  usesNodeTypes?: string[];
   /** 'false' (default) hides archived workflows, 'true' shows only them, 'all' both */
   archived?: 'false' | 'true' | 'all';
   limit: number;

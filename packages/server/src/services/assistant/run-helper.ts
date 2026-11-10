@@ -17,13 +17,15 @@ import {
   type ExecutionState,
   type ExecutionStatus,
   type Item,
+  type RedactionChannels,
   type RunData,
   redactSecrets,
+  reportedChannels,
   type WorkflowDefinition,
 } from '@workflow/workflow';
 import type { ServerContext } from '../../context';
 import { wrapUntrusted } from '../ai-builder/context';
-import type { ExecutionOutcome, StartExecutionInput } from '../executions';
+import type { ExecutionOutcome, StartExecutionInput, StoredRunOptions } from '../executions';
 import type { AssistantRunScope } from './types';
 
 /** what a tool may pass: everything but the mode (always `manual`), `wait`, the tenant and the user */
@@ -51,6 +53,11 @@ export interface RunOutcome {
   lastNodeExecuted?: string;
   /** every node's runs; only the last node's output when the workflow does not save manual runs */
   runData: RunData;
+  /**
+   * P6 S3 (C0): `ExecutionOutcome.redaction`, or for a run that did not report one (stopped, timed out) the
+   * stored snapshot and the sub-workflow reports in its run data. Present only when a channel is on.
+   */
+  redaction?: ExecutionOutcome['redaction'];
 }
 
 /** how much of a run the model sees */
@@ -136,6 +143,7 @@ export async function runAndCollect(
           ...(typeof outcome.error.node === 'string' ? { node: outcome.error.node } : {}),
         }
       : undefined;
+  const redaction = runRedaction(outcome, data?.runOptions as StoredRunOptions | null | undefined, runData);
   return {
     executionId,
     status,
@@ -143,7 +151,22 @@ export async function runAndCollect(
     ...(error ? { error } : {}),
     ...(lastNodeExecuted ? { lastNodeExecuted } : {}),
     runData,
+    ...(redaction ? { redaction } : {}),
   };
+}
+
+/** P6 S3 (C0): the run's redaction channels (see `RunOutcome.redaction`); undefined when none is on */
+function runRedaction(
+  outcome: ExecutionOutcome | undefined,
+  stored: StoredRunOptions | null | undefined,
+  runData: RunData,
+): RunOutcome['redaction'] {
+  const redaction = outcome?.redaction ?? {
+    own: { production: stored?.redaction?.production === true, manual: stored?.redaction?.manual === true },
+    fromSubWorkflows: reportedChannels(runData),
+  };
+  const on = (c: RedactionChannels) => c.production || c.manual;
+  return on(redaction.own) || on(redaction.fromSubWorkflows) ? redaction : undefined;
 }
 
 /** a run whose row was not kept (`saveManualExecutions: false`): the last node's output only */
@@ -211,13 +234,17 @@ function previewItem(item: Item): DataObject {
  * status, item counts and (with `sendValues`) the first items. Binary data never: name, type and size.
  */
 export function previewOutput(outcome: RunOutcome, sendValues: boolean): string {
+  // P6 S3 (C0): a run whose manual channel is redacted (its own snapshot or a sub-workflow's report) shows
+  // the model no item values, as with `sendValues` off (L8 fills the snapshot)
+  const redacted = isManualRedacted(outcome.redaction);
+  const showValues = sendValues && !redacted;
   const nodes = Object.entries(outcome.runData ?? {}).map(([name, runs]) => {
     const last = Array.isArray(runs) ? runs[runs.length - 1] : undefined;
     const outputs = (last?.data?.main ?? []).map((items) => {
       const list = Array.isArray(items) ? items : [];
       return {
         itemCount: list.length,
-        ...(sendValues ? { items: list.slice(0, RUN_PREVIEW.items).map(previewItem) } : {}),
+        ...(showValues ? { items: list.slice(0, RUN_PREVIEW.items).map(previewItem) } : {}),
       };
     });
     return {
@@ -239,10 +266,19 @@ export function previewOutput(outcome: RunOutcome, sendValues: boolean): string 
           },
         }
       : {}),
-    ...(sendValues ? {} : { note: 'Item values are hidden by a workspace setting' }),
+    ...(redacted
+      ? { note: 'Item values are redacted for this execution' }
+      : showValues
+        ? {}
+        : { note: 'Item values are hidden by a workspace setting' }),
     nodes,
   };
   return wrapUntrusted(PREVIEW_SOURCE, JSON.stringify(body));
+}
+
+/** P6 S3 (C0): the manual channel is on in the run's own snapshot or in what its sub-workflows reported */
+function isManualRedacted(redaction: RunOutcome['redaction']): boolean {
+  return redaction?.own.manual === true || redaction?.fromSubWorkflows.manual === true;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

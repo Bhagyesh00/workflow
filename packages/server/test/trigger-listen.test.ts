@@ -176,6 +176,7 @@ const secondMain = async (extra: Partial<ActiveWorkflowDeps> = {}) => {
     logger: server.ctx.logger,
     bus: server.ctx.bus,
     leadership: notLeader,
+    serviceDeps: server.ctx.serviceDeps,
     ...extra,
   });
   await activeWorkflows.init();

@@ -13,12 +13,15 @@ import {
   redactCredentialData,
 } from '@workflow/core';
 import type { CredentialType, DataObject, NodeCredentialRef, NodeProperty } from '@workflow/workflow';
+import type { ServiceDeps } from '../context';
 import type { CredentialRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
 import { AccessService } from './access';
 import type { SecretsManager } from './secrets/manager';
 import { collectSecretKeys, hasCredentialExpressions, resolveCredentialData } from './secrets/resolver';
+import { assertCredentialType } from './type-policies/enforce';
+import { PolicyCheckFailedError } from './type-policies/errors';
 
 /** keys never returned to the browser in clear text (OAuth token material) */
 const ALWAYS_SECRET = ['oauthTokenData'];
@@ -77,6 +80,8 @@ export interface CredentialProviderOptions {
 export class CredentialService {
   private secrets?: Pick<SecretsManager, 'secretsFor'>;
   private accessService?: AccessService;
+  /** P6 S3 (C0): the type policy checks' deps; until `setPolicyDeps` runs, `create` fails closed */
+  private policyDeps?: ServiceDeps;
 
   constructor(
     private readonly repos: Repositories,
@@ -87,6 +92,20 @@ export class CredentialService {
   /** where `$secrets` comes from: until this is called a read that names it fails closed */
   useSecrets(secrets: Pick<SecretsManager, 'secretsFor'>): void {
     this.secrets = secrets;
+  }
+
+  /**
+   * P6 S3 (C0): where the type policy checks read from (context.ts calls it right after construction).
+   * Until it runs, `create` fails closed with `PolicyCheckFailedError` (503), never passes.
+   */
+  setPolicyDeps(deps: ServiceDeps): void {
+    this.policyDeps = deps;
+  }
+
+  /** the policy deps, or the fail-closed refusal at `point` */
+  protected requirePolicyDeps(point: 'credentialSave'): ServiceDeps {
+    if (!this.policyDeps) throw new PolicyCheckFailedError(point);
+    return this.policyDeps;
   }
 
   /** the scope rules (P6-03), read from the repositories this service holds */
@@ -227,8 +246,16 @@ export class CredentialService {
     userId?: string,
   ) {
     this.resolvedType(input.type);
+    // P6 S3: fails closed until `setPolicyDeps`, then the type policy refuses creating a blocked type (P6-04)
+    const policyDeps = this.requirePolicyDeps('credentialSave');
     // P6 S1: the project the caller resolved (`AccessService.targetProject`)
     const { projectId } = input;
+    await assertCredentialType(policyDeps, 'credentialSave', {
+      tenantId,
+      projectId,
+      type: input.type,
+      isNew: true,
+    });
     const id = randomUUID();
     const clean = stripSentinels(input.data);
     const row = await this.repos.credentials.create(tenantId, {

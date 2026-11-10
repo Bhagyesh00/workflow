@@ -38,6 +38,9 @@ import { NodeStorageCallout } from '../data-tables/NodeStorageCallout';
 import { NodeIcon } from '../NodeIcon';
 import { ParameterContext, type ParameterContextValue } from '../parameters/context';
 import { ParameterList } from '../parameters/ParameterForm';
+import { RestrictedNodePanel } from '../policies/RestrictedNodePanel';
+import { SubWorkflowPolicyCallout } from '../policies/SubWorkflowPolicyCallout';
+import { ToolRestrictedCallout } from '../policies/ToolRestrictedCallout';
 import { Button, IconButton } from '../ui/Button';
 import { Callout, EmptyState } from '../ui/misc';
 import { Tabs } from '../ui/Tabs';
@@ -492,6 +495,10 @@ export function NodeDetailsView({
                     “{node.type}” is not installed on this server. Its parameters are kept as they are.
                   </Callout>
                 )}
+                {/* P6-50 (L5): a type policy blocks this node, one of its tools, or its sub-workflow */}
+                <RestrictedNodePanel node={node} />
+                <ToolRestrictedCallout node={node} />
+                <SubWorkflowPolicyCallout node={node} />
                 {tab === 'parameters' ? (
                   <div className="flex flex-col gap-4">
                     {node.type === 'core.dataTable' && <NodeStorageCallout />}

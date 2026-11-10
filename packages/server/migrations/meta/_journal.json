@@ -225,6 +225,27 @@
       "when": 1794272134580,
       "tag": "0031_oauth_jwe_keys",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794342215582,
+      "tag": "0032_type_policies",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794342255600,
+      "tag": "0033_insights",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794342276160,
+      "tag": "0034_public_api_idempotency",
+      "breakpoints": true
     }
   ]
 }

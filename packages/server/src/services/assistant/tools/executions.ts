@@ -30,7 +30,8 @@ import type { ServerContext } from '../../../context';
 import type { ExecutionRow, WorkflowRow } from '../../../db/schema';
 import { ApiError, parse } from '../../../http/errors';
 import { decodeCursor, encodeCursor, page as pageOf } from '../../../http/pagination';
-import { executionListQuery, executionSummary } from '../../../routes/executions';
+import { executionListQuery, executionSummary, viewerOf } from '../../../routes/executions';
+import { redactExecution, redactSummaries } from '../../redaction/read';
 import { toDefinition } from '../../workflow-model';
 import { chooseManualStartNode, type WorkflowService } from '../../workflows';
 import { previewOutput, RUN_PREVIEW, runAndCollect, triggerPinData } from '../run-helper';
@@ -92,8 +93,15 @@ async function loadExecution(
   caller: AssistantCaller,
   id: string,
 ): Promise<LoadedExecution> {
-  const row = await executionRow(ctx, caller, id);
-  const data = await ctx.repos.executions.getData(caller.tenant.id, row.id);
+  const stored = await executionRow(ctx, caller, id);
+  // P6-53 (S3): the run as this caller may read it (a redacted run gives cleared items, a blank error text);
+  // a tool never reveals
+  const { row, data } = await redactExecution(
+    ctx.serviceDeps,
+    viewerOf(caller),
+    stored,
+    await ctx.repos.executions.getData(caller.tenant.id, stored.id),
+  );
   const state = (data?.state ?? null) as ExecutionState | null;
   return {
     row,
@@ -239,21 +247,25 @@ const listExecutionsTool: AssistantToolDefinition<{
       cursor: decodeCursor(query.cursor),
     });
     const page = pageOf(rows, query.limit, (r) => encodeCursor(r.createdAt, r.id));
+    // P6-53 (S3): the page as this caller may read it (one `redactionFacts` query)
+    const summaries = await redactSummaries(
+      ctx.serviceDeps,
+      viewerOf(run),
+      page.data.map((r) => executionSummary(r)),
+    );
     return {
-      executions: page.data
-        .map((r) => executionSummary(r))
-        .map((e) => ({
-          id: e.id,
-          workflowId: e.workflowId,
-          workflowName: e.workflowName,
-          mode: e.mode,
-          status: e.status,
-          startedAt: e.startedAt,
-          stoppedAt: e.stoppedAt,
-          durationMs: e.durationMs,
-          ...(e.errorMessage ? { errorMessage: text(e.errorMessage) } : {}),
-          ...(e.errorNode ? { errorNode: e.errorNode } : {}),
-        })),
+      executions: summaries.map((e) => ({
+        id: e.id,
+        workflowId: e.workflowId,
+        workflowName: e.workflowName,
+        mode: e.mode,
+        status: e.status,
+        startedAt: e.startedAt,
+        stoppedAt: e.stoppedAt,
+        durationMs: e.durationMs,
+        ...(e.errorMessage ? { errorMessage: text(e.errorMessage) } : {}),
+        ...(e.errorNode ? { errorNode: e.errorNode } : {}),
+      })),
       nextCursor: page.nextCursor,
     };
   },
@@ -269,7 +281,8 @@ const getExecutionTool: AssistantToolDefinition<{ executionId: string }> = {
   untrusted: 'execution-output',
   async handler(ctx, run, input) {
     const { row, runData, state } = await loadExecution(ctx, run, input.executionId);
-    const summary = executionSummary(row);
+    // P6-53 (S3): the summary the tool builds goes through the redaction too
+    const [summary] = await redactSummaries(ctx.serviceDeps, viewerOf(run), [executionSummary(row)]);
     return {
       id: summary.id,
       workflowId: summary.workflowId,
@@ -280,7 +293,9 @@ const getExecutionTool: AssistantToolDefinition<{ executionId: string }> = {
       stoppedAt: summary.stoppedAt,
       durationMs: summary.durationMs,
       waitTill: summary.waitTill,
-      ...(row.errorMessage ? { error: { message: text(row.errorMessage), node: row.errorNode } } : {}),
+      ...(summary.errorMessage
+        ? { error: { message: text(summary.errorMessage), node: summary.errorNode } }
+        : {}),
       lastNodeExecuted: state?.resultData?.lastNodeExecuted ?? null,
       nodes: nodeSummaries(runData),
     };
@@ -819,6 +834,10 @@ const runNodeTool: AssistantToolDefinition<RunNodeInput> = {
     const last = targetRuns[targetRuns.length - 1];
     const ran = executed.includes(target.name);
     const status = ending === 'finished' ? done.row.status : 'timedOut';
+    // P6-53 (S3): the run's error text follows its redaction for this caller
+    const [ended] = await redactSummaries(ctx.serviceDeps, viewerOf(run), [
+      { id, errorMessage: done.row.errorMessage, errorNode: done.row.errorNode },
+    ]);
     const notes = [MODE_NOTES[mode]];
     if (!ran) notes.push('The target node did not run in this execution.');
     if (status === 'waiting')
@@ -831,9 +850,7 @@ const runNodeTool: AssistantToolDefinition<RunNodeInput> = {
       executionId: id,
       mode,
       status,
-      ...(done.row.errorMessage
-        ? { error: { message: text(done.row.errorMessage), node: done.row.errorNode } }
-        : {}),
+      ...(ended.errorMessage ? { error: { message: text(ended.errorMessage), node: ended.errorNode } } : {}),
       target: {
         node: text(target.name),
         ran,

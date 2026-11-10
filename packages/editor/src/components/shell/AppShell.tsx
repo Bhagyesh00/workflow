@@ -1,6 +1,7 @@
 /** Signed-in layout: sidebar with brand, workspace switcher and navigation; pages render on the right. */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
+  ChartColumn,
   Check,
   ChevronsUpDown,
   Inbox,
@@ -29,6 +30,7 @@ import type { Me } from '../../api/types';
 import { CommandBar } from '../../features/command-bar/CommandBar';
 import { InboxNavBadge } from '../../features/reviews/InboxNavBadge';
 import { assistantLinkVisible } from '../../lib/assistant-access';
+import { canWith } from '../../lib/permissions';
 import { ssoNavigation } from '../../pages/auth/SsoSignIn';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { DataTableStorageBanner } from '../data-tables/StorageBanner';
@@ -58,6 +60,8 @@ function useNarrowScreen(): boolean {
 
 // P6-41: Workflows, Executions, Credentials and Data tables are tabs of the project pages (ProjectTabs)
 const NAV = [
+  // P6-57: owner and admin (`insights:list`)
+  { to: '/insights', label: 'Insights', icon: ChartColumn },
   // P5-67: shown while the Assistant is on, to members once a model is set (lib/assistant-access.ts)
   { to: '/assistant', label: 'Assistant', icon: Sparkles },
   // P3-19: shown while workflow reviews are on for the workspace
@@ -329,7 +333,9 @@ export function AppShell() {
         <ul className="flex flex-col gap-0.5">
           {NAV.filter(
             (item) =>
-              (item.to !== '/inbox' || reviewsEnabled) && (item.to !== '/assistant' || assistantVisible),
+              (item.to !== '/inbox' || reviewsEnabled) &&
+              (item.to !== '/assistant' || assistantVisible) &&
+              (item.to !== '/insights' || canWith(data, 'insights:list')),
           ).map(({ to, label, icon: Icon }) => (
             <li key={to}>
               <NavLink

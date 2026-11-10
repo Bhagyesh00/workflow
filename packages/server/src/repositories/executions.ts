@@ -1,4 +1,6 @@
 /** Executions and their (separately stored) run data. */
+
+import type { RedactionChannels } from '@workflow/workflow';
 import { and, count, desc, eq, inArray, lt, lte, ne, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import { type ExecutionDataRow, type ExecutionRow, executionData, executions, workflows } from '../db/schema';
@@ -36,8 +38,65 @@ function withoutNulFields<T extends Partial<ExecutionInsert>>(patch: T): T {
   return Object.fromEntries(Object.entries(patch).map(([key, value]) => [key, withoutNul(value)])) as T;
 }
 
+/**
+ * P6-53 (S3): what the read side judges of one run without loading its state (`redactSummaries`, `/binary-data`)
+ */
+export interface ExecutionRedactionFacts {
+  /** the redaction snapshot taken at start (`run_options.redaction`); null when the run kept none */
+  redaction: (RedactionChannels & { reason?: string }) | null;
+  /** the user who started the run (`run_options.userId`); null on a server path */
+  userId: string | null;
+  /** the credential ids the nodes of the run's workflow snapshot name (strings only, no repeats) */
+  credentialIds: string[];
+  /** P6-15 (S2): the run used a user's own connection of a private credential */
+  usedPrivateCredentials: boolean;
+}
+
 export class ExecutionRepository {
   constructor(private readonly db: DbOrTx) {}
+
+  /**
+   * P6-53 (S3): the redaction facts of a page of runs in one query (no `state` read), keyed by run id; an id
+   * of another workspace or no run is absent. A run whose data row is gone keeps its row's facts.
+   */
+  async redactionFacts(
+    tenantId: string,
+    ids: readonly string[],
+  ): Promise<Map<string, ExecutionRedactionFacts>> {
+    const facts = new Map<string, ExecutionRedactionFacts>();
+    const valid = [...new Set(ids.filter(isUuid))];
+    if (!valid.length) return facts;
+    const rows = await this.db
+      .select({
+        id: executions.id,
+        usedPrivateCredentials: executions.usedPrivateCredentials,
+        redaction: sql<unknown>`${executionData.runOptions} -> 'redaction'`,
+        userId: sql<unknown>`${executionData.runOptions} ->> 'userId'`,
+        credentialIds: sql<unknown>`jsonb_path_query_array(${executionData.workflowData}, '$.nodes[*].credentials.*.id')`,
+      })
+      .from(executions)
+      .leftJoin(
+        executionData,
+        and(eq(executionData.executionId, executions.id), eq(executionData.tenantId, executions.tenantId)),
+      )
+      .where(and(eq(executions.tenantId, tenantId), inArray(executions.id, valid)));
+    for (const row of rows) {
+      const redaction =
+        row.redaction && typeof row.redaction === 'object' && !Array.isArray(row.redaction)
+          ? (row.redaction as ExecutionRedactionFacts['redaction'])
+          : null;
+      const credentialIds = Array.isArray(row.credentialIds)
+        ? [...new Set(row.credentialIds.filter((id): id is string => typeof id === 'string' && id !== ''))]
+        : [];
+      facts.set(row.id, {
+        redaction,
+        userId: typeof row.userId === 'string' && row.userId !== '' ? row.userId : null,
+        credentialIds,
+        usedPrivateCredentials: row.usedPrivateCredentials,
+      });
+    }
+    return facts;
+  }
 
   /** the row and its data are written together, so a failed data insert leaves no orphan 'new' row */
   async create(

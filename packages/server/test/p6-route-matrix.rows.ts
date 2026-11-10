@@ -31,6 +31,13 @@
  * credential routes and the public users, role mapping, LDAP and SSO rows). Public: the password token routes,
  * `GET /rest/auth/sso-options`, `/sso/saml/:slug/*` and `/sso/oidc/:slug/*` (the identity provider calls them),
  * `/scim/v2/*` (a SCIM token, no session) and the JWKS document. Only C0e edits this file in S2.
+ *
+ * P6 S3 (C0g): 67 rows (39 REST, 28 public) for the routes S3's C0 registers: node and credential type policies
+ * (workspace rows `target: 'none'`, the project rows and the two available types rows on the project), the
+ * sub-workflow policy check (`workflow:update`), insights, presence and write access, rate limits, the audit,
+ * dependencies, and the list filter rows (bulk stop and delete of runs, dependency counts) in the form of
+ * `GET /executions`. A stub that throws after its gate answers 500, which counts as "not 403". After C0 no lane
+ * edits this file.
  */
 import type { Scope } from '@workflow/workflow';
 import type { Role } from '../src/db/schema';
@@ -448,6 +455,21 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     access: 'public',
   },
 
+  // collaboration.ts
+  {
+    file: 'collaboration.ts',
+    method: 'POST',
+    path: '/rest/workflows/:id/presence',
+    scope: 'workflow:read',
+    target: 'workflow',
+  },
+  {
+    file: 'collaboration.ts',
+    method: 'POST',
+    path: '/rest/workflows/:id/write-access',
+    scope: 'workflow:update',
+    target: 'workflow',
+  },
   // credentials.ts
   {
     file: 'credentials.ts',
@@ -735,6 +757,34 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     legacyMin: 'viewer',
   },
 
+  // dependencies.ts
+  {
+    file: 'dependencies.ts',
+    method: 'POST',
+    path: '/rest/workflow-dependencies/counts',
+    scope: null,
+    target: 'workflow',
+    access: 'auth',
+    change: 'No gate on the route: the access filter of `workflow:read` narrows the rows (as n8n)',
+  },
+  {
+    file: 'dependencies.ts',
+    method: 'POST',
+    path: '/rest/workflow-dependencies/details',
+    scope: null,
+    target: 'workflow',
+    access: 'auth',
+    change: 'No gate on the route: the access filter of `workflow:read` narrows the rows (as n8n)',
+  },
+  {
+    file: 'dependencies.ts',
+    method: 'GET',
+    path: '/rest/workflow-dependencies/projects/:projectId/folders/:folderId',
+    scope: null,
+    target: 'folder',
+    access: 'auth',
+    change: 'No gate on the route: the access filter of `workflow:read` narrows the rows (as n8n)',
+  },
   // evaluations.ts
   {
     file: 'evaluations.ts',
@@ -793,6 +843,27 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     legacyMin: 'editor',
   },
 
+  // execution-bulk.ts
+  {
+    file: 'execution-bulk.ts',
+    method: 'POST',
+    path: '/rest/executions/stopMany',
+    scope: null,
+    target: 'execution',
+    access: 'auth',
+    change:
+      'No gate on the route: the access filter of `workflow:execute` narrows the runs it stops (as n8n)',
+  },
+  {
+    file: 'execution-bulk.ts',
+    method: 'POST',
+    path: '/rest/executions/delete',
+    scope: null,
+    target: 'execution',
+    access: 'auth',
+    change:
+      'No gate on the route: the access filter of `execution:delete` narrows the runs it deletes (as n8n)',
+  },
   // executions.ts
   {
     file: 'executions.ts',
@@ -941,6 +1012,42 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     legacyMin: 'viewer',
   },
 
+  // insights.ts
+  {
+    file: 'insights.ts',
+    method: 'GET',
+    path: '/rest/insights/summary',
+    scope: 'insights:list',
+    target: 'none',
+  },
+  {
+    file: 'insights.ts',
+    method: 'GET',
+    path: '/rest/insights/by-workflow',
+    scope: 'insights:list',
+    target: 'none',
+  },
+  {
+    file: 'insights.ts',
+    method: 'GET',
+    path: '/rest/insights/by-time',
+    scope: 'insights:list',
+    target: 'none',
+  },
+  {
+    file: 'insights.ts',
+    method: 'GET',
+    path: '/rest/insights/by-time/time-saved',
+    scope: 'insights:list',
+    target: 'none',
+  },
+  {
+    file: 'insights.ts',
+    method: 'GET',
+    path: '/rest/insights/settings',
+    scope: 'insights:list',
+    target: 'none',
+  },
   // jwks.ts
   {
     file: 'jwks.ts',
@@ -1669,6 +1776,14 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     legacyMin: 'editor',
   },
 
+  // public-audit.ts
+  {
+    file: 'public-audit.ts',
+    method: 'POST',
+    path: '/api/v1/audit',
+    scope: 'securityAudit:generate',
+    target: 'none',
+  },
   // public-data-tables.ts
   {
     file: 'public-data-tables.ts',
@@ -1802,6 +1917,21 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     legacyMin: 'editor',
   },
 
+  // public-dependencies.ts
+  {
+    file: 'public-dependencies.ts',
+    method: 'GET',
+    path: '/api/v1/workflows/:id/dependencies',
+    scope: 'workflow:read',
+    target: 'workflow',
+  },
+  {
+    file: 'public-dependencies.ts',
+    method: 'GET',
+    path: '/api/v1/credentials/:id/dependencies',
+    scope: 'credential:read',
+    target: 'credential',
+  },
   // public-evaluations.ts
   {
     file: 'public-evaluations.ts',
@@ -1886,6 +2016,15 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     legacyMin: 'editor',
   },
 
+  // public-insights.ts
+  {
+    file: 'public-insights.ts',
+    method: 'GET',
+    path: '/api/v1/insights/summary',
+    scope: 'insights:list',
+    target: 'none',
+    change: 'The key needs `insights:read`, the user `insights:list` (as n8n)',
+  },
   // public-ldap.ts
   {
     file: 'public-ldap.ts',
@@ -1989,6 +2128,21 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'credential',
   },
 
+  // public-rate-limits.ts
+  {
+    file: 'public-rate-limits.ts',
+    method: 'GET',
+    path: '/api/v1/settings/rate-limits',
+    scope: 'securitySettings:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-rate-limits.ts',
+    method: 'PUT',
+    path: '/api/v1/settings/rate-limits',
+    scope: 'securitySettings:manage',
+    target: 'none',
+  },
   // public-role-mapping.ts
   {
     file: 'public-role-mapping.ts',
@@ -2108,6 +2262,161 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'tenant',
   },
 
+  // public-type-policies.ts
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/node-type-policies/instance',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'PUT',
+    path: '/api/v1/node-type-policies/instance',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/node-type-policies/projects/:projectId',
+    scope: 'nodeTypePolicy:manage',
+    target: 'project',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'PUT',
+    path: '/api/v1/node-type-policies/projects/:projectId',
+    scope: 'nodeTypePolicy:manage',
+    target: 'project',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/node-type-policies/policies',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'POST',
+    path: '/api/v1/node-type-policies/policies',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/node-type-policies/policies/:policyId',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'PATCH',
+    path: '/api/v1/node-type-policies/policies/:policyId',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'DELETE',
+    path: '/api/v1/node-type-policies/policies/:policyId',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/node-type-policies/scopes/:scopeId/attachments',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'PUT',
+    path: '/api/v1/node-type-policies/scopes/:scopeId/attachments',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/credential-type-policies/instance',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'PUT',
+    path: '/api/v1/credential-type-policies/instance',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/credential-type-policies/projects/:projectId',
+    scope: 'credentialTypePolicy:manage',
+    target: 'project',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'PUT',
+    path: '/api/v1/credential-type-policies/projects/:projectId',
+    scope: 'credentialTypePolicy:manage',
+    target: 'project',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/credential-type-policies/policies',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'POST',
+    path: '/api/v1/credential-type-policies/policies',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/credential-type-policies/policies/:policyId',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'PATCH',
+    path: '/api/v1/credential-type-policies/policies/:policyId',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'DELETE',
+    path: '/api/v1/credential-type-policies/policies/:policyId',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'GET',
+    path: '/api/v1/credential-type-policies/scopes/:scopeId/attachments',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-type-policies.ts',
+    method: 'PUT',
+    path: '/api/v1/credential-type-policies/scopes/:scopeId/attachments',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
   // public-users.ts
   {
     file: 'public-users.ts',
@@ -2155,6 +2464,21 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     stream: true,
   },
 
+  // rate-limit-settings.ts
+  {
+    file: 'rate-limit-settings.ts',
+    method: 'GET',
+    path: '/rest/settings/policies/rate-limits',
+    scope: 'securitySettings:manage',
+    target: 'none',
+  },
+  {
+    file: 'rate-limit-settings.ts',
+    method: 'PUT',
+    path: '/rest/settings/policies/rate-limits',
+    scope: 'securitySettings:manage',
+    target: 'none',
+  },
   // resources.ts
   {
     file: 'resources.ts',
@@ -2877,6 +3201,183 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'workflow',
   },
 
+  // type-policies-project.ts
+  {
+    file: 'type-policies-project.ts',
+    method: 'GET',
+    path: '/rest/projects/:projectId/node-type-policies/project',
+    scope: 'nodeTypePolicy:manage',
+    target: 'project',
+  },
+  {
+    file: 'type-policies-project.ts',
+    method: 'PUT',
+    path: '/rest/projects/:projectId/node-type-policies/project',
+    scope: 'nodeTypePolicy:manage',
+    target: 'project',
+  },
+  {
+    file: 'type-policies-project.ts',
+    method: 'GET',
+    path: '/rest/projects/:projectId/credential-type-policies/project',
+    scope: 'credentialTypePolicy:manage',
+    target: 'project',
+  },
+  {
+    file: 'type-policies-project.ts',
+    method: 'PUT',
+    path: '/rest/projects/:projectId/credential-type-policies/project',
+    scope: 'credentialTypePolicy:manage',
+    target: 'project',
+  },
+  // type-policies.ts
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/node-type-policies/instance',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'PUT',
+    path: '/rest/node-type-policies/instance',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/node-type-policies/policies',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'POST',
+    path: '/rest/node-type-policies/policies',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/node-type-policies/policies/:policyId',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'PATCH',
+    path: '/rest/node-type-policies/policies/:policyId',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'DELETE',
+    path: '/rest/node-type-policies/policies/:policyId',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/node-type-policies/scopes/:scopeId/attachments',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'PUT',
+    path: '/rest/node-type-policies/scopes/:scopeId/attachments',
+    scope: 'nodeTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/credential-type-policies/instance',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'PUT',
+    path: '/rest/credential-type-policies/instance',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/credential-type-policies/policies',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'POST',
+    path: '/rest/credential-type-policies/policies',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/credential-type-policies/policies/:policyId',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'PATCH',
+    path: '/rest/credential-type-policies/policies/:policyId',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'DELETE',
+    path: '/rest/credential-type-policies/policies/:policyId',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/credential-type-policies/scopes/:scopeId/attachments',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'PUT',
+    path: '/rest/credential-type-policies/scopes/:scopeId/attachments',
+    scope: 'credentialTypePolicy:manage',
+    target: 'none',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/projects/:projectId/available-types',
+    scope: 'project:read',
+    target: 'project',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/projects/:projectId/available-credential-types',
+    scope: 'project:read',
+    target: 'project',
+  },
+  {
+    file: 'type-policies.ts',
+    method: 'GET',
+    path: '/rest/workflows/:id/sub-workflows/:subId/policy-check',
+    scope: 'workflow:update',
+    target: 'workflow',
+  },
   // webhooks.ts
   {
     file: 'webhooks.ts',

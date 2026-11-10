@@ -2,6 +2,7 @@
  * Thin JSON client for `/rest`. Unwraps `{ data }` envelopes and turns `{ error }` envelopes into
  * `ApiError`. The transport is swappable so the demo build can answer requests in-process.
  */
+import { clientId } from '../lib/client-id';
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
@@ -16,6 +17,8 @@ export interface ApiRequest {
   signal?: AbortSignal;
   /** the workspace this tab shows; the server rejects the request when the session moved on */
   tenantId?: string;
+  /** P6-81: this tab's id (lib/client-id.ts), sent as the `push-ref` header */
+  clientId?: string;
 }
 
 export interface ApiResponse {
@@ -51,11 +54,20 @@ export function buildUrl(path: string, query?: Record<string, QueryValue>): URL 
 }
 
 /** Browser transport. Mutating requests always carry a JSON body (CSRF rule: JSON content type). */
-export const fetchTransport: Transport = async ({ method, path, query, body, signal, tenantId }) => {
+export const fetchTransport: Transport = async ({
+  method,
+  path,
+  query,
+  body,
+  signal,
+  tenantId,
+  clientId: client,
+}) => {
   const mutating = method !== 'GET';
   const headers: Record<string, string> = { accept: 'application/json' };
   if (mutating) headers['content-type'] = 'application/json';
   if (tenantId) headers['x-tenant-id'] = tenantId;
+  if (client) headers['push-ref'] = client;
   const response = await fetch(buildUrl(path, query), {
     method,
     credentials: 'same-origin',
@@ -160,8 +172,10 @@ export async function requestRaw(
 ): Promise<{ data: unknown; nextCursor?: string | null; envelope?: Record<string, unknown> }> {
   let response: ApiResponse;
   const tenantId = request.path.startsWith('/auth/') ? undefined : (currentTenantId ?? undefined);
+  // P6-81: every request names this tab, so the demo transport sees it as well as fetchTransport
+  const withClient = { ...request, clientId: request.clientId ?? clientId() };
   try {
-    response = await transport(tenantId ? { ...request, tenantId } : request);
+    response = await transport(tenantId ? { ...withClient, tenantId } : withClient);
   } catch (error) {
     if ((error as Error)?.name === 'AbortError') throw error;
     throw new ApiError(

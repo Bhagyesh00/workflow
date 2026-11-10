@@ -25,6 +25,7 @@ import {
   createCodeRunnerCall,
   createSubWorkflowCaller,
   createToolParameterReader,
+  mergeSubWorkflowReport,
 } from './node-context';
 
 const NO_TOOL = 'No tool inputs found';
@@ -171,6 +172,8 @@ function supplyContext(
   rootExec: ExecuteData,
   signal: AbortSignal,
   closeFunctions: Array<() => Promise<void>>,
+  /** P6 S3 (C0): the tool run's sub-workflow reports, written to the tool's task */
+  report: DataObject,
 ): SupplyDataContext {
   const runIndex = host.state.resultData.runData[tool.name]?.length ?? 0;
   const exec: ExecuteData = { node: tool.name, data: rootExec.data, source: rootExec.source };
@@ -179,12 +182,13 @@ function supplyContext(
   return {
     ...base,
     runCode: createCodeRunnerCall(deps, base),
-    executeWorkflow: createSubWorkflowCaller(deps),
+    executeWorkflow: createSubWorkflowCaller(deps, (reported) => mergeSubWorkflowReport(report, reported)),
     getInputData: (inputIndex = 0) => (rootExec.data.main?.[inputIndex] ?? []) as Item[],
     getInputConnectionData: (type, itemIndex) =>
       host.supplySubNodes(tool, toolType, type, itemIndex, exec, signal, closeFunctions),
     getToolParameter: createToolParameterReader(deps),
-    logSubNodeRun: (input, output, error) => host.logSubNodeRun(tool, root, 'ai_tool', input, output, error),
+    logSubNodeRun: (input, output, error) =>
+      host.logSubNodeRun(tool, root, 'ai_tool', input, output, error, report),
     getParentNodes: () => connectedNodes(host.workflow, host.workflow.getParentNodes(root.name)),
   };
 }
@@ -201,11 +205,12 @@ async function toolsOf(
   rootExec: ExecuteData,
   signal: AbortSignal,
   closeFunctions: Array<() => Promise<void>>,
+  report: DataObject,
 ): Promise<AiTool[]> {
   const toolType = host.workflow.getNodeType(tool);
   if (tool.disabled) return [];
   if (toolType.supplyData) {
-    const context = supplyContext(host, tool, toolType, root, rootExec, signal, closeFunctions);
+    const context = supplyContext(host, tool, toolType, root, rootExec, signal, closeFunctions, report);
     const supplied = await toolType.supplyData(context, 0);
     if (supplied.closeFunction) closeFunctions.push(supplied.closeFunction);
     return [supplied.response].flat().filter(isAiTool);
@@ -238,8 +243,10 @@ export async function runToolExecutor(
   await host.services.hooks?.nodeExecuteBefore?.(tool.name, before);
 
   let args = request.query;
+  // P6 S3 (C0): a supplied tool's sub-workflow reports (a node run as a tool keeps its own in node-as-tool)
+  const report: DataObject = {};
   try {
-    const tools = await toolsOf(host, tool, root, rootExec, signal, closeFunctions);
+    const tools = await toolsOf(host, tool, root, rootExec, signal, closeFunctions, report);
     const chosen =
       tools.length === 1
         ? tools[0]
@@ -248,11 +255,19 @@ export async function runToolExecutor(
     args = requestArguments(request, chosen.parameters);
     const result = await chosen.invoke(args, { signal });
     if (taskCount() === before) {
-      host.logSubNodeRun(tool, root, 'ai_tool', args, { response: result as DataObject[string] });
+      host.logSubNodeRun(
+        tool,
+        root,
+        'ai_tool',
+        args,
+        { response: result as DataObject[string] },
+        undefined,
+        report,
+      );
     }
   } catch (error) {
     const failure = toolFailure(tool, error);
-    if (taskCount() === before) host.logSubNodeRun(tool, root, 'ai_tool', args, {}, failure);
+    if (taskCount() === before) host.logSubNodeRun(tool, root, 'ai_tool', args, {}, failure, report);
     throw failure;
   }
 }

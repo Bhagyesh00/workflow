@@ -2,7 +2,7 @@
  * Plan limits (ARCHITECTURE.md §10). A tenant's effective limits are its plan's defaults
  * overridden by `tenants.settings.limits`. `null` means unlimited.
  */
-import type { AssistantPermissions } from '@workflow/workflow';
+import type { AssistantPermissions, RedactionFloor } from '@workflow/workflow';
 import type { Config } from './config';
 
 export interface PlanLimits {
@@ -97,6 +97,29 @@ export interface TenantSettings {
   };
   /** P6-17: set once, atomically, when the first production run failed and its mail went out */
   firstProductionFailure?: { at: string };
+  /**
+   * P6-53 (L8): the workspace's redaction floor (`/settings/security` `redaction.floor`); absent is `off`. A
+   * workflow's `redactionPolicy` may not be weaker; new workflows are seeded from it.
+   */
+  redactionFloor?: RedactionFloor;
+  /** P6-83 (L15): the public API rate limits per API key; absent fields take `config.publicApiRateLimit` */
+  publicApiRateLimit?: PublicApiRateLimit;
+}
+
+/**
+ * P6-83: public API rate limits per API key (n8n's names). 0 = no limit; windows in seconds. Not enabled:
+ * today's fixed 600 per minute per key applies.
+ */
+export interface PublicApiRateLimit {
+  enabled: boolean;
+  globalReadLimit: number;
+  globalReadWindow: number;
+  globalWriteLimit: number;
+  globalWriteWindow: number;
+  endpointReadLimit: number;
+  endpointReadWindow: number;
+  endpointWriteLimit: number;
+  endpointWriteWindow: number;
 }
 
 export function effectiveLimits(plan: string, settings: TenantSettings | null | undefined): PlanLimits {

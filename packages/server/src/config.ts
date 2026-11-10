@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import type { MasterKey } from '@workflow/core';
 import { type CallerPolicy, type InstanceLimits, MAX_EVALUATION_CONCURRENCY } from '@workflow/workflow';
 import { z } from 'zod';
+import type { PublicApiRateLimit } from './plans';
 
 const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -79,6 +80,34 @@ const int = (fallback: number, min = 0) => z.coerce.number().int().min(min).defa
 /** a non-negative number that may have a fraction (e.g. 0.25 hours) */
 const num = (fallback: number) => z.coerce.number().min(0).default(fallback);
 /** one URL path segment (letters, digits, `-`, `_`), as the MCP trigger endpoints */
+/** P6-47: a JSON array of strings (n8n's NODES_EXCLUDE, NODES_INCLUDE); unset or bad JSON gives an empty list */
+const jsonList = z
+  .string()
+  .optional()
+  .transform((v) => {
+    if (!v?.trim()) return [];
+    try {
+      const parsed: unknown = JSON.parse(v);
+      return Array.isArray(parsed)
+        ? parsed.filter((x): x is string => typeof x === 'string' && x !== '')
+        : [];
+    } catch {
+      return [];
+    }
+  });
+
+/** P6-05: INSIGHTS_MAX_AGE_DAYS as n8n: -1 or over 730 gives 730; under 1 or not a number gives 365 */
+const insightsMaxAgeDays = z
+  .string()
+  .optional()
+  .transform((v) => {
+    const n = v === undefined || v.trim() === '' ? Number.NaN : Number(v);
+    if (Number.isNaN(n)) return 365;
+    if (n === -1 || n > 730) return 730;
+    if (n < 1) return 365;
+    return Math.floor(n);
+  });
+
 const endpointSegment = (fallback: string) =>
   z
     .string()
@@ -262,6 +291,37 @@ const envSchema = z.object({
   SCIM_RATE_LIMIT: int(600, 0),
   /** P6-01: when true, the sign-in page sends a workspace with SSO on to its identity provider */
   SSO_REDIRECT_LOGIN_TO_SSO: bool(true),
+  /** P6-47: node types left out of (or the only ones in) the registry, JSON arrays as n8n's */
+  NODES_EXCLUDE: jsonList,
+  NODES_INCLUDE: jsonList,
+  /** P6-52: refuse adding or editing a deprecated node (on by default) */
+  DEPRECATED_NODES_BLOCK: bool(true),
+  /** P6-54: a workflow not run in this many days counts as abandoned in the security audit */
+  SECURITY_AUDIT_DAYS_ABANDONED_WORKFLOW: int(90, 1),
+  /** P6-05: n8n's N8N_INSIGHTS_* (names less `N8N_`, same defaults); platform level */
+  INSIGHTS_COMPACTION_INTERVAL_MINUTES: int(60, 1),
+  INSIGHTS_COMPACTION_BATCH_SIZE: int(500, 1),
+  INSIGHTS_COMPACTION_HOURLY_TO_DAILY_THRESHOLD_DAYS: int(90, 1),
+  INSIGHTS_COMPACTION_DAILY_TO_WEEKLY_THRESHOLD_DAYS: int(180, 1),
+  INSIGHTS_FLUSH_BATCH_SIZE: int(1000, 1),
+  INSIGHTS_FLUSH_INTERVAL_SECONDS: int(30, 1),
+  INSIGHTS_MAX_AGE_DAYS: insightsMaxAgeDays,
+  INSIGHTS_PRUNE_CHECK_INTERVAL_HOURS: int(24, 1),
+  /** 0 = no bound */
+  INSIGHTS_COMPACTION_MAX_BATCHES_PER_RUN: int(1000, 0),
+  /** 0 = no bound */
+  INSIGHTS_COMPACTION_MAX_RUNTIME_SECONDS: int(300, 0),
+  INSIGHTS_COMPACTION_BATCH_DELAY_MILLISECONDS: int(100, 0),
+  /** P6-83: the platform defaults of a workspace's public API rate limits (0 = no limit, windows in seconds) */
+  PUBLIC_API_RATE_LIMIT_ENABLED: bool(false),
+  PUBLIC_API_RATE_LIMIT_GLOBAL_READ_LIMIT: int(1200, 0),
+  PUBLIC_API_RATE_LIMIT_GLOBAL_READ_WINDOW: int(60, 1),
+  PUBLIC_API_RATE_LIMIT_GLOBAL_WRITE_LIMIT: int(600, 0),
+  PUBLIC_API_RATE_LIMIT_GLOBAL_WRITE_WINDOW: int(60, 1),
+  PUBLIC_API_RATE_LIMIT_ENDPOINT_READ_LIMIT: int(1000, 0),
+  PUBLIC_API_RATE_LIMIT_ENDPOINT_READ_WINDOW: int(60, 1),
+  PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_LIMIT: int(500, 0),
+  PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_WINDOW: int(60, 1),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -413,6 +473,37 @@ export interface Config {
   ssoRedirectLogin: boolean;
   /** P6-20: INVITE_LINKS_EMAIL_ONLY */
   inviteLinksEmailOnly: boolean;
+  /**
+   * P6-47 (L3): NODES_EXCLUDE, NODES_INCLUDE; `buildRegistries(packages, config.nodes)` applies them
+   * (an empty `include` means every type)
+   */
+  nodes: { exclude: string[]; include: string[] };
+  /** P6-52 (L7): DEPRECATED_NODES_BLOCK */
+  deprecatedNodesBlock: boolean;
+  /** P6-54 (L9): SECURITY_AUDIT_DAYS_ABANDONED_WORKFLOW (a request's `daysAbandonedWorkflow` wins) */
+  securityAudit: { daysAbandonedWorkflow: number };
+  /** P6-05 (L11): INSIGHTS_* */
+  insights: InsightsConfig;
+  /** P6-83 (L15): PUBLIC_API_RATE_LIMIT_*, the defaults under a workspace's `publicApiRateLimit` */
+  publicApiRateLimit: PublicApiRateLimit;
+}
+
+/** P6-05: the insights collector, compaction and prune bounds (n8n's insights.config.ts names) */
+export interface InsightsConfig {
+  compactionIntervalMinutes: number;
+  compactionBatchSize: number;
+  compactionHourlyToDailyThresholdDays: number;
+  compactionDailyToWeeklyThresholdDays: number;
+  flushBatchSize: number;
+  flushIntervalSeconds: number;
+  /** 1..730 */
+  maxAgeDays: number;
+  pruneCheckIntervalHours: number;
+  /** 0 = no bound */
+  compactionMaxBatchesPerRun: number;
+  /** 0 = no bound */
+  compactionMaxRuntimeSeconds: number;
+  compactionBatchDelayMilliseconds: number;
 }
 
 /** P6-17: the mail templates a file may replace (UM_EMAIL_TEMPLATES_*) */
@@ -661,6 +752,33 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     scimRateLimit: e.SCIM_RATE_LIMIT,
     ssoRedirectLogin: e.SSO_REDIRECT_LOGIN_TO_SSO,
     inviteLinksEmailOnly: e.INVITE_LINKS_EMAIL_ONLY,
+    nodes: { exclude: e.NODES_EXCLUDE, include: e.NODES_INCLUDE },
+    deprecatedNodesBlock: e.DEPRECATED_NODES_BLOCK,
+    securityAudit: { daysAbandonedWorkflow: e.SECURITY_AUDIT_DAYS_ABANDONED_WORKFLOW },
+    insights: {
+      compactionIntervalMinutes: e.INSIGHTS_COMPACTION_INTERVAL_MINUTES,
+      compactionBatchSize: e.INSIGHTS_COMPACTION_BATCH_SIZE,
+      compactionHourlyToDailyThresholdDays: e.INSIGHTS_COMPACTION_HOURLY_TO_DAILY_THRESHOLD_DAYS,
+      compactionDailyToWeeklyThresholdDays: e.INSIGHTS_COMPACTION_DAILY_TO_WEEKLY_THRESHOLD_DAYS,
+      flushBatchSize: e.INSIGHTS_FLUSH_BATCH_SIZE,
+      flushIntervalSeconds: e.INSIGHTS_FLUSH_INTERVAL_SECONDS,
+      maxAgeDays: e.INSIGHTS_MAX_AGE_DAYS,
+      pruneCheckIntervalHours: e.INSIGHTS_PRUNE_CHECK_INTERVAL_HOURS,
+      compactionMaxBatchesPerRun: e.INSIGHTS_COMPACTION_MAX_BATCHES_PER_RUN,
+      compactionMaxRuntimeSeconds: e.INSIGHTS_COMPACTION_MAX_RUNTIME_SECONDS,
+      compactionBatchDelayMilliseconds: e.INSIGHTS_COMPACTION_BATCH_DELAY_MILLISECONDS,
+    },
+    publicApiRateLimit: {
+      enabled: e.PUBLIC_API_RATE_LIMIT_ENABLED,
+      globalReadLimit: e.PUBLIC_API_RATE_LIMIT_GLOBAL_READ_LIMIT,
+      globalReadWindow: e.PUBLIC_API_RATE_LIMIT_GLOBAL_READ_WINDOW,
+      globalWriteLimit: e.PUBLIC_API_RATE_LIMIT_GLOBAL_WRITE_LIMIT,
+      globalWriteWindow: e.PUBLIC_API_RATE_LIMIT_GLOBAL_WRITE_WINDOW,
+      endpointReadLimit: e.PUBLIC_API_RATE_LIMIT_ENDPOINT_READ_LIMIT,
+      endpointReadWindow: e.PUBLIC_API_RATE_LIMIT_ENDPOINT_READ_WINDOW,
+      endpointWriteLimit: e.PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_LIMIT,
+      endpointWriteWindow: e.PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_WINDOW,
+    },
   };
 }
 

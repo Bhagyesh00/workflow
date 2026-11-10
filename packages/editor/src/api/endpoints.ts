@@ -44,8 +44,10 @@ import type {
   AssistantThreadPage,
   AssistantThreadsQuery,
   AuthResult,
+  AvailableType,
   ChangeEmailBody,
   ChangePasswordBody,
+  CollaborationState,
   CreatedApiKey,
   CredentialCreateBody,
   CredentialDetail,
@@ -66,6 +68,9 @@ import type {
   DataTableInfo,
   DataTableLimits,
   DataTableWriteOptions,
+  DependencyCounts,
+  DependencyDetail,
+  DependencyResourceKind,
   ExecutionAnnotation,
   ExecutionDetail,
   ExecutionSummary,
@@ -73,6 +78,7 @@ import type {
   FavoriteResourceType,
   Folder,
   FolderCreateBody,
+  FolderDependencies,
   FolderDetail,
   FolderListQuery,
   FolderTransferBody,
@@ -80,6 +86,12 @@ import type {
   FormAuthCode,
   InboxQuery,
   InboxSummary,
+  InsightsByTimeRow,
+  InsightsByWorkflowPage,
+  InsightsByWorkflowQuery,
+  InsightsQuery,
+  InsightsSettings,
+  InsightsSummary,
   LdapConfig,
   LdapSyncRun,
   ListenTestTriggerResult,
@@ -113,6 +125,7 @@ import type {
   NodeTypeDescription,
   OidcConfig,
   OidcConfigBody,
+  PresenceAction,
   Project,
   ProjectAddUsersResult,
   ProjectCount,
@@ -127,6 +140,7 @@ import type {
   ProvisioningConfig,
   PublishBody,
   PublishTimelineEntry,
+  RateLimitSettings,
   ResetPasswordBody,
   ResetTokenInfo,
   ReviewActivity,
@@ -164,6 +178,7 @@ import type {
   SsoMethod,
   SsoOptions,
   SsoTestResult,
+  SubWorkflowPolicyCheck,
   Tag,
   TestCaseDto,
   TestCaseListQuery,
@@ -187,6 +202,7 @@ import type {
   WorkflowReviewDTO,
   WorkflowSummary,
   WorkflowTransferBody,
+  WriteAccessAction,
 } from './types';
 
 const enc = encodeURIComponent;
@@ -344,6 +360,8 @@ export interface WorkflowListQuery extends ProjectListFilter {
   nodeTypes?: string[];
   /** P3-01: with `search`, also match workflows with a tag named like the search */
   matchTags?: boolean;
+  /** P6-49: only workflows a type policy now blocks from running (they hold a restricted node type) */
+  executionBlockedBy?: 'restrictedNode';
 }
 
 /** `/workflows/:id/versions/:versionId/diff?against=` */
@@ -424,6 +442,23 @@ export interface ExecutionListQuery {
   /** P5-61: with `customDataKey`, the value; partial match unless `customDataExact` */
   customDataValue?: string;
   customDataExact?: boolean;
+  /** P6-85: runs started at or after this ISO time */
+  startedAfter?: string;
+  /** P6-85: runs started at or before this ISO time */
+  startedBefore?: string;
+}
+
+/** P6-85: the runs a bulk action covers: the list filter, or `ids` for a selection */
+export interface ExecutionBulkFilter extends Omit<ExecutionListQuery, 'limit' | 'cursor'> {
+  ids?: string[];
+}
+
+/** P6-85: POST /executions/delete; each row needs `execution:delete`, rows the caller cannot reach stay */
+export interface ExecutionDeleteBody {
+  ids?: string[];
+  filters?: ExecutionBulkFilter;
+  /** every run that started before this ISO time (within `filters`) */
+  deleteBefore?: string;
 }
 
 export const executionsApi = {
@@ -432,7 +467,14 @@ export const executionsApi = {
       ...query,
       annotationTags: annotationTags?.length ? annotationTags.join(',') : undefined,
     }),
-  get: (id: string) => api.get<ExecutionDetail>(`/executions/${enc(id)}`),
+  /** P6-53: `redactExecutionData: false` asks to reveal a redacted run (`execution:reveal`, logged) */
+  get: (id: string, options: { redactExecutionData?: boolean } = {}) =>
+    api.get<ExecutionDetail>(
+      `/executions/${enc(id)}`,
+      options.redactExecutionData === undefined
+        ? undefined
+        : { redactExecutionData: options.redactExecutionData },
+    ),
   retry: (id: string, useCurrentWorkflow: boolean) =>
     api.post<{ executionId: string }>(`/executions/${enc(id)}/retry`, { useCurrentWorkflow }),
   stop: (id: string) => api.post<{ status: string }>(`/executions/${enc(id)}/stop`),
@@ -953,4 +995,76 @@ export const assistantApi = {
 export const consentApi = {
   details: (flow: string) => api.get<McpConsentDetails>('/consent/details', { flow }),
   approve: (body: McpConsentDecisionBody) => api.post<McpConsentResult>('/consent/approve', body),
+};
+
+// ---------------------------------------------------------------------------------------------
+// Phase 6 S3
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * P6-49: what a project may use (`project:read`), and the sub-workflow start preview (`workflow:update`).
+ * The policy documents themselves are written through the public API only (no editor page, Q9).
+ */
+export const typePoliciesApi = {
+  /** every node type with `available`; only an unavailable row carries `reason` */
+  availableTypes: (projectId: string) =>
+    api.get<AvailableType[]>(`/projects/${enc(projectId)}/available-types`),
+  availableCredentialTypes: (projectId: string) =>
+    api.get<AvailableType[]>(`/projects/${enc(projectId)}/available-credential-types`),
+  /** would `subId` start from `workflowId`'s project under today's policies */
+  subWorkflowPolicyCheck: (workflowId: string, subId: string) =>
+    api.get<SubWorkflowPolicyCheck>(`/workflows/${enc(workflowId)}/sub-workflows/${enc(subId)}/policy-check`),
+};
+
+/** P6-05, P6-57: `insights:list` (owner and admin); production runs only, manual runs are not counted */
+export const insightsApi = {
+  summary: (query: InsightsQuery = {}) => api.get<InsightsSummary>('/insights/summary', { ...query }),
+  byWorkflow: (query: InsightsByWorkflowQuery = {}) =>
+    api.get<InsightsByWorkflowPage>('/insights/by-workflow', { ...query }),
+  byTime: (query: InsightsQuery = {}) => api.get<InsightsByTimeRow[]>('/insights/by-time', { ...query }),
+  byTimeSaved: (query: InsightsQuery = {}) =>
+    api.get<InsightsByTimeRow[]>('/insights/by-time/time-saved', { ...query }),
+  settings: () => api.get<InsightsSettings>('/insights/settings'),
+};
+
+/**
+ * P6-81: presence (`workflow:read`) and the write lock (`workflow:update`). The tab's `push-ref` header
+ * (lib/client-id.ts) names the client, so two tabs of one user hold different locks.
+ */
+export const collaborationApi = {
+  presence: (workflowId: string, action: PresenceAction) =>
+    api.post<CollaborationState>(`/workflows/${enc(workflowId)}/presence`, { action }),
+  writeAccess: (workflowId: string, action: WriteAccessAction) =>
+    api.post<CollaborationState>(`/workflows/${enc(workflowId)}/write-access`, { action }),
+};
+
+/** P6-86: "used by" counts and details, 100 ids at most per call; rows the caller cannot read are dropped */
+export const dependenciesApi = {
+  /** keyed by resource id; an id with nothing is `{}` or absent */
+  counts: (resourceType: DependencyResourceKind, resourceIds: string[]) =>
+    api.post<Record<string, DependencyCounts>>('/workflow-dependencies/counts', {
+      resourceType,
+      resourceIds,
+    }),
+  details: (resourceType: DependencyResourceKind, resourceIds: string[]) =>
+    api.post<Record<string, DependencyDetail[]>>('/workflow-dependencies/details', {
+      resourceType,
+      resourceIds,
+    }),
+  folder: (projectId: string, folderId: string) =>
+    api.get<FolderDependencies>(`/workflow-dependencies/projects/${enc(projectId)}/folders/${enc(folderId)}`),
+};
+
+/** P6-85: bulk stop and delete, each row checked (`workflow:execute`, `execution:delete`) */
+export const executionBulkApi = {
+  stopMany: (filter: ExecutionBulkFilter) =>
+    api.post<{ stopped: number }>('/executions/stopMany', { filter }),
+  deleteMany: (body: ExecutionDeleteBody) => api.post<{ deleted: number }>('/executions/delete', body),
+};
+
+/** P6-83: the public API rate limits (`securitySettings:manage`) */
+export const rateLimitsApi = {
+  get: () => api.get<RateLimitSettings>('/settings/policies/rate-limits'),
+  update: (body: Partial<RateLimitSettings>) =>
+    api.put<RateLimitSettings>('/settings/policies/rate-limits', body),
 };

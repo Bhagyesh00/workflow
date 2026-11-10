@@ -121,6 +121,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
           personalSpacePublishing: tenantSettings.securityPolicy?.personalSpacePublishing !== false,
           personalSpaceSharing: tenantSettings.securityPolicy?.personalSpaceSharing !== false,
         },
+        /** P6-53: the workspace's redaction floor (absent = off); every user reads it, no platform env is sent */
+        redactionFloor: tenantSettings.redactionFloor ?? 'off',
         /** P5-11: read only, the editor caps the "run in parallel" slider with it; PATCH never takes it */
         evaluationConcurrencyLimit: config.evaluationConcurrencyLimit,
         /** P5-09: the builder's model setup, admins only (it names a credential) */

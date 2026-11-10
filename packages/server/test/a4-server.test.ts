@@ -166,6 +166,7 @@ describe('R64: activation on a main that is not the leader', () => {
       logger: server.ctx.logger,
       bus,
       leadership: notLeader,
+      serviceDeps: server.ctx.serviceDeps,
       triggerStartTimeoutMs,
     });
 

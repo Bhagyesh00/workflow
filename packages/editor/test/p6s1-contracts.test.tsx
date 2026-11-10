@@ -243,6 +243,8 @@ describe('demo roles, security, variables, members, credentials', () => {
       publishedPersonalWorkflowsCount: 0,
       sharedPersonalWorkflowsCount: 0,
       sharedPersonalCredentialsCount: 0,
+      // P6-53 (S3 C0): the workspace's redaction floor, off by default
+      redaction: { floor: 'off' },
     });
     const personal = await data<{ id: string }>('GET', '/projects/personal');
     backend().seedWorkflow({ name: 'Live', active: true, projectId: personal.id });

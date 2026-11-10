@@ -6,14 +6,17 @@ import {
   annotationTagsApi,
   authApi,
   credentialsApi,
+  dependenciesApi,
   favoritesApi,
   foldersApi,
   inboxApi,
+  insightsApi,
   nodeTypesApi,
   projectsApi,
   rolesApi,
   settingsApi,
   tagsApi,
+  typePoliciesApi,
   variablesApi,
   workflowsApi,
 } from './endpoints';
@@ -21,6 +24,10 @@ import type {
   AiBuilderFeature,
   AssistantFeature,
   CredentialTypeDescription,
+  DependencyCounts,
+  DependencyResourceKind,
+  InsightsByWorkflowQuery,
+  InsightsQuery,
   NodeTypeDescription,
   Settings,
 } from './types';
@@ -136,6 +143,21 @@ export const queryKeys = {
     ['assistant', 'thread', threadId, 'drafts', draftId] as const,
   assistantSettings: ['assistant', 'settings'] as const,
   assistantMcpConnections: ['assistant', 'mcp-connections'] as const,
+  /** P6-49: invalidating `availableTypes` refreshes both lists of every project (prefix match) */
+  availableTypes: (projectId: string) => ['available-types', 'node', projectId] as const,
+  availableCredentialTypes: (projectId: string) => ['available-types', 'credential', projectId] as const,
+  /** P6-57: invalidating `insights` refreshes every insights query (prefix match) */
+  insights: ['insights'] as const,
+  insightsSummary: (query: object = {}) => ['insights', 'summary', query] as const,
+  insightsByTime: (query: object = {}) => ['insights', 'by-time', query] as const,
+  insightsByWorkflow: (query: object = {}) => ['insights', 'by-workflow', query] as const,
+  insightsSettings: ['insights', 'settings'] as const,
+  /** P6-86: invalidating `dependencies` refreshes every count (prefix match; a refresh is batched too) */
+  dependencies: ['dependencies'] as const,
+  dependencyCounts: (kind: DependencyResourceKind, id: string) =>
+    ['dependencies', 'counts', kind, id] as const,
+  /** P6-83 */
+  rateLimits: ['rate-limits'] as const,
 };
 
 export function createQueryClient(): QueryClient {
@@ -360,6 +382,125 @@ export function useInboxSummary(enabled = true) {
     queryKey: queryKeys.inboxSummary,
     queryFn: inboxApi.summary,
     enabled,
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
+/** P6-49: the node types a project may use; off until `projectId` is known */
+export function useAvailableTypes(projectId: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.availableTypes(projectId ?? 'none'),
+    queryFn: () => typePoliciesApi.availableTypes(projectId!),
+    enabled: Boolean(projectId),
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
+/** P6-49: the credential types a project may use; off until `projectId` is known */
+export function useAvailableCredentialTypes(projectId: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.availableCredentialTypes(projectId ?? 'none'),
+    queryFn: () => typePoliciesApi.availableCredentialTypes(projectId!),
+    enabled: Boolean(projectId),
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
+/** P6-57: the five tiles (`insights:list`; a member gets 403, so callers gate on the scope) */
+export function useInsightsSummary(query: InsightsQuery = {}, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.insightsSummary(query),
+    queryFn: () => insightsApi.summary(query),
+    enabled,
+    retry: false,
+  });
+}
+
+/** P6-57: the chart buckets; `timeSavedOnly` reads `/insights/by-time/time-saved` */
+export function useInsightsByTime(query: InsightsQuery = {}, enabled = true, timeSavedOnly = false) {
+  return useQuery({
+    queryKey: queryKeys.insightsByTime({ ...query, timeSavedOnly }),
+    queryFn: () => (timeSavedOnly ? insightsApi.byTimeSaved(query) : insightsApi.byTime(query)),
+    enabled,
+    retry: false,
+  });
+}
+
+/** P6-57: one page of the workflow table */
+export function useInsightsByWorkflow(query: InsightsByWorkflowQuery = {}, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.insightsByWorkflow(query),
+    queryFn: () => insightsApi.byWorkflow(query),
+    enabled,
+    retry: false,
+  });
+}
+
+/** P6-86: the server takes 100 ids per counts call */
+export const DEPENDENCY_COUNTS_BATCH = 100;
+
+interface CountsWaiter {
+  resolve(counts: DependencyCounts): void;
+  reject(error: unknown): void;
+}
+
+const pendingCounts = new Map<DependencyResourceKind, Map<string, CountsWaiter[]>>();
+let flushScheduled = false;
+
+function flushDependencyCounts(): void {
+  flushScheduled = false;
+  const batches = [...pendingCounts];
+  pendingCounts.clear();
+  for (const [kind, waiters] of batches) {
+    const ids = [...waiters.keys()];
+    for (let start = 0; start < ids.length; start += DEPENDENCY_COUNTS_BATCH) {
+      const chunk = ids.slice(start, start + DEPENDENCY_COUNTS_BATCH);
+      dependenciesApi.counts(kind, chunk).then(
+        (result) => {
+          for (const id of chunk) {
+            const counts = result?.[id] ?? {};
+            for (const waiter of waiters.get(id) ?? []) waiter.resolve(counts);
+          }
+        },
+        (error) => {
+          for (const id of chunk) for (const waiter of waiters.get(id) ?? []) waiter.reject(error);
+        },
+      );
+    }
+  }
+}
+
+/**
+ * P6-86: one resource's counts. Every id asked in the same tick (a page of rows mounting, or a refresh
+ * after `invalidateQueries`) goes in one POST `/workflow-dependencies/counts` per kind, 100 ids per call,
+ * as n8n fetches a page's counts at once; the same id asked twice is sent once.
+ */
+export function fetchDependencyCounts(kind: DependencyResourceKind, id: string): Promise<DependencyCounts> {
+  return new Promise<DependencyCounts>((resolve, reject) => {
+    let byId = pendingCounts.get(kind);
+    if (!byId) {
+      byId = new Map();
+      pendingCounts.set(kind, byId);
+    }
+    const waiters = byId.get(id);
+    if (waiters) waiters.push({ resolve, reject });
+    else byId.set(id, [{ resolve, reject }]);
+    if (!flushScheduled) {
+      flushScheduled = true;
+      setTimeout(flushDependencyCounts, 0);
+    }
+  });
+}
+
+/** P6-86: the "used by" counts of one workflow, credential or data table; off while `id` is missing */
+export function useDependencyCounts(kind: DependencyResourceKind, id: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.dependencyCounts(kind, id ?? 'none'),
+    queryFn: () => fetchDependencyCounts(kind, id!),
+    enabled: Boolean(id),
     retry: false,
     staleTime: 30_000,
   });

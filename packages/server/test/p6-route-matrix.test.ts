@@ -280,6 +280,10 @@ function urlOf(row: RouteMatrixRow, f: Fixtures = fx): string {
     tenantSlug,
     resourceType: 'workflow',
     resourceId: fx.workflow,
+    // P6 S3: type policy documents and scopes (no fixture: the fake id), the sub-workflow of a policy check
+    policyId: FAKE,
+    scopeId: FAKE,
+    subId: f.workflow,
   };
   return row.path
     .replace(/:(\w+)/g, (_match, name: string) => {

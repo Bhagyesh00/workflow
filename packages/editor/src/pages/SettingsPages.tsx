@@ -28,6 +28,8 @@ export function SettingsLayout() {
   const links = [
     { to: '/settings/account', label: 'Your account' },
     { to: '/settings/members', label: 'Members' },
+    // P6-84: every signed-in user, as n8n (no scope)
+    { to: '/settings/usage', label: 'Usage' },
     // P6-46: project and instance roles
     ...(can('role:manage') ? [{ to: '/settings/roles', label: 'Roles' }] : []),
     { to: '/settings/api-keys', label: 'API keys' },

@@ -76,6 +76,12 @@ export const settingsSchema = z
     callerIds: z.array(z.string()).optional(),
     /** P5-03, P5-04: the workflow is reachable from MCP (tenant server tools, trigger) */
     availableInMCP: z.boolean().optional(),
+    /** P6-56: time saved per production run, fixed minutes or the Track Time Saved nodes' sum */
+    timeSavedMode: z.enum(['fixed', 'dynamic']).optional(),
+    timeSavedPerExecution: z.number().int().min(0).optional(),
+    /** P6-53: which runs' data is hidden, and whether a caller's copy of this sub-workflow's output is too */
+    redactionPolicy: z.enum(['none', 'manual-only', 'non-manual', 'all']).optional(),
+    redactCallerExecutions: z.boolean().optional(),
   })
   .loose();
 

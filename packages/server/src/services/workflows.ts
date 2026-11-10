@@ -15,6 +15,7 @@ import {
   CHAT_TEST_TOKEN_TTL_S,
   CHAT_TOKEN_KINDS,
   CHAT_TRIGGER_TYPE,
+  type WorkflowSettings as EngineWorkflowSettings,
   ExpressionEvaluator,
   type Item,
   planPartialRun,
@@ -50,13 +51,18 @@ import { createRepositories, type Repositories, type TagRef } from '../repositor
 import { type AccessFilter, MISSING_SCOPE_MESSAGE } from './access';
 import type { ActiveWorkflowManager, ValidationIssue } from './active-workflows';
 import { assertCredentialsUsable } from './credential-usable';
+import { assertNoNewDeprecatedNodes } from './deprecated-nodes';
 import type { ExecutionService } from './executions';
 import type { FavoriteService } from './favorites';
 import type { FormTokenService } from './form-tokens';
 import { isAvailableInMcp } from './mcp/workflow-gate';
 import type { PublishHistoryService } from './publish-history';
+import { assertRedactionChange, seedRedactionSettings } from './redaction/policy';
 import { TEST_WEBHOOK_TTL_MS, type TestWebhookStore } from './test-webhooks';
 import { closeBounded } from './trigger-retry';
+import { evaluateWorkflow, restrictedTypes } from './type-policies/enforce';
+import { violationMessage } from './type-policies/errors';
+import { policyIssues } from './type-policies/tool-filter';
 import { hookUrl, nodeWebhooks, webhookUrlBase } from './webhook-paths';
 import { cloneDefinition, toDefinition, toDTO, type WorkflowDTO } from './workflow-model';
 import type { WorkflowReviewService } from './workflow-reviews';
@@ -138,6 +144,8 @@ export interface WorkflowListQuery {
   filter?: AccessFilter;
   /** P6-22: only rows owned by or shared with this project */
   projectId?: string;
+  /** P6-49 (S3, L4): only workflows using a node type the type policy blocks (in `projectId`, else the workspace) */
+  executionBlockedBy?: 'restrictedNode';
   /** P6-22: only rows shared into `projectId` */
   onlySharedWithMe?: boolean;
 }
@@ -238,7 +246,18 @@ export class WorkflowService {
   }
 
   async list(tenantId: string, query: WorkflowListQuery) {
-    const rows = await this.repos.workflows.list(tenantId, { ...query, cursor: decodeCursor(query.cursor) });
+    const { executionBlockedBy, ...filter } = query;
+    // P6-49 (S3): the node types the policy blocks where the list looks (the project, else the workspace);
+    // the repository keeps the workflows using any of them (L4 writes that query)
+    const usesNodeTypes =
+      executionBlockedBy === 'restrictedNode'
+        ? await restrictedTypes(this.deps.context().serviceDeps, tenantId, filter.projectId ?? null, 'node')
+        : undefined;
+    const rows = await this.repos.workflows.list(tenantId, {
+      ...filter,
+      cursor: decodeCursor(filter.cursor),
+      ...(usesNodeTypes ? { usesNodeTypes } : {}),
+    });
     const { data, nextCursor } = page(rows, query.limit, (r) => encodeCursor(r.updatedAt, r.id));
     const tags = await this.repos.workflows.tagsFor(
       tenantId,
@@ -447,9 +466,29 @@ export class WorkflowService {
       nodes: input.nodes as WorkflowNode[],
       connections: input.connections as WorkflowDefinition['connections'],
     });
+    // P6 S3, before the first write: the type policy (P6-04), deprecated nodes (P6-52) and the redaction
+    // settings the creator may set (P6-53)
+    const serviceDeps = this.deps.context().serviceDeps;
+    await evaluateWorkflow(serviceDeps, 'workflowSave', {
+      tenantId,
+      projectId,
+      workflow: { nodes: input.nodes as WorkflowNode[] },
+      stored: null,
+    });
+    await assertNoNewDeprecatedNodes(serviceDeps, {
+      next: { nodes: input.nodes as WorkflowNode[] },
+      stored: null,
+    });
+    await assertRedactionChange(
+      serviceDeps,
+      { tenantId, userId: actor.userId },
+      null,
+      undefined,
+      input.settings as EngineWorkflowSettings | undefined,
+    );
     const id = randomUUID();
     const versionId = randomUUID();
-    const settings: NonNullable<CreateInput['settings']> = { ...(input.settings ?? {}) };
+    let settings: NonNullable<CreateInput['settings']> = { ...(input.settings ?? {}) };
     // P5-04: a new workflow is available in MCP when the tenant auto exposes new workflows (unless the input says)
     // (it needs `workflow:update` on the new workflow, so a caller who cannot edit it does not expose it)
     const canExpose = actor.userId
@@ -457,12 +496,18 @@ export class WorkflowService {
           'workflow:update',
         )
       : true;
+    const tenant = await this.repos.tenants.get(tenantId);
     if (settings.availableInMCP === undefined && canExpose) {
-      const tenant = await this.repos.tenants.get(tenantId);
       if ((tenant?.settings as TenantSettings | null | undefined)?.mcp?.autoExposeNewWorkflows === true) {
         settings.availableInMCP = true;
       }
     }
+    // P6-53 (S3): the workspace's redaction floor seeds a new workflow's redaction settings
+    settings = ((await seedRedactionSettings(
+      serviceDeps,
+      tenant ?? { id: tenantId, settings: {} },
+      settings as EngineWorkflowSettings,
+    )) ?? settings) as NonNullable<CreateInput['settings']>;
     const content = {
       name: input.name,
       nodes: input.nodes,
@@ -566,6 +611,25 @@ export class WorkflowService {
         this.deps.nodeTypes,
       );
     }
+    // P6 S3, before the first write (a restore comes through here too): the type policy judges the types the
+    // save adds to the stored workflow (P6-04), no new deprecated node (P6-52), the redaction change (P6-53)
+    const serviceDeps = this.deps.context().serviceDeps;
+    const stored = { nodes: existing.nodes as WorkflowNode[] };
+    const nextNodes = (patch.nodes ?? existing.nodes) as WorkflowNode[];
+    await evaluateWorkflow(serviceDeps, 'workflowSave', {
+      tenantId,
+      projectId: existing.projectId,
+      workflow: { nodes: nextNodes },
+      stored,
+    });
+    await assertNoNewDeprecatedNodes(serviceDeps, { next: { nodes: nextNodes }, stored });
+    await assertRedactionChange(
+      serviceDeps,
+      { tenantId, userId: actor.userId },
+      id,
+      existing.settings as EngineWorkflowSettings,
+      (patch.settings ?? existing.settings) as EngineWorkflowSettings,
+    );
     const newVersionId = randomUUID();
     let previous: WorkflowRow | undefined;
     const row = await this.deps.database.db.transaction(async (tx) => {
@@ -622,6 +686,8 @@ export class WorkflowService {
       metadata: { versionId: newVersionId },
       ip: actor.ip,
     });
+    // P6 S3 (L14): the other editors of the workflow hear of the save
+    this.deps.context().collaboration.workflowSaved(tenantId, id, actor.userId);
 
     // a save writes the draft only (P3-10); the published version keeps running
     let activationError: { message: string; details?: unknown } | undefined;
@@ -874,6 +940,10 @@ export class WorkflowService {
     return this.getVersion(tenantId, id, versionId);
   }
 
+  /**
+   * A restore is a save of the version's content: `update` runs the S3 save checks on it (type policy
+   * `workflowSave` against the current stored workflow, deprecated nodes, the redaction change) before the write.
+   */
   async restoreVersion(tenantId: string, id: string, versionId: string, actor: Actor) {
     const snapshot = await this.getVersion(tenantId, id, versionId);
     return this.update(
@@ -972,6 +1042,12 @@ export class WorkflowService {
       ),
     );
     // binary data of a trigger's sample items is stored under the id of the execution that uses it
+    // P6-04 (S3): the type policy at run start, before a trigger runs with its credentials (manualTriggerItems)
+    await evaluateWorkflow(this.deps.context().serviceDeps, 'workflowStart', {
+      tenantId: tenant.id,
+      projectId: row.projectId,
+      workflow: definition,
+    });
     const executionId = randomUUID();
     let triggerItems = input.triggerItems as Item[] | undefined;
     const reusesStart = this.reusesStartOutput(workflow, start, input, pinData, toolRoot);
@@ -1139,6 +1215,12 @@ export class WorkflowService {
     if (input.destinationNode !== undefined && !workflow.nodes[input.destinationNode]) {
       throw ApiError.badRequest(`Node "${input.destinationNode}" does not exist`);
     }
+    // P6-04 (S3): the type policy refuses before the listen opens, as the credential gate does
+    await evaluateWorkflow(this.deps.context().serviceDeps, 'workflowStart', {
+      tenantId: tenant.id,
+      projectId: row.projectId,
+      workflow: definition,
+    });
     await this.deps.activeWorkflows.registerTestWebhooks(tenant, definition, node.name);
     const expiresAt = Date.now() + TEST_WEBHOOK_TTL_MS;
     // a chat trigger's registration gets a fresh id, and its test token names it: a token from an earlier
@@ -1208,6 +1290,12 @@ export class WorkflowService {
     if (!type?.trigger || type.execute || type.description.webhooks?.length || node.disabled) {
       throw ApiError.badRequest(`Node "${node.name}" does not listen for events`);
     }
+    // P6-04 (S3): the type policy refuses before the listen opens
+    await evaluateWorkflow(this.deps.context().serviceDeps, 'workflowStart', {
+      tenantId: tenant.id,
+      projectId: row.projectId,
+      workflow: definition,
+    });
     return this.deps.activeWorkflows.listenTestTrigger(tenant, workflow, node, type, {
       userId: actor.userId,
       onStarted: (executionId) =>
@@ -1321,7 +1409,20 @@ export class WorkflowService {
   /** dry-run activation checks (platform extension) */
   async validate(tenantId: string, id: string, data?: WorkflowData): Promise<ValidationIssue[]> {
     const row = await this.get(tenantId, id);
-    return this.deps.activeWorkflows.validate(tenantId, this.definitionFor(row, data), row.id);
+    const definition = this.definitionFor(row, data);
+    const issues = await this.deps.activeWorkflows.validate(tenantId, definition, row.id);
+    // P6-55 (S3, L10): type policy violations as issues (the whole workflow, as a publish judges it), so the
+    // Assistant's validate_workflow reports them and the model retries
+    const violations = await policyIssues(
+      this.deps.context().serviceDeps,
+      tenantId,
+      row.projectId,
+      definition,
+    );
+    return [
+      ...issues,
+      ...violations.map((v) => ({ node: v.nodeName ?? null, message: violationMessage([v]) })),
+    ];
   }
 }
 

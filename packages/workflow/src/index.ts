@@ -35,6 +35,7 @@ export * from './permissions/custom-role-scopes';
 export * from './permissions/role-maps';
 export * from './permissions/scopes';
 export * from './redact';
+export * from './redaction';
 export * from './subworkflow-extraction';
 export * from './tool-suspension';
 export * from './tool-variants';
