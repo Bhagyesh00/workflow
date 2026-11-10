@@ -22,6 +22,30 @@ function header(ctx: WebhookContext, name: string): string | undefined {
   return Array.isArray(v) ? v[0] : v;
 }
 
+/** the headers that carry a workspace sign-in: whoever reads them could call the webhook as that user */
+const SIGN_IN_HEADERS = new Set(['authorization', 'x-auth-token']);
+/** the browser sign-in cookies (`ncb-form-auth-wf-<id>` and the like) */
+const SIGN_IN_COOKIE = /^ncb-(?:form|chat)-auth-/;
+
+/** the request headers without the caller's sign-in, for run data (P6-87; as the Form and MCP triggers) */
+export function withoutSignIn(headers: DataObject): DataObject {
+  const out: DataObject = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const key = name.toLowerCase();
+    if (SIGN_IN_HEADERS.has(key)) continue;
+    if (key === 'cookie') {
+      const kept = (Array.isArray(value) ? value.join(';') : String(value ?? ''))
+        .split(';')
+        .map((pair) => pair.trim())
+        .filter((pair) => pair && !SIGN_IN_COOKIE.test(pair));
+      if (kept.length) out[name] = kept.join('; ');
+      continue;
+    }
+    out[name] = value;
+  }
+  return out;
+}
+
 const unauthorized = (message: string, code = 401): WebhookResponseData => ({
   webhookResponse: {
     statusCode: code,
@@ -363,7 +387,8 @@ export const WebhookNode: NodeType = {
 
     const item: Item = {
       json: {
-        headers: req.headers as DataObject,
+        // the sign-in token stays out of run data: a reader of the execution must not replay it
+        headers: signedIn ? withoutSignIn(req.headers as DataObject) : (req.headers as DataObject),
         params: req.params,
         query,
         body: (req.body ?? {}) as DataObject,

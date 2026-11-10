@@ -7,7 +7,10 @@
  * database error), and the caller then fails closed (webhooks.ts answers 503).
  *
  * A node is reached from the start node over its main connections; a sub-node (a model, a tool, a memory...)
- * is reached through the node it feeds, and so on up. A disabled node, and what only it feeds, is not.
+ * is reached through the node it feeds, and so on up. A disabled node passes its items on, as the engine does:
+ * the nodes after it are reached, but neither it nor its sub-nodes are. A credential named without an id is
+ * looked up as the run does (the workflow's project, a type that fits the node's), so the gate never asks for
+ * one the run would not use.
  */
 import type {
   CredentialConnectionStatus,
@@ -44,11 +47,13 @@ export function reachableNodes(workflow: WorkflowDefinition, startNode?: string)
   }
 
   const reached = new Set<string>();
+  // disabled nodes walked through: the engine hands their input to their children
+  const passed = new Set<string>();
   const queue: string[] = [];
   const reach = (name: string) => {
     const node = byName.get(name);
-    if (!node || node.disabled || reached.has(name)) return;
-    reached.add(name);
+    if (!node || reached.has(name) || passed.has(name)) return;
+    (node.disabled ? passed : reached).add(name);
     queue.push(name);
   };
   if (startNode !== undefined) reach(startNode);
@@ -56,6 +61,7 @@ export function reachableNodes(workflow: WorkflowDefinition, startNode?: string)
   while (queue.length) {
     const name = queue.shift() as string;
     for (const list of connections[name]?.main ?? []) for (const link of list ?? []) reach(link.node);
+    if (passed.has(name)) continue;
     for (const feeder of feeders.get(name) ?? []) reach(feeder);
   }
   return [...reached].map((name) => byName.get(name) as WorkflowNode);
@@ -67,11 +73,11 @@ export class CredentialGateService {
   forRun(
     tenantId: string,
     workflow: WorkflowDefinition,
-    _projectId: string,
+    projectId: string,
     startNode?: string,
   ): CredentialGateHelper {
     return {
-      check: (userId: string) => this.check(tenantId, workflow, startNode, userId),
+      check: (userId: string) => this.check(tenantId, workflow, projectId, startNode, userId),
       connectPageUrl: (credentialId, action, returnTo) => this.connectPageUrl(credentialId, action, returnTo),
     };
   }
@@ -80,22 +86,26 @@ export class CredentialGateService {
   async check(
     tenantId: string,
     workflow: WorkflowDefinition,
+    projectId: string,
     startNode: string | undefined,
     userId: string,
   ): Promise<CredentialGateResult> {
     const { repos } = this.deps;
     const ids = new Set<string>();
-    const names = new Set<string>();
+    // name-only references: the name and the type the node asks for (the key of `node.credentials`)
+    const named = new Map<string, { name: string; type: string }>();
     for (const node of reachableNodes(workflow, startNode)) {
       if (!node.credentials || typeof node.credentials !== 'object') continue;
-      for (const raw of Object.values(node.credentials as Record<string, unknown>)) {
+      for (const [type, raw] of Object.entries(node.credentials as Record<string, unknown>)) {
         if (!raw || typeof raw !== 'object') continue;
         const ref = raw as Partial<NodeCredentialRef>;
         if (typeof ref.id === 'string' && ref.id !== '') ids.add(ref.id);
-        else if (typeof ref.name === 'string' && ref.name !== '') names.add(ref.name);
+        else if (typeof ref.name === 'string' && ref.name !== '') {
+          named.set(JSON.stringify([ref.name, type]), { name: ref.name, type });
+        }
       }
     }
-    if (!ids.size && !names.size) return { readyToExecute: true, credentials: [] };
+    if (!ids.size && !named.size) return { readyToExecute: true, credentials: [] };
 
     // the private ones among them, by id and by name, each once
     const found = new Map<string, { name: string; type: string }>();
@@ -103,9 +113,15 @@ export class CredentialGateService {
       const row = await repos.credentials.get(tenantId, id);
       if (row) found.set(row.id, { name: row.name, type: row.type });
     }
-    for (const { id } of await repos.credentialEntries.resolvableByName(tenantId, [...names])) {
-      const row = await repos.credentials.get(tenantId, id);
-      if (row) found.set(row.id, { name: row.name, type: row.type });
+    // a name resolves as in the run (services/credentials.ts `provider`): the row the project can use, its own
+    // first, among the types that fit; it counts only when that row is private
+    const types = named.size ? this.deps.context().credentials.types : undefined;
+    for (const ref of named.values()) {
+      const candidates = (types?.list() ?? [])
+        .map((t) => t.name)
+        .filter((name) => types?.isA(name, ref.type));
+      const row = await repos.credentials.findByName(tenantId, projectId, ref.name, candidates);
+      if (row?.isResolvable) found.set(row.id, { name: row.name, type: row.type });
     }
     if (!found.size) return { readyToExecute: true, credentials: [] };
 

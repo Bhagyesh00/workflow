@@ -1027,14 +1027,15 @@ export class WebhookService {
       if (!result.workflowData) {
         reply = fromWebhookResponse(result.webhookResponse ?? { statusCode: 200, body: {} });
       } else {
-        const lost = await input.claim?.();
-        if (lost) return lost;
         // P6-87: a trigger that knew the person starts only when they have connected the private credentials
-        // the run reaches; the check fails closed (a throw is 503, no run)
+        // the run reaches; the check fails closed (a throw is 503, no run). It runs before the claim: a refusal
+        // leaves a test form or chat listening, as any refused request does
         if (result.triggerUserId) {
           const blocked = await this.credentialGate(services, result.triggerUserId, tenant.id, input.workflowId);
           if (blocked) return this.decorate(blocked, source, incoming.request.headers);
         }
+        const lost = await input.claim?.();
+        if (lost) return lost;
         // the submitter follows the run to its next page by polling, not on this request
         const pagesFollow =
           webhookUrlBase(hook.description) === 'form' &&

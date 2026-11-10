@@ -309,7 +309,7 @@ describe('the gate service', () => {
 
     expect(reachableNodes(definition, 'Hook').map((n) => n.name).sort()).toEqual(['A', 'Fixed', 'Hook', 'Model']);
     const gate = server.ctx.credentialGate;
-    const before = await gate.check(s.tenantId, definition, 'Hook', s.editor.user.id);
+    const before = await gate.check(s.tenantId, definition, s.team, 'Hook', s.editor.user.id);
     expect(before.readyToExecute).toBe(false);
     expect(before.credentials.map((c) => [c.credentialName, c.status])).toEqual([
       ['Calendar', 'missing'],
@@ -318,26 +318,32 @@ describe('the gate service', () => {
     expect(before.credentials[0]).toMatchObject({ credentialId: calendar.id, credentialType: 'oAuth2Api' });
 
     await connect(s.editor.client, mail.id, 'bea');
-    const half = await gate.check(s.tenantId, definition, 'Hook', s.editor.user.id);
+    const half = await gate.check(s.tenantId, definition, s.team, 'Hook', s.editor.user.id);
     expect(half.readyToExecute).toBe(false);
     expect(half.credentials.map((c) => [c.credentialName, c.status])).toEqual([
       ['Calendar', 'missing'],
       ['Mail', 'configured'],
     ]);
     // another user's connection does not count
-    const owners = await gate.check(s.tenantId, definition, 'Hook', s.owner.user.id);
+    const owners = await gate.check(s.tenantId, definition, s.team, 'Hook', s.owner.user.id);
     expect(owners.credentials.every((c) => c.status === 'missing')).toBe(true);
 
     await connect(s.editor.client, calendar.id, 'bea');
-    const ready = await gate.check(s.tenantId, definition, 'Hook', s.editor.user.id);
+    const ready = await gate.check(s.tenantId, definition, s.team, 'Hook', s.editor.user.id);
     expect(ready).toMatchObject({ readyToExecute: true });
     expect(ready.credentials.every((c) => c.status === 'configured')).toBe(true);
   });
 
   it('is ready with nothing to connect, and finds a private credential named without an id', async () => {
     const s = await setup();
-    const plain = { name: 'p', nodes: [node('Hook', 'core.webhook', {})], connections: {} } as unknown as WorkflowDefinition;
-    expect(await server.ctx.credentialGate.check(s.tenantId, plain, 'Hook', s.editor.user.id)).toEqual({
+    const plain = {
+      name: 'p',
+      nodes: [node('Hook', 'core.webhook', {})],
+      connections: {},
+    } as unknown as WorkflowDefinition;
+    expect(
+      await server.ctx.credentialGate.check(s.tenantId, plain, s.team, 'Hook', s.editor.user.id),
+    ).toEqual({
       readyToExecute: true,
       credentials: [],
     });
@@ -347,8 +353,101 @@ describe('the gate service', () => {
       nodes: [node('Hook', 'core.webhook', {}), node('A', 'test.whoAmI', {}, [0, 0], { credentials: { oAuth2Api: { id: null, name: 'ByName' } } })],
       connections: chain('Hook', 'A'),
     } as unknown as WorkflowDefinition;
-    const result = await server.ctx.credentialGate.check(s.tenantId, named, 'Hook', s.editor.user.id);
+    const result = await server.ctx.credentialGate.check(s.tenantId, named, s.team, 'Hook', s.editor.user.id);
     expect(result.credentials).toMatchObject([{ credentialId: mail.id, status: 'missing' }]);
+  });
+
+  it('walks through a disabled node to the nodes after it, as the engine does, but not into its sub-nodes', async () => {
+    const s = await setup();
+    const ref = (c: { id: string; name: string }) => ({ oAuth2Api: { id: c.id, name: c.name } });
+    const definition = {
+      name: 'pass',
+      nodes: [
+        node('Hook', 'core.webhook', { path: 'x' }),
+        node('Off', 'test.whoAmI', {}, [0, 0], {
+          credentials: ref(await privateCredential(s.owner.client, 'Off')),
+          disabled: true,
+        }),
+        node('After', 'test.whoAmI', {}, [0, 0], {
+          credentials: ref(await privateCredential(s.owner.client, 'After')),
+        }),
+        // feeds only the disabled node
+        node('OffModel', 'test.whoAmI', {}, [0, 0], {
+          credentials: ref(await privateCredential(s.owner.client, 'OffModel')),
+        }),
+      ],
+      connections: {
+        Hook: { main: [[{ node: 'Off', type: 'main', index: 0 }]] },
+        Off: { main: [[{ node: 'After', type: 'main', index: 0 }]] },
+        OffModel: { ai_languageModel: [[{ node: 'Off', type: 'ai_languageModel', index: 0 }]] },
+      },
+    } as unknown as WorkflowDefinition;
+    expect(
+      reachableNodes(definition, 'Hook')
+        .map((n) => n.name)
+        .sort(),
+    ).toEqual(['After', 'Hook']);
+    const result = await server.ctx.credentialGate.check(
+      s.tenantId,
+      definition,
+      s.team,
+      'Hook',
+      s.editor.user.id,
+    );
+    expect(result.readyToExecute).toBe(false);
+    expect(result.credentials.map((c) => c.credentialName)).toEqual(['After']);
+  });
+
+  it("looks a name up as the run does: the workflow's project, then a type that fits the node", async () => {
+    const s = await setup();
+    const other = await s.owner.client.data<{ id: string }>(
+      s.owner.client.post('/rest/projects', { name: 'Other' }),
+    );
+    // the workflow's project has a plain 'Google'; another project has a private one of the same name
+    await s.owner.client.data(
+      s.owner.client.post('/rest/credentials', { name: 'Google', type: 'oAuth2Api', data: oauth2Data() }),
+    );
+    const elsewhere = await s.owner.client.data<{ id: string }>(
+      s.owner.client.post('/rest/credentials', {
+        name: 'Google',
+        type: 'oAuth2Api',
+        isResolvable: true,
+        data: oauth2Data(),
+        projectId: other.id,
+      }),
+    );
+    // a private one in the project, but of a type the node does not take
+    await privateCredential(s.owner.client, 'Header');
+    const named = {
+      name: 'n',
+      nodes: [
+        node('Hook', 'core.webhook', {}),
+        node('A', 'test.whoAmI', {}, [0, 0], { credentials: { oAuth2Api: { id: null, name: 'Google' } } }),
+        node('B', 'test.whoAmI', {}, [0, 0], {
+          credentials: { httpHeaderAuth: { id: null, name: 'Header' } },
+        }),
+      ],
+      connections: {
+        Hook: {
+          main: [
+            [
+              { node: 'A', type: 'main', index: 0 },
+              { node: 'B', type: 'main', index: 0 },
+            ],
+          ],
+        },
+      },
+    } as unknown as WorkflowDefinition;
+    const gate = server.ctx.credentialGate;
+    expect(await gate.check(s.tenantId, named, s.team, 'Hook', s.editor.user.id)).toEqual({
+      readyToExecute: true,
+      credentials: [],
+    });
+    // in the other project the run would use the private one, so the gate asks for it
+    const there = await gate.check(s.tenantId, named, other.id, 'Hook', s.editor.user.id);
+    expect(there.credentials).toMatchObject([
+      { credentialId: elsewhere.id, credentialName: 'Google', status: 'missing' },
+    ]);
   });
 
   it('builds the connect link as a plain address: the credential, the action and the return path, nothing else', () => {
@@ -658,6 +757,38 @@ describe('/rest/form-auth/code for a webhook', () => {
     expect(res.statusCode).toBe(428);
     expect(await executionsOf(server.ctx, s.tenantId, hook.id)).toHaveLength(0);
   });
+
+  it("keeps the caller's token and sign-in cookie out of the stored run data", async () => {
+    const s = await setup();
+    const credential = await privateCredential(s.owner.client);
+    const hook = await webhookWorkflow(s, credential, { httpMethod: 'GET', oauthClient: 'auto' });
+    await connect(s.editor.client, credential.id, 'bea');
+    const access = await tokenFor(server, s.slug, s.editor, resourceOf(server, s.slug, hook.path));
+    const pageToken = server.ctx.formTokens.sign(
+      { kind: WEBHOOK_TOKEN_KIND, tenantId: s.tenantId, workflowId: hook.id, userId: s.editor.user.id },
+      3600,
+    );
+    const html = { accept: 'text/html', 'sec-fetch-mode': 'navigate' };
+    const callers: Array<Record<string, string>> = [
+      { ...bearer(access), cookie: 'theme=dark' },
+      { ...html, cookie: `theme=dark; ncb-form-auth-wf-${hook.id}=${pageToken}` },
+      { 'x-auth-token': pageToken, cookie: 'theme=dark' },
+    ];
+    for (const headers of callers) {
+      expect((await send(server, 'GET', hook.urlPath, headers)).statusCode).toBe(200);
+      expect(await lastWho(s, hook.id)).toBe('bea');
+    }
+    const runs = await executionsOf(server.ctx, s.tenantId, hook.id);
+    expect(runs).toHaveLength(3);
+    for (const run of runs) {
+      const stored = await server.ctx.repos.executions.getData(s.tenantId, run.id);
+      const text = JSON.stringify(stored);
+      expect(text).toContain('theme=dark');
+      expect(text).not.toContain(access);
+      expect(text).not.toContain(pageToken);
+      expect(text).not.toMatch(/"authorization"|"x-auth-token"|ncb-form-auth-/);
+    }
+  });
 });
 
 describe('Form Trigger with user auth', () => {
@@ -714,6 +845,32 @@ describe('Form Trigger with user auth', () => {
     const ok = await send(server, 'POST', form.urlPath, { 'x-auth-token': token }, { 'field-0': 'Ann' });
     expect(ok.statusCode).toBe(200);
     expect(await lastWho(s, form.id)).toBe('bea');
+  });
+
+  it('leaves a test form listening when the gate refuses the submit', async () => {
+    const s = await setup();
+    const credential = await privateCredential(s.owner.client);
+    const path = `form-${randomUUID().slice(0, 8)}`;
+    const wf = await createWorkflow(s.owner.client, {
+      nodes: [formNode(path), who(credential)],
+      connections: chain('Start', 'Who'),
+    });
+    await s.owner.client.data(
+      s.owner.client.post(`/rest/workflows/${wf.id}/listen-test-webhook`, { nodeName: 'Start' }),
+    );
+    const url = `/form-test/${s.slug}/${path}`;
+    const token = tokenOf(s, wf.id, s.editor.user.id);
+
+    const blocked = await send(server, 'POST', url, { 'x-auth-token': token }, { 'field-0': 'Ann' });
+    expect(blocked.statusCode).toBe(428);
+    expect(await executionsOf(server.ctx, s.tenantId, wf.id)).toHaveLength(0);
+    // still listening: the page answers, and the submit runs once the account is connected
+    expect((await send(server, 'GET', url, { 'x-auth-token': token })).statusCode).toBe(200);
+    await connect(s.editor.client, credential.id, 'bea');
+    expect(
+      (await send(server, 'POST', url, { 'x-auth-token': token }, { 'field-0': 'Ann' })).statusCode,
+    ).toBe(200);
+    expect(await lastWho(s, wf.id)).toBe('bea');
   });
 
   it('is 503 when the check throws, and the run does not start', async () => {

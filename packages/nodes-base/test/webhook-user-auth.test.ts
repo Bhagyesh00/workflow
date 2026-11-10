@@ -190,6 +190,16 @@ describe('client "bearer"', () => {
     expect(hidden.triggerUserId).toBe(USER.id);
   });
 
+  it('keeps the token out of the output headers, and keeps the other headers', async () => {
+    const result = await call({
+      headers: { ...bearer(GOOD_TOKEN), 'x-auth-token': 'tok-x', cookie: 'theme=dark', 'x-trace': 't1' },
+    });
+    const headers = result.workflowData?.[0][0].json.headers as DataObject;
+    expect(headers).toEqual({ cookie: 'theme=dark', 'x-trace': 't1' });
+    expect(JSON.stringify(result.workflowData)).not.toContain(GOOD_TOKEN);
+    expect(JSON.stringify(result.workflowData)).not.toContain('tok-x');
+  });
+
   it('does not take a browser: no token on a page navigation is 401, no redirect', async () => {
     const result = await call({ headers: browser });
     expect(result.webhookResponse?.statusCode).toBe(401);
@@ -276,6 +286,25 @@ describe('client "auto"', () => {
     });
     expect(result.workflowData).toBeDefined();
     expect(result.triggerUserId).toBe(USER.id);
+  });
+
+  it('keeps the sign-in cookie and token out of the output headers, and keeps the other cookies', async () => {
+    const token = formTokens.sign(
+      { kind: WEBHOOK_TOKEN_KIND, userId: USER.id, tenantId: 't1', workflowId: 'wf-1' },
+      HOUR,
+    );
+    const result = await call({
+      parameters: auto,
+      headers: { ...browser, cookie: `theme=dark; ncb-form-auth-wf-wf-1=${token}; ncb-chat-auth-wf-wf-2=c2` },
+    });
+    expect(result.triggerUserId).toBe(USER.id);
+    const headers = result.workflowData?.[0][0].json.headers as DataObject;
+    expect(headers.cookie).toBe('theme=dark');
+    expect(JSON.stringify(result.workflowData)).not.toContain(token);
+
+    const only = await call({ parameters: auto, headers: { 'x-auth-token': token } });
+    expect(only.triggerUserId).toBe(USER.id);
+    expect(only.workflowData?.[0][0].json.headers).toEqual({});
   });
 
   it('does not take a token of another kind (a form token never opens a webhook)', async () => {
