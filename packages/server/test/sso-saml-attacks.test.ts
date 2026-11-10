@@ -136,6 +136,16 @@ describe('SAML response attacks', () => {
     );
   });
 
+  it('refuses an assertion signed with a key the metadata does not name inside a correctly signed message', async () => {
+    const user = person('stranger-assertion');
+    refusedWith(
+      await postAcs(owner.tenant.slug, respond({ user, assertionKey: strangerKey() })),
+      'saml_response_invalid',
+    );
+    expect((await lastFailure(owner.tenant.id))?.detail).toBe('ERR_ASSERTION_SIGNATURE');
+    expect(await server.ctx.repos.users.getByEmail(user.email as string)).toBeUndefined();
+  });
+
   it('refuses an expired response', async () => {
     const past = new Date(Date.now() - 10 * 60_000);
     const res = await postAcs(
@@ -215,6 +225,18 @@ describe('SAML response attacks', () => {
       await server.app.inject({ method: 'GET', url: `/sso/saml/${owner.tenant.slug}/acs?${stranger}` }),
       'saml_response_invalid',
     );
+    // a correctly signed query and message whose assertion is signed with a stranger key
+    const embedded = idp.redirectResponse({
+      sp,
+      user: person('q3'),
+      signMessage: true,
+      assertionKey: strangerKey(),
+    });
+    refusedWith(
+      await server.app.inject({ method: 'GET', url: `/sso/saml/${owner.tenant.slug}/acs?${embedded}` }),
+      'saml_response_invalid',
+    );
+    expect((await lastFailure(owner.tenant.id))?.detail).toBe('ERR_ASSERTION_SIGNATURE');
   });
 });
 

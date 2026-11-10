@@ -79,6 +79,8 @@ export interface SamlResponseOptions {
   signMessage?: boolean;
   /** sign with this key instead of the fixture key */
   privateKey?: string;
+  /** sign only the assertion with this key (the message keeps `privateKey`); the metadata certificate stays in KeyInfo */
+  assertionKey?: string;
   /** changes the signed XML (a tampered response) */
   tamper?: (xml: string) => string;
   /** text put before the root element (a DOCTYPE) */
@@ -123,6 +125,8 @@ export class FakeSamlIdp {
   readonly ssoUrl: string;
   /** what GET /metadata answers (a test may replace it) */
   metadataXml: string;
+  /** awaited once before the next GET /metadata answers (a test makes a save land during the read) */
+  beforeMetadata?: () => Promise<unknown>;
   /** where GET /moved sends the caller (302) */
   movedTo = '';
   /** requests the server saw, by path */
@@ -155,8 +159,12 @@ export class FakeSamlIdp {
       const path = (req.url ?? '/').split('?')[0];
       fake?.hits.push(path);
       if (path === '/metadata') {
-        res.writeHead(200, { 'content-type': 'application/samlmetadata+xml' });
-        res.end(fake?.metadataXml ?? '');
+        const before = fake?.beforeMetadata;
+        if (fake) fake.beforeMetadata = undefined;
+        void (before ? before().catch(() => undefined) : Promise.resolve()).then(() => {
+          res.writeHead(200, { 'content-type': 'application/samlmetadata+xml' });
+          res.end(fake?.metadataXml ?? '');
+        });
         return;
       }
       if (path === '/moved') {
@@ -271,6 +279,7 @@ export class FakeSamlIdp {
     if (options.signAssertion !== false) {
       xml = samlify.SamlLib.constructSAMLSignature({
         ...sign,
+        privateKey: options.assertionKey ?? key,
         rawSamlMessage: xml,
         referenceTagXPath: "/*[local-name(.)='Response']/*[local-name(.)='Assertion']",
         signatureConfig: {

@@ -345,6 +345,22 @@ describe('SAML sign-in', () => {
     expect(sessionCookie(res)).toBeTruthy();
   });
 
+  it('a response without a name and a RelayState path goes to onboarding with that path next', async () => {
+    const owner = await workspace();
+    await samlOn(owner);
+    const res = await postAcs(
+      owner.tenant.slug,
+      idp.postResponse({
+        sp: target(owner.tenant.slug),
+        user: person('noname-next', { firstName: undefined, lastName: undefined }),
+        relayState: '/workflows?x=1',
+      }),
+    );
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe(`/saml/onboarding?next=${encodeURIComponent('/workflows?x=1')}`);
+    expect(sessionCookie(res)).toBeTruthy();
+  });
+
   it('a RelayState to another host stays local', async () => {
     const owner = await workspace();
     await samlOn(owner);
@@ -495,5 +511,60 @@ describe('SAML metadata URL', () => {
     } finally {
       idp.metadataXml = good;
     }
+  });
+
+  it('a read after 24 hours writes only the copy and its time, and a save made during the read wins', async () => {
+    const owner = await workspace();
+    const metadataUrl = `${idp.baseUrl}/metadata`;
+    const custom = 'urn:custom:email';
+    await owner.client.data(
+      owner.client.post('/rest/sso/saml/config', { metadataUrl, mapping: { email: custom } }),
+    );
+    await owner.client.data(owner.client.post('/rest/sso/saml/config/toggle', { loginEnabled: true }));
+    const old = '2000-01-01T00:00:00.000Z';
+    const age = async () => {
+      const row = await server.ctx.repos.sso.get(owner.tenant.id);
+      await server.ctx.repos.sso.upsert(owner.tenant.id, {
+        saml: { ...(row?.saml ?? {}), metadataFetchedAt: old },
+      });
+    };
+    const saml = async () =>
+      (await server.ctx.repos.sso.get(owner.tenant.id))?.saml as {
+        metadataUrl?: string;
+        metadataFetchedAt?: string;
+        mapping?: { email?: string };
+      };
+
+    // no save in between: the copy's time moves on, the rest of the section stays
+    await age();
+    const first = await server.app.inject({ method: 'GET', url: `/sso/saml/${owner.tenant.slug}/initsso` });
+    expect(first.statusCode).toBe(302);
+    const refreshed = await saml();
+    expect(refreshed.metadataFetchedAt).not.toBe(old);
+    expect(refreshed.metadataUrl).toBe(metadataUrl);
+    expect(refreshed.mapping?.email).toBe(custom);
+
+    // the admin pastes XML and a new mapping while the read is waiting on the identity provider
+    await age();
+    const pasted = idp.metadata();
+    let saved = false;
+    idp.beforeMetadata = async () => {
+      await owner.client.data(
+        owner.client.post('/rest/sso/saml/config', {
+          metadataUrl: '',
+          metadata: pasted,
+          mapping: { email: 'urn:new:email' },
+        }),
+      );
+      saved = true;
+    };
+    const second = await server.app.inject({ method: 'GET', url: `/sso/saml/${owner.tenant.slug}/initsso` });
+    expect(saved).toBe(true);
+    expect(second.statusCode).toBe(302);
+    const after = await saml();
+    expect(after.metadataUrl).toBe('');
+    expect(after.mapping?.email).toBe('urn:new:email');
+    expect(after.metadataFetchedAt).toBeUndefined();
+    expect((await server.ctx.repos.sso.get(owner.tenant.id))?.samlMetadata).toBe(pasted);
   });
 });

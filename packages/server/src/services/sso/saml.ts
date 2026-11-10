@@ -14,10 +14,11 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import type { DataObject } from '@workflow/workflow';
+import { and, eq, sql } from 'drizzle-orm';
 import type { IdentityProviderInstance, ServiceProviderInstance } from 'samlify';
 import { z } from 'zod';
 import type { ServiceDeps } from '../../context';
-import type { TenantAuthSettingsRow, TenantRow } from '../../db/schema';
+import { type TenantAuthSettingsRow, type TenantRow, tenantAuthSettings } from '../../db/schema';
 import { ApiError, parse } from '../../http/errors';
 import { createRepositories } from '../../repositories';
 import type { AuthResult, SessionMeta } from '../auth';
@@ -35,6 +36,19 @@ import { type SamlTestOutcome, samlPostCsp, samlPostPage, samlTestResultPage } f
 
 // samlify is CommonJS and exports `SamlLib` through a getter Node's ESM loader does not see
 const samlify: typeof import('samlify') = createRequire(import.meta.url)('samlify');
+
+/** the parts of an xmldom node the assertion check uses */
+interface SamlXmlNode {
+  nodeType: number;
+  localName?: string | null;
+  childNodes: ArrayLike<SamlXmlNode>;
+  removeChild(child: SamlXmlNode): unknown;
+}
+
+// samlify's own parser (its DOM options), so the assertion check reads the XML as samlify does
+const samlXml: {
+  parseXml(xml: string): { documentElement: SamlXmlNode | null; toString(): string };
+} = createRequire(import.meta.url)('samlify/build/src/xml');
 
 /** what the ACS answers the browser: a session, or the test flow's result page */
 export type SamlAcsResult =
@@ -316,7 +330,13 @@ export class SamlService {
       throw error;
     }
     const result = await this.deps.context().ssoLogin.signIn(tenant, profile, meta, { authMethod: 'saml' });
-    const redirect = noName ? SAML_ONBOARDING_PATH : safeSsoRedirect(relayState, this.deps.config.baseUrl);
+    const next = safeSsoRedirect(relayState, this.deps.config.baseUrl);
+    // the onboarding page asks for the name, then goes on to the page the person came for
+    const redirect = noName
+      ? next === '/'
+        ? SAML_ONBOARDING_PATH
+        : `${SAML_ONBOARDING_PATH}?next=${encodeURIComponent(next)}`
+      : next;
     return { kind: 'session', result, redirect };
   }
 
@@ -543,10 +563,24 @@ export class SamlService {
       const metadata = await this.fetchMetadata(section.metadataUrl);
       await validateIdpMetadata(metadata);
       this.refreshFailedAt.delete(tenant.id);
-      return await this.deps.repos.sso.upsert(tenant.id, {
-        samlMetadata: metadata,
-        saml: { ...(row.saml ?? {}), metadataFetchedAt: new Date().toISOString() },
-      });
+      // written only while the row still holds the URL and the copy this read replaces, and only the copy and
+      // its time: a save made during the read wins (the stale section is never written back)
+      const [updated] = await this.deps.database.db
+        .update(tenantAuthSettings)
+        .set({
+          samlMetadata: metadata,
+          saml: sql`jsonb_set(coalesce(${tenantAuthSettings.saml}, '{}'::jsonb), '{metadataFetchedAt}', to_jsonb(${new Date().toISOString()}::text))`,
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(tenantAuthSettings.tenantId, tenant.id),
+            sql`${tenantAuthSettings.saml}->>'metadataUrl' = ${section.metadataUrl}`,
+            sql`${tenantAuthSettings.saml}->>'metadataFetchedAt' is not distinct from ${section.metadataFetchedAt ?? null}::text`,
+          ),
+        )
+        .returning();
+      return updated ?? (await this.deps.repos.sso.get(tenant.id)) ?? row;
     } catch {
       // the stored copy stays in use (n8n's fallback, saml.service.ee.ts:586-599)
       this.refreshFailedAt.set(tenant.id, Date.now());
@@ -739,7 +773,7 @@ export class SamlService {
         code,
       );
     }
-    this.assertShape(xml, idp, binding);
+    this.assertShape(xml, idp);
     const { entityId, acsUrl } = this.urls(slug);
     const issuers = ([] as unknown[]).concat(extract.issuer ?? []);
     if (!issuers.length || issuers.some((issuer) => issuer !== idp.entityMeta.getEntityID())) {
@@ -754,7 +788,7 @@ export class SamlService {
   }
 
   /** one plain assertion, signed itself (wantAssertionsSigned), on either binding */
-  private assertShape(xml: string, idp: IdentityProviderInstance, binding: 'redirect' | 'post'): void {
+  private assertShape(xml: string, idp: IdentityProviderInstance): void {
     const found = samlify.Extractor.extract(xml, [
       { key: 'assertion', localPath: ['Response', 'Assertion'], attributes: [], context: true },
       { key: 'encrypted', localPath: ['Response', 'EncryptedAssertion'], attributes: [], context: true },
@@ -765,20 +799,27 @@ export class SamlService {
     }
     if (typeof found.signature !== 'string')
       throw new SamlRefusal('saml_response_invalid', 'ERR_ASSERTION_UNSIGNED');
-    if (binding === 'redirect') {
-      // samlify checks the query signature on this binding; the assertion's own signature is checked here
-      let verified = false;
-      try {
-        const [ok, assertion] = samlify.SamlLib.verifySignature(xml, {
+    // samlify stops at the first signature that verifies (the message's on a signed message), so the
+    // assertion's own signature is checked alone: the message signature taken out, then the metadata's
+    // certificates, the allowed algorithms and the enveloped reference to the assertion (both bindings)
+    let verified = false;
+    try {
+      const doc = samlXml.parseXml(xml);
+      const root = doc.documentElement;
+      if (root) {
+        for (const child of Array.from(root.childNodes)) {
+          if (child.nodeType === 1 && child.localName === 'Signature') root.removeChild(child);
+        }
+        const [ok, assertion] = samlify.SamlLib.verifySignature(doc.toString(), {
           metadata: idp.entityMeta,
           allowedSignatureAlgorithms: SIGNATURE_ALGORITHMS,
         });
         verified = ok && typeof assertion === 'string';
-      } catch {
-        verified = false;
       }
-      if (!verified) throw new SamlRefusal('saml_response_invalid', 'ERR_ASSERTION_SIGNATURE');
+    } catch {
+      verified = false;
     }
+    if (!verified) throw new SamlRefusal('saml_response_invalid', 'ERR_ASSERTION_SIGNATURE');
   }
 
   /** the person the response names, by the workspace's mapping; missing attributes are refused by name */
