@@ -48,9 +48,9 @@ test.describe('Private credentials (P6-15)', () => {
     await page.getByLabel('Search credential types').fill('OAuth2 API');
     await page.getByRole('button', { name: /^OAuth2 API/ }).first().click();
     await page.getByLabel('Name', { exact: true }).fill(credentialName);
-    await page.getByLabel('Authorization URL').fill('https://auth.example.com/authorize');
-    await page.getByLabel('Access Token URL').fill('https://auth.example.com/token');
-    await page.getByLabel('Client ID').fill('shared-client');
+    await page.getByRole('textbox', { name: /^Authorization URL/ }).fill('https://auth.example.com/authorize');
+    await page.getByRole('textbox', { name: /^Access Token URL/ }).fill('https://auth.example.com/token');
+    await page.getByRole('textbox', { name: /^Client ID/ }).fill('shared-client');
     const toggle = page.getByRole('switch', { name: 'Private credential', exact: true });
     await expect(toggle).toBeEnabled();
     await toggle.click();
@@ -77,7 +77,7 @@ test.describe('Private credentials (P6-15)', () => {
 
   test('switching back to one shared account saves', async () => {
     await page.goto(`/projects/${projectId}/credentials`);
-    await page.getByRole('button', { name: credentialName }).click();
+    await page.getByRole('button', { name: new RegExp(`^${credentialName}`) }).click();
     const section = page.getByRole('region', { name: 'Private credential', exact: true });
     const toggle = section.getByRole('switch', { name: 'Private credential', exact: true });
     await expect(toggle).toHaveAttribute('aria-checked', 'true');
