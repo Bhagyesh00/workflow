@@ -14,6 +14,7 @@ import type { AddressInfo } from 'node:net';
 import type { Scope } from '@workflow/workflow';
 import type { FastifyRequest } from 'fastify';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { loadConfig } from '../src/config';
 import { apiKeyScopesForRole } from '../src/http/api-key-scopes';
 import { type AuthContext, requireAnyScope } from '../src/http/auth';
 import { PING_INTERVAL_MS } from '../src/routes/push';
@@ -21,7 +22,12 @@ import { createRunScope } from '../src/services/assistant/run';
 import { ASSISTANT_TOOL_NO_ACCESS } from '../src/services/assistant/types';
 import { SSO_SESSION_FENCED_MESSAGE, sha256 } from '../src/services/auth';
 import { MCP_KEY_AUDIENCE } from '../src/services/mcp/types';
-import { changeMemberRole, disableMember, LAST_OWNER_MESSAGE } from '../src/services/member-disable';
+import {
+  changeMemberRole,
+  DISABLED_OWNER_MESSAGE,
+  disableMember,
+  LAST_OWNER_MESSAGE,
+} from '../src/services/member-disable';
 import {
   chain,
   createTestServer,
@@ -423,6 +429,24 @@ describe('disableMember and enableMember', () => {
       statusCode: 404,
     });
   });
+
+  it('never leaves a disabled owner: a disabled member is not made owner, an owner row is not disabled', async () => {
+    const owner = await newOwner();
+    const member = await realMember(owner);
+    expect(await disableMember(server.ctx, owner.tenant.id, member.user.id, owner.user.id)).toBe(true);
+    const patched = await owner.client.patch(`/rest/members/${member.user.id}`, { role: 'owner' });
+    expect(patched.statusCode).toBe(409);
+    expect(patched.body).toContain(DISABLED_OWNER_MESSAGE);
+    expect(
+      await failure(changeMemberRole(server.ctx, owner.tenant.id, member.user.id, 'owner')),
+    ).toMatchObject({ statusCode: 409, message: DISABLED_OWNER_MESSAGE });
+    expect(
+      await server.ctx.repos.memberships.getIncludingDisabled(owner.tenant.id, member.user.id),
+    ).toMatchObject({ role: 'member', disabledAt: expect.any(Date) });
+    // the write itself skips an owner, so a promotion that wins a race with disableMember stays enabled
+    expect(await server.ctx.repos.memberships.disable(owner.tenant.id, owner.user.id)).toBe(false);
+    expect(await server.ctx.repos.memberships.get(owner.tenant.id, owner.user.id)).toBeDefined();
+  });
 });
 
 describe('sessions and keys', () => {
@@ -473,6 +497,12 @@ describe('sessions and keys', () => {
     // the session row carries both, and /auth/me names the method
     const me = await saml.client.data(saml.client.get('/rest/auth/me'));
     expect(me).toMatchObject({ authMethod: 'saml', ssoFenced: true, mfaEnabled: false });
+  });
+
+  it('SCIM_RATE_LIMIT is 600 by default and 0 turns the SCIM rate limit off', () => {
+    expect(loadConfig({}).scimRateLimit).toBe(600);
+    expect(loadConfig({ SCIM_RATE_LIMIT: '0' }).scimRateLimit).toBe(0);
+    expect(() => loadConfig({ SCIM_RATE_LIMIT: '-1' })).toThrow();
   });
 
   it("USER_MANAGEMENT_JWT_DURATION_HOURS sets the session cookie's age", async () => {

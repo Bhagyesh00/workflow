@@ -28,7 +28,7 @@ export class SharingService {
     const workflow = await this.deps.repos.workflows.get(auth.tenant.id, workflowId);
     if (!workflow) throw ApiError.notFound('Workflow');
     const change = await this.apply(auth, 'workflow', workflow.id, workflow.projectId, shareWithIds);
-    // P6-17 (C0): stub (L1) PASSES
+    // P6-17: mails the users the workflow was shared with
     if (change.added.length) {
       await workflowShared(this.deps, auth.tenant.id, auth.user.id, workflow.id, change.added);
     }
@@ -38,11 +38,11 @@ export class SharingService {
     const credential = await this.deps.repos.credentials.get(auth.tenant.id, credentialId);
     if (!credential) throw ApiError.notFound('Credential');
     const change = await this.apply(auth, 'credential', credential.id, credential.projectId, shareWithIds);
-    // P6-17 (C0): stub (L1) PASSES
+    // P6-17: mails the users the credential was shared with
     if (change.added.length) {
       await credentialShared(this.deps, auth.tenant.id, auth.user.id, credential.id, change.added);
     }
-    // P6-15 (C0): entries of users who lost the credential go; stub (L14) PASSES
+    // P6-15: entries of users who lost the credential go
     if (change.removed.length) {
       await this.deps.context().privateCredentials.afterAccessChange(auth.tenant.id, {
         credentialId: credential.id,

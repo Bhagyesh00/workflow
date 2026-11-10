@@ -14,6 +14,9 @@ import { ApiError } from '../http/errors';
 import { createRepositories } from '../repositories';
 
 export const LAST_OWNER_MESSAGE = 'A workspace needs at least one owner';
+/** an owner is never disabled (`disableMember` refuses one), so a disabled member is not made an owner either */
+export const DISABLED_OWNER_MESSAGE =
+  "Couldn't change the role: enable the member before making them an owner";
 
 /**
  * A caller gives a workspace role only when it holds every scope of that role itself (an owner holds them
@@ -90,7 +93,8 @@ export async function enableMember(
  * Changes the member's workspace role. The caller's own checks come first (route: `assertMemberRole`, owner
  * rules, own role, `assertGrantable`; this takes a tenant id, not a session, because provisioning changes
  * roles at sign-in). Here: the provisioning lock unless `source` is provisioning, the last owner kept (409,
- * under a lock on the owners), the update, the audit `member.role_changed`, then the API key scopes above the
+ * under a lock on the owners), the update, a disabled member never made owner (409, read after the update so a
+ * disable that committed meanwhile is seen), the audit `member.role_changed`, then the API key scopes above the
  * new role are stripped and private credential entries the member lost are cleaned up. Finds a disabled
  * member too. 404 when there is no such member.
  */
@@ -102,7 +106,7 @@ export async function changeMemberRole(
   options: { source?: 'provisioning'; actorId?: string; ip?: string } = {},
 ): Promise<void> {
   if (options.source !== 'provisioning') {
-    // stub (L9): PASSES until provisioning manages the roles
+    // P6-11: refused while role provisioning manages the workspace roles
     await ctx.provisioning.assertInstanceRolesEditable(tenantId);
   }
   await ctx.database.db.transaction(async (tx) => {
@@ -113,6 +117,9 @@ export async function changeMemberRole(
       throw ApiError.conflict(LAST_OWNER_MESSAGE);
     }
     if (!(await repos.memberships.updateRole(tenantId, userId, role))) throw ApiError.notFound('Member');
+    if (role === 'owner' && (await repos.memberships.getIncludingDisabled(tenantId, userId))?.disabledAt) {
+      throw ApiError.conflict(DISABLED_OWNER_MESSAGE);
+    }
     await repos.audit.add(tenantId, {
       userId: options.actorId ?? null,
       action: 'member.role_changed',
@@ -122,8 +129,8 @@ export async function changeMemberRole(
       ip: options.ip,
     });
   });
-  // stub (L5): PASSES; strips the key scopes the new role does not give
+  // P6-21: strips the key scopes the new role does not give
   await ctx.apiKeys.onRoleChange(tenantId, userId, role);
-  // stub (L14): PASSES; deletes private credential entries the member can no longer reach
+  // P6-15: deletes private credential entries the member can no longer reach
   await ctx.privateCredentials.afterAccessChange(tenantId, { userId });
 }

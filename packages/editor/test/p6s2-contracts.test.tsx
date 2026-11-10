@@ -56,9 +56,29 @@ describe('moved member routes (mock-members.ts, today’s behaviour)', () => {
     signedIn();
     const sam = addSam();
     const list = await data<unknown[]>('GET', '/members');
+    // P6-20 (L4): each row also carries the membership fields (status, last active, 2FA, SCIM, SSO bypass)
+    const fresh = {
+      status: 'active',
+      lastActiveAt: null,
+      mfaEnabled: false,
+      managedByScim: false,
+      allowSsoManualLogin: false,
+    };
     expect(list).toEqual([
-      { userId: backend().session!.userId, email: 'owner@example.com', name: 'Olive Owner', role: 'owner' },
-      { userId: sam, email: 'sam@example.com', name: 'Sam Shaw', role: 'member' },
+      expect.objectContaining({
+        userId: backend().session!.userId,
+        email: 'owner@example.com',
+        name: 'Olive Owner',
+        role: 'owner',
+        ...fresh,
+      }),
+      expect.objectContaining({
+        userId: sam,
+        email: 'sam@example.com',
+        name: 'Sam Shaw',
+        role: 'member',
+        ...fresh,
+      }),
     ]);
     const invite = await data<Record<string, unknown>>('POST', '/members/invite', {
       email: 'New@Example.com',
@@ -97,7 +117,7 @@ describe('moved member routes (mock-members.ts, today’s behaviour)', () => {
     expect((await call('GET', '/members')).status).toBe(200);
   });
 
-  it('takes the new optional membership fields without changing the list answer', async () => {
+  it('takes the new optional membership fields into the list answer', async () => {
     signedIn();
     const extra: DemoMembership = {
       tenantId: backend().session!.tenantId,
@@ -111,12 +131,19 @@ describe('moved member routes (mock-members.ts, today’s behaviour)', () => {
     backend().users.push({ id: 'u-dee', email: 'dee@example.com', name: 'Dee', password: 'x' });
     backend().memberships.push(extra);
     const list = await data<Array<Record<string, unknown>>>('GET', '/members');
-    expect(list.find((m) => m.userId === 'u-dee')).toEqual({
-      userId: 'u-dee',
-      email: 'dee@example.com',
-      name: 'Dee',
-      role: 'member',
-    });
+    expect(list.find((m) => m.userId === 'u-dee')).toEqual(
+      expect.objectContaining({
+        userId: 'u-dee',
+        email: 'dee@example.com',
+        name: 'Dee',
+        role: 'member',
+        status: 'disabled',
+        lastActiveAt: null,
+        mfaEnabled: false,
+        managedByScim: true,
+        allowSsoManualLogin: false,
+      }),
+    );
   });
 });
 
@@ -277,7 +304,11 @@ describe('GET /auth/sso-options (mock-sso.ts, FULL)', () => {
 describe('GET /sso/provisioning/config (mock-provisioning.ts, FULL)', () => {
   it('answers provisioning off by default and what setDemoProvisioning set, for provisioning:manage only', async () => {
     signedIn();
-    expect(await data<ProvisioningConfig>('GET', '/sso/provisioning/config')).toEqual(DEMO_PROVISIONING_OFF);
+    // P6-11 (L9): the answer also carries the default condition, null while provisioning is off
+    expect(await data<ProvisioningConfig>('GET', '/sso/provisioning/config')).toEqual({
+      ...DEMO_PROVISIONING_OFF,
+      defaultInstanceRole: null,
+    });
     const on: ProvisioningConfig = { ...DEMO_PROVISIONING_OFF, scopesProvisionInstanceRole: true };
     backend().setDemoProvisioning(on);
     expect(await data<ProvisioningConfig>('GET', '/sso/provisioning/config')).toEqual(on);

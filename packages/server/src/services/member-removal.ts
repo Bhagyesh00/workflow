@@ -163,7 +163,7 @@ export async function removeMember(
   } else {
     await removeWithWipe(ctx, tenantId, auth.user.id, userId, target.role, personal.id, finish);
   }
-  // P6-15 (C0): the removed member's private credential entries in this workspace; stub (L14) PASSES
+  // P6-15: deletes the removed member's private credential entries in this workspace
   await ctx.privateCredentials.afterAccessChange(tenantId, { userId });
 }
 

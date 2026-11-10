@@ -977,7 +977,14 @@ export class WorkflowService {
     const reusesStart = this.reusesStartOutput(workflow, start, input, pinData, toolRoot);
     try {
       if (!triggerItems && !pinData[start.name] && !reusesStart) {
-        triggerItems = await this.manualTriggerItems(tenant, row.projectId, workflow, start, executionId);
+        triggerItems = await this.manualTriggerItems(
+          tenant,
+          row.projectId,
+          workflow,
+          start,
+          executionId,
+          actor.userId,
+        );
         if (!triggerItems) await this.deps.executions.removeBinaryData(tenant.id, executionId);
       }
       await this.deps.executions.start({
@@ -1044,6 +1051,8 @@ export class WorkflowService {
     workflow: Workflow,
     node: WorkflowNode,
     executionId: string,
+    /** P6-15 (C0): the person who started the manual run; a private credential resolves for them */
+    endUserId?: string,
   ) {
     const type = this.deps.nodeTypes.get(node.type);
     if (!type || type.execute || node.disabled || (!type.trigger && !type.poll)) return undefined;
@@ -1053,6 +1062,7 @@ export class WorkflowService {
       projectId,
       mode: 'manual',
       workflowId: workflow.id,
+      endUserId,
     });
     const abort = new AbortController();
     const deps: ContextDeps = {

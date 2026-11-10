@@ -175,7 +175,7 @@ export class TransferService {
     input: CredentialTransferInput,
   ): Promise<void> {
     const tenantId = auth.tenant.id;
-    // P6-15 (C0): first, a private credential's move rules (personal target, `credential:createEndUser`); stub (L14) PASSES
+    // P6-15: first, a private credential's move rules (personal target, `credential:createEndUser`)
     await this.deps
       .context()
       .privateCredentials.assertMovable(auth, credentialId, input.destinationProjectId);
@@ -201,7 +201,7 @@ export class TransferService {
         metadata: { from: row.projectId, to: destination },
       });
     });
-    // P6-15 (C0): stub (L14) PASSES
+    // P6-15: deletes private credential entries no one can reach after the move
     await this.deps.context().privateCredentials.afterAccessChange(tenantId, { credentialId });
   }
 

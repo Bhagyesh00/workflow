@@ -258,8 +258,8 @@ const envSchema = z.object({
   PUBLIC_API_DISABLED: bool(false),
   /** the session cookie and row lifetime in hours (n8n: 336, 14 days) */
   USER_MANAGEMENT_JWT_DURATION_HOURS: z.coerce.number().positive().default(336),
-  /** P6-02: the SCIM rate limit, requests per window and workspace (L13 sets the window) */
-  SCIM_RATE_LIMIT: int(600, 1),
+  /** P6-02: the SCIM rate limit, requests per IP per 5 minutes; 0 turns it off (as n8n) */
+  SCIM_RATE_LIMIT: int(600, 0),
   /** P6-01: when true, the sign-in page sends a workspace with SSO on to its identity provider */
   SSO_REDIRECT_LOGIN_TO_SSO: bool(true),
 });
@@ -407,7 +407,7 @@ export interface Config {
   publicApiDisabled: boolean;
   /** USER_MANAGEMENT_JWT_DURATION_HOURS in ms; session rows and the cookie live this long */
   sessionTtlMs: number;
-  /** P6-02: SCIM_RATE_LIMIT, requests per window and workspace */
+  /** P6-02: SCIM_RATE_LIMIT, requests per IP per 5 minutes; 0 = off */
   scimRateLimit: number;
   /** P6-01: SSO_REDIRECT_LOGIN_TO_SSO */
   ssoRedirectLogin: boolean;

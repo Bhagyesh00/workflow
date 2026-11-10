@@ -153,8 +153,15 @@ export interface SignInSteps {
   passwordTenants(user: UserRow, tenants: Tenants, workspace?: string): Promise<Tenants>;
   /** before the password check: a directory login (LDAP), or undefined to go on with the password */
   directoryLogin(input: LoginInput, meta: SessionMeta): Promise<DirectoryMatch | undefined>;
-  /** the session of a directory match (`ssoLogin.signIn` with `authMethod: 'ldap'`) */
-  directorySignIn(match: DirectoryMatch, meta: SessionMeta): Promise<AuthResult>;
+  /**
+   * the session of a directory match (`ssoLogin.signIn` with `authMethod: 'ldap'`); `mfaVerified` is the MFA
+   * step's answer (a bind is only a password, so the session is verified only when the step passed, as n8n)
+   */
+  directorySignIn(
+    match: DirectoryMatch,
+    meta: SessionMeta,
+    options?: { mfaVerified?: boolean },
+  ): Promise<AuthResult>;
   /** the MFA step: throws 401 `mfa_required` or a wrong code; `mfaVerified` goes on the session */
   mfaStep(user: UserRow, input: LoginInput): Promise<{ mfaVerified: boolean }>;
   /** before an invitation is accepted (no write before it) */
@@ -286,8 +293,11 @@ export class AuthService {
   async login(input: LoginInput, meta: SessionMeta): Promise<AuthResult> {
     const match = await this.steps.directoryLogin(input, meta);
     if (match) {
-      if (match.user) await this.steps.mfaStep(match.user, input);
-      return this.steps.directorySignIn(match, meta);
+      // a new directory user has no MFA yet: not verified, so an enforcing workspace asks them to set it up
+      const { mfaVerified } = match.user
+        ? await this.steps.mfaStep(match.user, input)
+        : { mfaVerified: false };
+      return this.steps.directorySignIn(match, meta, { mfaVerified });
     }
     const user = await this.repos.users.getByEmail(input.email);
     const ok = user
@@ -370,10 +380,13 @@ export class AuthService {
     return { invitation, token };
   }
 
-  /** accept an invitation: creates the user, or verifies the password of an existing one */
+  /**
+   * accept an invitation: creates the user, or verifies the password and the MFA step of an existing one
+   * (as a sign-in: an account with MFA on needs its code, 401 `mfa_required` without one)
+   */
   async acceptInvitation(
     token: string,
-    input: { name: string; password: string },
+    input: { name: string; password: string; mfaCode?: string; mfaRecoveryCode?: string },
     meta: SessionMeta,
   ): Promise<AuthResult> {
     const invitation = await this.repos.invitations.getPendingByTokenHash(sha256(token));
@@ -381,10 +394,18 @@ export class AuthService {
     // P6-01: SSO may refuse the entry; before any write
     await this.steps.assertInviteAcceptable(invitation.tenantId);
     let user = await this.repos.users.getByEmail(invitation.email);
+    let mfaVerified = false;
     if (user) {
       if (!(await this.verifyPassword(user.passwordHash, input.password))) {
         throw new ApiError(401, 'invalid_credentials', 'Wrong password for the existing account');
       }
+      // before any write, so a missing or wrong code leaves the invitation pending
+      ({ mfaVerified } = await this.steps.mfaStep(user, {
+        email: user.email,
+        password: input.password,
+        mfaCode: input.mfaCode,
+        mfaRecoveryCode: input.mfaRecoveryCode,
+      }));
     } else {
       const problem = passwordProblem(input.password);
       if (problem) throw new ApiError(400, 'weak_password', problem);
@@ -410,7 +431,10 @@ export class AuthService {
       await this.repos.projects.relations.add(invitation.tenantId, team.id, user.id, oldProjectRole);
     }
     const tenant = (await this.repos.tenants.get(invitation.tenantId))!;
-    const sessionToken = await this.createSession(user.id, tenant.id, meta);
+    const sessionToken = await this.createSession(user.id, tenant.id, meta, {
+      authMethod: 'password',
+      mfaVerified,
+    });
     await this.repos.audit.add(tenant.id, {
       userId: user.id,
       action: 'member.joined',

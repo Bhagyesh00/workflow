@@ -602,7 +602,11 @@ for (const file of files) {
           if (may && status === 401 && row.access !== 'public')
             wrong.push(`${role}: 401, expected signed in`);
           if (!may && status !== 403) wrong.push(`${role}: ${status}, expected 403`);
-          if (row.method === 'POST' && row.path === '/rest/auth/logout') await signIn(role);
+          if (
+            row.method === 'POST' &&
+            (row.path === '/rest/auth/logout' || row.path === '/rest/sso/oidc/logout')
+          )
+            await signIn(role);
           if (status >= 200 && status < 300 && row.method !== 'GET' && row.method !== 'OPTIONS') {
             await ensureFixtures();
           }

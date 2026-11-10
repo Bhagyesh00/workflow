@@ -352,7 +352,7 @@ export class ProjectService {
     const tenantId = auth.tenant.id;
     const project = await this.require(tenantId, projectId);
     if (project.type === 'personal') throw ApiError.badRequest("Can't add users to personal projects.");
-    // P6-11 (C0): refused while the provisioning manages project roles; stub (L9) PASSES
+    // P6-11: refused while role provisioning manages project roles
     await this.deps.context().provisioning.assertProjectRolesEditable(tenantId);
 
     for (const role of new Set(relations.map((r) => r.role))) await this.assertAssignableRole(tenantId, role);
@@ -398,9 +398,9 @@ export class ProjectService {
       }
     });
     if (addedUserIds.length) {
-      // P6-17 (C0): stub (L1) PASSES
+      // P6-17: mails the added members that the project was shared with them
       await projectShared(this.deps, tenantId, auth.user.id, projectId, addedUserIds);
-      // P6-15 (C0): stub (L14) PASSES
+      // P6-15: private credential entries follow the new access
       const { privateCredentials } = this.deps.context();
       for (const userId of addedUserIds)
         await privateCredentials.afterAccessChange(tenantId, { userId, projectId });
@@ -411,7 +411,7 @@ export class ProjectService {
   async changeUserRole(auth: AuthContext, projectId: string, userId: string, role: string): Promise<void> {
     const tenantId = auth.tenant.id;
     await this.require(tenantId, projectId);
-    // P6-11 (C0): stub (L9) PASSES
+    // P6-11: refused while role provisioning manages project roles
     await this.deps.context().provisioning.assertProjectRolesEditable(tenantId);
     const relation = await this.repos.projects.relations.get(tenantId, projectId, userId);
     if (!relation) throw ApiError.notFound('Project member');
@@ -429,14 +429,14 @@ export class ProjectService {
       from: relation.role,
       to: role,
     });
-    // P6-15 (C0): stub (L14) PASSES
+    // P6-15: deletes private credential entries the member can no longer reach
     await this.deps.context().privateCredentials.afterAccessChange(tenantId, { userId, projectId });
   }
 
   async removeUser(auth: AuthContext, projectId: string, userId: string): Promise<void> {
     const tenantId = auth.tenant.id;
     await this.require(tenantId, projectId);
-    // P6-11 (C0): stub (L9) PASSES
+    // P6-11: refused while role provisioning manages project roles
     await this.deps.context().provisioning.assertProjectRolesEditable(tenantId);
     const relation = await this.repos.projects.relations.get(tenantId, projectId, userId);
     if (!relation) throw ApiError.notFound('Project member');
@@ -446,7 +446,7 @@ export class ProjectService {
     await this.assertRoleGrantable(auth, projectId, [relation.role], 'remove the member');
     await this.repos.projects.relations.remove(tenantId, projectId, userId);
     await this.audit(auth, 'project.member.removed', projectId, { userId, role: relation.role });
-    // P6-15 (C0): stub (L14) PASSES
+    // P6-15: deletes private credential entries the member can no longer reach
     await this.deps.context().privateCredentials.afterAccessChange(tenantId, { userId, projectId });
   }
 
@@ -468,7 +468,7 @@ export class ProjectService {
       for (const scope of ['credential:create', 'workflow:create', 'dataTable:create'] as const) {
         if (!scopes.has(scope)) throw missingScope();
       }
-      // P6-15 (C0): a private credential never moves to a personal project, refused before any write; stub (L14) PASSES
+      // P6-15: a private credential never moves to a personal project, refused before any write
       await this.deps.context().privateCredentials.assertProjectTransfer(tenantId, projectId, target.id);
       const clashes = await this.repos.projects.dataTableNamesIn(
         tenantId,
@@ -491,7 +491,7 @@ export class ProjectService {
         await this.audit(auth, 'project.deleted', projectId, { transferId: target.id, moved }, repos);
       });
       await this.reloadVault(tenantId, vault);
-      // P6-15 (C0): stub (L14) PASSES
+      // P6-15: deletes private credential entries no one can reach after the change
       await this.deps.context().privateCredentials.afterAccessChange(tenantId, { projectId });
       return;
     }
@@ -523,7 +523,7 @@ export class ProjectService {
     await workflows.finishWipe(tenantId, executionIds);
     dataTables.sizesChanged(tenantId);
     await this.reloadVault(tenantId, vault);
-    // P6-15 (C0): stub (L14) PASSES
+    // P6-15: deletes private credential entries no one can reach after the change
     await this.deps.context().privateCredentials.afterAccessChange(tenantId, { projectId });
   }
 

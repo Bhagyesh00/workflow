@@ -939,7 +939,7 @@ export class ExecutionService {
       await this.startErrorWorkflow(tenant.id, row, definition, state, run).catch((e) =>
         logger.warn({ err: e, tenantId: tenant.id, executionId: row.id }, 'Error workflow could not start'),
       );
-      // P6-17 (C0): the workspace's first production failure mail (L1 decides, sends once); stub (L1) PASSES
+      // P6-17: the workspace's first production failure mail (sent once)
       const { serviceDeps } = this.deps;
       if (serviceDeps && row.workflowId && row.mode !== 'manual' && row.mode !== 'evaluation') {
         const workflowId = row.workflowId;
@@ -1605,8 +1605,9 @@ export class ExecutionService {
           executionId: retryId,
           retryOf: row.id,
           userId: options.userId,
-          // P6-15 (C0): a retry acts for the person the original run acted for
-          endUserId: runOptions.endUserId,
+          // P6-15 (C0): a run that acted for a person is retried for the person who asks for the retry, never
+          // for the original one (their private connections stay theirs); a run with no person stays without
+          endUserId: runOptions.endUserId === undefined ? undefined : options.userId,
           // P6 S1: a run with no workflow row keeps the project it was started in
           projectId: runOptions.projectId,
           inlineSource: runOptions.inlineSource,

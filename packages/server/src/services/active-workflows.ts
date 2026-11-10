@@ -498,7 +498,7 @@ export class ActiveWorkflowManager {
       throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', issues);
     // P6 S1: every credential the version uses must be usable in the workflow's project
     await assertCredentialsUsable(this.deps, tenantId, row.projectId, definition);
-    // P6-15 (C0): private credentials need a trigger that knows the person; stub (L14) PASSES
+    // P6-15: a workflow with a private credential publishes only when every enabled trigger knows the person
     await this.deps.privateCredentials?.assertPublishable(tenantId, definition);
 
     if (!row.active) {

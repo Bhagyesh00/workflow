@@ -18,6 +18,9 @@ import { renderApp } from './utils';
 
 afterEach(() => setCurrentTenant(null));
 
+// the page is a lazy chunk: the first test of the file waits for its first load, which takes longer than the default 1 s
+const T = { timeout: 20_000 };
+
 const testModel: NodeTypeDescription = {
   name: 'ai.lmChatTestAi',
   displayName: 'Test AI Chat Model',
@@ -83,7 +86,7 @@ describe('AI settings page (P5-09)', () => {
     const patches = serve();
     renderApp('/settings/ai');
 
-    const provider = await screen.findByLabelText(/Model provider/);
+    const provider = await screen.findByLabelText(/Model provider/, undefined, T);
     await waitFor(() => expect(screen.getByRole('option', { name: 'Test AI Chat Model' })).toBeTruthy());
     expect(screen.getByTestId('ai-setup-state').textContent).toBe('No model is set yet.');
     await user.selectOptions(provider, 'ai.lmChatTestAi');

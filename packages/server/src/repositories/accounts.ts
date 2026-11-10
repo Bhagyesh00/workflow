@@ -210,7 +210,10 @@ export class MembershipRepository {
       .orderBy(asc(memberships.createdAt), asc(tenants.id));
   }
 
-  /** P6-02, P6-12: disables the membership (kept, not found by `get`); true when it was enabled before */
+  /**
+   * P6-02, P6-12: disables the membership (kept, not found by `get`); true when it was enabled before. Never
+   * an owner, so a role change to owner running at the same time cannot leave a disabled owner.
+   */
   async disable(tenantId: string, userId: string): Promise<boolean> {
     if (!isUuid(tenantId) || !isUuid(userId)) return false;
     const rows = await this.db
@@ -221,6 +224,7 @@ export class MembershipRepository {
           eq(memberships.tenantId, tenantId),
           eq(memberships.userId, userId),
           isNull(memberships.disabledAt),
+          ne(memberships.role, 'owner'),
         ),
       )
       .returning({ userId: memberships.userId });
