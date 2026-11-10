@@ -28,6 +28,7 @@ import {
   renderMessagePage,
 } from './render';
 import { safeRedirectUrl, sanitizeHtml } from './sanitize';
+import { loadConnectPanel } from '../../../utils/connect-panel';
 import { checkFormUserAuth, type FormUserAuthParams } from './user-auth';
 
 export const FORM_TRIGGER_TYPE = 'core.formTrigger';
@@ -240,6 +241,8 @@ interface FormAccess {
   authToken?: string;
   replyHeaders: Record<string, string>;
   user?: DataObject;
+  /** the signed-in user's id (user auth): the run starts as them, whether or not Include User is on (P6-87) */
+  userId?: string;
 }
 
 async function checkAccess(
@@ -272,6 +275,7 @@ async function checkAccess(
     replyHeaders: auth.headers,
     authToken: tokenOfCookie(auth.headers['set-cookie']),
     user: auth.user ? { ...auth.user } : undefined,
+    userId: auth.user?.id,
   };
 }
 
@@ -325,11 +329,17 @@ export async function formTriggerWebhook(ctx: WebhookContext): Promise<WebhookRe
   const ending = completion(options);
 
   if (isPage) {
+    // P6-87: a signed-in visitor sees which private accounts the run needs and which they have connected
+    const connectPanel =
+      authentication === 'n8nUserAuth' && access.userId
+        ? await loadConnectPanel(ctx, access.userId, ctx.getRequestObject().url?.split('?')[0] ?? '')
+        : undefined;
     const page = renderFormPage({
       title: String(ctx.getNodeParameter('formTitle', 0, '')),
       description: String(ctx.getNodeParameter('formDescription', 0, '')),
       fields: fields.map((field) => prefilled(field, query)),
       buttonLabel: String(options.buttonLabel || FORM_DEFAULT_BUTTON_LABEL),
+      connectPanel,
       customCss: options.customCss ? String(options.customCss) : undefined,
       testMode: ctx.getMode() === 'manual',
       attribution: options.appendAttribution !== false,
@@ -343,6 +353,8 @@ export async function formTriggerWebhook(ctx: WebhookContext): Promise<WebhookRe
   if (user) item.json.user = user;
   return {
     workflowData: [[item]],
+    // P6-87: the person the sign-in identified, also with Include User off
+    ...(access.userId ? { triggerUserId: access.userId } : {}),
     webhookResponse: {
       statusCode: 200,
       headers: replyHeaders,

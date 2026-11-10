@@ -3,30 +3,130 @@
  * workspace sign-in). `check(userId)` lists the private credentials of the enabled nodes the trigger
  * reaches, sub-nodes included, and is ready when the user has an entry for each; the trigger answers 428
  * with `credentialConnectionsRequiredBody` when not. `forRun` is called for every run that builds services
- * with a definition (services/executions.ts `buildServices`), so it never throws.
- * Stub from C0: `forRun` and `check` PASS (ready, no credentials); `connectPageUrl` throws until L16.
+ * with a definition (services/executions.ts `buildServices`), so it never throws; `check` may throw (a
+ * database error), and the caller then fails closed (webhooks.ts answers 503).
+ *
+ * A node is reached from the start node over its main connections; a sub-node (a model, a tool, a memory...)
+ * is reached through the node it feeds, and so on up. A disabled node, and what only it feeds, is not.
  */
-import type { CredentialGateHelper, CredentialGateResult, WorkflowDefinition } from '@workflow/workflow';
+import type {
+  CredentialConnectionStatus,
+  CredentialGateHelper,
+  CredentialGateResult,
+  NodeCredentialRef,
+  WorkflowDefinition,
+  WorkflowNode,
+} from '@workflow/workflow';
 import type { ServiceDeps } from '../context';
+
+/** the credential connect page, a top-level page of the editor (`CredentialConnectPage`) */
+const CONNECT_PATH = '/credential-connect';
+
+/** the enabled nodes the trigger reaches: downstream over main, then every sub-node of those */
+export function reachableNodes(workflow: WorkflowDefinition, startNode?: string): WorkflowNode[] {
+  const byName = new Map<string, WorkflowNode>();
+  for (const node of workflow.nodes ?? []) if (node && typeof node.name === 'string') byName.set(node.name, node);
+  const connections = workflow.connections ?? {};
+
+  // sources feeding a node over a non-main connection
+  const feeders = new Map<string, string[]>();
+  for (const [source, byType] of Object.entries(connections)) {
+    for (const [type, outputs] of Object.entries(byType ?? {})) {
+      if (type === 'main') continue;
+      for (const list of outputs ?? []) {
+        for (const link of list ?? []) {
+          const into = feeders.get(link.node) ?? [];
+          into.push(source);
+          feeders.set(link.node, into);
+        }
+      }
+    }
+  }
+
+  const reached = new Set<string>();
+  const queue: string[] = [];
+  const reach = (name: string) => {
+    const node = byName.get(name);
+    if (!node || node.disabled || reached.has(name)) return;
+    reached.add(name);
+    queue.push(name);
+  };
+  if (startNode !== undefined) reach(startNode);
+  else for (const name of byName.keys()) reach(name);
+  while (queue.length) {
+    const name = queue.shift() as string;
+    for (const list of connections[name]?.main ?? []) for (const link of list ?? []) reach(link.node);
+    for (const feeder of feeders.get(name) ?? []) reach(feeder);
+  }
+  return [...reached].map((name) => byName.get(name) as WorkflowNode);
+}
 
 export class CredentialGateService {
   constructor(readonly deps: ServiceDeps) {}
 
   forRun(
-    _tenantId: string,
-    _workflow: WorkflowDefinition,
+    tenantId: string,
+    workflow: WorkflowDefinition,
     _projectId: string,
-    _startNode?: string,
+    startNode?: string,
   ): CredentialGateHelper {
     return {
-      // stub (L16): PASSES, ready with no credential to connect
-      check: async (_userId: string): Promise<CredentialGateResult> => ({
-        readyToExecute: true,
-        credentials: [],
-      }),
-      connectPageUrl: (_credentialId, _action, _returnTo) => {
-        throw new Error('not implemented (L16)');
-      },
+      check: (userId: string) => this.check(tenantId, workflow, startNode, userId),
+      connectPageUrl: (credentialId, action, returnTo) => this.connectPageUrl(credentialId, action, returnTo),
     };
+  }
+
+  /** the private credentials the trigger reaches and whether this user has an entry for each */
+  async check(
+    tenantId: string,
+    workflow: WorkflowDefinition,
+    startNode: string | undefined,
+    userId: string,
+  ): Promise<CredentialGateResult> {
+    const { repos } = this.deps;
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    for (const node of reachableNodes(workflow, startNode)) {
+      if (!node.credentials || typeof node.credentials !== 'object') continue;
+      for (const raw of Object.values(node.credentials as Record<string, unknown>)) {
+        if (!raw || typeof raw !== 'object') continue;
+        const ref = raw as Partial<NodeCredentialRef>;
+        if (typeof ref.id === 'string' && ref.id !== '') ids.add(ref.id);
+        else if (typeof ref.name === 'string' && ref.name !== '') names.add(ref.name);
+      }
+    }
+    if (!ids.size && !names.size) return { readyToExecute: true, credentials: [] };
+
+    // the private ones among them, by id and by name, each once
+    const found = new Map<string, { name: string; type: string }>();
+    for (const id of await repos.credentialEntries.resolvableIds(tenantId, [...ids])) {
+      const row = await repos.credentials.get(tenantId, id);
+      if (row) found.set(row.id, { name: row.name, type: row.type });
+    }
+    for (const { id } of await repos.credentialEntries.resolvableByName(tenantId, [...names])) {
+      const row = await repos.credentials.get(tenantId, id);
+      if (row) found.set(row.id, { name: row.name, type: row.type });
+    }
+    if (!found.size) return { readyToExecute: true, credentials: [] };
+
+    const connected = await repos.credentialEntries.connectedIds(tenantId, userId, [...found.keys()]);
+    const credentials: CredentialConnectionStatus[] = [...found]
+      .map(([credentialId, { name, type }]) => ({
+        credentialId,
+        credentialName: name,
+        credentialType: type,
+        status: connected.has(credentialId) ? ('configured' as const) : ('missing' as const),
+      }))
+      .sort((a, b) => a.credentialName.localeCompare(b.credentialName) || a.credentialId.localeCompare(b.credentialId));
+    return { readyToExecute: credentials.every((c) => c.status === 'configured'), credentials };
+  }
+
+  /**
+   * The link of the connect page (a top-level navigation, no session or token in it): the page has the
+   * visitor's session and `returnTo` is checked there (a form, chat or webhook path only).
+   */
+  connectPageUrl(credentialId: string, action: 'connect' | 'disconnect', returnTo: string): string {
+    const query = new URLSearchParams({ action, returnTo });
+    return `${this.deps.config.baseUrl}${CONNECT_PATH}/${encodeURIComponent(credentialId)}?${query.toString()}`;
   }
 }

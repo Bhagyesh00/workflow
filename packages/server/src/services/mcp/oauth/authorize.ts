@@ -2,7 +2,8 @@
  * The authorize step of the MCP OAuth server (P5-14). The redirect URI is checked BEFORE any redirect
  * (GHSA-rc3w), against the client's list and the tenant's allowed list (empty adds no rule, non-loopback
  * exact, loopback any port). PKCE S256 required. `resource` must be this tenant's server URL (only while
- * its MCP access is on) or one of its trigger URLs; omitted it is the server URL; anything else
+ * its MCP access is on) or one of its trigger URLs (an MCP Server Trigger, or a Webhook with workspace sign-in,
+ * on the MCP base URL); omitted it is the server URL; anything else
  * `invalid_target` (after the redirect check). Unknown scopes dropped. Then a flow token (`formTokens.sign`, 300 s) holding the redirect's
  * index, not the URI, and `state` capped at 1024, and a redirect to `${baseUrl}/oauth/consent?flow=<token>`.
  */

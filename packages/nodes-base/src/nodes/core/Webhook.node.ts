@@ -1,7 +1,15 @@
 import { timingSafeEqual } from 'node:crypto';
-import type { DataObject, Item, NodeType, WebhookContext, WebhookResponseData } from '@workflow/workflow';
+import type {
+  DataObject,
+  FormUser,
+  Item,
+  NodeType,
+  WebhookContext,
+  WebhookResponseData,
+} from '@workflow/workflow';
 import { isBotUserAgent } from '../../utils/bots';
 import { type SignaturePreset, verifyWebhookSignature } from '../../utils/webhook-signature';
+import { checkWebhookSignIn, type WebhookOAuthClient } from '../../utils/workspace-signin';
 
 function safeEqual(a: string, b: string): boolean {
   const x = Buffer.from(a);
@@ -89,7 +97,50 @@ export const WebhookNode: NodeType = {
             value: 'signature',
             description: 'Verify the HMAC signature the sending service puts on every delivery',
           },
+          {
+            name: 'Workspace sign-in (OAuth2)',
+            value: 'n8nOAuth2',
+            description:
+              'Only signed-in workspace members get through, with a token of the workspace or, in a browser, a sign-in',
+          },
         ],
+      },
+      {
+        displayName: 'Client',
+        name: 'oauthClient',
+        type: 'options',
+        default: 'bearer',
+        noDataExpression: true,
+        description: 'Who calls this webhook',
+        options: [
+          {
+            name: 'Token Only',
+            value: 'bearer',
+            description: 'An access token of the workspace for this webhook, in the Authorization header',
+          },
+          {
+            name: 'Token or Browser',
+            value: 'auto',
+            description: 'A token, or a visitor in a browser who signs in to the workspace first',
+          },
+        ],
+        displayOptions: { show: { authentication: ['n8nOAuth2'] } },
+      },
+      {
+        displayName: 'Require Workflow Execute Permission',
+        name: 'requireExecuteAccess',
+        type: 'boolean',
+        default: true,
+        description: 'Whether only members who may run this workflow, editors and above, can call it',
+        displayOptions: { show: { authentication: ['n8nOAuth2'] } },
+      },
+      {
+        displayName: 'Include User in Output',
+        name: 'includeUserInOutput',
+        type: 'boolean',
+        default: true,
+        description: 'Whether the signed-in user (id, email, first and last name) is added to the output',
+        displayOptions: { show: { authentication: ['n8nOAuth2'] } },
       },
       {
         displayName: 'Signature Format',
@@ -287,14 +338,38 @@ export const WebhookNode: NodeType = {
       }
     }
 
+    let user: DataObject | undefined;
+    let signedIn: FormUser | undefined;
+    // the sign-in page's one-time code is not a parameter of the caller
+    const query = { ...req.query } as DataObject;
+    if (authentication === 'n8nOAuth2') {
+      const oauthClient = ctx.getNodeParameter('oauthClient', 0, 'bearer') as WebhookOAuthClient;
+      const signIn = await checkWebhookSignIn(ctx, {
+        oauthClient: oauthClient === 'auto' ? 'auto' : 'bearer',
+        requireExecuteAccess: ctx.getNodeParameter('requireExecuteAccess', 0, true) !== false,
+      });
+      if (!signIn.allowed) return { webhookResponse: signIn.response };
+      signedIn = signIn.user;
+      if (oauthClient === 'auto') delete query.code;
+      if (ctx.getNodeParameter('includeUserInOutput', 0, true) !== false) {
+        user = {
+          id: signIn.user.id,
+          email: signIn.user.email,
+          firstName: signIn.user.firstName,
+          lastName: signIn.user.lastName,
+        };
+      }
+    }
+
     const item: Item = {
       json: {
         headers: req.headers as DataObject,
         params: req.params,
-        query: req.query,
+        query,
         body: (req.body ?? {}) as DataObject,
         webhookUrl: `${ctx.getInstanceBaseUrl()}`,
         executionMode: ctx.getMode() === 'manual' ? 'test' : 'production',
+        ...(user ? { user } : {}),
       },
     };
     if (options.rawBody && req.rawBody) {
@@ -317,6 +392,7 @@ export const WebhookNode: NodeType = {
         );
       }
     }
-    return { workflowData: [[item]] };
+    // the person the sign-in identified: the run starts as them, whether or not Include User is on (P6-87)
+    return { workflowData: [[item]], ...(signedIn ? { triggerUserId: signedIn.id } : {}) };
   },
 };

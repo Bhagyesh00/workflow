@@ -3,6 +3,12 @@
  * outputs of sanitize.ts and of `scriptJson` are marked safe. The script reads its settings from a
  * JSON block and writes with textContent only.
  */
+import {
+  CONNECT_PANEL_CSP,
+  CONNECT_PANEL_STYLES,
+  type ConnectPanel,
+  renderConnectPanelHtml,
+} from '../../../utils/connect-panel';
 import type { FormField } from './fields';
 import { sanitizeCustomCss, sanitizeHtml } from './sanitize';
 
@@ -66,6 +72,11 @@ export interface FormPageData {
   submittedText: string;
   /** checked by the caller: http or https only */
   redirectUrl?: string;
+  /**
+   * P6-87: the accounts the visitor still has to connect (Form Trigger with user auth). The page lists them,
+   * carries its own CSP, and its submit button stays disabled until every one is connected.
+   */
+  connectPanel?: ConnectPanel;
 }
 
 const STYLES = `
@@ -236,6 +247,20 @@ const PAGE_SCRIPT = `
           );
           return;
         }
+        if (response.status === 428) {
+          showFailure(
+            'Connect your accounts',
+            'Connect the accounts listed above, then open this form again and submit',
+          );
+          return;
+        }
+        if (response.status === 503) {
+          showFailure(
+            'Problem submitting response',
+            "We couldn't check your connected accounts. Please try again later",
+          );
+          return;
+        }
         if (!response.ok) {
           showFailure(
             'Problem submitting response',
@@ -379,9 +404,13 @@ export function renderFormPage(data: FormPageData): string {
     submittedText: data.submittedText,
     redirectUrl: data.redirectUrl ?? null,
   });
-  const css = data.customCss
+  const customCss = data.customCss
     ? html`<style>${new SafeHtml(sanitizeCustomCss(data.customCss))}</style>`
     : undefined;
+  const panel = data.connectPanel;
+  const css = panel
+    ? html`<meta http-equiv="Content-Security-Policy" content="${CONNECT_PANEL_CSP}"><style>${new SafeHtml(CONNECT_PANEL_STYLES)}</style>${customCss}`
+    : customCss;
   const description = data.description ? sanitizeHtml(data.description) : '';
   return htmlDocument(
     data.title,
@@ -389,10 +418,11 @@ export function renderFormPage(data: FormPageData): string {
 ${data.testMode ? html`<p class="notice">This is a test version of your form</p>` : ''}
 <h1>${data.title}</h1>
 ${description ? html`<div class="description">${new SafeHtml(description)}</div>` : ''}
+${panel ? new SafeHtml(renderConnectPanelHtml(panel)) : ''}
 <form id="form" novalidate>
 ${data.fields.map(renderField)}
 <div id="form-error" class="form-error" role="alert" hidden><strong></strong><span></span></div>
-<button type="submit" id="form-submit">${data.buttonLabel}</button>
+<button type="submit" id="form-submit"${panel && !panel.ready ? new SafeHtml(' disabled') : ''}>${data.buttonLabel}</button>
 </form>
 <div id="form-ending" hidden><p></p></div>
 </div>

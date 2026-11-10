@@ -57,6 +57,7 @@ import {
   isHitlVariant,
   isPlainObject,
   type McpAuthHelper,
+  credentialConnectionsRequiredBody,
   type NodeType,
   type WebhookRequest,
   type WebhookResponse,
@@ -938,6 +939,29 @@ export class WebhookService {
     };
   }
 
+  /**
+   * The credential gate of a run whose trigger identified a user (P6-87, n8n Form/utils/utils.ts): not ready is
+   * 428 with the credentials to connect, a check that throws is 503 `credential_readiness_check_failed`. Null
+   * when the run may start. No error text reaches the caller.
+   */
+  private async credentialGate(
+    services: ExecutionServices,
+    userId: string,
+    tenantId: string,
+    workflowId: string,
+  ): Promise<WebhookReply | null> {
+    try {
+      // no gate on a run that built services with a definition cannot happen: refuse rather than run
+      if (!services.credentialGate) throw new Error('The credential gate is missing');
+      const result = await services.credentialGate.check(userId);
+      if (result.readyToExecute) return null;
+      return json(428, credentialConnectionsRequiredBody(result));
+    } catch (error) {
+      this.deps.logger.warn({ err: error, tenantId, workflowId }, 'Credential readiness check failed');
+      return json(503, { status: 'credential_readiness_check_failed' });
+    }
+  }
+
   private async run(input: RunInput): Promise<WebhookReply> {
     const { executions, metrics, logger } = this.deps;
     const started = Date.now();
@@ -1005,6 +1029,12 @@ export class WebhookService {
       } else {
         const lost = await input.claim?.();
         if (lost) return lost;
+        // P6-87: a trigger that knew the person starts only when they have connected the private credentials
+        // the run reaches; the check fails closed (a throw is 503, no run)
+        if (result.triggerUserId) {
+          const blocked = await this.credentialGate(services, result.triggerUserId, tenant.id, input.workflowId);
+          if (blocked) return this.decorate(blocked, source, incoming.request.headers);
+        }
         // the submitter follows the run to its next page by polling, not on this request
         const pagesFollow =
           webhookUrlBase(hook.description) === 'form' &&

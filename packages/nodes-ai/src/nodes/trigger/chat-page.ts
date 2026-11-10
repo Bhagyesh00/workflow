@@ -4,6 +4,14 @@
  * served under the sandbox CSP. The page runs in an opaque origin, so it never touches browser storage or
  * cookies: the widget keeps the session id in memory and in the URL fragment (`#sessionId=...`).
  */
+import {
+  CONNECT_PANEL_STYLES,
+  CONNECT_PANEL_TEXTS,
+  type ConnectPanel,
+  connectedCount,
+  escapeConnectText,
+  renderConnectPanelHtml,
+} from '@workflow/nodes-base/utils/connect-panel';
 import { CHAT_AUTH_HEADER, CHAT_PAGE_HEADER, type ChatPageConfig } from '@workflow/workflow';
 
 /** where the server serves the built widget (routes/chat-widget.ts) */
@@ -61,6 +69,54 @@ const BOOTSTRAP = `(function () {
     },
   });
 })();`;
+
+/**
+ * Opens and closes the connect dialog. No value of a workflow is in this text: the dialog is rendered with the
+ * page (escaped), and `data-open` says whether it opens by itself.
+ */
+const CONNECT_SCRIPT = `(function () {
+  var dialog = document.getElementById('connect-dialog');
+  var open = document.getElementById('connect-open');
+  if (!dialog || !open || typeof dialog.showModal !== 'function') return;
+  open.addEventListener('click', function () { dialog.showModal(); });
+  if (dialog.hasAttribute('data-open')) dialog.showModal();
+})();`;
+
+const CONNECT_BAR_STYLES = `${CONNECT_PANEL_STYLES}
+#connect-bar{position:fixed;left:12px;bottom:12px;z-index:2147483000;font:14px/1.4 system-ui,sans-serif}
+#connect-open{padding:8px 14px;border:1px solid #c9c9d1;border-radius:999px;background:#fff;color:#1f1f24;cursor:pointer;font:inherit;box-shadow:0 1px 4px rgba(0,0,0,.15)}
+#connect-open[data-ready=false]{border-color:#c02b2b;color:#8f1f1f}
+#connect-dialog{max-width:480px;width:calc(100% - 32px);border:1px solid #c9c9d1;border-radius:10px;padding:16px;font:14px/1.5 system-ui,sans-serif}
+#connect-dialog form{margin:12px 0 0;text-align:right}
+#connect-dialog button{padding:6px 14px;border:0;border-radius:6px;background:#5b4fd6;color:#fff;font:inherit;cursor:pointer}`;
+
+/**
+ * P6-87: a hosted chat with user sign-in shows a bar ("Connect your accounts", "{n} of {m} connected") and a
+ * dialog that lists the accounts the run needs, with a link per account to the connect page (a top-level
+ * navigation, no session or token in it). The dialog opens by itself while an account is missing. Values are
+ * escaped; the one script is fixed text.
+ */
+export function renderChatConnectBar(panel: ConnectPanel): { styles: string; markup: string; script: string } {
+  const ready = panel.ready && !panel.failed;
+  const label = panel.failed ? CONNECT_PANEL_TEXTS.failed : `${CONNECT_PANEL_TEXTS.title} (${connectedCount(panel)})`;
+  const markup = [
+    `<div id="connect-bar"><button type="button" id="connect-open" data-ready="${ready}">${escapeConnectText(label)}</button></div>`,
+    `<dialog id="connect-dialog" aria-label="${escapeConnectText(CONNECT_PANEL_TEXTS.title)}"${ready ? '' : ' data-open'}>`,
+    renderConnectPanelHtml(panel),
+    '<form method="dialog"><button type="submit">Close</button></form>',
+    '</dialog>',
+  ].join('');
+  return { styles: CONNECT_BAR_STYLES, markup, script: CONNECT_SCRIPT };
+}
+
+/** the chat page with the connect bar and dialog added; a page without a body is returned as it is */
+export function injectChatConnectBar(page: string, panel: ConnectPanel): string {
+  const bar = renderChatConnectBar(panel);
+  if (!page.includes('</head>') || !page.includes('</body>')) return page;
+  return page
+    .replace('</head>', () => `<style>${bar.styles}</style>\n</head>`)
+    .replace('</body>', () => `${bar.markup}\n<script>${bar.script}</script>\n</body>`);
+}
 
 /** the whole page for one chat; every value of `config` is escaped for its context */
 export function renderChatPage(config: ChatPageConfig): string {

@@ -1,7 +1,8 @@
 /**
  * /rest/form-auth (P4-16). FormSignInPage calls it with the session; any member may ask, and only for
- * themselves. returnTo must be a form path or a chat path (P5-57) on this server, so the page cannot be
- * used to redirect elsewhere.
+ * themselves. returnTo must be a form path, a chat path (P5-57) or a webhook path (P6-87) on this server, so
+ * the page cannot be used to redirect elsewhere; the service takes a webhook path only for a Webhook node with
+ * workspace sign-in.
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -18,13 +19,18 @@ function staysOnForm(returnTo: string): boolean {
 
 /** a Chat Trigger's address: production or test, any path after the workspace, ending in /chat */
 const CHAT_PATH = /^\/webhook(-test)?\/[^/]+\/.+\/chat$/;
+/** a webhook's address: production or test, the workspace, then a path (the service checks the node) */
+const WEBHOOK_PATH = /^\/webhook(-test)?\/[^/]+\/.+/;
 const FORM_PATH = /^\/form(-test|-waiting)?\//;
 
 const codeBody = z.object({
   returnTo: z
     .string()
     .max(2048)
-    .refine((value) => FORM_PATH.test(value) || CHAT_PATH.test(value.split('?')[0]))
+    .refine((value) => {
+      const path = value.split('?')[0];
+      return FORM_PATH.test(value) || CHAT_PATH.test(path) || WEBHOOK_PATH.test(path);
+    })
     .refine(staysOnForm),
 });
 

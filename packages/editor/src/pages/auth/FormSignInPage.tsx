@@ -1,7 +1,9 @@
 /**
- * Top-level `/form-auth`: signs a user in for a protected form or chat. A form or chat never sees the
- * session, so it sends every visitor without a token here. With a session this page asks for the one-time
- * code and goes back to the form or chat; without one it goes to sign-in and comes back.
+ * Top-level `/form-auth`: signs a user in for a protected form, chat or webhook (P6-87: a Webhook with
+ * "Workspace sign-in (OAuth2)" opened in a browser). A form, chat or webhook never sees the session, so it
+ * sends every visitor without a token here. With a session this page asks for the one-time code and goes
+ * back to it; without one it goes to sign-in and comes back. The server takes a webhook path only for a
+ * Webhook node with that sign-in.
  */
 import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useSearchParams } from 'react-router';
@@ -15,14 +17,25 @@ export function isChatPath(value: string): boolean {
   return /^\/webhook(-test)?\/[^/]+\/.+\/chat$/.test(value.split('?')[0]);
 }
 
-/** a form or chat path on this server, as the server checks it */
-export function isFormReturnPath(value: string | null): value is string {
-  if (!value || !(/^\/form(-test|-waiting)?\/./.test(value) || isChatPath(value))) return false;
+/** printable ASCII only, no backslash, and no way out of the path, plain or encoded */
+function staysOnForm(value: string): boolean {
   if (/[^\x21-\x7e]|\\/.test(value)) return false;
   return !value
     .split('?')[0]
     .split('/')
     .some((segment) => /^(\.|%2e){1,2}$/i.test(segment));
+}
+
+/** a form or chat path on this server, as the server checks it */
+export function isFormReturnPath(value: string | null): value is string {
+  if (!value || !(/^\/form(-test|-waiting)?\/./.test(value) || isChatPath(value))) return false;
+  return staysOnForm(value);
+}
+
+/** a webhook path on this server: production or test, the workspace, then a path (the server checks the node) */
+export function isWebhookReturnPath(value: string | null): value is string {
+  if (!value || !/^\/webhook(-test)?\/[^/?]+\/[^?]/.test(value)) return false;
+  return staysOnForm(value);
 }
 
 /** leaves the app; `replace`, so that Back does not come here for another code */
@@ -47,7 +60,7 @@ function CouldNotOpen({
 }: {
   message: string;
   signInUrl?: string;
-  what?: 'form' | 'chat';
+  what?: 'form' | 'chat' | 'webhook';
 }) {
   return (
     <AuthLayout
@@ -68,7 +81,7 @@ function CouldNotOpen({
 export function FormSignInPage() {
   const [search] = useSearchParams();
   const returnTo = search.get('redirect');
-  const valid = isFormReturnPath(returnTo);
+  const valid = isFormReturnPath(returnTo) || isWebhookReturnPath(returnTo);
   const [failure, setFailure] = useState<Failure | null>(null);
   const asked = useRef(false);
 
@@ -86,7 +99,7 @@ export function FormSignInPage() {
   }, [valid, returnTo]);
 
   if (!valid) return <CouldNotOpen message="This sign-in link isn't valid." />;
-  const what = isChatPath(returnTo) ? 'chat' : 'form';
+  const what = isChatPath(returnTo) ? 'chat' : isWebhookReturnPath(returnTo) ? 'webhook' : 'form';
   const signInUrl = `/signin?redirect=${encodeURIComponent(`/form-auth?redirect=${encodeURIComponent(returnTo)}`)}`;
   if (failure?.signedOut) return <Navigate to={signInUrl} replace />;
   if (failure) return <CouldNotOpen message={failure.message} signInUrl={signInUrl} what={what} />;

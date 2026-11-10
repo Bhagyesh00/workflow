@@ -41,18 +41,33 @@ export function mcpAuthorizationServerMetadata(config: Config, tenantSlug: strin
   };
 }
 
-/** the parts of a trigger URL `<mcp base>/<endpoint>/<slug>/<path>`, or null when it is not one */
+/** which kind of trigger a resource URL names: an MCP Server Trigger, or a Webhook with workspace sign-in */
+export type TriggerResourceFamily = 'mcp' | 'webhook';
+
+/** the HTTP methods a Webhook node can listen on; a resource names no method, so every one is tried */
+export const WEBHOOK_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'] as const;
+
+/**
+ * the parts of a trigger URL `<mcp base>/<endpoint>/<slug>/<path>` (an MCP Server Trigger), or
+ * `<mcp base>/webhook[-test]/<slug>/<path>` (a Webhook with workspace sign-in, P6-87: its resource follows
+ * `config.mcp.baseUrl` too); null when it is neither
+ */
 export function parseMcpTriggerResource(
   config: Config,
   resource: string,
-): { test: boolean; slug: string; path: string } | null {
+): { test: boolean; slug: string; path: string; family: TriggerResourceFamily } | null {
   const base = `${config.mcp.baseUrl}/`;
   if (typeof resource !== 'string' || !resource.startsWith(base)) return null;
   const rest = resource.slice(base.length);
   if (/[?#\s]/.test(rest)) return null;
   const [endpoint, rawSlug, ...segments] = rest.split('/');
-  const test = endpoint === config.mcp.endpointTest;
-  if (!test && endpoint !== config.mcp.endpoint) return null;
+  let family: TriggerResourceFamily = 'mcp';
+  let test = endpoint === config.mcp.endpointTest;
+  if (!test && endpoint !== config.mcp.endpoint) {
+    if (endpoint !== 'webhook' && endpoint !== 'webhook-test') return null;
+    family = 'webhook';
+    test = endpoint === 'webhook-test';
+  }
   let slug: string;
   let decoded: string[];
   try {
@@ -64,7 +79,7 @@ export function parseMcpTriggerResource(
   const path = normalizePath(decoded.join('/'));
   // one spelling only: no empty, padded or trailing segments
   if (!slug || !path || path !== decoded.join('/')) return null;
-  return { test, slug, path };
+  return { test, slug, path, family };
 }
 
 /** an enabled MCP Server Trigger with "Workspace sign-in": only those are resources (as n8n) */
@@ -74,7 +89,54 @@ function isMcpTriggerNode(ctx: ServerContext, node: WorkflowNode | undefined): b
   return Boolean(type?.description.webhooks?.some((hook) => webhookUrlBase(hook) === 'mcp'));
 }
 
-/** whether `resource` is the URL of one of the tenant's MCP Server Triggers that serves now */
+/** an enabled Webhook node with "Workspace sign-in (OAuth2)" (P6-87): the only Webhook that is a resource */
+export function isWebhookSignInNode(node: WorkflowNode | undefined): boolean {
+  return Boolean(
+    node && !node.disabled && node.type === 'core.webhook' && node.parameters?.authentication === 'n8nOAuth2',
+  );
+}
+
+/**
+ * the nodes that serve `path` of this tenant now, one per method asked about: a published, active
+ * workflow's node on the production endpoint, a listening one on the test endpoint
+ */
+export async function triggerNodesAt(
+  ctx: ServerContext,
+  tenantId: string,
+  test: boolean,
+  path: string,
+  methods: readonly string[],
+): Promise<Array<WorkflowNode | undefined>> {
+  const { repos } = ctx;
+  const nodes: Array<WorkflowNode | undefined> = [];
+  for (const method of methods) {
+    if (test) {
+      const found = await findTestWebhook(ctx.testWebhooks, tenantId, method, path);
+      if (found) {
+        nodes.push(found.registration.workflow.nodes.find((n) => n.name === found.registration.nodeName));
+      }
+      continue;
+    }
+    let found = await repos.webhooks.findStatic(tenantId, method, path);
+    if (!found) {
+      const candidates = sortDynamic(await repos.webhooks.listDynamic(tenantId, method, path.split('/').length));
+      found = candidates.find((candidate) => matchDynamic(candidate.path, path) !== null);
+    }
+    if (!found) continue;
+    const { nodeName, workflowId } = found;
+    const row = await repos.workflows.get(tenantId, workflowId);
+    if (!row?.active) continue;
+    try {
+      const definition = await loadPublishedDefinition(repos, tenantId, row);
+      nodes.push(definition?.nodes.find((n) => n.name === nodeName));
+    } catch {
+      /* a definition that cannot be read serves nothing */
+    }
+  }
+  return nodes;
+}
+
+/** whether `resource` is the URL of one of the tenant's triggers with workspace sign-in that serves now */
 export async function isTenantTriggerResource(
   ctx: ServerContext,
   tenant: TenantRow,
@@ -82,33 +144,12 @@ export async function isTenantTriggerResource(
 ): Promise<boolean> {
   const parsed = parseMcpTriggerResource(ctx.config, resource);
   if (!parsed || parsed.slug !== tenant.slug) return false;
-  const { repos } = ctx;
-  if (parsed.test) {
-    const found = await findTestWebhook(ctx.testWebhooks, tenant.id, 'POST', parsed.path);
-    if (!found) return false;
-    const node = found.registration.workflow.nodes.find((n) => n.name === found.registration.nodeName);
-    return isMcpTriggerNode(ctx, node);
+  if (parsed.family === 'webhook') {
+    const nodes = await triggerNodesAt(ctx, tenant.id, parsed.test, parsed.path, WEBHOOK_METHODS);
+    return nodes.some(isWebhookSignInNode);
   }
-  let found = await repos.webhooks.findStatic(tenant.id, 'POST', parsed.path);
-  if (!found) {
-    const candidates = sortDynamic(
-      await repos.webhooks.listDynamic(tenant.id, 'POST', parsed.path.split('/').length),
-    );
-    found = candidates.find((candidate) => matchDynamic(candidate.path, parsed.path) !== null);
-  }
-  if (!found) return false;
-  const { nodeName, workflowId } = found;
-  const row = await repos.workflows.get(tenant.id, workflowId);
-  if (!row?.active) return false;
-  try {
-    const definition = await loadPublishedDefinition(repos, tenant.id, row);
-    return isMcpTriggerNode(
-      ctx,
-      definition?.nodes.find((n) => n.name === nodeName),
-    );
-  } catch {
-    return false;
-  }
+  const nodes = await triggerNodesAt(ctx, tenant.id, parsed.test, parsed.path, ['POST']);
+  return nodes.some((node) => isMcpTriggerNode(ctx, node));
 }
 
 /** whether `resource` is this tenant's server URL (only while MCP access is on) or one of its trigger URLs */
@@ -139,6 +180,10 @@ export async function mcpProtectedResourceMetadata(
     authorization_servers: [mcpOAuthIssuer(ctx.config, tenant.slug)],
     bearer_methods_supported: ['header'],
     scopes_supported: [...MCP_SCOPES],
-    resource_name: server ? `${tenant.name} MCP server` : `${tenant.name} MCP Server Trigger`,
+    resource_name: server
+      ? `${tenant.name} MCP server`
+      : path.startsWith('webhook')
+        ? `${tenant.name} Webhook`
+        : `${tenant.name} MCP Server Trigger`,
   };
 }

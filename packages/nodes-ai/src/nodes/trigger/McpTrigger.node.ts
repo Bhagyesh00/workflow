@@ -329,7 +329,8 @@ export const McpTriggerNode: NodeType = {
     if (auth.user && ctx.getNodeParameter('includeUserInOutput', 0, true) !== false) {
       item.user = userFields(auth.user);
     }
-    return { workflowData: [[{ json: item }]], customData };
+    // the person the OAuth sign-in verified: a tool call runs as them (P6-15, P6-87)
+    return { workflowData: [[{ json: item }]], customData, ...(auth.user ? { triggerUserId: auth.user.id } : {}) };
   },
 
   async execute(ctx) {

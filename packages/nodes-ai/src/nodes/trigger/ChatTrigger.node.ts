@@ -7,6 +7,7 @@
  * sign-in (chat-access.ts), an Origin allow-list, and no access to anything but the request itself.
  * `loadPreviousSession` answers the history of the memory node wired to the trigger (P5-57).
  */
+import { loadConnectPanel } from '@workflow/nodes-base/utils/connect-panel';
 import {
   type DataObject,
   HIGHLIGHTED_SESSION_KEY,
@@ -17,6 +18,7 @@ import {
   type WebhookResponseData,
 } from '@workflow/workflow';
 import { checkChatAccess, headerValue, loadChatHistory } from './chat-access';
+import { injectChatConnectBar } from './chat-page';
 import {
   chatOriginAllowed,
   DEFAULT_INITIAL_MESSAGES,
@@ -283,6 +285,11 @@ export const ChatTriggerNode: NodeType = {
       if (reply && access.headers['set-cookie']) {
         reply.headers = { ...reply.headers, 'set-cookie': access.headers['set-cookie'] };
       }
+      // P6-87: a signed-in visitor sees which private accounts a message needs and which they have connected
+      if (reply && access.user && typeof reply.body === 'string') {
+        const panel = await loadConnectPanel(ctx, access.user.id, ctx.getRequestObject().url?.split('?')[0] ?? '');
+        if (panel) reply.body = injectChatConnectBar(reply.body, panel);
+      }
       return page;
     }
 
@@ -305,11 +312,13 @@ export const ChatTriggerNode: NodeType = {
       access.user && ctx.getNodeParameter('includeUserInOutput', 0, true) !== false
         ? { user: { ...access.user } as DataObject }
         : {};
+    // the person the sign-in identified: a run starts as them, whether or not Include User is on (P6-87)
+    const identity = access.user ? { triggerUserId: access.user.id } : {};
 
     if (action === 'loadPreviousSession') {
       const mode = String(options.loadPreviousSession ?? 'notSupported');
       if (mode === 'manually') {
-        return { workflowData: [[{ json: { sessionId, action: 'loadPreviousSession', ...user } }]] };
+        return { workflowData: [[{ json: { sessionId, action: 'loadPreviousSession', ...user } }]], ...identity };
       }
       if (mode !== 'memory') return respond(200, { data: [] }, corsOrigin);
       // the memory reads this same body as its item: give it what a run's item holds, never the caller's
@@ -363,7 +372,7 @@ export const ChatTriggerNode: NodeType = {
         };
       });
     }
-    const result: WebhookResponseData = { workflowData: [[item]] };
+    const result: WebhookResponseData = { workflowData: [[item]], ...identity };
     // on unless turned off, as n8n; chatInput and sessionId are checked strings here
     if (options.autoSaveHighlightedData !== false) {
       result.customData = {
