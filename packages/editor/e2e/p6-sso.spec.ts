@@ -47,18 +47,19 @@ test.describe('Authentication settings (P6-13)', () => {
     await page.getByRole('button', { name: 'Turn on SAML', exact: true }).click();
     await expect(toggle).toHaveAttribute('aria-checked', 'true');
 
-    await page.goto('/settings/members');
+    // the demo keeps its state in memory, so move inside the app: a page.goto reloads it and SAML is off again
+    await page.getByRole('link', { name: 'Members page', exact: true }).click();
     const invite = page.getByRole('button', { name: 'Invite', exact: true });
     await expect(invite).toBeDisabled();
     await expect(invite).toHaveAttribute('title', /managed by your identity provider/);
 
-    await page.goto('/settings/sso');
+    await page.goBack();
     await page.getByRole('switch', { name: 'Allow SAML sign-in' }).click();
     await expect(page.getByRole('switch', { name: 'Allow SAML sign-in' })).toHaveAttribute(
       'aria-checked',
       'false',
     );
-    await page.goto('/settings/members');
+    await page.goForward();
     await expect(page.getByRole('button', { name: 'Invite', exact: true })).toBeEnabled();
   });
 
