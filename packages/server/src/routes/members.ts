@@ -1,6 +1,6 @@
 /**
- * /rest/members and /rest/invitations (moved from routes/resources.ts in S2's C0, unchanged; P6-20, L4 owns
- * it afterwards). Resend and copy link are stubs until L4.
+ * /rest/members and /rest/invitations (moved from routes/resources.ts in S2's C0; P6-20, L4 owns it): the
+ * filtered list, invite (one or many), resend and copy link. The invite logic is in services/members.ts.
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -8,8 +8,10 @@ import type { ServerContext } from '../context';
 import { requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { idParams } from '../http/schemas';
+import type { MemberListRow } from '../repositories/members-list';
 import { assertGrantable, changeMemberRole, LAST_OWNER_MESSAGE } from '../services/member-disable';
 import { type MemberRemovalChoice, removeMember } from '../services/member-removal';
+import type { MemberInviteResult } from '../services/members';
 
 /** a workspace role in a member route: a system role or a custom global slug (checked against the roles) */
 export const memberRoleSchema = z.string().trim().min(1).max(64);
@@ -37,55 +39,107 @@ export function removalChoice(body: unknown, query: unknown): MemberRemovalChoic
   );
 }
 
+const inviteSchema = z.object({ email: z.email().max(254), role: memberRoleSchema });
+/** one object (today's body) or a list of up to 100 */
+const inviteBodySchema = z.union([inviteSchema, z.array(inviteSchema).min(1).max(100)]);
+
+/** the sort names a list may use; anything else is a 400 */
+const SORT_FIELDS = ['name', 'email', 'role', 'mfaEnabled', 'lastActiveAt'] as const;
+const memberListQuerySchema = z.object({
+  q: z.string().trim().max(200).optional(),
+  role: memberRoleSchema.optional(),
+  projectId: z.uuid().optional(),
+  status: z.enum(['active', 'pending', 'disabled']).optional(),
+  sort: z
+    .string()
+    .regex(/^[A-Za-z]+(:(asc|desc))?$/)
+    .transform((value, issue) => {
+      const [by, dir] = value.split(':');
+      if (!(SORT_FIELDS as readonly string[]).includes(by)) {
+        issue.addIssue({ code: 'custom', message: `Sort by one of: ${SORT_FIELDS.join(', ')}` });
+        return z.NEVER;
+      }
+      return {
+        by: by as (typeof SORT_FIELDS)[number],
+        dir: dir === 'desc' ? ('desc' as const) : ('asc' as const),
+      };
+    })
+    .optional(),
+  take: z.coerce.number().int().min(1).max(1000).default(1000),
+  skip: z.coerce.number().int().min(0).default(0),
+});
+
+/** a list row as the editor's `Member`; a pending row's `userId` is its invitation id */
+function memberDto(row: MemberListRow) {
+  return {
+    userId: row.id,
+    ...(row.kind === 'invitation' ? { invitationId: row.id } : {}),
+    email: row.email,
+    name: row.name ?? '',
+    role: row.role,
+    joinedAt: row.joinedAt ? row.joinedAt.toISOString() : null,
+    status: row.status,
+    lastActiveAt: row.lastActiveAt ? row.lastActiveAt.toISOString() : null,
+    mfaEnabled: row.mfaEnabled,
+    managedByScim: row.managedByScim,
+    allowSsoManualLogin: row.allowSsoManualLogin,
+  };
+}
+
+function inviteRowDto(row: MemberInviteResult) {
+  return {
+    id: row.id,
+    email: row.email,
+    role: row.role,
+    emailSent: row.emailSent,
+    ...(row.inviteAcceptUrl ? { inviteAcceptUrl: row.inviteAcceptUrl } : {}),
+    error: row.error ?? '',
+  };
+}
+
 export function registerMemberRoutes(app: FastifyInstance, ctx: ServerContext): void {
-  const { repos, auth: authService, config } = ctx;
+  const { repos, auth: authService } = ctx;
 
   app.get('/members', async (request) => {
     const auth = await requireScope(request, 'user:list');
-    const members = await repos.memberships.listForTenant(auth.tenant.id);
+    const query = parse(memberListQuerySchema, request.query ?? {});
+    const page = await ctx.members.list(auth, {
+      q: query.q,
+      role: query.role,
+      projectId: query.projectId,
+      status: query.status,
+      sort: query.sort,
+      take: query.take,
+      skip: query.skip,
+    });
     return {
-      data: members.map((m) => ({
-        userId: m.userId,
-        email: m.email,
-        name: m.name,
-        role: m.role,
-        joinedAt: m.joinedAt.toISOString(),
-      })),
+      data: page.items.map(memberDto),
       nextCursor: null,
+      count: page.count,
+      ...(page.statusCounts ? { statusCounts: page.statusCounts } : {}),
     };
   });
 
+  // a single object keeps the answer the editor and the API tests know (token and inviteUrl, once); an array
+  // answers one row per invitation
   app.post('/members/invite', async (request) => {
     const auth = await requireScope(request, 'user:create');
-    const body = parse(z.object({ email: z.email().max(254), role: memberRoleSchema }), request.body);
-    // stub (L6): PASSES; refused under SSO (n8n keeps the rule in the service: L4 moves this into `inviteMany`)
-    await ctx.ssoLogin.assertInviteAllowed(auth.tenant.id);
-    await authService.assertMemberRole(auth.tenant.id, body.role);
-    await assertGrantable(ctx, auth, body.role, 'invite the member');
-    const { invitation, token } = await authService.invite(
-      auth.tenant.id,
-      { id: auth.user.id, role: auth.role },
-      body.email,
-      body.role,
-    );
-    await repos.audit.add(auth.tenant.id, {
-      userId: auth.user.id,
-      action: 'member.invited',
-      resourceType: 'invitation',
-      resourceId: invitation.id,
-      metadata: { email: invitation.email, role: invitation.role },
-      ip: request.ip,
-    });
+    const body = parse(inviteBodySchema, request.body);
+    const meta = { ip: request.ip };
+    if (Array.isArray(body)) {
+      const rows = await ctx.members.inviteMany(auth, body, meta);
+      return { data: rows.map(inviteRowDto) };
+    }
+    const { result, token, expiresAt } = await ctx.members.inviteOne(auth, body, meta);
     return {
       data: {
-        id: invitation.id,
-        email: invitation.email,
-        role: invitation.role,
-        expiresAt: invitation.expiresAt.toISOString(),
-        // shown once: deliver it to the invitee (no mail transport is configured)
-        token,
-        // the editor's accept page (`/invitation/:token`)
-        inviteUrl: `${config.baseUrl}/invitation/${token}`,
+        id: result.id,
+        email: result.email,
+        role: result.role,
+        expiresAt: expiresAt.toISOString(),
+        emailSent: result.emailSent,
+        // shown once; left out when the mail went out and links are email only
+        ...(result.inviteAcceptUrl ? { token, inviteUrl: result.inviteAcceptUrl } : {}),
       },
     };
   });
@@ -147,17 +201,18 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: ServerContext): 
     return { data: { ok: true } };
   });
 
-  // P6-20: a new token and expiry, sent again by mail; the old link stops working
+  // a new token and expiry, sent again by mail; the old link stops working
   app.post('/invitations/:id/resend', async (request) => {
-    await requireScope(request, 'user:create');
-    parse(idParams, request.params);
-    throw new Error('not implemented (L4)');
+    const auth = await requireScope(request, 'user:create');
+    const { id } = parse(idParams, request.params);
+    return { data: inviteRowDto(await ctx.members.resend(auth, id, { ip: request.ip })) };
   });
 
-  // P6-20: a new token and expiry, answered as the invite link (the token is stored hashed, so it rotates)
+  // a new token and expiry, answered as the invite link (the token is stored hashed, so it rotates)
   app.post('/invitations/:id/link', async (request) => {
-    await requireScope(request, 'user:generateInviteLink');
-    parse(idParams, request.params);
-    throw new Error('not implemented (L4)');
+    const auth = await requireScope(request, 'user:generateInviteLink');
+    const { id } = parse(idParams, request.params);
+    const { inviteAcceptUrl } = await ctx.members.inviteLink(auth, id);
+    return { data: { link: inviteAcceptUrl } };
   });
 }
