@@ -52,6 +52,8 @@ export const PRIVATE_SHARED_CONNECT_MESSAGE =
 export const OTHER_USER_CALLBACK_MESSAGE =
   'This connection was started by another user. Sign in as that user and connect again.';
 export const NO_LONGER_CONNECT_MESSAGE = 'You can no longer connect this credential';
+export const MCP_CLIENT_FIRST_MESSAGE =
+  "Couldn't connect your account: this MCP credential has no registered app yet. Ask someone who can edit the credential to connect first.";
 
 /**
  * P6-15: the checks of a per user callback, before any token call: the session's user is the state's, the
@@ -243,7 +245,8 @@ export class OAuth2Service {
     tenantId: string,
     userId: string,
     credentialId: string,
-    options: { perUser?: boolean } = {},
+    /** `registerClient` (P6-15): a per user caller who may update the credential registers its first MCP client */
+    options: { perUser?: boolean; registerClient?: boolean } = {},
   ): Promise<string> {
     const loaded = await this.loadOAuth2(tenantId, credentialId);
     const { row } = loaded;
@@ -252,7 +255,13 @@ export class OAuth2Service {
     if (!options.perUser && row.isResolvable) throw ApiError.badRequest(PRIVATE_SHARED_CONNECT_MESSAGE);
     const mcp = this.credentials.types.isA(row.type, MCP_OAUTH2_TYPE);
     if (mcp && data.useDynamicClientRegistration !== false) {
-      data = await this.connectMcpClient(tenantId, row, data);
+      // P6-15: a per user connect keeps the shared row's client (the other users' tokens were issued to it);
+      // only the first one registers it, and only for a caller who may update the credential
+      if (!options.perUser || (!data.clientId && options.registerClient)) {
+        data = await this.connectMcpClient(tenantId, row, data);
+      } else if (!data.clientId) {
+        throw ApiError.badRequest(MCP_CLIENT_FIRST_MESSAGE);
+      }
     }
     if (!data.authUrl || !data.clientId) {
       throw ApiError.badRequest('The credential needs an authorization URL and a client ID');
@@ -362,7 +371,7 @@ export class OAuth2Service {
       auth,
       ...(allowedDomains === undefined ? {} : { allowedDomains }),
     })) as DataObject;
-    // P6-16 (C0): a JWE response is decrypted before the check; the stub (L15) keeps it unless `jweEnabled`
+    // P6-16: a JWE response is decrypted before the check when the credential has `jweEnabled`
     if (token && typeof token === 'object') token = await this.decryptToken(payload.t, token, data);
     if (!token || typeof token !== 'object' || !token.access_token) {
       throw ApiError.badRequest('The token response did not contain an access token');

@@ -102,7 +102,9 @@ const testCredentialTool: AssistantToolDefinition<z.output<typeof idInput>> = {
     const tenantId = run.tenant.id;
     const row = await ctx.repos.credentials.get(tenantId, input.credentialId);
     if (!row) throw ApiError.notFound('Credential');
-    const data = ctx.credentials.merge(ctx.credentials.decrypt(row), {});
+    // the stored data as it is, as the REST route tests it for a caller who cannot update it (a merge with an
+    // empty body would test an empty credential)
+    const data = ctx.credentials.decrypt(row);
     ctx.credentials.resolvedType(row.type);
     let resolved: DataObject;
     try {
@@ -114,6 +116,8 @@ const testCredentialTool: AssistantToolDefinition<z.output<typeof idInput>> = {
       nodeTypes: ctx.registries.nodeTypes,
       tenantId,
       logger: toWorkflowLogger(ctx.logger),
+      // P6-16: a JWE credential's token answer opens with the workspace's key, as on a run
+      oauthTokenDecrypt: (token, data) => ctx.oauthJwe.decryptResponse(tenantId, token, data),
     });
     // a client error can quote the URL or header it was given, which may be a vault value
     return { status: result.status, message: scrubValues(result.message, resolvedValues(data, resolved)) };

@@ -14,6 +14,7 @@ import {
   idParams,
 } from '../http/schemas';
 import { toWorkflowLogger } from '../logger';
+import { MISSING_SCOPE_MESSAGE } from '../services/access';
 import { testCredential } from '../services/credential-test';
 import { NOT_PRIVATE_MESSAGE, type OAuthCallbackSession, oauthCallbackPage } from '../services/oauth2';
 import { credentialReadErrorText, resolvedValues, scrubValues } from '../services/secrets/resolver';
@@ -135,6 +136,12 @@ export async function deleteCredential(
   userId: string,
   ip: string,
 ) {
+  // P6-15: deleting a private credential also needs `credential:createEndUser` (n8n), on every path (REST,
+  // public API, assistant); the caller's `credential:delete` is each path's own check
+  if ((await ctx.repos.credentials.get(tenantId, id))?.isResolvable) {
+    const scopes = await ctx.access.scopesFor(tenantId, userId, { credentialId: id });
+    if (!scopes.has('credential:createEndUser')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
+  }
   if (!(await ctx.repos.credentials.delete(tenantId, id))) throw ApiError.notFound('Credential');
   await ctx.repos.audit.add(tenantId, {
     userId,
@@ -317,10 +324,6 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
   app.delete('/credentials/:id', async (request) => {
     const { id } = parse(idParams, request.params);
     const auth = await requireScope(request, 'credential:delete', { credentialId: id });
-    // P6-15: deleting a private credential also needs `credential:createEndUser` (n8n)
-    if ((await repos.credentials.get(auth.tenant.id, id))?.isResolvable) {
-      await requireScope(request, 'credential:createEndUser', { credentialId: id });
-    }
     await deleteCredential(ctx, auth.tenant.id, id, auth.user.id, request.ip);
     return { data: { ok: true } };
   });
@@ -335,7 +338,11 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     const perUser = { perUser: true };
     let url: string;
     if (credentials.types.isA(row.type, 'oAuth2Api')) {
-      url = await ctx.oauth2.authorizeUrl(auth.tenant.id, auth.user.id, id, perUser);
+      // an MCP credential's first automatic registration writes the shared row: only with credential:update
+      const registerClient = (await ctx.access.scopesForAuth(auth, { credentialId: id })).has(
+        'credential:update',
+      );
+      url = await ctx.oauth2.authorizeUrl(auth.tenant.id, auth.user.id, id, { ...perUser, registerClient });
     } else if (credentials.types.isA(row.type, 'oAuth1Api')) {
       url = await ctx.oauth1.authorizeUrl(auth.tenant.id, auth.user.id, id, perUser);
     } else {
@@ -392,6 +399,8 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
       nodeTypes: ctx.registries.nodeTypes,
       tenantId: auth.tenant.id,
       logger: toWorkflowLogger(ctx.logger),
+      // P6-16: a JWE credential's token answer opens with the workspace's key, as on a run
+      oauthTokenDecrypt: (token, data) => ctx.oauthJwe.decryptResponse(auth.tenant.id, token, data),
     });
     // a client error can quote the URL or header it was given, which may be a vault value
     return { data: { ...result, message: scrubValues(result.message, resolvedValues(data, resolved)) } };
