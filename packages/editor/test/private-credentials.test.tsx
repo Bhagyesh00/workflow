@@ -17,7 +17,7 @@ import {
   PRIVATE_SCOPE_REASON,
 } from '../src/components/credentials/PrivateCredentialSection';
 import { MoveDialog, PRIVATE_MOVE_TEXT } from '../src/components/projects/MoveDialog';
-import type { MockBackend } from '../src/demo/mock-backend';
+import { type MockBackend, PRIVATE_MOVE_PERSONAL_ERROR } from '../src/demo/mock-backend';
 import { useOpenWorkflowStore } from '../src/features/editor/open-resources';
 import { useProjectStore } from '../src/stores/project-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
@@ -246,5 +246,38 @@ describe('private credentials on the other screens', () => {
     await waitFor(() => expect(within(select).queryByRole('option', { name: 'Beta team' })).toBeTruthy());
     expect(within(select).queryAllByRole('option').some((o) => /\(personal\)/.test(o.textContent ?? ''))).toBe(false);
     expect(backend()).toBe(demo);
+  });
+
+  it('the demo refuses to move a private credential to a personal project, by a move or a project delete', async () => {
+    const { demo, tenantId, team, userId } = setup();
+    const beta = demo.createProject({ tenantId, name: 'Beta team', type: 'team' });
+    const personal = demo.personalProject(tenantId, userId);
+    seedOAuth(demo, beta.id, { id: 'cred-private', name: 'Team mail', isResolvable: true });
+    const moved = await demo.handle({
+      method: 'PUT',
+      path: '/credentials/cred-private/transfer',
+      body: { destinationProjectId: personal.id },
+    });
+    expect(moved.status).toBe(400);
+    expect(moved.body).toMatchObject({ error: { message: PRIVATE_MOVE_PERSONAL_ERROR } });
+    const deleted = await demo.handle({
+      method: 'DELETE',
+      path: `/projects/${beta.id}`,
+      query: { transferId: personal.id },
+    });
+    expect(deleted.status).toBe(400);
+    expect(deleted.body).toMatchObject({
+      error: {
+        message: "Can't delete project. Private credentials can't be moved to a personal project: Team mail",
+      },
+    });
+    expect(demo.credentials.find((c) => c.id === 'cred-private')?.projectId).toBe(beta.id);
+    // a team project is still a valid target
+    const toTeam = await demo.handle({
+      method: 'PUT',
+      path: '/credentials/cred-private/transfer',
+      body: { destinationProjectId: team.id },
+    });
+    expect(toTeam.status).toBe(200);
   });
 });

@@ -245,6 +245,15 @@ export function registerProjectRoutes(backend: MockBackend): void {
       for (const scope of ['credential:create', 'workflow:create', 'dataTable:create'] as const) {
         if (!scopes.includes(scope)) throw new HttpError(403, 'forbidden', MISSING_SCOPE);
       }
+      // P6-15, as the server: a private credential never moves to a personal project, refused before any write
+      const privates = backend.credentials.filter((c) => owned(c) && c.isResolvable).map((c) => c.name);
+      if (target.type === 'personal' && privates.length) {
+        throw new HttpError(
+          400,
+          'bad_request',
+          `Can't delete project. Private credentials can't be moved to a personal project: ${privates.sort().join(', ')}`,
+        );
+      }
       for (const row of [...backend.workflows, ...backend.credentials, ...backend.variables]) {
         if (owned(row)) row.projectId = target.id;
       }

@@ -60,9 +60,32 @@ const privatePackage: NodePackage = {
         return [[{ json: { who: answer.who } }]];
       },
     },
+    {
+      // a poll trigger whose manual sample calls the provider with the private credential
+      description: {
+        name: 'test.whoPoll',
+        displayName: 'Who polls',
+        description: '',
+        group: ['trigger'],
+        version: 1,
+        defaults: { name: 'Who polls' },
+        inputs: [],
+        outputs: ['main'],
+        polling: true,
+        credentials: [{ name: 'oAuth2Api', required: true }],
+        properties: [{ displayName: 'URL', name: 'url', type: 'string', default: '' }],
+      },
+      async poll(ctx) {
+        const url = String(ctx.getNodeParameter('url', 0));
+        const answer = (await ctx.helpers.httpRequestWithAuthentication('oAuth2Api', { url })) as DataObject;
+        return [[{ json: { who: answer.who } }]];
+      },
+    },
   ],
   credentials: [],
 };
+/** when true the provider's /me fails (a run to retry) */
+let meFails = false;
 
 beforeAll(async () => {
   server = await createTestServer({}, { nodePackages: [privatePackage] });
@@ -94,6 +117,7 @@ beforeAll(async () => {
         return json(400, { error: 'unsupported_grant_type' });
       }
       if (req.url === '/me') {
+        if (meFails) return json(500, { error: 'down' });
         const who = accounts.get(String(req.headers.authorization ?? '').replace(/^Bearer /, ''));
         return who ? json(200, { who }) : json(401, { error: 'invalid_token' });
       }
@@ -123,6 +147,7 @@ beforeEach(async () => {
   await resetDatabase(server.ctx);
   tokenCalls.length = 0;
   accounts.clear();
+  meFails = false;
 });
 
 const repos = () => server.ctx.repos;
@@ -417,7 +442,59 @@ describe('private credentials: runs', () => {
     expect(tokenCalls.filter((call) => call.grant_type !== 'authorization_code')).toHaveLength(0);
   });
 
-  it('a workflow with a private credential and a schedule trigger cannot publish; a manual one can', async () => {
+  it("a retry by another member runs as that member, never with the original user's connection", async () => {
+    const { owner, member, tenantId, team } = await setup();
+    const other = await realMember(owner);
+    await addToProject(server, tenantId, team, other.user.id, 'project:editor');
+    other.client.defaultProjectId = team;
+    const credential = await privateCredential(owner.client);
+    await connect(member.client, credential.id, 'bea');
+    await connect(other.client, credential.id, 'otto');
+    const workflow = await whoWorkflow(owner.client, credential);
+    meFails = true;
+    const failed = await runAs(member.client, tenantId, workflow.id);
+    expect(failed.row.status).toBe('error');
+    meFails = false;
+
+    const { executionId } = await other.client.data<{ executionId: string }>(
+      other.client.post(`/rest/executions/${failed.row.id}/retry`, {}),
+    );
+    await waitForExecution(server.ctx, tenantId, executionId);
+    const retried = await repos().executions.getData(tenantId, executionId);
+    expect(outputOf(retried?.state, 'Who')).toEqual([{ who: 'otto' }]);
+    expect(retried?.runOptions).toMatchObject({ endUserId: other.user.id });
+    // the original user retries their own run with their own connection
+    const own = await member.client.data<{ executionId: string }>(
+      member.client.post(`/rest/executions/${failed.row.id}/retry`, {}),
+    );
+    await waitForExecution(server.ctx, tenantId, own.executionId);
+    const ownData = await repos().executions.getData(tenantId, own.executionId);
+    expect(outputOf(ownData?.state, 'Who')).toEqual([{ who: 'bea' }]);
+  });
+
+  it("a manual run's trigger sample uses the private credential of the user who runs it", async () => {
+    const { owner, member, tenantId } = await setup();
+    const credential = await privateCredential(owner.client);
+    await connect(member.client, credential.id, 'bea');
+    const workflow = await createWorkflow(owner.client, {
+      name: 'Who polls',
+      nodes: [
+        node('Poll', 'test.whoPoll', { url: `${providerUrl}/me` }, [0, 0], {
+          credentials: { oAuth2Api: { id: credential.id, name: credential.name } },
+        }),
+      ],
+      connections: {},
+    });
+    const run = await runAs(member.client, tenantId, workflow.id);
+    expect(run.row.status).toBe('success');
+    expect(outputOf(run.data?.state, 'Poll')).toEqual([{ who: 'bea' }]);
+    // the owner has no connection: the sample fails for them, the member's is never used
+    const refused = await owner.client.post(`/rest/workflows/${workflow.id}/run`, {});
+    expect(refused.statusCode).toBe(400);
+    expect(refused.body).toMatch(/is not connected for this user/);
+  });
+
+  it('a private credential publishes only when every enabled trigger gives a user identity', async () => {
     const { owner } = await setup();
     const credential = await privateCredential(owner.client);
     const who = node('Who', 'test.whoAmI', { url: `${providerUrl}/me` }, [200, 0], {
@@ -433,7 +510,7 @@ describe('private credentials: runs', () => {
     expect(refused.json().error.message).toMatch(
       /^Cannot publish workflow: end-user credentials \(Mail\) are only supported with Manual Trigger/,
     );
-    // a disabled schedule does not count; the private credential named by name only counts too
+    // the private credential named by name only counts too
     const byName = await createWorkflow(owner.client, {
       name: 'By name',
       nodes: [
@@ -445,6 +522,38 @@ describe('private credentials: runs', () => {
     const byNameRefused = await owner.client.post(`/rest/workflows/${byName.id}/activate`);
     expect(byNameRefused.statusCode).toBe(400);
     expect(byNameRefused.body).toContain('end-user credentials (Mail)');
+
+    // a Webhook with workspace sign-in gives an identity, and a disabled schedule beside it does not count
+    const signedIn = await createWorkflow(owner.client, {
+      name: 'Signed in',
+      nodes: [
+        node('Webhook', 'core.webhook', {
+          httpMethod: 'POST',
+          path: `who-${randomUUID().slice(0, 8)}`,
+          authentication: 'n8nOAuth2',
+        }),
+        { ...node('Every', 'core.scheduleTrigger', {}, [0, 200]), disabled: true },
+        who,
+      ],
+      connections: chain('Webhook', 'Who'),
+    });
+    const published = await owner.client.post(`/rest/workflows/${signedIn.id}/activate`);
+    expect(published.statusCode).toBe(200);
+    // the same schedule enabled refuses it again
+    const enabled = await createWorkflow(owner.client, {
+      name: 'Signed in and nightly',
+      nodes: [
+        node('Webhook', 'core.webhook', {
+          httpMethod: 'POST',
+          path: `who-${randomUUID().slice(0, 8)}`,
+          authentication: 'n8nOAuth2',
+        }),
+        node('Every', 'core.scheduleTrigger', {}, [0, 200]),
+        who,
+      ],
+      connections: chain('Webhook', 'Who'),
+    });
+    expect((await owner.client.post(`/rest/workflows/${enabled.id}/activate`)).statusCode).toBe(400);
   });
 });
 

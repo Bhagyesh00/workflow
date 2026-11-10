@@ -6,7 +6,12 @@
  */
 import type { Scope } from '@workflow/workflow';
 import type { PolicyViolation, TransferPreview } from '../api/types';
-import type { MockBackend, StoredProject, StoredWorkflow } from './mock-backend';
+import {
+  type MockBackend,
+  PRIVATE_MOVE_PERSONAL_ERROR,
+  type StoredProject,
+  type StoredWorkflow,
+} from './mock-backend';
 import { folderState } from './mock-folders';
 import { HttpError, now } from './mock-http';
 
@@ -222,6 +227,15 @@ export function registerSharingRoutes(backend: MockBackend): void {
 
   backend.on('PUT', '/credentials/:id/transfer', ({ params, body }) => {
     const c = credentialOf(params[0]);
+    // P6-15, as the server: a private credential's move needs `credential:createEndUser` and never goes to a
+    // personal project, checked first
+    if (c.isResolvable) {
+      backend.requireScope('credential:createEndUser', { scopes: backend.rowScopes(c) });
+      const target = backend.projects.find((p) => p.id === body.destinationProjectId);
+      if (target?.tenantId === c.tenantId && target.type === 'personal') {
+        throw badRequest(PRIVATE_MOVE_PERSONAL_ERROR);
+      }
+    }
     backend.requireScope('credential:move', { scopes: backend.rowScopes(c) });
     const destination = destinationOf(backend, body.destinationProjectId, 'credential:create');
     if (c.projectId === destination.id) throw sameHome('credential');
