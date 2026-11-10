@@ -41,8 +41,9 @@ function runSummary(run: LdapSyncRun): string {
 export function LdapSettingsPage() {
   const queryClient = useQueryClient();
   const { can } = usePermissions();
+  const canManage = can('ldap:manage');
   const canSync = can('ldap:sync');
-  const config = useQuery({ queryKey: queryKeys.ldapConfig, queryFn: ldapApi.config });
+  const config = useQuery({ queryKey: queryKeys.ldapConfig, queryFn: ldapApi.config, enabled: canManage });
   const runs = useQuery({ queryKey: queryKeys.ldapSyncRuns, queryFn: ldapApi.syncRuns, enabled: canSync });
   const [form, setForm] = useState<Form | null>(null);
   const [password, setPassword] = useState('');
@@ -84,6 +85,15 @@ export function LdapSettingsPage() {
     onError: (error) => toast.error('Could not run the sync', errorMessage(error)),
   });
 
+  if (!canManage) {
+    return (
+      <Panel title="LDAP sign-in">
+        <p className="px-5 py-4 text-sm text-ink-2">
+          You don't have access to the LDAP settings. Ask a workspace owner or admin.
+        </p>
+      </Panel>
+    );
+  }
   if (config.isLoading || !form) {
     return config.error ? <Callout tone="err">{errorMessage(config.error)}</Callout> : <PageLoader />;
   }

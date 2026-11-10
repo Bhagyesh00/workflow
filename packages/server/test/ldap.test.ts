@@ -1,7 +1,7 @@
 /**
  * P6-12 (L10): LDAP sign-in and sync with the `LdapDirectory` fake (test/fakes/ldap-directory.ts). The
  * config (defaults as n8n, bind password encrypted and blank on read, validation, scopes), a directory user
- * signing in (personal project, `ldap` session with MFA verified), the refusals (wrong password, filter
+ * signing in (personal project, `ldap` session not MFA verified until the MFA step passes), the refusals (wrong password, filter
  * injection, two entries, another workspace's user, a disabled member), MFA, a slow directory, the sync
  * (create, update, disable, re-enable, dry run, duplicate emails, history paging, one run at a time, the
  * sweep) and the public rows. The wire test is ldap-wire.test.ts.
@@ -72,6 +72,15 @@ async function workspace(extra: Record<string, unknown> = {}, configure = true) 
     if (res.statusCode !== 200) throw new Error(`config failed: ${res.body}`);
   }
   return { o, base, fake };
+}
+
+/** a true member joins first (an LDAP workspace takes no password invitation), then the directory is switched on */
+async function workspaceWithMember(extra: Record<string, unknown> = {}) {
+  const made = await workspace(extra, false);
+  const m = await realMember(made.o, { remoteAddress: nextIp() });
+  const res = await made.o.client.put('/rest/ldap/config', configFor(made.base, extra));
+  if (res.statusCode !== 200) throw new Error(`config failed: ${res.body}`);
+  return { ...made, m };
 }
 
 function person(fake: FakeLdap, uid: string, extra: Partial<Parameters<FakeLdap['addPerson']>[0]> = {}) {
@@ -163,8 +172,7 @@ describe('config', () => {
   });
 
   it('is for owners and admins: a member holds no ldap scope', async () => {
-    const { o } = await workspace();
-    const m = await realMember(o, { remoteAddress: nextIp() });
+    const { m } = await workspaceWithMember();
     expect((await m.client.get('/rest/ldap/config')).statusCode).toBe(403);
     expect((await m.client.put('/rest/ldap/config', { loginLabel: 'x' })).statusCode).toBe(403);
     expect((await m.client.post('/rest/ldap/test-connection')).statusCode).toBe(403);
@@ -205,7 +213,7 @@ describe('config', () => {
 });
 
 describe('sign-in', () => {
-  it('a directory user signs in: one personal project, an ldap session with MFA verified, and a workflow lands there', async () => {
+  it('a directory user signs in: one personal project, an ldap session not MFA verified, and a workflow lands there', async () => {
     const { o, fake } = await workspace();
     const alice = person(fake, 'alice', { givenName: 'Alice', sn: 'Smith' });
     const { res, client } = await ldapLogin(o.tenant.slug, 'alice', alice.password);
@@ -220,7 +228,8 @@ describe('sign-in', () => {
     const [session] = await query('select auth_method, mfa_verified from sessions where user_id = $1', [
       userId,
     ]);
-    expect(session).toEqual({ auth_method: 'ldap', mfa_verified: true });
+    // a bind is only a password: a new directory user has passed no MFA step (n8n; P6-01)
+    expect(session).toEqual({ auth_method: 'ldap', mfa_verified: false });
     const personal = await query(
       "select id from projects where tenant_id = $1 and type = 'personal' and owner_user_id = $2",
       [o.tenant.id, userId],
@@ -304,8 +313,7 @@ describe('sign-in', () => {
   });
 
   it('keeps the password path for owners and refuses it for members', async () => {
-    const { o } = await workspace();
-    const m = await realMember(o, { remoteAddress: nextIp() });
+    const { o, m } = await workspaceWithMember();
     const owner = await ldapLogin(o.tenant.slug, o.user.email, 'Passw0rd!');
     expect(owner.res.statusCode).toBe(200);
     const [session] = await query(
@@ -338,8 +346,7 @@ describe('sign-in', () => {
   });
 
   it('links a current member by email only when the admin allows it', async () => {
-    const { o, fake } = await workspace();
-    const m = await realMember(o, { remoteAddress: nextIp() });
+    const { o, fake, m } = await workspaceWithMember();
     const entry = person(fake, 'member1', { mail: m.email });
     const off = await ldapLogin(o.tenant.slug, 'member1', entry.password);
     expect(off.res.json().error.code).toBe('ldap_link_disabled');
@@ -352,6 +359,25 @@ describe('sign-in', () => {
       m.user.id,
     ]);
     expect(linked.length).toBe(1);
+  });
+
+  it('refuses a sign-in when another entry shares the email, until uniqueness is switched off (ldap-1)', async () => {
+    const { o, fake, m } = await workspaceWithMember({ linkExistingAccountsByEmail: true });
+    // alice and bob carry the member's email; bob signs in with his own id and password
+    const alice = person(fake, 'alice', { mail: m.email });
+    const bob = person(fake, 'bob', { mail: m.email });
+    for (const entry of [alice, bob]) {
+      const { res } = await ldapLogin(o.tenant.slug, entry.uid, entry.password);
+      expect(res.statusCode).toBe(401);
+    }
+    expect(fake.binds.some((b) => b.dn.startsWith('uid=bob'))).toBe(false);
+    expect(fake.binds.some((b) => b.dn.startsWith('uid=alice'))).toBe(false);
+    expect((await query('select 1 from auth_identities where tenant_id = $1', [o.tenant.id])).length).toBe(0);
+    // the rule follows the setting
+    await o.client.put('/rest/ldap/config', { enforceEmailUniqueness: false });
+    const { res } = await ldapLogin(o.tenant.slug, 'bob', bob.password);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.user.id).toBe(m.user.id);
   });
 
   it('joins a person with a pending invitation, and refuses a disabled member', async () => {
@@ -400,6 +426,23 @@ describe('sign-in', () => {
     const ok = await ldapLogin(o.tenant.slug, 'secure', entry.password, { mfaCode: code(1) });
     expect(ok.res.statusCode).toBe(200);
     expect(ok.res.json().data.user.id).toBe(userId);
+    // only the sign-in that passed the MFA step is verified (as n8n)
+    const sessions = await query(
+      "select mfa_verified from sessions where user_id = $1 and auth_method = 'ldap' order by expires_at",
+      [userId],
+    );
+    expect(sessions.map((s) => s.mfa_verified)).toEqual([false, true]);
+  });
+
+  it('in a workspace that enforces MFA, a directory user without MFA must set it up after signing in', async () => {
+    const { o, fake } = await workspace();
+    await server.ctx.repos.tenants.update(o.tenant.id, { settings: { mfa: { enforced: true } } });
+    const entry = person(fake, 'unenrolled');
+    const { res, client } = await ldapLogin(o.tenant.slug, 'unenrolled', entry.password);
+    expect(res.statusCode).toBe(200);
+    const blocked = await client.get('/rest/workflows');
+    expect(blocked.statusCode).toBe(401);
+    expect(blocked.json().error.code).toBe('mfa_enrollment_required');
   });
 
   it('does not hold the login for a slow directory: no match, the password path decides', async () => {
@@ -509,6 +552,41 @@ describe('sync', () => {
     fake.remove('boss');
     const after = await syncNow(o.client);
     expect(after.disabled).toBe(0);
+    expect(await server.ctx.repos.memberships.get(o.tenant.id, o.user.id)).toBeDefined();
+  });
+
+  it('does not disable a user who still has one identity in the directory (ldap-2)', async () => {
+    const { o, fake, m } = await workspaceWithMember({ linkExistingAccountsByEmail: true });
+    person(fake, 'carol', { mail: m.email });
+    expect(await syncNow(o.client)).toMatchObject({ updated: 1, disabled: 0 });
+    // the entry is re-created with a new entryUUID and the same email: the user has two identities
+    fake.remove('carol');
+    person(fake, 'carol2', { mail: m.email, extra: { entryUUID: `uuid-${unique()}` } });
+    for (let run = 0; run < 3; run++) {
+      expect(await syncNow(o.client)).toMatchObject({ status: 'success', disabled: 0 });
+      expect(await server.ctx.repos.memberships.get(o.tenant.id, m.user.id)).toBeDefined();
+    }
+    const actions = await query(
+      "select action from audit_log where tenant_id = $1 and action in ('member.disabled','member.enabled')",
+      [o.tenant.id],
+    );
+    expect(actions).toHaveLength(0);
+  });
+
+  it('a dry run counts what the live run disables, and not an owner (ldap-4)', async () => {
+    const { o, fake, m } = await workspaceWithMember({ linkExistingAccountsByEmail: true });
+    person(fake, 'boss', { mail: o.user.email });
+    person(fake, 'worker', { mail: m.email });
+    person(fake, 'stays');
+    expect((await syncNow(o.client)).updated).toBe(2);
+    fake.remove('boss');
+    fake.remove('worker');
+    const dry = await syncNow(o.client, 'dry');
+    expect(dry).toMatchObject({ runMode: 'dry', disabled: 1 });
+    expect(await server.ctx.repos.memberships.get(o.tenant.id, m.user.id)).toBeDefined();
+    const live = await syncNow(o.client);
+    expect(live).toMatchObject({ disabled: 1 });
+    expect(await server.ctx.repos.memberships.get(o.tenant.id, m.user.id)).toBeUndefined();
     expect(await server.ctx.repos.memberships.get(o.tenant.id, o.user.id)).toBeDefined();
   });
 

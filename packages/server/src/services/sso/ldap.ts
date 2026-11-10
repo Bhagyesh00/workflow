@@ -368,6 +368,11 @@ export class LdapService {
         });
         // two entries for one login id: nobody signs in with it
         if (found.length !== 1) return undefined;
+        // two entries with one email: nobody signs in with it (n8n's rule, while uniqueness is enforced)
+        if (settings.enforceEmailUniqueness) {
+          const mail = attributeOf(found[0], settings.emailAttribute);
+          if (mail && (await this.emailIsShared(directory, settings, found[0], mail))) return undefined;
+        }
         await directory.bind(found[0].dn, password);
         return found[0];
       });
@@ -424,6 +429,27 @@ export class LdapService {
       if (key !== undefined) claims[name] = entry.attributes[key];
     }
     return claims;
+  }
+
+  /** true when another entry (a different LDAP id) of the user filter carries the same email */
+  private async emailIsShared(
+    directory: LdapDirectory,
+    settings: LdapSettings,
+    entry: LdapEntry,
+    email: string,
+  ): Promise<boolean> {
+    const match = `(${settings.emailAttribute}=${escapeLdapFilterValue(email)})`;
+    const sharing = await directory.search({
+      baseDn: settings.baseDn,
+      filter: settings.userFilter ? `(&${match}${settings.userFilter})` : match,
+      attributes: requestedAttributes(settings),
+      pageSize: 0,
+      timeoutMs: this.operationTimeout(settings, this.budgets.login),
+    });
+    const own = attributeOf(entry, settings.ldapIdAttribute);
+    return sharing.some(
+      (other) => other.dn !== entry.dn && (!own || attributeOf(other, settings.ldapIdAttribute) !== own),
+    );
   }
 
   private loginFilter(settings: LdapSettings, loginId: string): string {
@@ -588,10 +614,22 @@ export class LdapService {
     }
 
     const known = new Map(identities.map((identity) => [identity.providerId, identity]));
+    // a user seen under any of their identities (or linked or created in this run) is not disabled for an
+    // identity that is gone from the directory
+    const seenUsers = new Set<string>();
+    for (const identity of identities) if (seenIds.has(identity.providerId)) seenUsers.add(identity.userId);
     let failures = 0;
     for (const person of people) {
       try {
-        await this.applyPerson(tenantId, mode, settings, person, known.get(person.ldapId), counts);
+        const userId = await this.applyPerson(
+          tenantId,
+          mode,
+          settings,
+          person,
+          known.get(person.ldapId),
+          counts,
+        );
+        if (userId) seenUsers.add(userId);
       } catch (error) {
         failures++;
         this.deps.logger.warn(
@@ -601,10 +639,14 @@ export class LdapService {
       }
     }
     for (const identity of identities) {
-      if (seenIds.has(identity.providerId) || identity.disabled) continue;
+      if (seenIds.has(identity.providerId) || identity.disabled || seenUsers.has(identity.userId)) continue;
       try {
         if (mode === 'live') {
           if (!(await disableMember(this.ctx, tenantId, identity.userId, null))) continue;
+        } else {
+          // the dry run counts what the live run would: no owner, no missing or disabled member
+          const membership = await repos.memberships.getIncludingDisabled(tenantId, identity.userId);
+          if (!membership || membership.role === 'owner' || membership.disabledAt) continue;
         }
         counts.disabled++;
       } catch (error) {
@@ -623,7 +665,7 @@ export class LdapService {
     person: DirectoryPerson,
     identity: { userId: string; disabled: boolean } | undefined,
     counts: SyncCounts,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { repos } = this.deps;
     const ctx = this.ctx;
     if (identity) {
@@ -643,7 +685,7 @@ export class LdapService {
         changed = true;
       }
       if (changed) counts.updated++;
-      return;
+      return identity.userId;
     }
 
     const existing = await repos.users.getByEmail(person.email);
@@ -651,7 +693,7 @@ export class LdapService {
       // another workspace's account, or a person nobody here knows: only a current member links, and only
       // when the admin allows linking by email (decision Q-A2)
       const membership = await repos.memberships.getIncludingDisabled(tenantId, existing.id);
-      if (!membership || !settings.linkExistingAccountsByEmail) return;
+      if (!membership || !settings.linkExistingAccountsByEmail) return undefined;
       if (mode === 'live') {
         await repos.sso.linkIdentity(tenantId, {
           providerType: PROVIDER_TYPE,
@@ -660,15 +702,17 @@ export class LdapService {
         });
       }
       counts.updated++;
-      return;
+      return existing.id;
     }
     // a pending invitation joins at the person's first sign-in (SsoLoginService.signIn accepts it)
-    if (await repos.sso.pendingInvitation(tenantId, person.email)) return;
+    if (await repos.sso.pendingInvitation(tenantId, person.email)) return undefined;
+    let createdId: string | undefined;
     if (mode === 'live') {
       const passwordHash = await ctx.auth.hashPassword(randomToken(32));
       await this.deps.database.db.transaction(async (tx) => {
         const txRepos = createRepositories(tx);
         const user = await txRepos.users.create({ email: person.email, name: person.name, passwordHash });
+        createdId = user.id;
         await txRepos.memberships.add(tenantId, user.id, 'member');
         // P6-03: every member has a personal project, in the same transaction as the membership
         await txRepos.projects.ensurePersonal(tenantId, user);
@@ -687,6 +731,7 @@ export class LdapService {
       });
     }
     counts.created++;
+    return createdId;
   }
 
   /** one page of the history, newest first; `more` = a further page exists */

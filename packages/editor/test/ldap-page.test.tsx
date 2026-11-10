@@ -135,6 +135,16 @@ describe('LDAP settings page', () => {
     expect(within(within(table).getAllByRole('row')[1]).getAllByRole('cell')[4].textContent).toBe('0');
   });
 
+  it('shows a member who opens the LDAP page the no-access text and sends no config request (ui-5)', async () => {
+    signedIn();
+    backend().setDemoRole('member');
+    renderApp('/settings/ldap');
+    expect(await screen.findByText(/don't have access to the LDAP settings/, undefined, T)).toBeTruthy();
+    expect(screen.queryByLabelText('Server address')).toBeNull();
+    expect(screen.queryByText(/missing a scope/)).toBeNull();
+    expect(backend().requests.some((r) => r.path === '/ldap/config')).toBe(false);
+  });
+
   it('disables running and testing while there are unsaved changes', async () => {
     const user = userEvent.setup();
     signedIn();
