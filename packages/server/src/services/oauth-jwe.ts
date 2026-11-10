@@ -56,9 +56,7 @@ export class OAuthJweService {
     let decrypted = 0;
     const rows = await this.deps.repos.jweKeys.list(tenantId);
     const keys = new Map<string, Awaited<ReturnType<typeof importPKCS8>>>();
-    const resolveKey = async (header: CompactJWEHeaderParameters) => {
-      const row = (header.kid ? rows.filter((r) => r.kid === header.kid) : rows)[0];
-      if (!row) throw new Error('no key');
+    const keyOf = async (row: (typeof rows)[number]) => {
       let key = keys.get(row.kid);
       if (!key) {
         const pem = this.deps.context().cipher.decrypt<string>(row.privateEnc, {
@@ -70,14 +68,35 @@ export class OAuthJweService {
       }
       return key;
     };
+    const resolveKey = async (header: CompactJWEHeaderParameters) => {
+      const row = rows.find((r) => r.kid === header.kid);
+      if (!row) throw new Error('no key');
+      return keyOf(row);
+    };
+    const options = {
+      keyManagementAlgorithms: [KEY_ALGORITHM],
+      contentEncryptionAlgorithms: CONTENT_ALGORITHMS,
+    };
+    /** the key named by `kid`; a JWE without `kid` is tried against each of the workspace's keys in turn */
+    const open = async (value: string) => {
+      const kid = (
+        JSON.parse(Buffer.from(value.split('.')[0], 'base64url').toString('utf8')) as { kid?: unknown }
+      ).kid;
+      if (typeof kid === 'string' && kid) return compactDecrypt(value, resolveKey, options);
+      for (const row of rows) {
+        try {
+          return await compactDecrypt(value, await keyOf(row), options);
+        } catch {
+          // try the next key
+        }
+      }
+      throw new Error('no key');
+    };
     for (const field of TOKEN_FIELDS) {
       const value = token[field];
       if (!looksLikeJwe(value)) continue;
       try {
-        const { plaintext } = await compactDecrypt(value, resolveKey, {
-          keyManagementAlgorithms: [KEY_ALGORITHM],
-          contentEncryptionAlgorithms: CONTENT_ALGORITHMS,
-        });
+        const { plaintext } = await open(value);
         out[field] = new TextDecoder().decode(plaintext);
         decrypted += 1;
       } catch {
@@ -95,7 +114,8 @@ export class OAuthJweService {
     const tenant = await this.deps.repos.tenants.getBySlug(slug);
     if (!tenant) return undefined;
     let rows = await this.deps.repos.jweKeys.list(tenant.id);
-    if (rows.length === 0) rows = [await this.createKey(tenant.id)];
+    // first fetches that arrive together make one key: the insert holds a per-workspace lock and re-lists
+    if (rows.length === 0) rows = await this.createKey(tenant.id);
     return { keys: rows.map((r) => ({ ...r.publicJwk }) as DataObject) };
   }
 
@@ -108,6 +128,6 @@ export class OAuthJweService {
     const publicJwk = { ...(await exportJWK(publicKey)), kid, use: 'enc', alg: KEY_ALGORITHM };
     const pem = await exportPKCS8(privateKey);
     const privateEnc = this.deps.context().cipher.encrypt(pem, { tenantId, credentialId: `jwe:${kid}` });
-    return this.deps.repos.jweKeys.create(tenantId, { kid, privateEnc, publicJwk });
+    return this.deps.repos.jweKeys.createIfNone(tenantId, { kid, privateEnc, publicJwk });
   }
 }

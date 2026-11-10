@@ -7,7 +7,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { CredentialTypes, type OAuth2Data, requestOAuth2Token } from '@workflow/core';
 import { nodesBasePackage } from '@workflow/nodes-base';
-import { CompactEncrypt, importJWK } from 'jose';
+import { CompactEncrypt, exportJWK, exportPKCS8, generateKeyPair, importJWK } from 'jose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { testCredential } from '../src/services/credential-test';
 import { CredentialService } from '../src/services/credentials';
@@ -132,7 +132,46 @@ describe('JWKS route', () => {
   });
 });
 
+describe('key creation', () => {
+  it('makes one key when the first fetches arrive together', async () => {
+    const { tenant } = await signup(server.app);
+    const answers = await Promise.all(
+      Array.from({ length: 8 }, () => server.app.inject({ url: `/.well-known/jwks/${tenant.slug}.json` })),
+    );
+    for (const res of answers) expect(res.statusCode).toBe(200);
+    const kids = new Set(answers.flatMap((res) => (res.json() as { keys: Jwk[] }).keys.map((k) => k.kid)));
+    expect(kids.size).toBe(1);
+    expect(await server.ctx.repos.jweKeys.list(tenant.id)).toHaveLength(1);
+  });
+});
+
 describe('decryptResponse', () => {
+  it('opens a JWE without kid when the workspace holds more than one key', async () => {
+    const { tenant } = await signup(server.app);
+    const first = (await jwksOf(tenant.slug)).keys[0];
+    // a newer second key, as after a rotation: the newest key is not the one the provider used
+    const pair = await generateKeyPair('RSA-OAEP-256', { modulusLength: 2048, extractable: true });
+    const kid = 'second-key';
+    await server.ctx.repos.jweKeys.create(tenant.id, {
+      kid,
+      privateEnc: server.ctx.cipher.encrypt(await exportPKCS8(pair.privateKey), {
+        tenantId: tenant.id,
+        credentialId: `jwe:${kid}`,
+      }),
+      publicJwk: { ...(await exportJWK(pair.publicKey)), kid, use: 'enc', alg: 'RSA-OAEP-256' },
+    });
+    expect((await server.ctx.repos.jweKeys.list(tenant.id))[0].kid).toBe(kid);
+    const noKid = await new CompactEncrypt(new TextEncoder().encode('plain-access'))
+      .setProtectedHeader({ alg: 'RSA-OAEP-256', enc: 'A256GCM' })
+      .encrypt(await importJWK(first, 'RSA-OAEP-256'));
+    const out = await server.ctx.oauthJwe.decryptResponse(
+      tenant.id,
+      { access_token: noKid },
+      { jweEnabled: true },
+    );
+    expect(out.access_token).toBe('plain-access');
+  });
+
   it('leaves a response unchanged when the flag is off', async () => {
     const { tenant } = await signup(server.app);
     const token = { access_token: 'plain-access', token_type: 'Bearer' };
