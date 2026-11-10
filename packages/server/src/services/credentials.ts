@@ -37,8 +37,31 @@ function notFound(ref: NodeCredentialRef): Error {
 }
 
 /**
- * What a run's credential lookup gets (`provider`). P6-15 (C0): `endUserId`, `executionId` and `startNode`
- * are for private (per user) credentials and unused until L14 reads them, so today's behaviour holds.
+ * P6-15: a private credential in a run that no user started (a schedule, a webhook without sign-in), as n8n's
+ * credentials helper refuses a resolvable credential without an identity. No fallback to the shared data.
+ */
+export function privateWithoutUserError(name: string): Error {
+  return new Error(
+    `Credential "${name}" is private: each user connects their own account, and this run was not started by a signed-in user`,
+  );
+}
+
+/** P6-15: the user the run acts for has not connected their own account to the private credential */
+export function privateNotConnectedError(name: string): Error {
+  return new Error(`Credential "${name}" is not connected for this user. Connect your own account in the credential.`);
+}
+
+/** the shared fields of a credential (token material left out), to see whether a save changed one */
+function sharedFields(data: DataObject): string {
+  const keys = Object.keys(data)
+    .filter((key) => !ALWAYS_SECRET.includes(key))
+    .sort();
+  return JSON.stringify(keys.map((key) => [key, data[key]]));
+}
+
+/**
+ * What a run's credential lookup gets (`provider`). P6-15: a private credential uses the entry of
+ * `endUserId` and marks `executionId` as a run that used one; `startNode` is the credential gate's (P6-87).
  */
 export interface CredentialProviderOptions {
   /** credential ids a server path allows beyond the project's own (never from a node or a body) */
@@ -77,6 +100,15 @@ export class CredentialService {
   async userMayUpdate(tenantId: string, userId: string, credentialId: string): Promise<boolean> {
     const scopes = await this.access.scopesFor(tenantId, userId, { credentialId });
     return scopes.has('credential:update');
+  }
+
+  /**
+   * P6-15: whether `userId` may still connect their own account to the credential (`credential:connect` on
+   * it), as the per user OAuth callbacks check for the user of their signed state.
+   */
+  async userMayConnect(tenantId: string, userId: string, credentialId: string): Promise<boolean> {
+    const scopes = await this.access.scopesFor(tenantId, userId, { credentialId });
+    return scopes.has('credential:connect');
   }
 
   /**
@@ -129,6 +161,29 @@ export class CredentialService {
     return this.cipher.decrypt<DataObject>(row.dataEnc, { tenantId: row.tenantId, credentialId: row.id });
   }
 
+  /** P6-15: OAuth1 and OAuth2 types (and their children) are the only ones that can be private */
+  isOAuthType(type: string): boolean {
+    return this.types.isA(type, 'oAuth2Api') || this.types.isA(type, 'oAuth1Api');
+  }
+
+  /** P6-15: a private entry is bound to its credential and its user, so no entry decrypts as another's */
+  private entryBinding(tenantId: string, credentialId: string, userId: string) {
+    return { tenantId, credentialId: `${credentialId}:user:${userId}` };
+  }
+
+  /** P6-15: the member's own connection of a private credential (its token data), decrypted */
+  async readEntry(tenantId: string, credentialId: string, userId: string): Promise<DataObject | undefined> {
+    const entry = await this.repos.credentialEntries.get(tenantId, credentialId, userId);
+    if (!entry) return undefined;
+    return this.cipher.decrypt<DataObject>(entry.dataEnc, this.entryBinding(tenantId, credentialId, userId));
+  }
+
+  /** P6-15: writes the member's own connection; the shared row is never touched */
+  async saveEntry(tenantId: string, credentialId: string, userId: string, data: DataObject): Promise<void> {
+    const dataEnc = this.cipher.encrypt(data, this.entryBinding(tenantId, credentialId, userId));
+    await this.repos.credentialEntries.save(tenantId, credentialId, userId, dataEnc);
+  }
+
   encrypt(tenantId: string, credentialId: string, data: DataObject): string {
     return this.cipher.encrypt(data, { tenantId, credentialId });
   }
@@ -163,9 +218,10 @@ export class CredentialService {
     return out;
   }
 
+  /** `isResolvable` (P6-15): the route checked the type, the project and `credential:createEndUser` */
   async create(
     tenantId: string,
-    input: { name: string; type: string; data: DataObject; projectId: string },
+    input: { name: string; type: string; data: DataObject; projectId: string; isResolvable?: boolean },
     userId?: string,
   ) {
     this.resolvedType(input.type);
@@ -181,24 +237,42 @@ export class CredentialService {
       projectId,
       createdBy: userId,
     });
-    return this.saveSecretKeys(row, clean);
+    const saved = await this.saveSecretKeys(row, clean);
+    if (!input.isResolvable) return saved;
+    await this.repos.credentialEntries.setResolvable(tenantId, id, true);
+    return { ...saved, isResolvable: true };
   }
 
-  /** `isGlobal` (P6-24): the route checks `credential:shareGlobally` before it passes the flag */
+  /**
+   * `isGlobal` (P6-24): the route checks `credential:shareGlobally` before it passes the flag. `isResolvable`
+   * (P6-15): the route checked the type, the project and `credential:createEndUser`. As n8n, a switch back to
+   * fixed deletes every user's connection, and so does a change of a shared field (client id, URLs, scope)
+   * of a private credential: the connections were made against the old values.
+   */
   async update(
     tenantId: string,
     id: string,
-    patch: { name?: string; data?: DataObject; isGlobal?: boolean },
+    patch: { name?: string; data?: DataObject; isGlobal?: boolean; isResolvable?: boolean },
   ) {
     const row = await this.repos.credentials.get(tenantId, id);
     if (!row) throw ApiError.notFound('Credential');
     const update: { name?: string; dataEnc?: string; isGlobal?: boolean } = {};
     if (patch.name !== undefined) update.name = patch.name;
     if (patch.isGlobal !== undefined) update.isGlobal = patch.isGlobal;
-    const merged = patch.data ? this.merge(this.decrypt(row), patch.data) : undefined;
+    const stored = patch.data ? this.decrypt(row) : undefined;
+    const merged = stored && patch.data ? this.merge(stored, patch.data) : undefined;
     if (merged) update.dataEnc = this.encrypt(tenantId, id, merged);
     const updated = (await this.repos.credentials.update(tenantId, id, update)) ?? row;
-    return merged ? this.saveSecretKeys(updated, merged) : updated;
+    const isResolvable = patch.isResolvable ?? row.isResolvable;
+    if (isResolvable !== row.isResolvable) {
+      await this.repos.credentialEntries.setResolvable(tenantId, id, isResolvable);
+    }
+    const sharedChanged = !!stored && !!merged && sharedFields(stored) !== sharedFields(merged);
+    if (row.isResolvable && (!isResolvable || sharedChanged)) {
+      await this.repos.credentialEntries.deleteForCredential(tenantId, id);
+    }
+    const out = { ...updated, isResolvable };
+    return merged ? this.saveSecretKeys(out, merged) : out;
   }
 
   /**
@@ -224,6 +298,11 @@ export class CredentialService {
    * for workspace-level settings, never a node's or a body's); a name is looked up only among what the project
    * can use, its own rows first. Anything else fails as a missing credential would. The OAuth2 write-back
    * goes through the same lookup.
+   *
+   * P6-15: a private credential uses the connection of `options.endUserId` merged over the shared fields
+   * (`{ ...shared, ...entry }`); with no user, or no connection of that user, the node fails (no fallback to
+   * the shared data). A refreshed token goes to that user's entry, never to the shared row. The first use
+   * marks the run (`executions.used_private_credentials`); the entry itself never enters run data.
    */
   provider(
     tenantId: string,
@@ -246,12 +325,34 @@ export class CredentialService {
       }
       return row;
     };
+    const { endUserId, executionId } = options;
+    let marked = false;
+    const entryOf = async (row: CredentialRow): Promise<{ userId: string; entry: DataObject }> => {
+      if (!endUserId) throw privateWithoutUserError(row.name);
+      const entry = await this.readEntry(tenantId, row.id, endUserId);
+      if (!entry) throw privateNotConnectedError(row.name);
+      if (executionId && !marked) {
+        marked = true;
+        await this.repos.credentialEntries.markExecutionUsed(tenantId, executionId);
+      }
+      return { userId: endUserId, entry };
+    };
     return {
-      get: async (ref, type) => this.readResolved(await find(ref, type)),
+      get: async (ref, type) => {
+        const row = await find(ref, type);
+        if (!row.isResolvable) return this.readResolved(row);
+        const { entry } = await entryOf(row);
+        return { ...(await this.readResolved(row)), ...entry };
+      },
       // OAuth2 write-back: `data` holds resolved values, so only the new token goes into the stored object
       update: async (ref, type, data) => {
         const row = await find(ref, type);
         if (data.oauthTokenData === undefined) return;
+        if (row.isResolvable) {
+          const { userId, entry } = await entryOf(row);
+          await this.saveEntry(tenantId, row.id, userId, { ...entry, oauthTokenData: data.oauthTokenData });
+          return;
+        }
         const stored = this.decrypt(row);
         await this.saveData(tenantId, row.id, { ...stored, oauthTokenData: data.oauthTokenData });
       },

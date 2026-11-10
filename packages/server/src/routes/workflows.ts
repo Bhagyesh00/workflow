@@ -108,7 +108,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
     // so a member sees the projects it belongs to and a caller with nothing sees an empty list
     const auth = requireAuth(request);
     // a project filter the caller holds nothing in answers an empty list, as n8n (not 403)
-    return workflows.listFor(auth, parse(workflowListQuery, request.query), { unheldProject: 'narrow' });
+    const page = await workflows.listFor(auth, parse(workflowListQuery, request.query), {
+      unheldProject: 'narrow',
+    });
+    // P6-15: a workflow whose nodes name a private credential (the card's icon), one query for the page
+    const usesPrivate = await ctx.repos.credentialEntries.workflowsUsingPrivate(
+      auth.tenant.id,
+      page.data.map((row) => row.id),
+    );
+    return { ...page, data: page.data.map((row) => ({ ...row, usesPrivateCredentials: usesPrivate.has(row.id) })) };
   });
 
   app.post('/workflows', async (request) => {

@@ -32,6 +32,46 @@ interface StatePayload {
   e: number; // expiry (epoch ms)
   n: string; // nonce
   v?: string; // encrypted PKCE verifier
+  p?: 1; // P6-15: the user's own connection of a private credential (the entry, not the shared row)
+}
+
+/**
+ * P6-15: the signed-in session of the callback request. A per user flow writes the entry of the state's
+ * user, so that user must be the one who comes back; otherwise a link sent to a victim would put the
+ * victim's token on the sender's entry.
+ */
+export interface OAuthCallbackSession {
+  tenantId: string;
+  userId: string;
+}
+
+/** P6-15: the texts of the per user flow (shared with OAuth1) */
+export const NOT_PRIVATE_MESSAGE = 'This credential is not private: connect it from the credential instead';
+export const PRIVATE_SHARED_CONNECT_MESSAGE =
+  'This credential is private: each user connects their own account from the credential';
+export const OTHER_USER_CALLBACK_MESSAGE =
+  'This connection was started by another user. Sign in as that user and connect again.';
+export const NO_LONGER_CONNECT_MESSAGE = 'You can no longer connect this credential';
+
+/**
+ * P6-15: the checks of a per user callback, before any token call: the session's user is the state's, the
+ * user still holds `credential:connect`, and the credential is still private.
+ */
+export async function assertPerUserCallback(
+  credentials: Pick<CredentialService, 'userMayConnect'>,
+  repos: Repositories,
+  state: { t: string; c: string; u: string },
+  session: OAuthCallbackSession | undefined,
+): Promise<void> {
+  if (!session || session.tenantId !== state.t || session.userId !== state.u) {
+    throw ApiError.forbidden(OTHER_USER_CALLBACK_MESSAGE);
+  }
+  if (!(await credentials.userMayConnect(state.t, state.u, state.c))) {
+    throw ApiError.forbidden(NO_LONGER_CONNECT_MESSAGE);
+  }
+  const row = await repos.credentials.get(state.t, state.c);
+  if (!row) throw ApiError.notFound('Credential');
+  if (!row.isResolvable) throw ApiError.badRequest(NOT_PRIVATE_MESSAGE);
 }
 
 /**
@@ -195,10 +235,21 @@ export class OAuth2Service {
     }
   }
 
-  async authorizeUrl(tenantId: string, userId: string, credentialId: string): Promise<string> {
+  /**
+   * `perUser` (P6-15): the caller's own connection of a private credential (POST /credentials/:id/authorize);
+   * the shared connect refuses a private credential and the per user one a fixed credential.
+   */
+  async authorizeUrl(
+    tenantId: string,
+    userId: string,
+    credentialId: string,
+    options: { perUser?: boolean } = {},
+  ): Promise<string> {
     const loaded = await this.loadOAuth2(tenantId, credentialId);
     const { row } = loaded;
     let { data } = loaded;
+    if (options.perUser && !row.isResolvable) throw ApiError.badRequest(NOT_PRIVATE_MESSAGE);
+    if (!options.perUser && row.isResolvable) throw ApiError.badRequest(PRIVATE_SHARED_CONNECT_MESSAGE);
     const mcp = this.credentials.types.isA(row.type, MCP_OAUTH2_TYPE);
     if (mcp && data.useDynamicClientRegistration !== false) {
       data = await this.connectMcpClient(tenantId, row, data);
@@ -224,6 +275,7 @@ export class OAuth2Service {
       u: userId,
       e: Date.now() + STATE_TTL_MS,
       n: randomBytes(12).toString('base64url'),
+      ...(options.perUser ? { p: 1 as const } : {}),
     };
     url.searchParams.set('client_id', String(data.clientId));
     url.searchParams.set('redirect_uri', this.callbackUrl);
@@ -244,12 +296,21 @@ export class OAuth2Service {
     return url.toString();
   }
 
-  /** exchange the code and store the tokens; returns the credential id */
-  async callback(code: string, state: string): Promise<{ tenantId: string; credentialId: string }> {
+  /**
+   * Exchange the code and store the tokens; returns the credential id. `session` (P6-15) is the callback
+   * request's signed-in user: a per user state is refused unless it is the state's user.
+   */
+  async callback(
+    code: string,
+    state: string,
+    session?: OAuthCallbackSession,
+  ): Promise<{ tenantId: string; credentialId: string }> {
     const payload = this.verifyState(state);
-    // P6-24: the user of the state must still hold `credential:update` on this credential (a lost project, a
-    // removed member or a narrowed role refuses the write-back before any token call)
-    if (!(await this.credentials.userMayUpdate(payload.t, payload.u, payload.c))) {
+    if (payload.p) {
+      await assertPerUserCallback(this.credentials, this.repos, payload, session);
+    } else if (!(await this.credentials.userMayUpdate(payload.t, payload.u, payload.c))) {
+      // P6-24: the user of the state must still hold `credential:update` on this credential (a lost project, a
+      // removed member or a narrowed role refuses the write-back before any token call)
       throw ApiError.forbidden('You can no longer edit credentials in this workspace');
     }
     const { row, data } = await this.loadOAuth2(payload.t, payload.c);
@@ -306,15 +367,21 @@ export class OAuth2Service {
     if (!token || typeof token !== 'object' || !token.access_token) {
       throw ApiError.badRequest('The token response did not contain an access token');
     }
-    const stored = this.credentials.decrypt(row);
-    stored.oauthTokenData = {
+    const oauthTokenData = {
       ...token,
       expires_at: token.expires_in ? Date.now() + Number(token.expires_in) * 1000 : undefined,
     };
-    await this.credentials.saveData(payload.t, row.id, stored);
+    if (payload.p) {
+      // P6-15: the user's own entry; the shared row keeps no token
+      await this.credentials.saveEntry(payload.t, row.id, payload.u, { oauthTokenData });
+    } else {
+      const stored = this.credentials.decrypt(row);
+      stored.oauthTokenData = oauthTokenData;
+      await this.credentials.saveData(payload.t, row.id, stored);
+    }
     await this.repos.audit.add(payload.t, {
       userId: payload.u,
-      action: 'credential.oauth2_connected',
+      action: payload.p ? 'credential.user_connected' : 'credential.oauth2_connected',
       resourceType: 'credential',
       resourceId: row.id,
     });

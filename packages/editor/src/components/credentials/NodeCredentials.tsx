@@ -18,6 +18,7 @@ import { ExpressionInput } from '../parameters/ExpressionInput';
 import { IconButton } from '../ui/Button';
 import { Select } from '../ui/Field';
 import { CredentialModal } from './CredentialModal';
+import { PrivateCredentialStatus } from './PrivateCredentialSection';
 
 const CREATE = '__create__';
 
@@ -54,6 +55,8 @@ function CredentialSelect({
   }, [readOnly, current?.id, list.data, onSelect]);
 
   const missing = !slot && current?.id && list.data && !list.data.some((c) => c.id === current.id);
+  // P6-15: a private credential runs with the account of the user who starts the run
+  const picked = !slot && current?.id ? list.data?.find((c) => c.id === current.id) : undefined;
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
@@ -134,6 +137,16 @@ function CredentialSelect({
               <Plus size={14} />
             </IconButton>
           )}
+        </div>
+      )}
+      {picked?.isResolvable && (
+        <div className="flex flex-col gap-1" data-testid="private-credential-row">
+          <PrivateCredentialStatus credential={picked} />
+          <p className="text-sm text-ink-3">
+            {picked.connectedByMe
+              ? 'Runs you start use your own account. Each user connects their own.'
+              : 'Connect your own account in the credential before you run this node.'}
+          </p>
         </div>
       )}
       <CredentialModal

@@ -8,6 +8,7 @@ import { useCredentialTypes } from '../api/queries';
 import type { CredentialSummary } from '../api/types';
 import { CredentialModal } from '../components/credentials/CredentialModal';
 import { CredentialTypePicker } from '../components/credentials/CredentialTypePicker';
+import { PrivateCredentialStatus } from '../components/credentials/PrivateCredentialSection';
 import { NodeIcon } from '../components/NodeIcon';
 import { ProjectBadge } from '../components/projects/ProjectBadge';
 import { ProjectFilter, useProjectListScope } from '../components/projects/ProjectFilter';
@@ -184,6 +185,8 @@ export function CredentialsPage() {
                       {type?.displayName ?? c.type}, updated {formatRelative(c.updatedAt)}
                     </span>
                   </button>
+                  {/* P6-15: a private credential's connection state and count */}
+                  <PrivateCredentialStatus credential={c} />
                   {scope.kind !== 'project' && (
                     <ProjectBadge
                       homeProject={c.homeProject}

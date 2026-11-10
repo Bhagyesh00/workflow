@@ -15,6 +15,12 @@ import type { Config } from '../config';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
 import type { CredentialService } from './credentials';
+import {
+  assertPerUserCallback,
+  NOT_PRIVATE_MESSAGE,
+  type OAuthCallbackSession,
+  PRIVATE_SHARED_CONNECT_MESSAGE,
+} from './oauth2';
 import { credentialReadErrorText } from './secrets/resolver';
 
 const STATE_TTL_MS = 10 * 60_000;
@@ -26,6 +32,7 @@ interface StatePayload {
   u: string; // user id
   e: number; // expiry (epoch ms)
   n: string; // nonce, also the key of the stored request token
+  p?: 1; // P6-15: the user's own connection of a private credential (the entry, not the shared row)
 }
 
 interface PendingToken {
@@ -159,9 +166,19 @@ export class OAuth1Service {
     return parseOAuthResponse(typeof body === 'string' ? body : '');
   }
 
-  /** step 1: request token, then the provider's authorization URL for the popup */
-  async authorizeUrl(tenantId: string, userId: string, credentialId: string): Promise<string> {
+  /**
+   * step 1: request token, then the provider's authorization URL for the popup. `perUser` (P6-15): the
+   * caller's own connection of a private credential, as OAuth2Service.authorizeUrl.
+   */
+  async authorizeUrl(
+    tenantId: string,
+    userId: string,
+    credentialId: string,
+    options: { perUser?: boolean } = {},
+  ): Promise<string> {
     const { row, data } = await this.loadOAuth1(tenantId, credentialId);
+    if (options.perUser && !row.isResolvable) throw ApiError.badRequest(NOT_PRIVATE_MESSAGE);
+    if (!options.perUser && row.isResolvable) throw ApiError.badRequest(PRIVATE_SHARED_CONNECT_MESSAGE);
     if (!data.requestTokenUrl || !data.authUrl || !data.consumerKey) {
       throw ApiError.badRequest(
         'The credential needs a request token URL, an authorization URL and a consumer key',
@@ -176,6 +193,7 @@ export class OAuth1Service {
       u: userId,
       e: Date.now() + STATE_TTL_MS,
       n: randomBytes(12).toString('base64url'),
+      ...(options.perUser ? { p: 1 as const } : {}),
     };
     const callback = new URL(this.callbackUrl);
     callback.searchParams.set('state', this.sign(payload));
@@ -191,15 +209,21 @@ export class OAuth1Service {
     return authUrl.toString();
   }
 
-  /** step 2: the provider sent the user back; trade the verifier for the access token */
+  /**
+   * step 2: the provider sent the user back; trade the verifier for the access token. `session` (P6-15): a
+   * per user state is refused unless the callback's signed-in user is the state's.
+   */
   async callback(
     query: { oauth_token?: string; oauth_verifier?: string; denied?: string },
     state: string,
+    session?: OAuthCallbackSession,
   ): Promise<{ tenantId: string; credentialId: string }> {
     const payload = this.verifyState(state);
-    // P6-24: the user of the state must still hold `credential:update` on this credential (a lost project, a
-    // removed member or a narrowed role refuses the write-back before any token call)
-    if (!(await this.credentials.userMayUpdate(payload.t, payload.u, payload.c))) {
+    if (payload.p) {
+      await assertPerUserCallback(this.credentials, this.repos, payload, session);
+    } else if (!(await this.credentials.userMayUpdate(payload.t, payload.u, payload.c))) {
+      // P6-24: the user of the state must still hold `credential:update` on this credential (a lost project, a
+      // removed member or a narrowed role refuses the write-back before any token call)
       throw ApiError.forbidden('You can no longer edit credentials in this workspace');
     }
     if (query.denied || !query.oauth_verifier || !query.oauth_token) {
@@ -223,12 +247,17 @@ export class OAuth1Service {
     if (!token.oauth_token || !token.oauth_token_secret) {
       throw ApiError.badRequest('The access token response did not contain a token');
     }
-    const stored = this.credentials.decrypt(row);
-    stored.oauthTokenData = { ...token };
-    await this.credentials.saveData(payload.t, row.id, stored);
+    if (payload.p) {
+      // P6-15: the user's own entry; the shared row keeps no token
+      await this.credentials.saveEntry(payload.t, row.id, payload.u, { oauthTokenData: { ...token } });
+    } else {
+      const stored = this.credentials.decrypt(row);
+      stored.oauthTokenData = { ...token };
+      await this.credentials.saveData(payload.t, row.id, stored);
+    }
     await this.repos.audit.add(payload.t, {
       userId: payload.u,
-      action: 'credential.oauth1_connected',
+      action: payload.p ? 'credential.user_connected' : 'credential.oauth1_connected',
       resourceType: 'credential',
       resourceId: row.id,
     });

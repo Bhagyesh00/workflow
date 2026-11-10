@@ -15,12 +15,18 @@ import {
 } from '../http/schemas';
 import { toWorkflowLogger } from '../logger';
 import { testCredential } from '../services/credential-test';
-import { oauthCallbackPage } from '../services/oauth2';
+import { NOT_PRIVATE_MESSAGE, type OAuthCallbackSession, oauthCallbackPage } from '../services/oauth2';
 import { credentialReadErrorText, resolvedValues, scrubValues } from '../services/secrets/resolver';
 
-/** P6-24: the body fields the editor sends beyond the Phase 5 schemas (editor api/types.ts) */
-const createBody = credentialCreateSchema.extend({ projectId: z.uuid().optional() });
-const updateBody = credentialUpdateSchema.extend({ isGlobal: z.boolean().optional() });
+/** P6-24, P6-15: the body fields the editor sends beyond the Phase 5 schemas (editor api/types.ts) */
+const createBody = credentialCreateSchema.extend({
+  projectId: z.uuid().optional(),
+  isResolvable: z.boolean().optional(),
+});
+const updateBody = credentialUpdateSchema.extend({
+  isGlobal: z.boolean().optional(),
+  isResolvable: z.boolean().optional(),
+});
 const testBody = credentialTestSchema.extend({ projectId: z.uuid().optional() });
 const queryFlag = z
   .union([z.boolean(), z.enum(['true', 'false'])])
@@ -77,16 +83,38 @@ async function accessFields(
   };
 }
 
+/**
+ * P6-15: the private fields of credential rows: `isResolvable` on each, and for the private ones the caller's
+ * `connectedByMe` and the `connectedCount` of every user (one query each for the whole list).
+ */
+async function privateFields(
+  ctx: ServerContext,
+  auth: AuthContext,
+  ids: string[],
+): Promise<Map<string, { isResolvable: boolean; connectedByMe?: boolean; connectedCount?: number }>> {
+  const resolvable = await ctx.repos.credentialEntries.resolvableIds(auth.tenant.id, ids);
+  const status = await ctx.privateCredentials.connectedStatus(auth.tenant.id, auth.user.id, [...resolvable]);
+  return new Map(
+    ids.map((id) => [id, resolvable.has(id) ? { isResolvable: true, ...status.get(id) } : { isResolvable: false }]),
+  );
+}
+
 export async function createCredential(
   ctx: ServerContext,
   tenantId: string,
-  body: z.output<typeof credentialCreateSchema> & { projectId: string },
+  body: z.output<typeof credentialCreateSchema> & { projectId: string; isResolvable?: boolean },
   userId: string,
   ip: string,
 ) {
   const row = await ctx.credentials.create(
     tenantId,
-    { name: body.name, type: body.type, data: body.data as DataObject, projectId: body.projectId },
+    {
+      name: body.name,
+      type: body.type,
+      data: body.data as DataObject,
+      projectId: body.projectId,
+      isResolvable: body.isResolvable === true,
+    },
     userId,
   );
   await ctx.repos.audit.add(tenantId, {
@@ -94,7 +122,7 @@ export async function createCredential(
     action: 'credential.created',
     resourceType: 'credential',
     resourceId: row.id,
-    metadata: { type: row.type },
+    metadata: { type: row.type, ...(row.isResolvable ? { isResolvable: true } : {}) },
     ip,
   });
   return { id: row.id, name: row.name, type: row.type };
@@ -115,6 +143,12 @@ export async function deleteCredential(
     resourceId: id,
     ip,
   });
+}
+
+/** P6-15: the signed-in user of an OAuth callback (the popup carries the session cookie), if any */
+function callbackSession(request: FastifyRequest): OAuthCallbackSession | undefined {
+  const auth = request.auth;
+  return auth ? { tenantId: auth.tenant.id, userId: auth.user.id } : undefined;
 }
 
 /** a string field of the raw body, read before validation so the scope gate answers first */
@@ -168,6 +202,11 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
       const project = projects.get(share.projectId);
       if (project) shared.set(share.resourceId, [...(shared.get(share.resourceId) ?? []), project]);
     }
+    const privates = await privateFields(
+      ctx,
+      auth,
+      rows.map((row) => row.id),
+    );
     const data = [];
     for (const row of rows) {
       data.push({
@@ -176,6 +215,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
         homeProject: projects.get(row.projectId) ?? null,
         sharedWithProjects: shared.get(row.id) ?? [],
         isGlobal: row.isGlobal,
+        ...privates.get(row.id),
         ...(query.includeScopes ? { scopes: await credentialScopes(ctx, auth, row.id) } : {}),
       });
     }
@@ -188,6 +228,11 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     const projectId = await ctx.access.targetProject(auth, rawField(request, 'projectId'));
     await requireScope(request, 'credential:create', { projectId });
     const body = parse(createBody, request.body);
+    // P6-15: a private credential needs `credential:createEndUser` in the project, an OAuth type and a team project
+    if (body.isResolvable) {
+      await requireScope(request, 'credential:createEndUser', { projectId });
+      await ctx.privateCredentials.assertCanBePrivate(auth.tenant.id, body.type, projectId);
+    }
     return {
       data: await createCredential(ctx, auth.tenant.id, { ...body, projectId }, auth.user.id, request.ip),
     };
@@ -211,6 +256,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
         ...credentialSummary(row),
         data: credentials.redacted(row),
         ...(await accessFields(ctx, auth.tenant.id, row)),
+        ...(await privateFields(ctx, auth, [row.id])).get(row.id),
         scopes: await credentialScopes(ctx, auth, id),
       },
     };
@@ -222,17 +268,37 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     const body = parse(updateBody, request.body);
     // usable by every member: a workspace scope (owner and admin), as n8n
     if (body.isGlobal !== undefined) await requireScope(request, 'credential:shareGlobally');
+    // P6-15: the switch between fixed and private needs `credential:createEndUser` on the credential; to
+    // private also an OAuth type in a team project
+    if (body.isResolvable !== undefined) {
+      const current = await repos.credentials.get(auth.tenant.id, id);
+      if (!current) throw ApiError.notFound('Credential');
+      if (body.isResolvable !== current.isResolvable) {
+        await requireScope(request, 'credential:createEndUser', { credentialId: id });
+        if (body.isResolvable) {
+          await ctx.privateCredentials.assertCanBePrivate(auth.tenant.id, current.type, current.projectId);
+        }
+      }
+    }
     const row = await credentials.update(auth.tenant.id, id, {
       name: body.name,
       data: body.data as DataObject,
       isGlobal: body.isGlobal,
+      isResolvable: body.isResolvable,
     });
     await repos.audit.add(auth.tenant.id, {
       userId: auth.user.id,
       action: 'credential.updated',
       resourceType: 'credential',
       resourceId: id,
-      ...(body.isGlobal !== undefined ? { metadata: { isGlobal: body.isGlobal } } : {}),
+      ...(body.isGlobal !== undefined || body.isResolvable !== undefined
+        ? {
+            metadata: {
+              ...(body.isGlobal !== undefined ? { isGlobal: body.isGlobal } : {}),
+              ...(body.isResolvable !== undefined ? { isResolvable: body.isResolvable } : {}),
+            },
+          }
+        : {}),
       ip: request.ip,
     });
     return {
@@ -242,6 +308,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
         type: row.type,
         projectId: row.projectId,
         isGlobal: row.isGlobal,
+        ...(await privateFields(ctx, auth, [row.id])).get(row.id),
         scopes: await credentialScopes(ctx, auth, id),
       },
     };
@@ -250,16 +317,31 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
   app.delete('/credentials/:id', async (request) => {
     const { id } = parse(idParams, request.params);
     const auth = await requireScope(request, 'credential:delete', { credentialId: id });
+    // P6-15: deleting a private credential also needs `credential:createEndUser` (n8n)
+    if ((await repos.credentials.get(auth.tenant.id, id))?.isResolvable) {
+      await requireScope(request, 'credential:createEndUser', { credentialId: id });
+    }
     await deleteCredential(ctx, auth.tenant.id, id, auth.user.id, request.ip);
     return { data: { ok: true } };
   });
 
-  // P6-15 (L14): a private credential's own connection. Authorize starts the caller's OAuth flow (the state
-  // marks the per user target); stub (L14), the handler throws until the lane
+  // P6-15: the caller's own connection of a private credential: the provider's consent URL, whose signed state
+  // marks the per user target (the callback writes the caller's entry, never the shared row)
   app.post('/credentials/:id/authorize', async (request) => {
     const { id } = parse(idParams, request.params);
-    await requireScope(request, 'credential:connect', { credentialId: id });
-    throw new Error('not implemented (L14)');
+    const auth = await requireScope(request, 'credential:connect', { credentialId: id });
+    const row = await repos.credentials.get(auth.tenant.id, id);
+    if (!row) throw ApiError.notFound('Credential');
+    const perUser = { perUser: true };
+    let url: string;
+    if (credentials.types.isA(row.type, 'oAuth2Api')) {
+      url = await ctx.oauth2.authorizeUrl(auth.tenant.id, auth.user.id, id, perUser);
+    } else if (credentials.types.isA(row.type, 'oAuth1Api')) {
+      url = await ctx.oauth1.authorizeUrl(auth.tenant.id, auth.user.id, id, perUser);
+    } else {
+      throw ApiError.badRequest(NOT_PRIVATE_MESSAGE);
+    }
+    return { data: { url } };
   });
 
   // session only, as n8n: a user who lost access to the credential may still clear their own row
@@ -331,7 +413,8 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
       .header('cross-origin-opener-policy', 'unsafe-none')
       .send(body);
 
-  // the provider redirects the popup here; the signed state (not the session) identifies the tenant
+  // the provider redirects the popup here; the signed state (not the session) identifies the tenant. A per
+  // user state (P6-15) also needs the session's user to be the state's (`callbackSession`)
   app.get('/oauth1/callback', { logLevel: 'warn' }, async (request, reply) => {
     const query = parse(
       z.object({
@@ -346,7 +429,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     const origin = new URL(config.baseUrl).origin;
     try {
       if (!query.state) throw ApiError.badRequest('The authorization response is incomplete');
-      const result = await ctx.oauth1.callback(query, query.state);
+      const result = await ctx.oauth1.callback(query, query.state, callbackSession(request));
       return popupReply(
         reply,
         200,
@@ -381,7 +464,8 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     return { data: { url: await ctx.oauth2.authorizeUrl(auth.tenant.id, auth.user.id, credentialId) } };
   });
 
-  // the provider redirects the popup here; the signed state (not the session) identifies the tenant
+  // the provider redirects the popup here; the signed state (not the session) identifies the tenant. A per
+  // user state (P6-15) also needs the session's user to be the state's (`callbackSession`)
   app.get('/oauth2/callback', { logLevel: 'warn' }, async (request, reply) => {
     const query = parse(
       z.object({
@@ -399,7 +483,7 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     try {
       if (query.error) throw ApiError.badRequest(query.error_description ?? query.error);
       if (!query.code || !query.state) throw ApiError.badRequest('The authorization response is incomplete');
-      const result = await ctx.oauth2.callback(query.code, query.state);
+      const result = await ctx.oauth2.callback(query.code, query.state, callbackSession(request));
       body = oauthCallbackPage(origin, nonce, { status: 'success', credentialId: result.credentialId });
     } catch (error) {
       status = 400;

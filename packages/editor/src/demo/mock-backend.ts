@@ -251,6 +251,11 @@ interface StoredCredential extends CredentialSummary {
   data: Record<string, unknown>;
 }
 
+/** P6-15: the server's texts for a private credential that is not allowed */
+export const PRIVATE_TYPE_ERROR = 'Only OAuth1 and OAuth2 credentials can be private';
+export const PRIVATE_PERSONAL_ERROR = "Private credentials can't be used in a personal project";
+export const PRIVATE_MOVE_PERSONAL_ERROR = "A private credential can't be moved to a personal project";
+
 export interface MockBackendOptions {
   stepDelayMs?: number;
   /** demo: simulate a call to the test URL this many ms after "Listen for test event" */
@@ -293,6 +298,8 @@ export class MockBackend {
   versions: StoredVersion[] = [];
   executions: StoredExecution[] = [];
   credentials: StoredCredential[] = [];
+  /** P6-15: the users who connected their own account, per private credential id (tests and demo seeds) */
+  privateConnections = new Map<string, Set<string>>();
   tags: Array<Tag & { tenantId: string }> = [];
   variables: Array<Variable & { tenantId: string }> = [];
   apiKeys: Array<ApiKey & { tenantId: string }> = [];
@@ -840,6 +847,28 @@ export class MockBackend {
     return e;
   }
 
+  /**
+   * P6-15: the private fields of a credential row, as the server: `isResolvable`, and for a private one the
+   * caller's `connectedByMe` and the `connectedCount` of every user. A fixed row gets none (absent is false).
+   */
+  privateFields(c: { id: string; isResolvable?: boolean }): {
+    isResolvable?: true;
+    connectedByMe?: boolean;
+    connectedCount?: number;
+  } {
+    if (!c.isResolvable) return {};
+    const users = this.privateConnections.get(c.id) ?? new Set<string>();
+    return { isResolvable: true, connectedByMe: users.has(this.auth().user.id), connectedCount: users.size };
+  }
+
+  /** P6-15: a private credential is an OAuth type in a team project (the route checks createEndUser) */
+  assertCanBePrivate(type: string, project: StoredProject): void {
+    const description = demoCredentialTypes.find((t) => t.name === type);
+    if (!description?.isOAuth1 && !description?.isOAuth2)
+      throw new HttpError(400, 'bad_request', PRIVATE_TYPE_ERROR);
+    if (project.type === 'personal') throw new HttpError(400, 'bad_request', PRIVATE_PERSONAL_ERROR);
+  }
+
   executionSummary(e: StoredExecution): ExecutionSummary {
     return {
       id: e.id,
@@ -853,6 +882,7 @@ export class MockBackend {
       errorMessage: e.errorMessage,
       customData: e.customData,
       workflowVersionId: e.workflowVersionId ?? null,
+      ...(e.usedPrivateCredentials ? { usedPrivateCredentials: true } : {}),
       annotation: e.annotation ? copy(e.annotation) : null,
     };
   }
@@ -872,6 +902,14 @@ export class MockBackend {
       ...this.projectFields(w),
       scopes: this.rowScopes(w),
       sharedWithProjects: this.sharedWith('workflow', w.id),
+      // P6-15: a node names a private credential (the card's icon)
+      ...(w.nodes.some((n) =>
+        Object.values(n.credentials ?? {}).some(
+          (ref) => ref.id && this.credentials.some((c) => c.id === ref.id && c.isResolvable),
+        ),
+      )
+        ? { usesPrivateCredentials: true }
+        : {}),
     };
   }
 
@@ -1711,6 +1749,7 @@ export class MockBackend {
             updatedAt: c.updatedAt,
             ...this.projectFields(c),
             ...(c.isGlobal ? { isGlobal: true } : {}),
+            ...this.privateFields(c),
             scopes: this.rowScopes(c),
             sharedWithProjects: this.sharedWith('credential', c.id),
           }))
@@ -1720,6 +1759,11 @@ export class MockBackend {
       // P6-39: `credential:create` in the body's project, else the caller's personal project (as the server)
       const project = this.targetProject(body.projectId);
       const { tenant } = this.requireScope('credential:create', { scopes: this.projectScopes(project) });
+      // P6-15: a private credential needs `credential:createEndUser` there, an OAuth type and a team project
+      if (body.isResolvable === true) {
+        this.requireScope('credential:createEndUser', { scopes: this.projectScopes(project) });
+        this.assertCanBePrivate(String(body.type ?? ''), project);
+      }
       const c: StoredCredential = {
         id: newId(),
         tenantId: tenant.id,
@@ -1730,6 +1774,7 @@ export class MockBackend {
         updatedAt: now(),
         projectId: project.id,
         isGlobal: false,
+        ...(body.isResolvable === true ? { isResolvable: true } : {}),
       };
       this.credentials.push(c);
       return { id: c.id, name: c.name, type: c.type };
@@ -1752,6 +1797,7 @@ export class MockBackend {
         data,
         ...this.projectFields(c),
         ...(c.isGlobal ? { isGlobal: true } : {}),
+        ...this.privateFields(c),
         scopes: this.rowScopes(c),
         sharedWithProjects: this.sharedWith('credential', c.id),
       };
@@ -1765,18 +1811,44 @@ export class MockBackend {
         this.requireScope('credential:shareGlobally');
         c.isGlobal = body.isGlobal;
       }
+      // P6-15: the switch between fixed and private needs `credential:createEndUser` on the credential
+      const wasPrivate = c.isResolvable === true;
+      if (typeof body.isResolvable === 'boolean' && body.isResolvable !== wasPrivate) {
+        this.requireScope('credential:createEndUser', { scopes: this.rowScopes(c) });
+        if (body.isResolvable) {
+          const project = this.projects.find((p) => p.id === c.projectId);
+          if (project) this.assertCanBePrivate(c.type, project);
+          c.isResolvable = true;
+        } else {
+          delete c.isResolvable;
+        }
+      }
       if (typeof body.name === 'string') c.name = body.name;
+      let sharedChanged = false;
       if (body.data && typeof body.data === 'object') {
         const next = copy(body.data as Record<string, unknown>);
         for (const [k, v] of Object.entries(next)) if (v === REDACTED) next[k] = c.data[k];
+        const keys = new Set([...Object.keys(next), ...Object.keys(c.data)]);
+        sharedChanged = [...keys].some((k) => JSON.stringify(next[k]) !== JSON.stringify(c.data[k]));
         c.data = next;
       }
+      // as the server: back to fixed, or a changed shared field, removes every user's connection
+      if (wasPrivate && (!c.isResolvable || sharedChanged)) this.privateConnections.delete(c.id);
       c.updatedAt = now();
-      return { id: c.id, name: c.name, type: c.type };
+      return {
+        id: c.id,
+        name: c.name,
+        type: c.type,
+        ...this.privateFields(c),
+        scopes: this.rowScopes(c),
+      };
     });
     this.on('DELETE', '/credentials/:id', ({ params }) => {
       const c = credential(params[0]);
+      // P6-15: deleting a private credential also needs `credential:createEndUser`
+      if (c.isResolvable) this.requireScope('credential:createEndUser', { scopes: this.rowScopes(c) });
       this.credentials = this.credentials.filter((x) => x !== c);
+      this.privateConnections.delete(c.id);
       return { ok: true };
     });
     this.on('POST', '/credentials/test', ({ body }) => {

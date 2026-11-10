@@ -8,10 +8,10 @@ import { type NodeParameters, resolveNodeParameters, type WorkflowNode } from '@
 import { CheckCircle2, KeyRound, Link2, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
-import { credentialsApi, secretsApi } from '../../api/endpoints';
-import { queryKeys, useCredentialTypes, useMe, useSettings } from '../../api/queries';
+import { credentialsApi, privateCredentialsApi, secretsApi } from '../../api/endpoints';
+import { queryKeys, useCredentialTypes, useMe, useProject, useSettings } from '../../api/queries';
 import type { CredentialTestResult, CredentialTypeDescription } from '../../api/types';
-import { workingProjectId } from '../../features/editor/open-resources';
+import { useWorkingProjectId, workingProjectId } from '../../features/editor/open-resources';
 import { canWith } from '../../lib/permissions';
 import { setIn } from '../../lib/workflow-ops';
 import { toast } from '../../stores/ui-store';
@@ -24,7 +24,7 @@ import { Dialog } from '../ui/Dialog';
 import { FormField, TextInput } from '../ui/Field';
 import { Callout, PageLoader } from '../ui/misc';
 import { JweUriRow } from './JweUriRow';
-import { PrivateCredentialSection } from './PrivateCredentialSection';
+import { PrivateCredentialSection, PrivateTypeChoice, usePrivateAllowed } from './PrivateCredentialSection';
 
 export interface CredentialModalProps {
   open: boolean;
@@ -104,12 +104,25 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
   const [savedId, setSavedId] = useState<string | null>(credentialId ?? null);
   const [testResult, setTestResult] = useState<CredentialTestResult | null>(null);
   const [oauthState, setOauthState] = useState<'idle' | 'waiting' | 'connected' | 'failed'>('idle');
+  // P6-15: a new OAuth credential may be private (each user connects their own account)
+  const [privateChoice, setPrivateChoice] = useState(false);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const workingId = useWorkingProjectId();
+  const workingProject = useProject(credentialId ? null : workingId);
+  const privateGate = usePrivateAllowed(credentialId ? null : workingProject.data);
+  // the saved credential's private state (the same query as `existing` once it is saved)
+  const saved = useQuery({
+    queryKey: queryKeys.credential(savedId ?? 'new'),
+    queryFn: () => credentialsApi.get(savedId!),
+    enabled: open && isOAuth && Boolean(savedId),
+  });
+  const isPrivate = saved.data ? saved.data.isResolvable === true : !credentialId && privateChoice;
 
   useEffect(() => {
     if (!open) return;
     setTestResult(null);
     setOauthState('idle');
+    setPrivateChoice(false);
     setSavedId(credentialId ?? null);
     if (credentialId && existing.data) {
       setName(existing.data.name);
@@ -138,12 +151,18 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
       const body = { name: name.trim() || 'Untitled credential', data: payloadData() };
       if (savedId) return credentialsApi.update(savedId, body);
       // a new credential goes to the project the user works in (the open workflow's, or the project page's)
-      return credentialsApi.create({ ...body, type: typeName, projectId: workingProjectId() });
+      return credentialsApi.create({
+        ...body,
+        type: typeName,
+        projectId: workingProjectId(),
+        ...(isOAuth && privateChoice ? { isResolvable: true } : {}),
+      });
     },
     onSuccess: async (credential) => {
       setSavedId(credential.id);
       await queryClient.invalidateQueries({ queryKey: ['credentials'] });
       await queryClient.invalidateQueries({ queryKey: queryKeys.credential(credential.id) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.credential('new') });
       toast.success('Credential saved', credential.name);
       onSaved?.(credential);
       if (!isOAuth) onClose();
@@ -167,9 +186,12 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
     if (!savedId) return;
     cleanupRef.current?.();
     try {
-      const { url } = await (typeDescription?.isOAuth1
-        ? credentialsApi.oauth1Authorize(savedId)
-        : credentialsApi.oauth2Authorize(savedId));
+      // P6-15: a private credential connects the caller's own account (the server writes their entry)
+      const { url } = await (isPrivate
+        ? privateCredentialsApi.connect(savedId)
+        : typeDescription?.isOAuth1
+          ? credentialsApi.oauth1Authorize(savedId)
+          : credentialsApi.oauth2Authorize(savedId));
       const target = new URL(url, window.location.origin);
       if (target.protocol !== 'https:' && target.protocol !== 'http:')
         throw new Error('Unsupported authorization URL');
@@ -188,6 +210,7 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
         if (result.ok) {
           toast.success('Account connected');
           void queryClient.invalidateQueries({ queryKey: queryKeys.credential(savedId) });
+          void queryClient.invalidateQueries({ queryKey: ['credentials'] });
         } else toast.error('Connection failed', result.message);
       };
       const onMessage = (event: MessageEvent) => {
@@ -323,13 +346,19 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
               Test connection
             </Button>
           )}
-          {isOAuth && savedId && (
+          {isOAuth && savedId && (!isPrivate || canWith(me, 'credential:connect', saved.data)) && (
             <Button
               icon={<Link2 size={14} />}
               onClick={() => void connectOAuth()}
               loading={oauthState === 'waiting'}
             >
-              {oauthState === 'connected' ? 'Reconnect account' : 'Connect account'}
+              {isPrivate
+                ? saved.data?.connectedByMe || oauthState === 'connected'
+                  ? 'Reconnect my account'
+                  : 'Connect my account'
+                : oauthState === 'connected'
+                  ? 'Reconnect account'
+                  : 'Connect account'}
             </Button>
           )}
           <Button
@@ -365,7 +394,15 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
           </ParameterContext.Provider>
           {/* P6-16 (L15): the JWKS URI for the provider when JWE is on */}
           <JweUriRow typeName={typeName} jweEnabled={data.jweEnabled === true} />
-          {/* P6-15 (L14): private (per user) credentials */}
+          {/* P6-15: private (per user) credentials: the choice of a new one, the state of a saved one */}
+          {isOAuth && !savedId && (
+            <PrivateTypeChoice
+              value={privateChoice}
+              onChange={setPrivateChoice}
+              disabled={!privateGate.allowed}
+              reason={privateGate.reason}
+            />
+          )}
           <PrivateCredentialSection credentialId={savedId} typeName={typeName} isOAuth={isOAuth} />
           {isOAuth && !savedId && (
             <Callout tone="info">Save the credential first, then connect your account.</Callout>

@@ -26,7 +26,13 @@ interface MoveRow extends ProjectOwnedFields {
   name: string;
   /** a workflow's credential ids (the picks of the move) */
   usedCredentialIds?: string[];
+  /** P6-15: a private credential (each user connects their own account) */
+  isResolvable?: boolean;
 }
+
+/** P6-15: the move note of a private credential */
+export const PRIVATE_MOVE_TEXT =
+  "This credential is private. It can't move to a personal project, and users who can't reach the destination lose their own connection.";
 
 async function loadRow(resource: MoveDialogProps['resource'], id: string): Promise<MoveRow> {
   if (resource === 'credential') return credentialsApi.get(id);
@@ -72,8 +78,11 @@ export function MoveDialog({ resource, id, onClose }: MoveDialogProps) {
   const data = row.data;
   const homeId = data?.homeProject?.id ?? data?.projectId;
   const canMove = !data?.scopes || data.scopes.includes(`${resource}:move`);
+  // P6-15: a private credential never moves to a personal project
+  const isPrivate = resource === 'credential' && data?.isResolvable === true;
   const targets = (projects.data ?? []).filter(
-    (p) => p.id !== homeId && p.scopes?.includes(`${resource}:create`),
+    (p) =>
+      p.id !== homeId && p.scopes?.includes(`${resource}:create`) && !(isPrivate && p.type === 'personal'),
   );
   const target = targets.find((p) => p.id === destination);
 
@@ -139,6 +148,7 @@ export function MoveDialog({ resource, id, onClose }: MoveDialogProps) {
     body = (
       <div className="flex flex-col gap-4 text-sm">
         <Callout tone="warn">{MOVE_REMOVES_SHARING_TEXT}</Callout>
+        {isPrivate && <Callout tone="warn">{PRIVATE_MOVE_TEXT}</Callout>}
         {targets.length === 0 ? (
           <p className="text-ink-2">{`No other project can take this ${resource}.`}</p>
         ) : (

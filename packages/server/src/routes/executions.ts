@@ -75,6 +75,8 @@ export function executionSummary(row: ExecutionRow, annotation: ExecutionAnnotat
     retryOf: row.retryOf,
     retrySuccessId: row.retrySuccessId,
     workflowVersionId: row.workflowVersionId,
+    // P6-15: the run used a user's own connection of a private credential (the editor shows an icon)
+    usedPrivateCredentials: row.usedPrivateCredentials,
     annotation,
   };
 }

@@ -29,6 +29,7 @@ import { errorMessage } from '../api/client';
 import { favoritesApi, foldersApi, workflowsApi } from '../api/endpoints';
 import { queryKeys, useFavorites, useFolder, useNodeTypes, useTags } from '../api/queries';
 import type { Folder, WorkflowSummary } from '../api/types';
+import { PrivateCredentialsMark } from '../components/credentials/PrivateCredentialSection';
 import { NodeIcon } from '../components/NodeIcon';
 import { ProjectBadge } from '../components/projects/ProjectBadge';
 import { ProjectFilter, useProjectListScope } from '../components/projects/ProjectFilter';
@@ -542,6 +543,7 @@ function WorkflowRow({
             {workflow.name}
           </Link>
           {workflow.isArchived && <Badge tone="warn">Archived</Badge>}
+          {workflow.usesPrivateCredentials && <PrivateCredentialsMark label="Uses private credentials" />}
           {showProject && (
             <ProjectBadge
               homeProject={workflow.homeProject}

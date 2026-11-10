@@ -7,6 +7,7 @@ import { Link, useSearchParams } from 'react-router';
 import { errorMessage } from '../api/client';
 import { executionsApi, workflowsApi } from '../api/endpoints';
 import type { AnnotationVote } from '../api/types';
+import { PrivateCredentialsMark } from '../components/credentials/PrivateCredentialSection';
 import { AnnotationBadges } from '../components/executions/AnnotationBadges';
 import { AnnotationFilters, type AnnotationFilterValue } from '../components/executions/AnnotationFilters';
 import { VersionFilter } from '../components/executions/VersionFilter';
@@ -248,7 +249,12 @@ export function ExecutionsPage() {
                     <AnnotationBadges annotation={e.annotation} />
                   </td>
                   <td className="px-3 py-3">
-                    <StatusBadge status={e.status} />
+                    <span className="inline-flex items-center gap-1.5">
+                      <StatusBadge status={e.status} />
+                      {e.usedPrivateCredentials && (
+                        <PrivateCredentialsMark label="Ran with the account of the user who started it" />
+                      )}
+                    </span>
                   </td>
                   <td className="px-3 py-3 text-ink-2" title={formatDateTime(e.startedAt)}>
                     {formatRelative(e.startedAt)}
