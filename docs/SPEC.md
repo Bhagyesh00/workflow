@@ -158,6 +158,9 @@
 | External secret vaults (AWS, GCP, Azure, Vault, 1Password), `$secrets`                                             | M2    | ✅                                    |
 | End-user credentials / per-customer credential slots (see NF-05)                                                   | M1/M2 | 📋                                    |
 | Credential sharing between users/projects                                                                          | M2    | ✅                                    |
+| Private credentials: per-user connections on a shared OAuth app                                                    | M2    | ✅                                    |
+| OAuth2 encrypted tokens (JWE), workspace JWKS                                                                      | M2    | ✅                                    |
+| Credential gate before a run, connect panels, Webhook user sign-in                                                 | M2    | ✅                                    |
 
 ### 1.10 Integrations
 
@@ -229,15 +232,18 @@
 
 ### 1.13 Users, access and authentication
 
-| Capability                                                                                 | M   | Status |
-| ------------------------------------------------------------------------------------------ | --- | ------ |
-| Tenants (workspaces), owner, admin, member and project roles, invitations, tenant switcher | M1  | 🔨     |
-| Email + password (argon2id), sessions, CSRF origin checks, login rate limits               | M1  | 🔨     |
-| API keys for the public API                                                                | M1  | 🔨     |
-| Audit log (append-only, every tier)                                                        | M1  | 🔨     |
-| Password reset, TOTP 2FA (enforceable)                                                     | M2  | 📋     |
-| Projects inside a tenant with project roles, custom roles                                  | M2  | ✅     |
-| SSO: SAML, OIDC; SCIM; role provisioning from IdP claims                                   | M2  | 📋     |
+| Capability                                                                                                | M   | Status |
+| --------------------------------------------------------------------------------------------------------- | --- | ------ |
+| Tenants (workspaces), owner, admin, member and project roles, invitations, tenant switcher                | M1  | 🔨     |
+| Email + password (argon2id), sessions, CSRF origin checks, login rate limits                              | M1  | 🔨     |
+| API keys for the public API                                                                               | M1  | 🔨     |
+| Audit log (append-only, every tier)                                                                       | M1  | 🔨     |
+| Password reset, TOTP 2FA (enforceable)                                                                    | M2  | ✅     |
+| Projects inside a tenant with project roles, custom roles                                                 | M2  | ✅     |
+| SSO: SAML, OIDC; SCIM; role provisioning from IdP claims                                                  | M2  | ✅     |
+| LDAP sign-in, user sync and settings                                                                      | M2  | ✅     |
+| Members page (filters, last active, 2FA, invite many); API keys with expiry, edit, rotate and role limits | M2  | ✅     |
+| Account mail over SMTP: invitations, password reset, shares, first failure                                | M2  | ✅     |
 
 ### 1.14 Lifecycle and governance
 
