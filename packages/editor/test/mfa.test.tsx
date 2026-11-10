@@ -212,6 +212,34 @@ describe('Your account: two-step sign-in', () => {
     await waitFor(() => expect(router.state.location.search).toBe(''));
   });
 
+  it('asks an enrolled user on ?mfa=setup for a code (POST /auth/mfa/verify), not for a new setup', async () => {
+    const user = userEvent.setup();
+    signedIn();
+    backend().setDemoMfa(true);
+    const verifies: unknown[] = [];
+    server.use(
+      http.post(/\/rest\/auth\/mfa\/verify$/, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        verifies.push(body);
+        const res = await backend().handle({ method: 'POST', path: '/auth/mfa/verify', body });
+        return HttpResponse.json(res.body as Record<string, unknown>, { status: res.status });
+      }),
+    );
+    const { router } = renderApp('/settings/account?mfa=setup');
+    const dialog = await screen.findByRole('dialog', undefined, T);
+    expect(within(dialog).getByRole('heading', { name: 'Confirm two-step sign-in' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Set up two-step sign-in' })).toBeNull();
+    await waitFor(() => expect(router.state.location.search).toBe(''));
+    await user.type(within(dialog).getByLabelText('Authentication code'), '222222');
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm' }));
+    expect(await within(dialog).findByText('Invalid mfa token or recovery code', undefined, T)).toBeTruthy();
+    await user.clear(within(dialog).getByLabelText('Authentication code'));
+    await user.type(within(dialog).getByLabelText('Authentication code'), DEMO_MFA_CODE);
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull(), T);
+    expect(verifies.at(-1)).toEqual({ mfaCode: DEMO_MFA_CODE });
+  });
+
   it('shows no buttons in an SSO session, and says MFA is off when the server turns it off', async () => {
     signedIn();
     server.use(

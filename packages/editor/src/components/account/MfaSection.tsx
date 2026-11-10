@@ -1,7 +1,8 @@
 /**
  * P6-18: Settings > Your account, two-step sign-in: set up (QR code, secret, recovery codes with copy and
  * download), disable. Opens the setup dialog when the address has `?mfa=setup` (AppShell sends an enforced
- * user there on `mfa_enrollment_required`).
+ * user there on `mfa_enrollment_required`); a user who already has MFA on gets the code check instead
+ * (`POST /auth/mfa/verify`, which marks the session verified).
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Copy, Download } from 'lucide-react';
@@ -52,9 +53,11 @@ function SetupDialog({ open, onClose }: { open: boolean; onClose: () => void }) 
   const [saved, setSaved] = useState(false);
   const started = useRef(false);
 
+  // the secret and recovery codes are shown once: gcTime 0 drops them from the mutation cache on reset
   const start = useMutation({
     mutationFn: () => mfaApi.setup(),
     onSuccess: (result) => setSetup(result),
+    gcTime: 0,
   });
   const enable = useMutation({
     mutationFn: (mfaCode: string) => mfaApi.enable(mfaCode),
@@ -193,6 +196,74 @@ function SetupDialog({ open, onClose }: { open: boolean; onClose: () => void }) 
   );
 }
 
+/** an enrolled user whose session did not pass the MFA step (it began before the workspace required it) */
+function VerifyDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [code, setCode] = useState('');
+  const verify = useMutation({
+    mutationFn: (mfaCode: string) => mfaApi.verify(mfaCode),
+    onSuccess: async () => {
+      // every query the gate refused loads again
+      await queryClient.invalidateQueries();
+      toast.success('Code confirmed');
+      onClose();
+    },
+  });
+  useEffect(() => {
+    if (open) return;
+    setCode('');
+    verify.reset();
+  }, [open, verify.reset]);
+  const ready = /^\d{6}$/.test(code);
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (ready && !verify.isPending) verify.mutate(code);
+  };
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Confirm two-step sign-in"
+      description="Your workspace requires two-step sign-in. Enter the 6 digit code from your authenticator app to continue."
+      size="sm"
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button
+            variant="primary"
+            type="submit"
+            form="mfa-verify-form"
+            loading={verify.isPending}
+            disabled={!ready}
+          >
+            Confirm
+          </Button>
+        </>
+      }
+    >
+      <form id="mfa-verify-form" onSubmit={submit} className="flex flex-col gap-3">
+        {verify.isError && <Callout tone="err">{errorMessage(verify.error)}</Callout>}
+        <FormField
+          label="Authentication code"
+          hint="Lost your app? Sign out and sign in with a recovery code."
+        >
+          {(id) => (
+            <TextInput
+              id={id}
+              value={code}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))}
+              data-autofocus
+            />
+          )}
+        </FormField>
+      </form>
+    </Dialog>
+  );
+}
+
 function DisableDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [useRecovery, setUseRecovery] = useState(false);
@@ -282,15 +353,20 @@ export function MfaSection() {
   const [params, setParams] = useSearchParams();
   const [setupOpen, setSetupOpen] = useState(false);
   const [disableOpen, setDisableOpen] = useState(false);
+  const [verifyOpen, setVerifyOpen] = useState(false);
   const wantsSetup = params.get('mfa') === 'setup';
   const available = settings.features.mfa !== false;
   const enabled = me?.mfaEnabled === true;
   const fenced = me?.ssoFenced === true;
 
-  // `?mfa=setup`: open the setup once the account is known to have none, then drop the parameter
+  // `?mfa=setup`: open the setup once the account is known to have none (or the code check when it has MFA
+  // on: the session did not pass the step), then drop the parameter
   useEffect(() => {
     if (!wantsSetup || !me) return;
-    if (!enabled && available && !fenced) setSetupOpen(true);
+    if (available && !fenced) {
+      if (enabled) setVerifyOpen(true);
+      else setSetupOpen(true);
+    }
     setParams(
       (current) => {
         const next = new URLSearchParams(current);
@@ -338,13 +414,14 @@ export function MfaSection() {
               </span>
             </p>
           )}
-          {settings.mfa?.enforced && !enabled && !fenced && (
+          {available && settings.mfa?.enforced && !enabled && !fenced && (
             <Callout tone="warn">Your workspace requires two-step sign-in. Set it up to continue.</Callout>
           )}
         </div>
       </Panel>
       <SetupDialog open={setupOpen} onClose={() => setSetupOpen(false)} />
       <DisableDialog open={disableOpen} onClose={() => setDisableOpen(false)} />
+      <VerifyDialog open={verifyOpen} onClose={() => setVerifyOpen(false)} />
     </>
   );
 }
