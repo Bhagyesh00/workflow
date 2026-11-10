@@ -77,10 +77,12 @@ export const fetchTransport: Transport = async ({ method, path, query, body, sig
 
 type UnauthorizedListener = () => void;
 type TenantChangedListener = () => void;
+type MfaEnrollmentListener = () => void;
 
 let transport: Transport = fetchTransport;
 const unauthorizedListeners = new Set<UnauthorizedListener>();
 const tenantChangedListeners = new Set<TenantChangedListener>();
+const mfaEnrollmentListeners = new Set<MfaEnrollmentListener>();
 let currentTenantId: string | null = null;
 
 export function setTransport(next: Transport): void {
@@ -95,6 +97,20 @@ export function getTransport(): Transport {
 export function onUnauthorized(listener: UnauthorizedListener): () => void {
   unauthorizedListeners.add(listener);
   return () => unauthorizedListeners.delete(listener);
+}
+
+/**
+ * P6-18: called instead of the unauthorized listeners when a 401 says `mfa_enrollment_required`: the
+ * workspace enforces two-step sign-in and this user has not set it up. The session stays valid.
+ */
+export function onMfaEnrollmentRequired(listener: MfaEnrollmentListener): () => void {
+  mfaEnrollmentListeners.add(listener);
+  return () => mfaEnrollmentListeners.delete(listener);
+}
+
+/** the error code of an answer body (`{ error: { code } }`), if any */
+function errorCodeOf(body: unknown): string | undefined {
+  return (body as { error?: { code?: string } } | null)?.error?.code;
 }
 
 /**
@@ -141,7 +157,7 @@ function toError(status: number, body: unknown): ApiError {
 
 export async function requestRaw(
   request: ApiRequest,
-): Promise<{ data: unknown; nextCursor?: string | null }> {
+): Promise<{ data: unknown; nextCursor?: string | null; envelope?: Record<string, unknown> }> {
   let response: ApiResponse;
   const tenantId = request.path.startsWith('/auth/') ? undefined : (currentTenantId ?? undefined);
   try {
@@ -155,7 +171,12 @@ export async function requestRaw(
     );
   }
   if (response.status === 401 && !request.path.startsWith('/auth/')) {
-    for (const listener of unauthorizedListeners) listener();
+    // P6-18: an enforced user without MFA keeps the session and goes to the setup, not to sign-in
+    const listeners =
+      errorCodeOf(response.body) === 'mfa_enrollment_required'
+        ? mfaEnrollmentListeners
+        : unauthorizedListeners;
+    for (const listener of listeners) listener();
   }
   const failure =
     response.status < 200 || response.status >= 300 ? toError(response.status, response.body) : null;
@@ -164,7 +185,8 @@ export async function requestRaw(
   }
   if (failure) throw failure;
   const body = (response.body ?? {}) as { data?: unknown; nextCursor?: string | null };
-  return { data: body.data, nextCursor: body.nextCursor };
+  // `envelope`: the whole answer, for the few that carry fields beside `data` (P6-20 members' counts)
+  return { data: body.data, nextCursor: body.nextCursor, envelope: body as Record<string, unknown> };
 }
 
 export async function request<T>(request: ApiRequest): Promise<T> {
@@ -177,6 +199,7 @@ export const api = {
     request<T>({ method: 'GET', path, query, signal }),
   post: <T>(path: string, body?: unknown) => request<T>({ method: 'POST', path, body }),
   patch: <T>(path: string, body?: unknown) => request<T>({ method: 'PATCH', path, body }),
+  put: <T>(path: string, body?: unknown) => request<T>({ method: 'PUT', path, body }),
   delete: <T>(path: string) => request<T>({ method: 'DELETE', path }),
   async list<T>(path: string, query?: Record<string, QueryValue>, signal?: AbortSignal) {
     const { data, nextCursor } = await requestRaw({ method: 'GET', path, query, signal });

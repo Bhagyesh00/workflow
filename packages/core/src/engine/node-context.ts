@@ -348,6 +348,7 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
           request,
           (updated) => services.credentials.update(ref, credentialType, updated),
           deps.signal,
+          services.oauthTokenDecrypt,
         );
         return mapStreamErrors(node, options, response);
       }
@@ -747,6 +748,7 @@ export function createWebhookContext(
     verifyFormToken: (token) => services.formTokens?.verify(token) ?? null,
     getFormAuth: () => services.formAuth,
     getMcpAuth: () => services.mcpAuth,
+    getCredentialGate: () => services.credentialGate,
     async getInputConnectionData(type, itemIndex) {
       if (!callbacks) throw new NodeOperationError(node, 'Sub-nodes are not available here');
       return callbacks.getInputConnectionData(type, itemIndex);

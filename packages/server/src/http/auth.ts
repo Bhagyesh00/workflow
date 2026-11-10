@@ -1,6 +1,6 @@
 /**
  * Request authentication and authorization helpers.
- * - `/rest`: session cookie (`wf_session`), sliding 14-day expiry, CSRF checks.
+ * - `/rest`: session cookie (`wf_session`), sliding expiry of `config.sessionTtlMs` (default 14 days), CSRF checks.
  * - `/api/v1`: `X-API-KEY`.
  */
 import type {} from '@fastify/cookie';
@@ -14,9 +14,10 @@ import {
   type AuthService,
   SESSION_COOKIE,
   SESSION_REFRESH_MS,
-  SESSION_TTL_MS,
+  type SessionAuthMethod,
   sha256,
 } from '../services/auth';
+import { assertMfaSatisfied } from '../services/mfa-gate';
 import { ApiError } from './errors';
 
 export interface AuthContext {
@@ -33,6 +34,10 @@ export interface AuthContext {
    * It lives on this request only and is never shared or stored.
    */
   scopeCache?: Map<string, ReadonlySet<Scope>>;
+  /** P6-01: how the session signed in (set on sessions only; an API key has none) */
+  authMethod?: SessionAuthMethod;
+  /** P6-18: the session passed the MFA step (or signed in through SSO, which counts as verified) */
+  mfaVerified?: boolean;
 }
 
 declare module 'fastify' {
@@ -57,7 +62,7 @@ export function setSessionCookie(reply: FastifyReply, config: Config, token: str
     sameSite: 'lax',
     secure: config.cookieSecure,
     path: SESSION_COOKIE_PATH,
-    maxAge: Math.floor(SESSION_TTL_MS / 1000),
+    maxAge: Math.floor(config.sessionTtlMs / 1000),
   });
 }
 
@@ -87,10 +92,22 @@ export async function loadSession(
     repos.tenants.get(session.tenantId),
     repos.memberships.get(session.tenantId, session.userId),
   ]);
+  // a disabled membership is not found by `get` (P6-02, P6-12): the session is refused like an unknown one
   if (!user || !tenant || !membership) return;
-  request.auth = { user, tenant, role: membership.role, sessionId };
-  if (session.expiresAt.getTime() - Date.now() < SESSION_TTL_MS - SESSION_REFRESH_MS) {
-    await repos.sessions.extend(sessionId, new Date(Date.now() + SESSION_TTL_MS));
+  // P6-18: an enforced MFA the session has not passed answers 401 (stub L2: passes)
+  await assertMfaSatisfied(request, tenant, session);
+  request.auth = {
+    user,
+    tenant,
+    role: membership.role,
+    sessionId,
+    authMethod: session.authMethod,
+    mfaVerified: session.mfaVerified,
+  };
+  // P6-20: last active, written at most once a day
+  await repos.memberships.touchLastActive(tenant.id, user.id, new Date());
+  if (session.expiresAt.getTime() - Date.now() < config.sessionTtlMs - SESSION_REFRESH_MS) {
+    await repos.sessions.extend(sessionId, new Date(Date.now() + config.sessionTtlMs));
     setSessionCookie(reply, config, token);
   }
 }
@@ -150,6 +167,18 @@ export async function requireScope(
   const wanted: readonly Scope[] = typeof scope === 'string' ? [scope] : scope;
   if (!wanted.some((s) => held.has(s))) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
   return auth;
+}
+
+/**
+ * From S2 (S4 and S5 use the name): passes when the caller holds any one of `scopes`, the same 401 and 403
+ * texts as `requireScope`, which already reads an array as any of.
+ */
+export function requireAnyScope(
+  request: FastifyRequest,
+  scopes: readonly Scope[],
+  target?: AccessTarget,
+): Promise<AuthContext> {
+  return requireScope(request, scopes, target);
 }
 
 /** P6-03: the workspace owner only (`DELETE /tenant`; n8n has no tenants, so no scope names it) */

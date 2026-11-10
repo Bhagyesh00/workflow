@@ -4,6 +4,7 @@
  * (P6-33, L12) and workflow reviews (P3-19). Each section gates itself.
  */
 import type { ComponentType } from 'react';
+import { MfaEnforcementSection } from './MfaEnforcementSection';
 import { PersonalSpaceSection } from './PersonalSpaceSection';
 import { WorkflowReviewsSection } from './WorkflowReviewsSection';
 
@@ -14,6 +15,8 @@ export interface SecuritySection {
 }
 
 export const SECURITY_SECTIONS: readonly SecuritySection[] = [
+  // P6-18 (L2)
+  { id: 'mfa', Component: MfaEnforcementSection },
   { id: 'personal-space', Component: PersonalSpaceSection },
   { id: 'workflow-reviews', Component: WorkflowReviewsSection },
 ];

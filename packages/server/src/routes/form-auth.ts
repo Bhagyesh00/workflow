@@ -34,6 +34,6 @@ export function registerFormAuthRoutes(app: FastifyInstance, deps: { formAuth: F
   app.post('/form-auth/code', async (request) => {
     const auth = requireAuth(request);
     const { returnTo } = parse(codeBody, request.body);
-    return { data: { code: await formAuth.issueCode(auth.user.id, returnTo) } };
+    return { data: { code: await formAuth.issueCode(auth, returnTo) } };
   });
 }

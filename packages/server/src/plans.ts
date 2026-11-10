@@ -83,6 +83,20 @@ export interface TenantSettings {
    * service reads it for `project:personalOwner` (`personalOwnerScopes`), GET /settings returns it.
    */
   securityPolicy?: { personalSpacePublishing?: boolean; personalSpaceSharing?: boolean };
+  /** P6-18: MFA for every member (`user:enforceMfa`, POST /settings/mfa-enforce); not in `settingsPatch` */
+  mfa?: { enforced?: boolean };
+  /**
+   * P6-02: SCIM (`scim:manage`): on or off, what a SCIM delete does to the membership, and what happens to the
+   * person's work (moved to `transferProjectId` or deleted); not in `settingsPatch`
+   */
+  scim?: {
+    enabled?: boolean;
+    onDelete?: 'disable' | 'delete';
+    dataAction?: 'transfer' | 'delete';
+    transferProjectId?: string;
+  };
+  /** P6-17: set once, atomically, when the first production run failed and its mail went out */
+  firstProductionFailure?: { at: string };
 }
 
 export function effectiveLimits(plan: string, settings: TenantSettings | null | undefined): PlanLimits {

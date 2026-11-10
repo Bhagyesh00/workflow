@@ -429,7 +429,12 @@ describe('routes/form-auth.ts', () => {
     const payload = { returnTo: '/form/acme/survey?x=1' };
     expect((await send(instance, 'POST', code, undefined, payload)).statusCode).toBe(401);
     expect((await send(instance, 'POST', code, 'viewer', payload)).statusCode).toBe(200);
-    expect(calls).toEqual([{ method: 'issueCode', args: [USER, payload.returnTo] }]);
+    expect(calls).toEqual([
+      {
+        method: 'issueCode',
+        args: [expect.objectContaining({ user: expect.objectContaining({ id: USER }) }), payload.returnTo],
+      },
+    ]);
   });
 
   it.each(['/form-test/acme/survey', '/form-waiting/abc'])('accepts returnTo %s', async (returnTo) => {

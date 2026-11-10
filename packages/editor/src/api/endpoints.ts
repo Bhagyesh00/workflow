@@ -18,7 +18,7 @@ import type {
   ResourceMapperFields,
   WorkflowNode,
 } from '@workflow/workflow';
-import { ApiError, api, buildUrl, getCurrentTenant, request } from './client';
+import { ApiError, api, buildUrl, getCurrentTenant, type QueryValue, request, requestRaw } from './client';
 import type {
   AiSessionDTO,
   AiUsageSettingsBody,
@@ -26,6 +26,8 @@ import type {
   AnnotationTag,
   AnnotationVote,
   ApiKey,
+  ApiKeyListAllQuery,
+  ApiKeyPatchBody,
   AssistantAcceptDraftBody,
   AssistantAcceptDraftResult,
   AssistantConfirmAnswer,
@@ -42,6 +44,8 @@ import type {
   AssistantThreadPage,
   AssistantThreadsQuery,
   AuthResult,
+  ChangeEmailBody,
+  ChangePasswordBody,
   CreatedApiKey,
   CredentialCreateBody,
   CredentialDetail,
@@ -76,9 +80,12 @@ import type {
   FormAuthCode,
   InboxQuery,
   InboxSummary,
+  LdapConfig,
+  LdapSyncRun,
   ListenTestTriggerResult,
   ListenTestWebhookOptions,
   ListenTestWebhookResult,
+  LoginBody,
   McpApiKey,
   McpConsentDecisionBody,
   McpConsentDetails,
@@ -94,9 +101,18 @@ import type {
   McpWorkflowsQuery,
   Me,
   Member,
+  MemberInvite,
+  MemberInviteResult,
+  MemberListQuery,
+  MemberPage,
   MemberRemovalChoice,
+  MemberStatus,
+  MfaDisableBody,
+  MfaSetup,
   MoveWorkflowsBody,
   NodeTypeDescription,
+  OidcConfig,
+  OidcConfigBody,
   Project,
   ProjectAddUsersResult,
   ProjectCount,
@@ -108,8 +124,11 @@ import type {
   ProjectPatchBody,
   ProjectRef,
   ProjectRelationInput,
+  ProvisioningConfig,
   PublishBody,
   PublishTimelineEntry,
+  ResetPasswordBody,
+  ResetTokenInfo,
   ReviewActivity,
   ReviewCreateBody,
   ReviewDecisionBody,
@@ -120,10 +139,18 @@ import type {
   Role,
   RoleAssignmentsPage,
   RoleCreateBody,
+  RoleMappingRule,
+  RoleMappingRuleBody,
   RoleMembersPage,
   RolePatchBody,
   RolesMap,
   RunWorkflowBody,
+  SamlConfig,
+  SamlConfigBody,
+  ScimConfig,
+  ScimDeprovisioningBody,
+  ScimTokenResult,
+  ScimTransferTarget,
   SecretCompletions,
   SecretConnection,
   SecretConnectionCreateBody,
@@ -134,6 +161,9 @@ import type {
   SecurityPolicyPatch,
   Settings,
   SettingsPatchBody,
+  SsoMethod,
+  SsoOptions,
+  SsoTestResult,
   Tag,
   TestCaseDto,
   TestCaseListQuery,
@@ -142,6 +172,7 @@ import type {
   TestRunStartBody,
   TestRunStartResult,
   TransferPreview,
+  User,
   Variable,
   VariableBody,
   VersionDiff,
@@ -163,12 +194,107 @@ const enc = encodeURIComponent;
 export const authApi = {
   signup: (body: { email: string; password: string; name: string; workspaceName: string }) =>
     api.post<AuthResult>('/auth/signup', body),
-  login: (body: { email: string; password: string }) => api.post<AuthResult>('/auth/login', body),
+  /** P6-01, P6-18: 401 `mfa_required` asks for the second step (send it again with `mfaCode` or `mfaRecoveryCode`) */
+  login: (body: LoginBody) => api.post<AuthResult>('/auth/login', body),
   logout: () => api.post<{ ok: true }>('/auth/logout'),
   me: () => api.get<Me>('/auth/me'),
   switchTenant: (tenantId: string) => api.post<AuthResult>('/auth/switch-tenant', { tenantId }),
   acceptInvitation: (token: string, body: { name: string; password: string }) =>
     api.post<AuthResult>(`/invitations/${enc(token)}/accept`, body),
+  /** P6-01 (public): the sign-in method of a workspace (by slug); `email` with no workspace */
+  ssoOptions: (workspace?: string) => api.get<SsoOptions>('/auth/sso-options', { workspace }),
+};
+
+/** P6-18: two-step sign-in of the signed-in user; refused from an SSO session (`sso_session_fenced`) */
+export const mfaApi = {
+  /** a new secret and new recovery codes on each call until enabled */
+  setup: () => api.get<MfaSetup>('/auth/mfa/setup'),
+  /** turns MFA on and marks this session verified */
+  enable: (mfaCode: string) => api.post<{ ok: true }>('/auth/mfa/enable', { mfaCode }),
+  disable: (body: MfaDisableBody) => api.post<{ ok: true }>('/auth/mfa/disable', body),
+  verify: (mfaCode: string) => api.post<{ ok: true }>('/auth/mfa/verify', { mfaCode }),
+  /** `user:enforceMfa`; refused until the caller's own MFA is on */
+  enforce: (enforce: boolean) => api.post<{ enforced: boolean }>('/settings/mfa-enforce', { enforce }),
+};
+
+/** P6-19: password reset, profile, password and email changes; every token travels in a body */
+export const passwordApi = {
+  /** the same answer whether or not the email has an account */
+  forgot: (email: string) => api.post<{ ok: true }>('/auth/forgot-password', { email }),
+  resolveResetToken: (token: string) => api.post<ResetTokenInfo>('/auth/reset-token/resolve', { token }),
+  reset: (body: ResetPasswordBody) => api.post<{ ok: true }>('/auth/reset-password', body),
+  confirmEmailChange: (token: string) => api.post<{ ok: true }>('/auth/confirm-email-change', { token }),
+  updateProfile: (body: { name: string }) => api.patch<User>('/auth/me', body),
+  /** ends every other session, keeps this one */
+  changePassword: (body: ChangePasswordBody) => api.patch<{ ok: true }>('/auth/me/password', body),
+  /** mails a confirm link to the new address */
+  changeEmail: (body: ChangeEmailBody) => api.post<{ ok: true }>('/auth/change-email', body),
+  /** `user:resetPassword`; an owner's link is refused */
+  resetLink: (userId: string) => api.get<{ link: string }>(`/members/${enc(userId)}/password-reset-link`),
+};
+
+/** P6-01, P6-09, P6-10, P6-13: the sign-in method, SAML and OIDC settings */
+export const ssoApi = {
+  /** any of `saml:manage`, `oidc:manage`, `ldap:manage` */
+  method: () => api.get<{ method: SsoMethod }>('/sso/method'),
+  setMethod: (method: SsoMethod) => api.put<{ method: SsoMethod }>('/sso/method', { method }),
+  /** `user:update`: password sign-in for this member while SSO is on */
+  memberSettings: (userId: string, body: { allowSsoManualLogin: boolean }) =>
+    api.patch<Member>(`/members/${enc(userId)}/sso-settings`, body),
+  samlConfig: () => api.get<SamlConfig>('/sso/saml/config'),
+  saveSamlConfig: (body: SamlConfigBody) => api.post<SamlConfig>('/sso/saml/config', body),
+  toggleSaml: (loginEnabled: boolean) => api.post<SamlConfig>('/sso/saml/config/toggle', { loginEnabled }),
+  testSaml: () => api.post<SsoTestResult>('/sso/saml/config/test'),
+  oidcConfig: () => api.get<OidcConfig>('/sso/oidc/config'),
+  saveOidcConfig: (body: OidcConfigBody) => api.post<OidcConfig>('/sso/oidc/config', body),
+  testOidc: () => api.post<SsoTestResult>('/sso/oidc/config/test'),
+  /** the identity provider's logout URL when RP-initiated logout is on */
+  oidcLogout: () => api.post<{ url: string | null }>('/sso/oidc/logout'),
+};
+
+/** P6-11: role provisioning (`provisioning:manage`) and role mapping rules (`roleMappingRule:*`) */
+export const provisioningApi = {
+  config: () => api.get<ProvisioningConfig>('/sso/provisioning/config'),
+  updateConfig: (body: Partial<ProvisioningConfig>) =>
+    api.patch<ProvisioningConfig>('/sso/provisioning/config', body),
+  rules: () => api.get<RoleMappingRule[]>('/sso/role-mapping-rules'),
+  createRule: (body: RoleMappingRuleBody) => api.post<RoleMappingRule>('/sso/role-mapping-rules', body),
+  updateRule: (id: string, body: RoleMappingRuleBody) =>
+    api.patch<RoleMappingRule>(`/sso/role-mapping-rules/${enc(id)}`, body),
+  /** to 0-based `position` among the rules of its type */
+  moveRule: (id: string, position: number) =>
+    api.post<RoleMappingRule[]>(`/sso/role-mapping-rules/${enc(id)}/move`, { position }),
+  deleteRule: (id: string) => api.delete<{ ok: true }>(`/sso/role-mapping-rules/${enc(id)}`),
+};
+
+/** P6-12: LDAP (`ldap:manage`, the sync routes `ldap:sync`) */
+export const ldapApi = {
+  config: () => api.get<LdapConfig>('/ldap/config'),
+  saveConfig: (body: Partial<LdapConfig>) => api.put<LdapConfig>('/ldap/config', body),
+  testConnection: () => api.post<{ ok: true; message?: string }>('/ldap/test-connection'),
+  syncRuns: () => api.get<LdapSyncRun[]>('/ldap/sync'),
+  sync: (runMode: 'dry' | 'live') => api.post<LdapSyncRun>('/ldap/sync', { type: runMode }),
+};
+
+/** P6-02: the SCIM panel (`scim:manage`) */
+export const scimApi = {
+  config: () => api.get<ScimConfig>('/scim/config'),
+  /** turning on needs SAML or OIDC on */
+  setEnabled: (enabled: boolean) => api.patch<ScimConfig>('/scim/config', { enabled }),
+  setDeprovisioning: (body: ScimDeprovisioningBody) => api.put<ScimConfig>('/scim/deprovisioning', body),
+  /** a new token replaces the old one; shown once */
+  createToken: () => api.post<ScimTokenResult>('/scim/token'),
+  revokeToken: () => api.delete<{ ok: true }>('/scim/token'),
+  transferTargets: () => api.get<ScimTransferTarget[]>('/scim/transfer-targets'),
+};
+
+/** P6-15: the caller's own connection to a private (per user) credential */
+export const privateCredentialsApi = {
+  /** `credential:connect`: the provider's consent URL for this user's own account */
+  connect: (credentialId: string) => api.post<{ url: string }>(`/credentials/${enc(credentialId)}/authorize`),
+  /** session only: a user who lost access may still clear their own connection */
+  disconnect: (credentialId: string) =>
+    api.delete<{ ok: true }>(`/credentials/${enc(credentialId)}/my-connection`),
 };
 
 export const settingsApi = {
@@ -471,21 +597,70 @@ export const variablesApi = {
   remove: (id: string) => api.delete<{ ok: true }>(`/variables/${enc(id)}`),
 };
 
+/** GET /members query params; only the known keys (react-query passes its own context as the argument) */
+function memberQuery(query: MemberListQuery): Record<string, QueryValue> | undefined {
+  const { q, role, projectId, status, sort, take, skip } = query;
+  const known = Object.entries({ q, role, projectId, status, sort, take, skip }).filter(
+    ([, value]) => value !== undefined,
+  );
+  // no filter: the same request as before S2
+  return known.length > 0 ? Object.fromEntries(known) : undefined;
+}
+
 export const membersApi = {
-  list: () => api.get<Member[]>('/members'),
+  /** P6-20: rows include pending invitations; `status` needs `user:create` */
+  list: ({ signal, ...query }: MemberListQuery & { signal?: AbortSignal } = {}) =>
+    api.get<Member[]>('/members', memberQuery(query), signal),
+  /** P6-20: one page with the total `count` and, for `user:create`, `statusCounts` */
+  listPage: async ({
+    signal,
+    ...query
+  }: MemberListQuery & { signal?: AbortSignal } = {}): Promise<MemberPage> => {
+    const { data, envelope } = await requestRaw({
+      method: 'GET',
+      path: '/members',
+      query: memberQuery(query),
+      signal,
+    });
+    const items = (data ?? []) as Member[];
+    const count = typeof envelope?.count === 'number' ? envelope.count : items.length;
+    const statusCounts = envelope?.statusCounts as Record<MemberStatus, number> | undefined;
+    return statusCounts ? { items, count, statusCounts } : { items, count };
+  },
   invite: (body: { email: string; role: Role }) =>
     api.post<Record<string, unknown> | null>('/members/invite', body),
   updateRole: (userId: string, role: Role) => api.patch<Member>(`/members/${enc(userId)}`, { role }),
   /** P6-31: the server needs `choice`: move the member's personal work to a project, or delete it */
   remove: (userId: string, choice?: MemberRemovalChoice) =>
     request<{ ok: true }>({ method: 'DELETE', path: `/members/${enc(userId)}`, body: choice ?? {} }),
+  /** P6-20: an array body answers per row */
+  inviteMany: (invites: MemberInvite[]) => api.post<MemberInviteResult[]>('/members/invite', invites),
+  /** P6-20 (`user:create`): a new token and expiry; the old link stops working */
+  resend: (invitationId: string) => api.post<MemberInviteResult>(`/invitations/${enc(invitationId)}/resend`),
+  /** P6-20 (`user:generateInviteLink`): rotates the token too (it is stored hashed) */
+  inviteLink: (invitationId: string) => api.post<{ link: string }>(`/invitations/${enc(invitationId)}/link`),
 };
 
 export const apiKeysApi = {
   list: () => api.get<ApiKey[]>('/api-keys'),
   /** P4-18: empty `scopes` means every scope */
-  create: (name: string, scopes: string[] = []) => api.post<CreatedApiKey>('/api-keys', { name, scopes }),
+  /** P6-21: `expiresAt` in unix seconds, in the future; left out = never expires */
+  create: (name: string, scopes: string[] = [], expiresAt?: number | null) =>
+    api.post<CreatedApiKey>(
+      '/api-keys',
+      expiresAt === undefined ? { name, scopes } : { name, scopes, expiresAt },
+    ),
+  /** an admin deleting another user's key needs `apiKey:manage` (the owner gets a mail) */
   remove: (id: string) => api.delete<{ ok: true }>(`/api-keys/${enc(id)}`),
+  /** P6-21: name and scopes */
+  update: (id: string, body: ApiKeyPatchBody) => api.patch<ApiKey>(`/api-keys/${enc(id)}`, body),
+  /** P6-21: same key, new secret, shown once */
+  rotate: (id: string) => api.post<CreatedApiKey>(`/api-keys/${enc(id)}/rotate`),
+  /** P6-21: the scopes the caller's role may give a key */
+  scopes: () => api.get<string[]>('/api-keys/scopes'),
+  /** P6-21 (`apiKey:manage`): every member's keys, with the owner's name */
+  listAll: ({ signal, ownerId, label }: ApiKeyListAllQuery & { signal?: AbortSignal } = {}) =>
+    api.get<ApiKey[]>('/api-keys', { scope: 'all', ownerId, label }, signal),
 };
 
 /** `?sortBy=` of the data table routes */

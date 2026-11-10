@@ -456,6 +456,46 @@ export class HttpClient {
   }
 
   /**
+   * A `fetch` for libraries that take one (OpenID discovery, JWKS, SAML metadata): every connect
+   * goes through the guarded agent with TLS checked, so a blocked host surfaces as the
+   * SsrfBlockedError. A redirect is returned to the caller, never followed. The answer is a global
+   * `Response`, so a library's `instanceof Response` holds.
+   */
+  asFetch(): typeof globalThis.fetch {
+    const guarded: typeof globalThis.fetch = async (input, init) => {
+      const source = input instanceof Request ? input : undefined;
+      const url = new URL(source ? source.url : String(input));
+      const method = (init?.method ?? source?.method ?? 'GET').toUpperCase();
+      const headers = new Headers(init?.headers ?? source?.headers);
+      if (!headers.has('user-agent')) headers.set('user-agent', this.userAgent);
+      let body: unknown = init?.body ?? undefined;
+      if (body === undefined && source?.body && method !== 'GET' && method !== 'HEAD') {
+        body = new Uint8Array(await source.arrayBuffer());
+      }
+      const timeout = AbortSignal.timeout(this.defaultTimeoutMs);
+      const callerSignal = init?.signal ?? source?.signal;
+      const signal = callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout;
+      const answer = await this.send(url, {
+        method,
+        headers: [...headers.entries()],
+        body: body as RequestInit['body'],
+        dispatcher: this.agent,
+        redirect: 'manual',
+        signal,
+      });
+      const nullBody = [101, 103, 204, 205, 304].includes(answer.status);
+      const response = new Response(nullBody ? null : (answer.body as ReadableStream<Uint8Array> | null), {
+        status: answer.status,
+        statusText: answer.statusText,
+        headers: [...answer.headers.entries()],
+      });
+      Object.defineProperty(response, 'url', { value: answer.url || url.href });
+      return response;
+    };
+    return guarded;
+  }
+
+  /**
    * Answer a 401 Digest challenge once: the same request goes again with the Authorization header,
    * and whatever comes back is the result (never a loop). Without a Digest challenge, an answer, or
    * when a redirect ended on another origin, the 401 is returned as it is.

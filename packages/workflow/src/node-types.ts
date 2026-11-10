@@ -26,6 +26,7 @@ import type {
   WorkflowNode,
 } from './interfaces';
 import type { ToolResumeData, ToolSuspension } from './tool-suspension';
+import type { CredentialGateHelper } from './trigger-credential-gate';
 
 export interface Logger {
   debug(message: string, meta?: DataObject): void;
@@ -328,6 +329,11 @@ export interface WebhookContext extends BaseContext {
    * host has none. Optional so hand-built contexts stay valid.
    */
   getMcpAuth?(): McpAuthHelper | undefined;
+  /**
+   * the credential readiness gate of identity triggers (P6-87); undefined where the host has none.
+   * Optional so hand-built contexts stay valid.
+   */
+  getCredentialGate?(): CredentialGateHelper | undefined;
   /** resolves sub-nodes (memory, tools...) attached to the webhook node via `type`, as in `ExecuteContext` */
   getInputConnectionData(type: ConnectionType, itemIndex: number): Promise<unknown>;
   /** the Chat Trigger of this workflow (this node when it is one); null when there is none */
@@ -389,6 +395,8 @@ export interface WebhookResponseData {
   noWebhookResponse?: boolean;
   /** stored on the started execution as custom data (as `ExecuteContext.setCustomData`) */
   customData?: Record<string, string>;
+  /** the workspace user the trigger identified (Chat, Form, MCP, Webhook sign-in); the run starts as this user */
+  triggerUserId?: string;
 }
 
 /** registration of webhooks with third-party services (e.g. Telegram setWebhook) */

@@ -36,6 +36,19 @@ function notFound(ref: NodeCredentialRef): Error {
   return new Error(`Credential "${ref.name || ref.id}" was not found`);
 }
 
+/**
+ * What a run's credential lookup gets (`provider`). P6-15 (C0): `endUserId`, `executionId` and `startNode`
+ * are for private (per user) credentials and unused until L14 reads them, so today's behaviour holds.
+ */
+export interface CredentialProviderOptions {
+  /** credential ids a server path allows beyond the project's own (never from a node or a body) */
+  allow?: string[];
+  /** the person the run acts for (a manual run's user, a signed-in trigger's user) */
+  endUserId?: string;
+  executionId?: string;
+  startNode?: string;
+}
+
 export class CredentialService {
   private secrets?: Pick<SecretsManager, 'secretsFor'>;
   private accessService?: AccessService;
@@ -212,7 +225,11 @@ export class CredentialService {
    * can use, its own rows first. Anything else fails as a missing credential would. The OAuth2 write-back
    * goes through the same lookup.
    */
-  provider(tenantId: string, projectId: string, options: { allow?: string[] } = {}): CredentialsProvider {
+  provider(
+    tenantId: string,
+    projectId: string,
+    options: CredentialProviderOptions = {},
+  ): CredentialsProvider {
     const allow = [...(options.allow ?? [])];
     const find = async (ref: NodeCredentialRef, type: string): Promise<CredentialRow> => {
       let row = ref.id ? await this.repos.credentials.get(tenantId, ref.id) : undefined;

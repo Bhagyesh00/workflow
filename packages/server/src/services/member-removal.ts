@@ -5,16 +5,9 @@
  * personal project and its relations cascade with it). S2 and S3 call these (P6-02, P6-12, P6-21).
  * Only this workspace is touched: the user, their other memberships and their other personal projects stay.
  */
-import { and, eq } from 'drizzle-orm';
 import type { ServerContext } from '../context';
 import type { DbOrTx } from '../db/client';
-import {
-  oauthAccessTokens,
-  oauthAuthorizationCodes,
-  oauthRefreshTokens,
-  oauthUserConsents,
-  type ProjectRow,
-} from '../db/schema';
+import type { ProjectRow } from '../db/schema';
 import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { createRepositories } from '../repositories';
@@ -65,18 +58,8 @@ async function revokeAccess(tx: DbOrTx, tenantId: string, userId: string): Promi
   const repos = createRepositories(tx);
   await repos.sessions.deleteForUserInTenant(tenantId, userId);
   await repos.apiKeys.deleteAllForUser(tenantId, userId);
-  await tx
-    .delete(oauthUserConsents)
-    .where(and(eq(oauthUserConsents.tenantId, tenantId), eq(oauthUserConsents.userId, userId)));
-  await tx
-    .delete(oauthAuthorizationCodes)
-    .where(and(eq(oauthAuthorizationCodes.tenantId, tenantId), eq(oauthAuthorizationCodes.userId, userId)));
-  await tx
-    .delete(oauthAccessTokens)
-    .where(and(eq(oauthAccessTokens.tenantId, tenantId), eq(oauthAccessTokens.userId, userId)));
-  await tx
-    .delete(oauthRefreshTokens)
-    .where(and(eq(oauthRefreshTokens.tenantId, tenantId), eq(oauthRefreshTokens.userId, userId)));
+  // P6-02, P6-12 (C0): the four MCP OAuth deletes live in the repository now (a savepoint inside this transaction)
+  await repos.mcpOAuth.deleteTokensForUser(tenantId, userId);
 }
 
 /**
@@ -125,7 +108,8 @@ export async function removeMember(
 ): Promise<void> {
   const tenantId = auth.tenant.id;
   const { repos } = ctx;
-  const target = await repos.memberships.get(tenantId, userId);
+  // P6-02, P6-12, P6-21 (C0): a disabled member can still be removed (REST and public DELETE, SCIM)
+  const target = await repos.memberships.getIncludingDisabled(tenantId, userId);
   if (!target) throw ApiError.notFound('Member');
   if (target.role === 'owner' && auth.role !== 'owner') {
     throw ApiError.forbidden('Only owners can remove owners');
@@ -147,7 +131,7 @@ export async function removeMember(
   /** the last step, in one transaction with whatever work was left: the membership and its leftovers */
   const finish = async (tx: DbOrTx): Promise<void> => {
     const txRepos = createRepositories(tx);
-    const current = await txRepos.memberships.get(tenantId, userId);
+    const current = await txRepos.memberships.getIncludingDisabled(tenantId, userId);
     if (!current) throw ApiError.notFound('Member');
     if (current.role === 'owner' && (await txRepos.memberships.lockOwners(tenantId)) <= 1) {
       throw ApiError.conflict('A workspace needs at least one owner');
@@ -176,14 +160,29 @@ export async function removeMember(
 
   if (destination || !personal) {
     await ctx.database.db.transaction(finish);
-    return;
+  } else {
+    await removeWithWipe(ctx, tenantId, auth.user.id, userId, target.role, personal.id, finish);
   }
+  // P6-15 (C0): the removed member's private credential entries in this workspace; stub (L14) PASSES
+  await ctx.privateCredentials.afterAccessChange(tenantId, { userId });
+}
+
+/** a removal that deletes the personal work: the ways in end first, then the work goes, then `finish` */
+async function removeWithWipe(
+  ctx: ServerContext,
+  tenantId: string,
+  actorId: string,
+  userId: string,
+  role: string,
+  personalId: string,
+  finish: (tx: DbOrTx) => Promise<void>,
+): Promise<void> {
   // Decide before anything is deleted, under the owner lock: the last owner stays, an owner leaves the
   // owner count (so removing another owner at the same time is refused first), and the member's ways in
   // end, so nothing new is saved during the wipe.
   await ctx.database.db.transaction(async (tx) => {
     const txRepos = createRepositories(tx);
-    if (target.role === 'owner') {
+    if (role === 'owner') {
       if ((await txRepos.memberships.lockOwners(tenantId)) <= 1) {
         throw ApiError.conflict('A workspace needs at least one owner');
       }
@@ -191,7 +190,7 @@ export async function removeMember(
     }
     await revokeAccess(tx, tenantId, userId);
   });
-  await wipeWork(ctx, tenantId, auth.user.id, personal.id, finish);
+  await wipeWork(ctx, tenantId, actorId, personalId, finish);
 }
 
 /**

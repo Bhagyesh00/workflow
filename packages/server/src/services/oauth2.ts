@@ -34,8 +34,16 @@ interface StatePayload {
   v?: string; // encrypted PKCE verifier
 }
 
+/**
+ * P6-16 (C0): turns a token response into plain token fields (a JWE response decrypted with the
+ * workspace's key, L15); `data` is the credential's data (`jweEnabled`). Throws to refuse the response.
+ */
+export type OAuthJweDecrypt = (tenantId: string, token: DataObject, data: DataObject) => Promise<DataObject>;
+
 export class OAuth2Service {
   private readonly stateKey: Buffer;
+  /** until `useJwe` is called, the token response is used as it came */
+  private decryptToken: OAuthJweDecrypt = async (_tenantId, token) => token;
 
   constructor(
     private readonly config: Config,
@@ -48,6 +56,11 @@ export class OAuth2Service {
     this.stateKey = Buffer.from(
       hkdfSync('sha256', master, Buffer.alloc(0), Buffer.from('oauth2-state:v1'), 32),
     );
+  }
+
+  /** P6-16 (C0): the JWE hook of the callback (context.ts wires `oauthJwe.decryptResponse`), as `useSecrets` */
+  useJwe(decrypt: OAuthJweDecrypt): void {
+    this.decryptToken = decrypt;
   }
 
   get callbackUrl(): string {
@@ -279,7 +292,7 @@ export class OAuth2Service {
     } else {
       auth = { username: String(data.clientId ?? ''), password: String(data.clientSecret ?? '') };
     }
-    const token = (await this.http.request({
+    let token = (await this.http.request({
       url: accessTokenUrl,
       method: 'POST',
       body,
@@ -288,6 +301,8 @@ export class OAuth2Service {
       auth,
       ...(allowedDomains === undefined ? {} : { allowedDomains }),
     })) as DataObject;
+    // P6-16 (C0): a JWE response is decrypted before the check; the stub (L15) keeps it unless `jweEnabled`
+    if (token && typeof token === 'object') token = await this.decryptToken(payload.t, token, data);
     if (!token || typeof token !== 'object' || !token.access_token) {
       throw ApiError.badRequest('The token response did not contain an access token');
     }

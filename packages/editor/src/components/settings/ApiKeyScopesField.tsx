@@ -52,6 +52,15 @@ const GROUPS: Array<{ resource: string; label: string; scopes: string[] }> = [
   { resource: 'testRun', label: 'Test runs', scopes: ['list', 'create', 'read', 'cancel'] },
   { resource: 'sourceControl', label: 'Source control', scopes: ['pull'] },
   { resource: 'securityAudit', label: 'Security audit', scopes: ['generate'] },
+  // P6-09, P6-10, P6-11, P6-12: sign-in methods and role mapping
+  { resource: 'saml', label: 'SAML', scopes: ['manage'] },
+  { resource: 'oidc', label: 'OIDC', scopes: ['manage'] },
+  { resource: 'ldap', label: 'LDAP', scopes: ['manage', 'sync'] },
+  {
+    resource: 'roleMappingRule',
+    label: 'Role mapping rules',
+    scopes: ['list', 'create', 'update', 'delete'],
+  },
 ];
 
 const withScopes = GROUPS.map((group) => ({

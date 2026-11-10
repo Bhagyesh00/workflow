@@ -6,6 +6,7 @@
 import type {
   BinaryData,
   ChatChunkMeta,
+  CredentialGateHelper,
   CredentialType,
   DataObject,
   DataTableAccess,
@@ -157,6 +158,10 @@ export interface ExecutionServices {
   formAuth?: FormAuthHelper;
   /** OAuth token checks and execute access for the MCP Server Trigger (`getMcpAuth()` on the webhook context) */
   mcpAuth?: McpAuthHelper;
+  /** the credential readiness gate of identity triggers (`getCredentialGate()` on the webhook context, P6-87) */
+  credentialGate?: CredentialGateHelper;
+  /** runs on every OAuth2 token answer before its `access_token` is read (P6-16 JWE); unset leaves it unchanged */
+  oauthTokenDecrypt?: (token: DataObject, data: DataObject) => Promise<DataObject>;
   /** signs and checks the tokens forms hand out (`signFormToken`, `verifyFormToken`) */
   formTokens?: {
     sign(payload: DataObject, ttlSeconds: number): string;

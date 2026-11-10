@@ -74,6 +74,12 @@ export interface Me extends AuthResult {
   tenants: TenantMembership[];
   /** P6-03: the scopes of the workspace role; `can()` (lib/permissions.ts) reads them */
   globalScopes: Scope[];
+  /** P6-01: how this session signed in (absent before S2's server) */
+  authMethod?: AuthMethod;
+  /** P6-18: two-step sign-in is set up for this user */
+  mfaEnabled: boolean;
+  /** P6-01: an SSO session: the global account (name, email, password, MFA) cannot change from it */
+  ssoFenced: boolean;
 }
 
 export interface Brand {
@@ -88,7 +94,9 @@ export interface Settings {
   webhookBaseUrl: string;
   timezone: string;
   limits: Record<string, unknown>;
-  features: Record<string, unknown>;
+  features: Record<string, unknown> & SettingsFeatures;
+  /** P6-18: the workspace requires two-step sign-in (absent = not required) */
+  mfa?: { enforced: boolean };
   /** false when the server sets WORKFLOWS_AUTOSAVE_DISABLED (P3-17) */
   autosaveEnabled: boolean;
   /** tenant setting, off by default; admins change it in Settings > Security (P3-19) */
@@ -376,6 +384,8 @@ export interface WorkflowSummary extends ProjectOwnedFields {
   isArchived: boolean;
   folderId: string | null;
   publishedVersionId: string | null;
+  /** P6-15: a node uses a private (per user) credential; the card shows an icon */
+  usesPrivateCredentials?: boolean;
 }
 
 export interface WorkflowDTO extends ProjectOwnedFields {
@@ -644,6 +654,8 @@ export interface ExecutionSummary {
   workflowVersionId: string | null;
   /** P3-09 */
   annotation: ExecutionAnnotation | null;
+  /** P6-15: the run used a private (per user) credential; the list shows an icon */
+  usedPrivateCredentials?: boolean;
 }
 
 export interface ExecutionDetail extends ExecutionSummary {
@@ -670,6 +682,12 @@ export interface CredentialSummary extends ProjectOwnedFields {
   updatedAt: string;
   /** P6-24: usable by every member, read only (`credential:shareGlobally` sets it) */
   isGlobal?: boolean;
+  /** P6-15: a private credential: each user connects their own account (`credential:createEndUser`) */
+  isResolvable?: boolean;
+  /** P6-15: the caller has connected their own account to this private credential */
+  connectedByMe?: boolean;
+  /** P6-15: how many users have connected an account to this private credential */
+  connectedCount?: number;
 }
 
 export interface CredentialDetail extends ProjectOwnedFields {
@@ -678,6 +696,10 @@ export interface CredentialDetail extends ProjectOwnedFields {
   type: string;
   data: Record<string, unknown>;
   isGlobal?: boolean;
+  /** P6-15: as on `CredentialSummary` */
+  isResolvable?: boolean;
+  connectedByMe?: boolean;
+  connectedCount?: number;
 }
 
 /** GET /credentials query (P6-24) */
@@ -692,6 +714,8 @@ export interface CredentialCreateBody {
   data: Record<string, unknown>;
   /** the project the credential goes to (omitted = the server's default project) */
   projectId?: string;
+  /** P6-15: a private (per user) credential; OAuth types only, never in a personal project */
+  isResolvable?: boolean;
 }
 
 /** PATCH /credentials/:id; `isGlobal` needs `credential:shareGlobally` */
@@ -699,6 +723,8 @@ export interface CredentialPatchBody {
   name?: string;
   data?: Record<string, unknown>;
   isGlobal?: boolean;
+  /** P6-15: needs `credential:createEndUser` */
+  isResolvable?: boolean;
 }
 
 /** POST /credentials/test: `projectId` names the project whose vaults the data may read */
@@ -734,6 +760,18 @@ export interface Member {
   email: string;
   name: string;
   role: Role;
+  /** P6-20: pending is an open invitation; disabled is a member turned off (SCIM, LDAP, an admin) */
+  status?: MemberStatus;
+  /** P6-20: a pending row's invitation (resend, invite link) */
+  invitationId?: string;
+  /** P6-20: ISO time, updated at most once a day; null = never */
+  lastActiveAt?: string | null;
+  /** P6-18: two-step sign-in is set up */
+  mfaEnabled?: boolean;
+  /** P6-02: SCIM created this user; only SCIM changes the name and email */
+  managedByScim?: boolean;
+  /** P6-13: may sign in with a password while SSO is on */
+  allowSsoManualLogin?: boolean;
   [key: string]: unknown;
 }
 
@@ -745,6 +783,11 @@ export interface ApiKey {
   lastUsedAt?: string | null;
   /** P4-18: empty means every scope */
   scopes?: string[];
+  /** P6-21: unix seconds; null or absent = never expires */
+  expiresAt?: number | null;
+  /** P6-21: the All keys tab (`apiKey:manage`) */
+  ownerId?: string;
+  ownerName?: string;
   [key: string]: unknown;
 }
 
@@ -753,6 +796,8 @@ export interface CreatedApiKey {
   name: string;
   key: string;
   scopes?: string[];
+  /** P6-21: unix seconds; null or absent = never expires */
+  expiresAt?: number | null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1385,3 +1430,309 @@ export interface AssistantMcpConnectionBody {
 
 /** body of PATCH /assistant/mcp-connections/:id (admin) */
 export type AssistantMcpConnectionPatchBody = Partial<AssistantMcpConnectionBody>;
+
+// ---------------------------------------------------------------------------------------------
+// Phase 6 S2: identity (sign-in methods, MFA, password, members, API keys, SSO, LDAP, SCIM)
+// ---------------------------------------------------------------------------------------------
+
+/** P6-01: how a session signed in */
+export type AuthMethod = 'password' | 'saml' | 'oidc' | 'ldap';
+
+/** P6-01: the workspace's sign-in method; `email` is email and password */
+export type SsoMethod = 'email' | 'saml' | 'oidc' | 'ldap';
+
+/** `Settings.features` keys of S2 (absent until the settings load) */
+export interface SettingsFeatures {
+  /** P6-17: the server can send mail (SMTP configured) */
+  mail?: boolean;
+  /** P6-18: two-step sign-in is available (`MFA_ENABLED`) */
+  mfa?: boolean;
+  /** P6-21: the public API is on (`PUBLIC_API_DISABLED` unset) */
+  publicApi?: boolean;
+}
+
+/** body of POST /auth/login */
+export interface LoginBody {
+  email: string;
+  password: string;
+  /** P6-01: the workspace slug to sign in to (`?workspace=`) */
+  workspace?: string;
+  /** P6-18: the 6 digit code of the second step */
+  mfaCode?: string;
+  /** P6-18: a recovery code instead of `mfaCode` */
+  mfaRecoveryCode?: string;
+}
+
+/** P6-18: the second sign-in step's input (exactly one of the two) */
+export type MfaLoginInput = { mfaCode: string } | { mfaRecoveryCode: string };
+
+/** GET /auth/sso-options?workspace= (public, P6-01) */
+export interface SsoOptions {
+  method: SsoMethod;
+  /** the sign-in button's text (null or absent: a default text) */
+  label?: string | null;
+  /** send the sign-in page straight to the identity provider (`SSO_REDIRECT_LOGIN_TO_SSO`) */
+  redirect: boolean;
+}
+
+/** GET /auth/mfa/setup (P6-18): a new secret and new codes on each call until enabled; codes shown once */
+export interface MfaSetup {
+  secret: string;
+  /** the otpauth:// URI the QR code encodes */
+  otpauthUrl: string;
+  recoveryCodes: string[];
+}
+
+/** body of POST /auth/mfa/disable: exactly one of the two */
+export type MfaDisableBody = { mfaCode: string } | { mfaRecoveryCode: string };
+
+/** POST /auth/reset-token/resolve (P6-19) */
+export interface ResetTokenInfo {
+  /** the reset needs an MFA code too */
+  mfaEnabled: boolean;
+}
+
+/** body of POST /auth/reset-password (P6-19); the token travels in the body, never in a URL */
+export interface ResetPasswordBody {
+  token: string;
+  password: string;
+  mfaCode?: string;
+}
+
+/** body of POST /auth/change-email (P6-19): the current password or an MFA code */
+export interface ChangeEmailBody {
+  email: string;
+  currentPassword?: string;
+  mfaCode?: string;
+}
+
+/** body of PATCH /auth/me/password (P6-19) */
+export interface ChangePasswordBody {
+  currentPassword: string;
+  newPassword: string;
+  mfaCode?: string;
+}
+
+/** P6-20 */
+export type MemberStatus = 'active' | 'pending' | 'disabled';
+
+export type MemberSortField = 'name' | 'email' | 'role' | 'mfaEnabled' | 'lastActiveAt';
+
+/** GET /members query (P6-20); `status` needs `user:create` */
+export interface MemberListQuery {
+  q?: string;
+  role?: Role;
+  projectId?: string;
+  status?: MemberStatus;
+  sort?: `${MemberSortField}:${'asc' | 'desc'}`;
+  take?: number;
+  skip?: number;
+}
+
+/** GET /members with paging (P6-20): `count` and `statusCounts` ride beside `data` in the answer */
+export interface MemberPage {
+  items: Member[];
+  /** every row the filter matches (all pages) */
+  count: number;
+  /** callers with `user:create` only */
+  statusCounts?: Record<MemberStatus, number>;
+}
+
+/** one row of POST /members/invite with an array body (P6-20) */
+export interface MemberInvite {
+  email: string;
+  role: Role;
+}
+
+/** the answer per row of POST /members/invite with an array body, and of resend (P6-20) */
+export interface MemberInviteResult {
+  id: string;
+  email: string;
+  role: Role;
+  emailSent: boolean;
+  /** absent when the mail went out and `INVITE_LINKS_EMAIL_ONLY` is set */
+  inviteAcceptUrl?: string;
+  error?: string;
+}
+
+/** GET /api-keys?scope=all query (P6-21, `apiKey:manage`) */
+export interface ApiKeyListAllQuery {
+  ownerId?: string;
+  label?: string;
+}
+
+/** body of PATCH /api-keys/:id (P6-21) */
+export interface ApiKeyPatchBody {
+  name?: string;
+  scopes?: string[];
+}
+
+/** P6-09: the SAML attributes that carry the user's fields */
+export interface SamlAttributeMapping {
+  email: string;
+  firstName: string;
+  lastName: string;
+  userPrincipalName: string;
+}
+
+/** GET /sso/saml/config (P6-09, `saml:manage`) */
+export interface SamlConfig {
+  /** the identity provider's metadata XML */
+  metadata: string;
+  /** or its URL (the server reads it through the egress guard) */
+  metadataUrl: string;
+  mapping: SamlAttributeMapping;
+  loginBinding: 'redirect' | 'post';
+  loginEnabled: boolean;
+  loginLabel: string;
+  /** refuse a sign-in whose email is not marked verified */
+  emailVerifiedRequired: boolean;
+  wantAssertionsSigned?: boolean;
+  wantMessageSigned?: boolean;
+  authnRequestsSigned?: boolean;
+  /** read only: the values to give the identity provider */
+  entityID?: string;
+  returnUrl?: string;
+}
+
+/** body of POST /sso/saml/config: the read only fields are left out */
+export type SamlConfigBody = Partial<Omit<SamlConfig, 'entityID' | 'returnUrl'>>;
+
+export type OidcPrompt = 'none' | 'login' | 'consent' | 'select_account' | 'create';
+
+/** GET /sso/oidc/config (P6-10, `oidc:manage`) */
+export interface OidcConfig {
+  clientId: string;
+  /** blank on read; a blank secret on save keeps the stored one */
+  clientSecret: string;
+  discoveryEndpoint: string;
+  loginEnabled: boolean;
+  prompt: OidcPrompt;
+  authenticationContextClassReference: string[];
+  /** space separated, added to `openid email profile` */
+  additionalScopes: string;
+  emailVerifiedRequired: boolean;
+  rpInitiatedLogoutEnabled: boolean;
+  /** read only: the redirect URL to give the identity provider */
+  callbackUrl?: string;
+}
+
+/** body of POST /sso/oidc/config */
+export type OidcConfigBody = Partial<Omit<OidcConfig, 'callbackUrl'>>;
+
+/** POST /sso/saml/config/test and /sso/oidc/config/test: the URL to open in a new window */
+export interface SsoTestResult {
+  url: string;
+}
+
+/** GET /sso/provisioning/config (P6-11, `provisioning:manage`) */
+export interface ProvisioningConfig {
+  /** the workspace role comes from the identity provider on each sign-in */
+  scopesProvisionInstanceRole: boolean;
+  /** project roles too */
+  scopesProvisionProjectRoles: boolean;
+  /** true: the role mapping rules here; false: the claims named below */
+  scopesUseExpressionMapping: boolean;
+  /** the scope asked for when provisioning is on */
+  scopesName: string;
+  scopesInstanceRoleClaimName: string;
+  scopesProjectsRolesClaimName: string;
+}
+
+/** one row of GET /sso/role-mapping-rules (P6-11, `roleMappingRule:list`) */
+export interface RoleMappingRule {
+  id: string;
+  type: 'instance' | 'project';
+  /** evaluated with the sign-in claims; only `true` matches, an error is false */
+  expression: string;
+  role: Role;
+  order: number;
+  /** project rules only */
+  projectIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** body of POST /sso/role-mapping-rules and PATCH /sso/role-mapping-rules/:id */
+export interface RoleMappingRuleBody {
+  type?: 'instance' | 'project';
+  expression?: string;
+  role?: Role;
+  projectIds?: string[];
+}
+
+export type LdapConnectionSecurity = 'none' | 'tls' | 'startTls';
+
+/** GET /ldap/config (P6-12, `ldap:manage`) */
+export interface LdapConfig {
+  loginEnabled: boolean;
+  loginLabel: string;
+  connectionUrl: string;
+  allowUnauthorizedCerts: boolean;
+  connectionSecurity: LdapConnectionSecurity;
+  connectionPort: number;
+  baseDn: string;
+  bindingAdminDn: string;
+  /** blank on read; a blank password on save keeps the stored one */
+  bindingAdminPassword: string;
+  firstNameAttribute: string;
+  lastNameAttribute: string;
+  emailAttribute: string;
+  loginIdAttribute: string;
+  ldapIdAttribute: string;
+  userFilter: string;
+  synchronizationEnabled: boolean;
+  /** minutes */
+  synchronizationInterval: number;
+  searchPageSize: number;
+  /** seconds */
+  searchTimeout: number;
+  enforceEmailUniqueness: boolean;
+  linkExistingAccountsByEmail: boolean;
+}
+
+/** one row of GET /ldap/sync (P6-12, `ldap:sync`), newest first */
+export interface LdapSyncRun {
+  id: string;
+  runMode: 'dry' | 'live';
+  status: 'success' | 'error';
+  startedAt: string;
+  endedAt: string | null;
+  scanned: number;
+  created: number;
+  updated: number;
+  disabled: number;
+  error: string | null;
+}
+
+/** GET /scim/config (P6-02, `scim:manage`) */
+export interface ScimConfig {
+  enabled: boolean;
+  hasToken: boolean;
+  /** the token's last four characters */
+  tokenHint: string | null;
+  baseUrl: string;
+  onDelete: 'disable' | 'delete';
+  dataAction: 'transfer' | 'delete';
+  transferProjectId: string | null;
+}
+
+/** body of PUT /scim/deprovisioning */
+export interface ScimDeprovisioningBody {
+  onDelete: 'disable' | 'delete';
+  dataAction: 'transfer' | 'delete';
+  transferProjectId?: string | null;
+}
+
+/** POST /scim/token: the token is shown once */
+export interface ScimTokenResult {
+  token: string;
+  baseUrl: string;
+}
+
+/** one row of GET /scim/transfer-targets: team projects and active members' personal projects */
+export interface ScimTransferTarget {
+  id: string;
+  name: string;
+  type: 'team' | 'personal';
+}

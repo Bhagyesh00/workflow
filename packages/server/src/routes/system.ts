@@ -27,6 +27,9 @@ const RESERVED = [
   '/mcp-server',
   '/mcp-oauth',
   '/.well-known',
+  // P6-01, P6-02: SAML and OIDC sign-in, SCIM
+  '/sso',
+  '/scim',
 ];
 
 /** RESERVED plus the MCP trigger endpoints of the config (`ENDPOINT_MCP`, `ENDPOINT_MCP_TEST`) */

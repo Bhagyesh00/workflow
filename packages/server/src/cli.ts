@@ -4,8 +4,13 @@
  *   worker   queue worker (EXECUTIONS_MODE=queue)
  *   migrate  apply database migrations
  *   seed     create a demo workspace, owner and sample workflow
+ *   mfa:disable  turn a user's two-factor sign-in off (`--email <address>`)
+ *   ldap:reset   clear a workspace's LDAP setup (`--tenant <slug>` and one of `--userId`, `--projectId`,
+ *                `--deleteWorkflowsAndCredentials`)
  */
 import { buildApp } from './app';
+import { ldapResetCommand } from './commands/ldap-reset';
+import { mfaDisableCommand } from './commands/mfa-disable';
 import { ConfigError, loadConfig } from './config';
 import { createContext, type ServerContext } from './context';
 import { createDatabase, runMigrations } from './db/client';
@@ -67,6 +72,18 @@ async function main(command: string): Promise<void> {
     return;
   }
 
+  // P6-18, P6-12: maintenance commands on a context with no listener (no triggers, no leader duties)
+  if (command === 'mfa:disable' || command === 'ldap:reset') {
+    const ctx = await createContext({ config, logger });
+    try {
+      const run = command === 'mfa:disable' ? mfaDisableCommand : ldapResetCommand;
+      await run(ctx, process.argv.slice(3));
+    } finally {
+      await ctx.close();
+    }
+    return;
+  }
+
   if (command === 'worker') {
     if (config.executionsMode !== 'queue') {
       throw new ConfigError('The worker command needs EXECUTIONS_MODE=queue (and REDIS_URL)');
@@ -95,7 +112,9 @@ async function main(command: string): Promise<void> {
     return;
   }
 
-  throw new ConfigError(`Unknown command "${command}". Use start, worker, migrate or seed.`);
+  throw new ConfigError(
+    `Unknown command "${command}". Use start, worker, migrate, seed, mfa:disable or ldap:reset.`,
+  );
 }
 
 main(process.argv[2] ?? 'start').catch((error) => {

@@ -313,6 +313,32 @@ export class McpOAuthRepository {
     });
   }
 
+  /**
+   * Ends every MCP OAuth grant of one user in the workspace (P6-02, P6-12 disable; S1's member removal):
+   * consents, codes, access and refresh tokens of every client. Other users' grants and the clients stay.
+   * Consents go too, so a re-enabled or re-invited member must consent again (they only cascade with the
+   * user row).
+   */
+  async deleteTokensForUser(tenantId: string, userId: string): Promise<void> {
+    if (!isUuid(tenantId) || !isUuid(userId)) return;
+    await this.db.transaction(async (tx) => {
+      await tx
+        .delete(oauthUserConsents)
+        .where(and(eq(oauthUserConsents.tenantId, tenantId), eq(oauthUserConsents.userId, userId)));
+      await tx
+        .delete(oauthAuthorizationCodes)
+        .where(
+          and(eq(oauthAuthorizationCodes.tenantId, tenantId), eq(oauthAuthorizationCodes.userId, userId)),
+        );
+      await tx
+        .delete(oauthAccessTokens)
+        .where(and(eq(oauthAccessTokens.tenantId, tenantId), eq(oauthAccessTokens.userId, userId)));
+      await tx
+        .delete(oauthRefreshTokens)
+        .where(and(eq(oauthRefreshTokens.tenantId, tenantId), eq(oauthRefreshTokens.userId, userId)));
+    });
+  }
+
   async getConsent(
     tenantId: string,
     userId: string,

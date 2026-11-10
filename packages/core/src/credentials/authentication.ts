@@ -122,12 +122,20 @@ function isHttpsUrl(value: string): boolean {
   }
 }
 
+/**
+ * Turns a token endpoint's parsed answer into the plain token (P6-16 JWE: decrypts the encrypted
+ * parts when the credential asks for it, refuses a plain answer then). Runs before the
+ * `access_token` check; its throw reaches the caller.
+ */
+export type OAuthTokenDecrypt = (token: DataObject, data: DataObject) => Promise<DataObject>;
+
 /** Fetch a token with the client-credentials grant or refresh an existing token. */
 export async function requestOAuth2Token(
   http: HttpClient,
   data: OAuth2Data,
   grant: { type: 'refresh_token'; refreshToken: string } | { type: 'client_credentials' },
   signal?: AbortSignal,
+  decryptToken?: OAuthTokenDecrypt,
 ): Promise<NonNullable<OAuth2Data['oauthTokenData']>> {
   if (!data.accessTokenUrl) throw new Error('OAuth2 credential has no access token URL');
   const accessTokenUrl = resolveCredentialUrl(data.accessTokenUrl, data);
@@ -155,7 +163,7 @@ export async function requestOAuth2Token(
   } else {
     auth = { username: data.clientId ?? '', password: data.clientSecret ?? '' };
   }
-  const token = (await http.request(
+  let token = (await http.request(
     {
       url: accessTokenUrl,
       method: 'POST',
@@ -168,6 +176,7 @@ export async function requestOAuth2Token(
     },
     signal,
   )) as Record<string, unknown>;
+  if (decryptToken) token = await decryptToken(token, data);
   if (!token.access_token) throw new Error('OAuth2 token response did not contain an access_token');
   return {
     ...token,
@@ -192,6 +201,7 @@ export async function oauth2Request<T>(
   request: HttpRequestOptions,
   onTokenRefresh: (data: OAuth2Data) => Promise<void>,
   signal?: AbortSignal,
+  decryptToken?: OAuthTokenDecrypt,
 ): Promise<T> {
   let tokenData = data.oauthTokenData;
   const refresh = async () => {
@@ -201,9 +211,10 @@ export async function oauth2Request<T>(
         data,
         { type: 'refresh_token', refreshToken: tokenData.refresh_token },
         signal,
+        decryptToken,
       );
     } else if (data.grantType === 'clientCredentials') {
-      tokenData = await requestOAuth2Token(http, data, { type: 'client_credentials' }, signal);
+      tokenData = await requestOAuth2Token(http, data, { type: 'client_credentials' }, signal, decryptToken);
     } else {
       throw new Error(
         'OAuth2 credential is not connected or has no refresh token. Reconnect the credential.',

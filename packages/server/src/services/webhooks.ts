@@ -964,6 +964,9 @@ export class WebhookService {
         projectId: await executions.projectFor(tenant.id, input.workflowId),
         mode: input.mode,
         workflowId: input.workflowId,
+        // P6-87 (C0): the credential gate walks from this trigger (`ctx.getCredentialGate()`, L16)
+        workflow: definition,
+        startNode: node.name,
       });
       const contextDeps: ContextDeps = {
         workflow,
@@ -1024,6 +1027,8 @@ export class WebhookService {
             triggerItems: JSON.parse(JSON.stringify(result.workflowData[0] ?? [])),
             executionId,
             userId: input.userId,
+            // P6-15, P6-87 (C0): the person a signed-in trigger verified (Webhook, Form, Chat with workspace sign-in)
+            endUserId: result.triggerUserId,
             destinationNode: input.destinationNode,
             // P5-61: custom data the node set for this run (e.g. the chat's session id)
             customData: result.customData,

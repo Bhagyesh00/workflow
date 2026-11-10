@@ -25,6 +25,12 @@
  * After C0 only L13 edits this file (its public rows: `/folders` gone for `/projects/:projectId/folders`, the
  * new project, role, transfer and security policy rows, the unfiltered list rows as `scope: null`); L24 edits it last. Later stages
  * add one row per new route in their own C0.
+ *
+ * P6 S2 (C0e): 84 rows for the identity routes C0 registers (members and API keys moved from resources.ts to
+ * members.ts and api-keys.ts; MFA, password, SSO settings, SAML, OIDC, provisioning, LDAP, SCIM, JWKS, the private
+ * credential routes and the public users, role mapping, LDAP and SSO rows). Public: the password token routes,
+ * `GET /rest/auth/sso-options`, `/sso/saml/:slug/*` and `/sso/oidc/:slug/*` (the identity provider calls them),
+ * `/scim/v2/*` (a SCIM token, no session) and the JWKS document. Only C0e edits this file in S2.
  */
 import type { Scope } from '@workflow/workflow';
 import type { Role } from '../src/db/schema';
@@ -171,6 +177,57 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     change: 'CHANGE: `member` holds it, so an old viewer gains writes (n8n GLOBAL_MEMBER_SCOPES)',
   },
 
+  // api-keys.ts
+  {
+    file: 'api-keys.ts',
+    method: 'GET',
+    path: '/rest/api-keys',
+    scope: null,
+    target: 'apiKey',
+    access: 'auth',
+    legacyMin: 'viewer',
+  },
+  {
+    file: 'api-keys.ts',
+    method: 'POST',
+    path: '/rest/api-keys',
+    scope: 'apiKey:create',
+    target: 'apiKey',
+    legacyMin: 'viewer',
+  },
+  {
+    file: 'api-keys.ts',
+    method: 'DELETE',
+    path: '/rest/api-keys/:id',
+    scope: null,
+    target: 'apiKey',
+    access: 'auth',
+    legacyMin: 'viewer',
+  },
+  {
+    file: 'api-keys.ts',
+    method: 'GET',
+    path: '/rest/api-keys/scopes',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+  },
+  {
+    file: 'api-keys.ts',
+    method: 'PATCH',
+    path: '/rest/api-keys/:id',
+    scope: null,
+    target: 'apiKey',
+    access: 'auth',
+  },
+  {
+    file: 'api-keys.ts',
+    method: 'POST',
+    path: '/rest/api-keys/:id/rotate',
+    scope: null,
+    target: 'apiKey',
+    access: 'auth',
+  },
   // app.ts
   { file: 'app.ts', method: 'OPTIONS', path: '/rest/*', scope: null, target: 'none', access: 'public' },
 
@@ -488,6 +545,22 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: null,
     target: 'none',
     access: 'public',
+  },
+  {
+    file: 'credentials.ts',
+    method: 'POST',
+    path: '/rest/credentials/:id/authorize',
+    scope: 'credential:connect',
+    target: 'credential',
+  },
+  {
+    file: 'credentials.ts',
+    method: 'DELETE',
+    path: '/rest/credentials/:id/my-connection',
+    scope: null,
+    target: 'credential',
+    access: 'auth',
+    change: 'session only, as n8n: a user who lost access may still clear their own connection',
   },
 
   // data-tables.ts
@@ -870,6 +943,52 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     legacyMin: 'viewer',
   },
 
+  // jwks.ts
+  {
+    file: 'jwks.ts',
+    method: 'GET',
+    path: '/.well-known/jwks/:slug.json',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+
+  // ldap.ts
+  {
+    file: 'ldap.ts',
+    method: 'GET',
+    path: '/rest/ldap/config',
+    scope: 'ldap:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'ldap.ts',
+    method: 'PUT',
+    path: '/rest/ldap/config',
+    scope: 'ldap:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'ldap.ts',
+    method: 'POST',
+    path: '/rest/ldap/test-connection',
+    scope: 'ldap:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'ldap.ts',
+    method: 'GET',
+    path: '/rest/ldap/sync',
+    scope: 'ldap:sync',
+    target: 'tenant',
+  },
+  {
+    file: 'ldap.ts',
+    method: 'POST',
+    path: '/rest/ldap/sync',
+    scope: 'ldap:sync',
+    target: 'tenant',
+  },
   // mcp-consent.ts
   {
     file: 'mcp-consent.ts',
@@ -1072,6 +1191,175 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     change: 'No gate on the route: the service checks `workflow:update` per workflow of the body',
   },
 
+  // members.ts
+  {
+    file: 'members.ts',
+    method: 'GET',
+    path: '/rest/invitations',
+    scope: 'user:create',
+    target: 'invitation',
+    legacyMin: 'admin',
+  },
+  {
+    file: 'members.ts',
+    method: 'DELETE',
+    path: '/rest/invitations/:id',
+    scope: 'user:create',
+    target: 'invitation',
+    legacyMin: 'admin',
+  },
+  {
+    file: 'members.ts',
+    method: 'GET',
+    path: '/rest/members',
+    scope: 'user:list',
+    target: 'member',
+    legacyMin: 'viewer',
+  },
+  {
+    file: 'members.ts',
+    method: 'DELETE',
+    path: '/rest/members/:userId',
+    scope: 'user:delete',
+    target: 'member',
+    legacyMin: 'admin',
+  },
+  {
+    file: 'members.ts',
+    method: 'PATCH',
+    path: '/rest/members/:userId',
+    scope: 'user:changeRole',
+    target: 'member',
+    legacyMin: 'admin',
+  },
+  {
+    file: 'members.ts',
+    method: 'POST',
+    path: '/rest/members/invite',
+    scope: 'user:create',
+    target: 'member',
+    legacyMin: 'admin',
+  },
+  {
+    file: 'members.ts',
+    method: 'POST',
+    path: '/rest/invitations/:id/resend',
+    scope: 'user:create',
+    target: 'invitation',
+  },
+  {
+    file: 'members.ts',
+    method: 'POST',
+    path: '/rest/invitations/:id/link',
+    scope: 'user:generateInviteLink',
+    target: 'invitation',
+  },
+
+  // mfa.ts
+  {
+    file: 'mfa.ts',
+    method: 'GET',
+    path: '/rest/auth/mfa/setup',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+  },
+  {
+    file: 'mfa.ts',
+    method: 'POST',
+    path: '/rest/auth/mfa/enable',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+  },
+  {
+    file: 'mfa.ts',
+    method: 'POST',
+    path: '/rest/auth/mfa/disable',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+  },
+  {
+    file: 'mfa.ts',
+    method: 'POST',
+    path: '/rest/auth/mfa/verify',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+  },
+  {
+    file: 'mfa.ts',
+    method: 'POST',
+    path: '/rest/settings/mfa-enforce',
+    scope: 'user:enforceMfa',
+    target: 'tenant',
+  },
+
+  // password.ts
+  {
+    file: 'password.ts',
+    method: 'POST',
+    path: '/rest/auth/forgot-password',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'password.ts',
+    method: 'POST',
+    path: '/rest/auth/reset-token/resolve',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'password.ts',
+    method: 'POST',
+    path: '/rest/auth/reset-password',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'password.ts',
+    method: 'POST',
+    path: '/rest/auth/confirm-email-change',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'password.ts',
+    method: 'PATCH',
+    path: '/rest/auth/me',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+  },
+  {
+    file: 'password.ts',
+    method: 'PATCH',
+    path: '/rest/auth/me/password',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+  },
+  {
+    file: 'password.ts',
+    method: 'POST',
+    path: '/rest/auth/change-email',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+  },
+  {
+    file: 'password.ts',
+    method: 'GET',
+    path: '/rest/members/:userId/password-reset-link',
+    scope: 'user:resetPassword',
+    target: 'member',
+  },
   // projects.ts
   {
     file: 'projects.ts',
@@ -1600,6 +1888,35 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     legacyMin: 'editor',
   },
 
+  // public-ldap.ts
+  {
+    file: 'public-ldap.ts',
+    method: 'GET',
+    path: '/api/v1/settings/ldap',
+    scope: 'ldap:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'public-ldap.ts',
+    method: 'PUT',
+    path: '/api/v1/settings/ldap',
+    scope: 'ldap:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'public-ldap.ts',
+    method: 'GET',
+    path: '/api/v1/settings/ldap/sync',
+    scope: 'ldap:sync',
+    target: 'tenant',
+  },
+  {
+    file: 'public-ldap.ts',
+    method: 'POST',
+    path: '/api/v1/settings/ldap/sync',
+    scope: 'ldap:sync',
+    target: 'tenant',
+  },
   // public-projects.ts
   {
     file: 'public-projects.ts',
@@ -1674,6 +1991,42 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'credential',
   },
 
+  // public-role-mapping.ts
+  {
+    file: 'public-role-mapping.ts',
+    method: 'GET',
+    path: '/api/v1/role-mapping-rules',
+    scope: 'roleMappingRule:list',
+    target: 'none',
+  },
+  {
+    file: 'public-role-mapping.ts',
+    method: 'POST',
+    path: '/api/v1/role-mapping-rules',
+    scope: 'roleMappingRule:create',
+    target: 'none',
+  },
+  {
+    file: 'public-role-mapping.ts',
+    method: 'POST',
+    path: '/api/v1/role-mapping-rules/:id/move',
+    scope: 'roleMappingRule:update',
+    target: 'none',
+  },
+  {
+    file: 'public-role-mapping.ts',
+    method: 'PATCH',
+    path: '/api/v1/role-mapping-rules/:id',
+    scope: 'roleMappingRule:update',
+    target: 'none',
+  },
+  {
+    file: 'public-role-mapping.ts',
+    method: 'DELETE',
+    path: '/api/v1/role-mapping-rules/:id',
+    scope: 'roleMappingRule:delete',
+    target: 'none',
+  },
   // public-roles.ts
   {
     file: 'public-roles.ts',
@@ -1727,6 +2080,72 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'tenant',
   },
 
+  // public-sso.ts
+  {
+    file: 'public-sso.ts',
+    method: 'GET',
+    path: '/api/v1/settings/sso/saml',
+    scope: 'saml:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'public-sso.ts',
+    method: 'PUT',
+    path: '/api/v1/settings/sso/saml',
+    scope: 'saml:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'public-sso.ts',
+    method: 'GET',
+    path: '/api/v1/settings/sso/oidc',
+    scope: 'oidc:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'public-sso.ts',
+    method: 'PUT',
+    path: '/api/v1/settings/sso/oidc',
+    scope: 'oidc:manage',
+    target: 'tenant',
+  },
+
+  // public-users.ts
+  {
+    file: 'public-users.ts',
+    method: 'GET',
+    path: '/api/v1/users',
+    scope: 'user:list',
+    target: 'member',
+  },
+  {
+    file: 'public-users.ts',
+    method: 'GET',
+    path: '/api/v1/users/:id',
+    scope: 'user:read',
+    target: 'member',
+  },
+  {
+    file: 'public-users.ts',
+    method: 'POST',
+    path: '/api/v1/users',
+    scope: 'user:create',
+    target: 'member',
+  },
+  {
+    file: 'public-users.ts',
+    method: 'DELETE',
+    path: '/api/v1/users/:id',
+    scope: 'user:delete',
+    target: 'member',
+  },
+  {
+    file: 'public-users.ts',
+    method: 'PATCH',
+    path: '/api/v1/users/:id/role',
+    scope: 'user:changeRole',
+    target: 'member',
+  },
   // push.ts
   {
     file: 'push.ts',
@@ -1742,83 +2161,9 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
   {
     file: 'resources.ts',
     method: 'GET',
-    path: '/rest/api-keys',
-    scope: null,
-    target: 'apiKey',
-    access: 'auth',
-    legacyMin: 'viewer',
-  },
-  {
-    file: 'resources.ts',
-    method: 'POST',
-    path: '/rest/api-keys',
-    scope: 'apiKey:create',
-    target: 'apiKey',
-    legacyMin: 'viewer',
-  },
-  {
-    file: 'resources.ts',
-    method: 'DELETE',
-    path: '/rest/api-keys/:id',
-    scope: null,
-    target: 'apiKey',
-    access: 'auth',
-    legacyMin: 'viewer',
-  },
-  {
-    file: 'resources.ts',
-    method: 'GET',
     path: '/rest/audit-log',
     scope: 'auditLogs:manage',
     target: 'tenant',
-    legacyMin: 'admin',
-  },
-  {
-    file: 'resources.ts',
-    method: 'GET',
-    path: '/rest/invitations',
-    scope: 'user:create',
-    target: 'invitation',
-    legacyMin: 'admin',
-  },
-  {
-    file: 'resources.ts',
-    method: 'DELETE',
-    path: '/rest/invitations/:id',
-    scope: 'user:create',
-    target: 'invitation',
-    legacyMin: 'admin',
-  },
-  {
-    file: 'resources.ts',
-    method: 'GET',
-    path: '/rest/members',
-    scope: 'user:list',
-    target: 'member',
-    legacyMin: 'viewer',
-  },
-  {
-    file: 'resources.ts',
-    method: 'DELETE',
-    path: '/rest/members/:userId',
-    scope: 'user:delete',
-    target: 'member',
-    legacyMin: 'admin',
-  },
-  {
-    file: 'resources.ts',
-    method: 'PATCH',
-    path: '/rest/members/:userId',
-    scope: 'user:changeRole',
-    target: 'member',
-    legacyMin: 'admin',
-  },
-  {
-    file: 'resources.ts',
-    method: 'POST',
-    path: '/rest/members/invite',
-    scope: 'user:create',
-    target: 'member',
     legacyMin: 'admin',
   },
   {
@@ -1929,6 +2274,123 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
   },
   { file: 'roles.ts', method: 'GET', path: '/rest/roles/:slug/members', scope: 'role:read', target: 'role' },
 
+  // scim-settings.ts
+  {
+    file: 'scim-settings.ts',
+    method: 'GET',
+    path: '/rest/scim/config',
+    scope: 'scim:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'scim-settings.ts',
+    method: 'PATCH',
+    path: '/rest/scim/config',
+    scope: 'scim:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'scim-settings.ts',
+    method: 'PUT',
+    path: '/rest/scim/deprovisioning',
+    scope: 'scim:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'scim-settings.ts',
+    method: 'POST',
+    path: '/rest/scim/token',
+    scope: 'scim:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'scim-settings.ts',
+    method: 'DELETE',
+    path: '/rest/scim/token',
+    scope: 'scim:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'scim-settings.ts',
+    method: 'GET',
+    path: '/rest/scim/transfer-targets',
+    scope: 'scim:manage',
+    target: 'tenant',
+  },
+
+  // scim.ts
+  {
+    file: 'scim.ts',
+    method: 'GET',
+    path: '/scim/v2/Users',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'scim.ts',
+    method: 'POST',
+    path: '/scim/v2/Users',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'scim.ts',
+    method: 'GET',
+    path: '/scim/v2/Users/:id',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'scim.ts',
+    method: 'PUT',
+    path: '/scim/v2/Users/:id',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'scim.ts',
+    method: 'PATCH',
+    path: '/scim/v2/Users/:id',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'scim.ts',
+    method: 'DELETE',
+    path: '/scim/v2/Users/:id',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'scim.ts',
+    method: 'GET',
+    path: '/scim/v2/ServiceProviderConfig',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'scim.ts',
+    method: 'GET',
+    path: '/scim/v2/ResourceTypes',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'scim.ts',
+    method: 'GET',
+    path: '/scim/v2/Schemas',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
   // secret-connections.ts
   {
     file: 'secret-connections.ts',
@@ -2167,6 +2629,200 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'workflow',
   },
 
+  // sso-oidc.ts
+  {
+    file: 'sso-oidc.ts',
+    method: 'GET',
+    path: '/sso/oidc/:slug/login',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'sso-oidc.ts',
+    method: 'GET',
+    path: '/sso/oidc/:slug/callback',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'sso-oidc.ts',
+    method: 'GET',
+    path: '/rest/sso/oidc/config',
+    scope: 'oidc:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'sso-oidc.ts',
+    method: 'POST',
+    path: '/rest/sso/oidc/config',
+    scope: 'oidc:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'sso-oidc.ts',
+    method: 'POST',
+    path: '/rest/sso/oidc/config/test',
+    scope: 'oidc:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'sso-oidc.ts',
+    method: 'POST',
+    path: '/rest/sso/oidc/logout',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+  },
+
+  // sso-provisioning.ts
+  {
+    file: 'sso-provisioning.ts',
+    method: 'GET',
+    path: '/rest/sso/provisioning/config',
+    scope: 'provisioning:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'sso-provisioning.ts',
+    method: 'PATCH',
+    path: '/rest/sso/provisioning/config',
+    scope: 'provisioning:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'sso-provisioning.ts',
+    method: 'GET',
+    path: '/rest/sso/role-mapping-rules',
+    scope: 'roleMappingRule:list',
+    target: 'none',
+  },
+  {
+    file: 'sso-provisioning.ts',
+    method: 'POST',
+    path: '/rest/sso/role-mapping-rules',
+    scope: 'roleMappingRule:create',
+    target: 'none',
+  },
+  {
+    file: 'sso-provisioning.ts',
+    method: 'POST',
+    path: '/rest/sso/role-mapping-rules/:id/move',
+    scope: 'roleMappingRule:update',
+    target: 'none',
+  },
+  {
+    file: 'sso-provisioning.ts',
+    method: 'PATCH',
+    path: '/rest/sso/role-mapping-rules/:id',
+    scope: 'roleMappingRule:update',
+    target: 'none',
+  },
+  {
+    file: 'sso-provisioning.ts',
+    method: 'DELETE',
+    path: '/rest/sso/role-mapping-rules/:id',
+    scope: 'roleMappingRule:delete',
+    target: 'none',
+  },
+
+  // sso-saml.ts
+  {
+    file: 'sso-saml.ts',
+    method: 'GET',
+    path: '/sso/saml/:slug/metadata',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'sso-saml.ts',
+    method: 'GET',
+    path: '/sso/saml/:slug/acs',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'sso-saml.ts',
+    method: 'POST',
+    path: '/sso/saml/:slug/acs',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'sso-saml.ts',
+    method: 'GET',
+    path: '/sso/saml/:slug/initsso',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'sso-saml.ts',
+    method: 'GET',
+    path: '/rest/sso/saml/config',
+    scope: 'saml:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'sso-saml.ts',
+    method: 'POST',
+    path: '/rest/sso/saml/config',
+    scope: 'saml:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'sso-saml.ts',
+    method: 'POST',
+    path: '/rest/sso/saml/config/toggle',
+    scope: 'saml:manage',
+    target: 'tenant',
+  },
+  {
+    file: 'sso-saml.ts',
+    method: 'POST',
+    path: '/rest/sso/saml/config/test',
+    scope: 'saml:manage',
+    target: 'tenant',
+  },
+
+  // sso-settings.ts
+  {
+    file: 'sso-settings.ts',
+    method: 'GET',
+    path: '/rest/auth/sso-options',
+    scope: null,
+    target: 'none',
+    access: 'public',
+  },
+  {
+    file: 'sso-settings.ts',
+    method: 'GET',
+    path: '/rest/sso/method',
+    scope: 'saml:manage',
+    target: 'tenant',
+    change:
+      'any of saml:manage, oidc:manage, ldap:manage (`requireAnyScope`); every allowed role holds all three',
+  },
+  {
+    file: 'sso-settings.ts',
+    method: 'PUT',
+    path: '/rest/sso/method',
+    scope: 'saml:manage',
+    target: 'tenant',
+    change:
+      'any of saml:manage, oidc:manage, ldap:manage (`requireAnyScope`); every allowed role holds all three',
+  },
+  {
+    file: 'sso-settings.ts',
+    method: 'PATCH',
+    path: '/rest/members/:userId/sso-settings',
+    scope: 'user:update',
+    target: 'member',
+  },
   // system.ts
   { file: 'system.ts', method: 'GET', path: '/healthz', scope: null, target: 'none', access: 'public' },
   {

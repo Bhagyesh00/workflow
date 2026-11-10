@@ -254,6 +254,22 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
     return { data: { ok: true } };
   });
 
+  // P6-15 (L14): a private credential's own connection. Authorize starts the caller's OAuth flow (the state
+  // marks the per user target); stub (L14), the handler throws until the lane
+  app.post('/credentials/:id/authorize', async (request) => {
+    const { id } = parse(idParams, request.params);
+    await requireScope(request, 'credential:connect', { credentialId: id });
+    throw new Error('not implemented (L14)');
+  });
+
+  // session only, as n8n: a user who lost access to the credential may still clear their own row
+  app.delete('/credentials/:id/my-connection', async (request) => {
+    const { id } = parse(idParams, request.params);
+    const auth = requireAuth(request);
+    await ctx.privateCredentials.deleteMine(auth, id);
+    return { data: { ok: true } };
+  });
+
   // P6-24: the data resolves `$secrets` and `$vars` under one project: a stored credential's own (with
   // `credential:read` on it; the body data counts only with `credential:update`), else the body's project
   // (else the default) with `credential:create` there

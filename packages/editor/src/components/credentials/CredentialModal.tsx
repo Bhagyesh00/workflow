@@ -23,6 +23,8 @@ import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { FormField, TextInput } from '../ui/Field';
 import { Callout, PageLoader } from '../ui/misc';
+import { JweUriRow } from './JweUriRow';
+import { PrivateCredentialSection } from './PrivateCredentialSection';
 
 export interface CredentialModalProps {
   open: boolean;
@@ -361,6 +363,10 @@ export function CredentialModal({ open, onClose, credentialId, type, onSaved }: 
           <ParameterContext.Provider value={context}>
             <ParameterList properties={shownProperties} values={data} path={[]} />
           </ParameterContext.Provider>
+          {/* P6-16 (L15): the JWKS URI for the provider when JWE is on */}
+          <JweUriRow typeName={typeName} jweEnabled={data.jweEnabled === true} />
+          {/* P6-15 (L14): private (per user) credentials */}
+          <PrivateCredentialSection credentialId={savedId} typeName={typeName} isOAuth={isOAuth} />
           {isOAuth && !savedId && (
             <Callout tone="info">Save the credential first, then connect your account.</Callout>
           )}

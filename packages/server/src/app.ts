@@ -9,6 +9,7 @@ import { handleError } from './http/errors';
 import { registerAiRoutes } from './routes/ai';
 import { registerAiSessionRoutes } from './routes/ai-sessions';
 import { registerAnnotationTagRoutes } from './routes/annotation-tags';
+import { registerApiKeyRoutes } from './routes/api-keys';
 import { registerAssistantRoutes } from './routes/assistant';
 import { registerAssistantConfirmRoutes } from './routes/assistant-confirm';
 import { registerAssistantDraftRoutes } from './routes/assistant-drafts';
@@ -23,20 +24,32 @@ import { registerExecutionRoutes } from './routes/executions';
 import { registerFavoriteRoutes } from './routes/favorites';
 import { registerFolderRoutes } from './routes/folders';
 import { registerFormAuthRoutes } from './routes/form-auth';
+import { registerJwksRoutes } from './routes/jwks';
+import { registerLdapRoutes } from './routes/ldap';
 import { registerMcpConsentRoutes } from './routes/mcp-consent';
 import { mcpOAuthPlugin } from './routes/mcp-oauth';
 import { registerMcpOAuthClientRoutes } from './routes/mcp-oauth-clients';
 import { registerMcpServerRoutes } from './routes/mcp-server';
 import { registerMcpSettingsRoutes } from './routes/mcp-settings';
+import { registerMemberRoutes } from './routes/members';
+import { registerMfaRoutes } from './routes/mfa';
+import { registerPasswordRoutes } from './routes/password';
 import { registerProjectRoutes } from './routes/projects';
 import { publicApiPlugin } from './routes/public-api';
 import { registerPushRoutes } from './routes/push';
 import { registerResourceRoutes } from './routes/resources';
 import { registerRoleRoutes } from './routes/roles';
+import { scimPlugin } from './routes/scim';
+import { registerScimSettingsRoutes } from './routes/scim-settings';
 import { registerSecretConnectionRoutes } from './routes/secret-connections';
 import { registerSecuritySettingsRoutes } from './routes/security-settings';
 import { registerSettingsRoutes } from './routes/settings';
 import { registerSharingRoutes } from './routes/sharing';
+import { registerOidcRestRoutes } from './routes/sso-oidc';
+import { registerProvisioningRoutes } from './routes/sso-provisioning';
+import { ssoPlugin } from './routes/sso-public';
+import { registerSamlRestRoutes } from './routes/sso-saml';
+import { registerSsoSettingsRoutes } from './routes/sso-settings';
 import { registerEditor, registerHealthRoutes } from './routes/system';
 import { registerTransferRoutes } from './routes/transfer';
 import { webhookPlugin } from './routes/webhooks';
@@ -115,6 +128,11 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
 
   // webhooks: raw bodies, sandboxed responses
   await app.register(webhookPlugin, { ctx });
+  // P6 S2: SAML and OIDC sign-in (P6-09, P6-10), SCIM (P6-02) and the JWE keys (P6-16), outside /rest (no
+  // session, no CSRF: the signed IdP message, the signed state, the SCIM token is the proof; the keys are public)
+  await app.register(ssoPlugin, { prefix: '/sso', ctx });
+  await app.register(scimPlugin, { prefix: '/scim/v2', ctx });
+  registerJwksRoutes(app, ctx);
 
   registerHealthRoutes(app, ctx);
   // P5-56: the chat widget's script and styles, outside /rest (no session, no CSRF)
@@ -184,11 +202,24 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerTransferRoutes(rest, ctx);
       registerRoleRoutes(rest, ctx);
       registerSecuritySettingsRoutes(rest, ctx);
+      // Phase 6 S2: members and API keys (moved from resources.ts; P6-20, P6-21), MFA (P6-18), password
+      // (P6-19), SSO settings, SAML, OIDC, provisioning (P6-01, P6-09, P6-10, P6-11), LDAP (P6-12), SCIM (P6-02)
+      registerMemberRoutes(rest, ctx);
+      registerApiKeyRoutes(rest, ctx);
+      registerMfaRoutes(rest, ctx);
+      registerPasswordRoutes(rest, ctx);
+      registerSsoSettingsRoutes(rest, ctx);
+      registerSamlRestRoutes(rest, ctx);
+      registerOidcRestRoutes(rest, ctx);
+      registerProvisioningRoutes(rest, ctx);
+      registerLdapRoutes(rest, ctx);
+      registerScimSettingsRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );
 
-  await app.register(publicApiPlugin, { prefix: '/api/v1', ctx });
+  // P6-21: PUBLIC_API_DISABLED turns the whole public API off (every /api/v1 path answers 404, never the SPA)
+  if (!config.publicApiDisabled) await app.register(publicApiPlugin, { prefix: '/api/v1', ctx });
   await registerEditor(app, ctx);
   return app;
 }

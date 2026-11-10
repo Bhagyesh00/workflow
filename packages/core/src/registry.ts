@@ -61,7 +61,8 @@ export class CredentialTypes implements CredentialTypeRegistry {
     const parents = (type.extends ?? [])
       .map((p) => this.getResolved(p))
       .filter((p): p is CredentialType => !!p);
-    const properties = [...parents.flatMap((p) => p.properties)];
+    // a parent's property marked `doNotInherit` stays on the parent only
+    const properties = [...parents.flatMap((p) => p.properties.filter((prop) => !prop.doNotInherit))];
     for (const prop of type.properties) {
       const i = properties.findIndex((p) => p.name === prop.name);
       if (i >= 0) properties[i] = prop;

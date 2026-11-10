@@ -7,12 +7,14 @@ import { hash, verify } from '@node-rs/argon2';
 import type { Config } from '../config';
 import type { Database } from '../db/client';
 import type { LegacyRole, Role, SystemRole, TenantRow, UserRow } from '../db/schema';
+import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { createRepositories, type Repositories } from '../repositories';
 import { PUBLIC_API_AUDIENCE } from '../repositories/accounts';
+import type { SsoProfile } from './sso/login';
 
 export const SESSION_COOKIE = 'wf_session';
-export const SESSION_TTL_MS = 14 * 86_400_000;
+// the session lifetime is `config.sessionTtlMs` (USER_MANAGEMENT_JWT_DURATION_HOURS, default 14 days)
 /** a session is extended at most once per this interval (sliding expiry) */
 export const SESSION_REFRESH_MS = 3_600_000;
 const INVITATION_TTL_MS = 7 * 86_400_000;
@@ -36,6 +38,12 @@ export function sha256(value: string): string {
 
 export function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString('base64url');
+}
+
+/** an API key `wfk_<prefix>_<secret>` and its prefix; only sha256(key) is stored */
+function newApiKeySecret(): { prefix: string; key: string } {
+  const prefix = randomBytes(4).toString('hex');
+  return { prefix, key: `wfk_${prefix}_${randomToken(32)}` };
 }
 
 /** at least 8 characters with a letter and a digit */
@@ -106,12 +114,94 @@ export interface AuthResult {
   token: string;
 }
 
+/** how a session signed in (`sessions.auth_method`); every way but password is fenced (P6-01) */
+export type SessionAuthMethod = 'password' | 'saml' | 'oidc' | 'ldap';
+
+/** P6-01, P6-12, P6-18: the sign-in body (routes/auth.ts `loginSchema`) */
+export interface LoginInput {
+  email: string;
+  password: string;
+  /** the workspace slug the person signs in to (the sign-in page's workspace field) */
+  workspace?: string;
+  /** six digits from the authenticator app */
+  mfaCode?: string;
+  mfaRecoveryCode?: string;
+}
+
+/** a workspace of the user, as `memberships.listForUser` lists it */
+export interface MemberTenant {
+  id: string;
+  name: string;
+  slug: string;
+  role: Role;
+}
+export type Tenants = MemberTenant[];
+
+/** P6-12: a person the directory verified (LDAP bind), with no session yet; `user` null = no account yet */
+export interface DirectoryMatch {
+  tenant: TenantRow;
+  profile: SsoProfile;
+  user: UserRow | null;
+}
+
+/**
+ * The sign-in steps other services own (wired by context.ts through `useSignInSteps`): the SSO rules
+ * (L6), the LDAP login (L10) and the MFA step (L2). Until wired, the defaults below keep today's sign-in.
+ */
+export interface SignInSteps {
+  /** after the password: the workspaces this user may enter with a password; none left is 403 `sso_required` */
+  passwordTenants(user: UserRow, tenants: Tenants, workspace?: string): Promise<Tenants>;
+  /** before the password check: a directory login (LDAP), or undefined to go on with the password */
+  directoryLogin(input: LoginInput, meta: SessionMeta): Promise<DirectoryMatch | undefined>;
+  /** the session of a directory match (`ssoLogin.signIn` with `authMethod: 'ldap'`) */
+  directorySignIn(match: DirectoryMatch, meta: SessionMeta): Promise<AuthResult>;
+  /** the MFA step: throws 401 `mfa_required` or a wrong code; `mfaVerified` goes on the session */
+  mfaStep(user: UserRow, input: LoginInput): Promise<{ mfaVerified: boolean }>;
+  /** before an invitation is accepted (no write before it) */
+  assertInviteAcceptable(tenantId: string): Promise<void>;
+  /** a session entering a workspace (switch): throws 403 when SSO fences it */
+  assertSessionEntry(auth: AuthContext, tenantId: string): Promise<void>;
+}
+
+/** today's sign-in: every workspace, no directory, no MFA, every invitation, a switch to any membership */
+const DEFAULT_SIGN_IN_STEPS: SignInSteps = {
+  passwordTenants: async (_user, tenants) => tenants,
+  directoryLogin: async () => undefined,
+  directorySignIn: async () => {
+    throw new Error('directory sign-in is not wired');
+  },
+  mfaStep: async () => ({ mfaVerified: false }),
+  assertInviteAcceptable: async () => {},
+  assertSessionEntry: async () => {},
+};
+
+/** P6-01: a session that signed in through SSO or LDAP cannot change what the account holds everywhere */
+export const SSO_SESSION_FENCED_MESSAGE =
+  'This session signed in with single sign-on, so it cannot change the account. Sign in with your password to change it.';
+
 export class AuthService {
+  private steps: SignInSteps = DEFAULT_SIGN_IN_STEPS;
+
   constructor(
     private readonly config: Config,
     private readonly database: Database,
     private readonly repos: Repositories,
   ) {}
+
+  /** where the SSO, LDAP and MFA steps come from (context.ts), as `CredentialService.useSecrets` */
+  useSignInSteps(steps: SignInSteps): void {
+    this.steps = steps;
+  }
+
+  /**
+   * P6-01: account-wide changes (name, email, password, MFA) need a password session; a session that
+   * signed in with SAML, OIDC or LDAP gets 403 `sso_session_fenced`. An API key has no `authMethod`.
+   */
+  assertGlobalAccountChange(auth: AuthContext): void {
+    if (auth.authMethod && auth.authMethod !== 'password') {
+      throw new ApiError(403, 'sso_session_fenced', SSO_SESSION_FENCED_MESSAGE);
+    }
+  }
 
   hashPassword(password: string): Promise<string> {
     return hash(password, ARGON2);
@@ -135,15 +225,23 @@ export class AuthService {
     return `${base}-${randomBytes(4).toString('hex')}`;
   }
 
-  async createSession(userId: string, tenantId: string, meta: SessionMeta): Promise<string> {
+  /** a new session; `authMethod` defaults to password and `mfaVerified` to false */
+  async createSession(
+    userId: string,
+    tenantId: string,
+    meta: SessionMeta,
+    options: { authMethod?: SessionAuthMethod; mfaVerified?: boolean } = {},
+  ): Promise<string> {
     const token = randomToken();
     await this.repos.sessions.create({
       id: sha256(token),
       userId,
       tenantId,
-      expiresAt: new Date(Date.now() + SESSION_TTL_MS),
+      expiresAt: new Date(Date.now() + this.config.sessionTtlMs),
       ip: meta.ip,
       userAgent: meta.userAgent?.slice(0, 512),
+      authMethod: options.authMethod ?? 'password',
+      mfaVerified: options.mfaVerified ?? false,
     });
     return token;
   }
@@ -180,7 +278,17 @@ export class AuthService {
     return { user, tenant, role: 'owner', token };
   }
 
-  async login(input: { email: string; password: string }, meta: SessionMeta): Promise<AuthResult> {
+  /**
+   * Sign-in. A directory login (LDAP, L10) goes first: on a match, the MFA step for a known user, then the
+   * directory session (as n8n checks MFA after the LDAP check). With no match, the password as before, then
+   * the workspaces SSO still lets in by password (none left: 403 `sso_required`), then the MFA step.
+   */
+  async login(input: LoginInput, meta: SessionMeta): Promise<AuthResult> {
+    const match = await this.steps.directoryLogin(input, meta);
+    if (match) {
+      if (match.user) await this.steps.mfaStep(match.user, input);
+      return this.steps.directorySignIn(match, meta);
+    }
     const user = await this.repos.users.getByEmail(input.email);
     const ok = user
       ? await this.verifyPassword(user.passwordHash, input.password)
@@ -193,12 +301,21 @@ export class AuthService {
       }
       throw new ApiError(401, 'invalid_credentials', 'Wrong email or password');
     }
-    const tenants = await this.repos.memberships.listForUser(user.id);
-    if (!tenants.length) throw ApiError.forbidden('This account does not belong to any workspace');
-    const first = tenants[0];
+    const memberOf = await this.repos.memberships.listForUser(user.id);
+    if (!memberOf.length) throw ApiError.forbidden('This account does not belong to any workspace');
+    const tenants = await this.steps.passwordTenants(user, memberOf, input.workspace);
+    if (!tenants.length) {
+      throw new ApiError(
+        403,
+        'sso_required',
+        'This workspace signs in with single sign-on. Use SSO to sign in.',
+      );
+    }
+    const { mfaVerified } = await this.steps.mfaStep(user, input);
+    const first = (input.workspace && tenants.find((t) => t.slug === input.workspace)) || tenants[0];
     const tenant = (await this.repos.tenants.get(first.id))!;
     await this.repos.users.touchLogin(user.id);
-    const token = await this.createSession(user.id, tenant.id, meta);
+    const token = await this.createSession(user.id, tenant.id, meta, { authMethod: 'password', mfaVerified });
     await this.repos.audit.add(tenant.id, { userId: user.id, action: 'auth.login', ip: meta.ip });
     return { user, tenant, role: first.role, token };
   }
@@ -208,10 +325,13 @@ export class AuthService {
     await this.repos.audit.add(tenantId, { userId, action: 'auth.logout', ip });
   }
 
-  async switchTenant(sessionId: string, userId: string, tenantId: string) {
-    const membership = await this.repos.memberships.get(tenantId, userId);
+  /** moves the session to another workspace of the user; SSO may fence the entry (`assertSessionEntry`, L6) */
+  async switchTenant(auth: AuthContext, tenantId: string) {
+    if (!auth.sessionId) throw ApiError.unauthorized();
+    const membership = await this.repos.memberships.get(tenantId, auth.user.id);
     if (!membership) throw ApiError.notFound('Workspace');
-    await this.repos.sessions.switchTenant(sessionId, tenantId);
+    await this.steps.assertSessionEntry(auth, tenantId);
+    await this.repos.sessions.switchTenant(auth.sessionId, tenantId);
     const tenant = (await this.repos.tenants.get(tenantId))!;
     return { tenant, role: membership.role };
   }
@@ -234,7 +354,8 @@ export class AuthService {
     if (role === 'owner' && inviter.role !== 'owner')
       throw ApiError.forbidden('Only owners can invite owners');
     const existing = await this.repos.users.getByEmail(email);
-    if (existing && (await this.repos.memberships.get(tenantId, existing.id))) {
+    // a disabled member is still a member: enable them instead of inviting again
+    if (existing && (await this.repos.memberships.getIncludingDisabled(tenantId, existing.id))) {
       throw ApiError.conflict('This user is already a member of the workspace');
     }
     const token = randomToken();
@@ -257,6 +378,8 @@ export class AuthService {
   ): Promise<AuthResult> {
     const invitation = await this.repos.invitations.getPendingByTokenHash(sha256(token));
     if (!invitation) throw ApiError.notFound('Invitation');
+    // P6-01: SSO may refuse the entry; before any write
+    await this.steps.assertInviteAcceptable(invitation.tenantId);
     let user = await this.repos.users.getByEmail(invitation.email);
     if (user) {
       if (!(await this.verifyPassword(user.passwordHash, input.password))) {
@@ -309,7 +432,8 @@ export class AuthService {
 
   /**
    * empty scopes = every route the user's role allows; `audience` says where the key works
-   * (`public-api` for /api/v1, `mcp-server-api` for the tenant MCP server) and nowhere else
+   * (`public-api` for /api/v1, `mcp-server-api` for the tenant MCP server) and nowhere else;
+   * `expiresAt` (P6-21) null or absent = never expires
    */
   async createApiKey(
     tenantId: string,
@@ -317,9 +441,9 @@ export class AuthService {
     name: string,
     scopes: string[] = [],
     audience: string = PUBLIC_API_AUDIENCE,
+    expiresAt: Date | null = null,
   ) {
-    const prefix = randomBytes(4).toString('hex');
-    const key = `wfk_${prefix}_${randomToken(32)}`;
+    const { prefix, key } = newApiKeySecret();
     const row = await this.repos.apiKeys.create({
       tenantId,
       userId,
@@ -328,6 +452,7 @@ export class AuthService {
       keyHash: sha256(key),
       scopes,
       audience,
+      expiresAt,
     });
     return {
       id: row.id,
@@ -336,6 +461,31 @@ export class AuthService {
       key,
       scopes: row.scopes,
       createdAt: row.createdAt.toISOString(),
+      expiresAt: row.expiresAt?.toISOString() ?? null,
+    };
+  }
+
+  /**
+   * P6-21: a new secret on the same row (new prefix and hash; name, scopes and expiry kept), shown once.
+   * The owner's own `public-api` key only (another's or an MCP key is 404); an expired key is a 400.
+   */
+  async rotateApiKey(tenantId: string, userId: string, id: string) {
+    const current = (await this.repos.apiKeys.list(tenantId, userId)).find((k) => k.id === id);
+    if (!current) throw ApiError.notFound('API key');
+    if (current.expiresAt && current.expiresAt.getTime() <= Date.now()) {
+      throw ApiError.badRequest('Cannot rotate an expired API key');
+    }
+    const { prefix, key } = newApiKeySecret();
+    const row = await this.repos.apiKeys.rotate(tenantId, userId, id, { prefix, keyHash: sha256(key) });
+    if (!row) throw ApiError.notFound('API key');
+    return {
+      id: row.id,
+      name: row.name,
+      prefix,
+      key,
+      scopes: row.scopes,
+      createdAt: row.createdAt.toISOString(),
+      expiresAt: row.expiresAt?.toISOString() ?? null,
     };
   }
 
@@ -347,6 +497,8 @@ export class AuthService {
     if (!/^wfk_[0-9a-f]{8}_[A-Za-z0-9_-]{20,}$/.test(key)) return undefined;
     const row = await this.repos.apiKeys.getByHash(sha256(key));
     if (!row || row.audience !== audience) return undefined;
+    // P6-21: an expired key is refused like an unknown key
+    if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) return undefined;
     const membership = await this.repos.memberships.get(row.tenantId, row.userId);
     if (!membership) return undefined;
     const [user, tenant] = await Promise.all([

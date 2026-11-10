@@ -24,9 +24,20 @@ import { Redis } from 'ioredis';
 import { buildApp } from '../src/app';
 import { type Config, loadConfig } from '../src/config';
 import { createContext, type ServerContext } from '../src/context';
-import type { CredentialRow, DataTableRow, FolderRow, ProjectRow, Role, WorkflowRow } from '../src/db/schema';
+import type {
+  CredentialRow,
+  DataTableRow,
+  FolderRow,
+  ProjectRow,
+  Role,
+  TenantAuthSettingsRow,
+  WorkflowRow,
+} from '../src/db/schema';
+import type { AuthContext } from '../src/http/auth';
+import type { SsoMethod, SsoSettingsPatch } from '../src/repositories/sso';
 import type { AiRuntime } from '../src/services/ai-builder/runtime';
 import type { AssistantToolDefinition } from '../src/services/assistant/types';
+import { type SessionAuthMethod, sha256 } from '../src/services/auth';
 import type { SecretProviderType } from '../src/services/secrets/types';
 
 export const BASE_URL = 'http://localhost:5678';
@@ -349,6 +360,16 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'credential_user_entries',
+  'role_mapping_rule_projects',
+  'role_mapping_rules',
+  'auth_identities',
+  'auth_provider_sync_history',
+  'scim_tokens',
+  'tenant_auth_settings',
+  'oauth_jwe_keys',
+  'user_tokens',
+  'user_mfa',
   'workflow_shares',
   'credential_shares',
   'project_secret_access',
@@ -433,6 +454,8 @@ export async function createTestServer(
     aiRuntime?: AiRuntime;
     /** P5-67: extra Assistant tools (`createContext`'s `assistantTools`, the test seam) */
     assistantTools?: AssistantToolDefinition[];
+    /** P6-09, P6-10: plain http to the fake identity providers (`createContext`'s `allowInsecureIdp`) */
+    allowInsecureIdp?: boolean;
   } = {},
 ): Promise<TestServer> {
   const config = testConfig(overrides);
@@ -442,6 +465,7 @@ export async function createTestServer(
     secretProviderTypes: options.secretProviderTypes,
     aiRuntime: options.aiRuntime,
     assistantTools: options.assistantTools,
+    allowInsecureIdp: options.allowInsecureIdp,
     // local test servers (credential test, OAuth2 token endpoint) live on 127.0.0.1
     http:
       options.http ??
@@ -459,6 +483,72 @@ export async function createTestServer(
       await ctx.close();
       await rm(config.binaryData.dir, { recursive: true, force: true });
     },
+  };
+}
+
+/**
+ * P6 S2 (C0e): turns a workspace's sign-in method on through the repository (`repos.sso.upsert`), so a lane
+ * sets up SSO without another lane's routes. `config` holds the method's other columns (`saml`, `oidc`,
+ * `ldap`, `provisioning`, `jit`, ...); the method's config is not checked.
+ */
+export async function ssoOn(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  method: SsoMethod,
+  config: Omit<SsoSettingsPatch, 'method'> = {},
+): Promise<TenantAuthSettingsRow> {
+  return server.ctx.repos.sso.upsert(tenantId, { ...config, method });
+}
+
+export interface TestSession {
+  /** the session row's id (sha256 of the token), as `AuthContext.sessionId` */
+  sessionId: string;
+  /** the token the cookie carries */
+  token: string;
+  /** the `cookie` header value (`wf_session=...`) */
+  cookie: string;
+  /** a client that sends the session (inject, `ORIGIN`) */
+  client: TestClient;
+  /** the session's `AuthContext`, as `loadSession` fills it */
+  auth: AuthContext;
+}
+
+/**
+ * P6 S2 (C0e): a session of `userId` in `tenantId` with the given sign-in method and MFA state, made through
+ * `ctx.auth.createSession` (no route), and the `AuthContext` a request on it gets. The user must be a member.
+ */
+export async function sessionFor(
+  server: { ctx: ServerContext; app: FastifyInstance },
+  tenantId: string,
+  userId: string,
+  options: { authMethod?: SessionAuthMethod; mfaVerified?: boolean; remoteAddress?: string } = {},
+): Promise<TestSession> {
+  const { repos } = server.ctx;
+  const [user, tenant, membership] = await Promise.all([
+    repos.users.get(userId),
+    repos.tenants.get(tenantId),
+    repos.memberships.get(tenantId, userId),
+  ]);
+  if (!user || !tenant || !membership)
+    throw new Error(`sessionFor: ${userId} is not a member of ${tenantId}`);
+  const authMethod = options.authMethod ?? 'password';
+  const mfaVerified = options.mfaVerified ?? false;
+  const token = await server.ctx.auth.createSession(
+    userId,
+    tenantId,
+    { ip: options.remoteAddress },
+    { authMethod, mfaVerified },
+  );
+  const sessionId = sha256(token);
+  const cookie = `wf_session=${token}`;
+  const client = new TestClient(server.app, ORIGIN, options.remoteAddress);
+  client.cookie = cookie;
+  return {
+    sessionId,
+    token,
+    cookie,
+    client,
+    auth: { user, tenant, role: membership.role, sessionId, authMethod, mfaVerified },
   };
 }
 

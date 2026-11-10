@@ -46,6 +46,7 @@ import {
   WorkflowOperationError,
 } from '@workflow/workflow';
 import type { Config } from '../config';
+import type { ServiceDeps } from '../context';
 import type { ExecutionRow, TenantRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import type { PinoLogger } from '../logger';
@@ -57,6 +58,7 @@ import type { MessageBus, PushService } from './bus';
 import { assertCredentialsUsable } from './credential-usable';
 import type { CredentialService } from './credentials';
 import type { DataTableService } from './data-tables';
+import { maybeSendFirstFailure } from './first-failure-mail';
 import type { Metrics } from './metrics';
 import { runtimeDefinition } from './published-workflow';
 import type { ExecutionJob, ExecutionQueue } from './queue';
@@ -90,6 +92,11 @@ export interface StoredRunOptions {
   resumeCustomData?: Record<string, string> | null;
   depth?: number;
   userId?: string;
+  /**
+   * P6-15, P6-87 (C0): the person the run acts for (a manual run's user, a signed-in trigger's user); a
+   * sub-run inherits it, a retry keeps it. Private credentials resolve for this user (L14).
+   */
+  endUserId?: string;
   /** the execution is an error workflow or runs below one: its failure never starts another error workflow */
   errorChain?: boolean;
   /** the execution continues at the node that failed, from the state it was started with */
@@ -165,6 +172,8 @@ export interface StartExecutionInput {
   parentExecutionId?: string;
   depth?: number;
   userId?: string;
+  /** P6-15, P6-87 (C0): stored as `StoredRunOptions.endUserId` */
+  endUserId?: string;
   /** set for sub-workflows started below an error workflow (error executions always carry it) */
   errorChain?: boolean;
   /** run in this process even in queue mode */
@@ -204,6 +213,11 @@ export interface ExecutionServiceDeps {
   bus: MessageBus;
   metrics: Metrics;
   queue?: ExecutionQueue;
+  /**
+   * P6 S2 (C0): the whole context, read lazily, for the credential gate (L16), the OAuth JWE hook (L15) and
+   * the first production failure mail (L1). Absent in a hand-built service: none of the three runs.
+   */
+  serviceDeps?: ServiceDeps;
 }
 
 /** binary data of one execution lives in `<dir>/<tenantId>/<executionId>` */
@@ -347,6 +361,7 @@ export class ExecutionService {
       rootMode: input.rootMode,
       depth: input.depth ?? 0,
       userId: input.userId,
+      endUserId: input.endUserId,
       errorChain: input.mode === 'error' || input.errorChain === true ? true : undefined,
       retryFromFailure: input.retryState ? true : undefined,
       customData: input.customData,
@@ -613,6 +628,9 @@ export class ExecutionService {
         depth: options.depth ?? 0,
         errorChain: options.errorChain,
         rootMode: options.rootMode,
+        endUserId: options.endUserId,
+        startNode: options.startNode,
+        workflow: definition,
         hooks: this.hooks(tenant.id, row, definition, delivery),
         signal,
       });
@@ -921,6 +939,17 @@ export class ExecutionService {
       await this.startErrorWorkflow(tenant.id, row, definition, state, run).catch((e) =>
         logger.warn({ err: e, tenantId: tenant.id, executionId: row.id }, 'Error workflow could not start'),
       );
+      // P6-17 (C0): the workspace's first production failure mail (L1 decides, sends once); stub (L1) PASSES
+      const { serviceDeps } = this.deps;
+      if (serviceDeps && row.workflowId && row.mode !== 'manual' && row.mode !== 'evaluation') {
+        const workflowId = row.workflowId;
+        void maybeSendFirstFailure(serviceDeps, tenant.id, workflowId).catch((e) =>
+          logger.warn(
+            { err: e, tenantId: tenant.id, executionId: row.id, workflowId },
+            'First failure mail could not be sent',
+          ),
+        );
+      }
     }
 
     this.emitFinished(
@@ -1105,6 +1134,12 @@ export class ExecutionService {
     errorChain?: boolean;
     /** P3-10: mode of the root execution; absent = `mode` (this execution is the root) */
     rootMode?: ExecutionMode;
+    /** P6-15, P6-87 (C0): the person the run acts for (`StoredRunOptions.endUserId`) */
+    endUserId?: string;
+    /** P6-87 (C0): the node the run starts at (the trigger the credential gate walks from) */
+    startNode?: string;
+    /** P6-87 (C0): the definition that runs; with it the services carry the credential gate */
+    workflow?: WorkflowDefinition;
     hooks?: ExecutionHooks;
     /** aborts when the execution is stopped or times out; sub-workflows it waits for are canceled then */
     signal?: AbortSignal;
@@ -1114,6 +1149,8 @@ export class ExecutionService {
     const { tenant, executionId } = input;
     const settings = tenant.settings as TenantSettings;
     const depth = input.depth ?? 0;
+    // P6 S2 (C0): the gate (L16) and the OAuth JWE hook (L15); both stubs PASS (ready, token unchanged)
+    const shared = this.deps.serviceDeps?.context();
     return {
       tenantId: tenant.id,
       projectId: input.projectId,
@@ -1127,7 +1164,19 @@ export class ExecutionService {
       signReviewKey: executionId ? (key) => this.signReviewKey(executionId, key) : undefined,
       nodeTypes,
       credentialTypes: credentials.types,
-      credentials: credentials.provider(tenant.id, input.projectId, { allow: input.allowCredentials }),
+      credentials: credentials.provider(tenant.id, input.projectId, {
+        allow: input.allowCredentials,
+        endUserId: input.endUserId,
+        executionId: executionId || undefined,
+        startNode: input.startNode,
+      }),
+      credentialGate:
+        shared && input.workflow
+          ? shared.credentialGate.forRun(tenant.id, input.workflow, input.projectId, input.startNode)
+          : undefined,
+      oauthTokenDecrypt: shared
+        ? (token, data) => shared.oauthJwe.decryptResponse(tenant.id, token, data)
+        : undefined,
       // P6-25: a node reads only the stored files of this run, its parent runs and its project
       binaryData: this.reachableStore(
         tenant.id,
@@ -1162,6 +1211,7 @@ export class ExecutionService {
           input.errorChain === true,
           input.signal,
           input.rootMode ?? input.mode,
+          input.endUserId,
         ),
     };
   }
@@ -1223,6 +1273,8 @@ export class ExecutionService {
     errorChain: boolean,
     signal?: AbortSignal,
     rootMode?: ExecutionMode,
+    /** P6-15 (C0): a sub-run acts for the parent's person */
+    endUserId?: string,
   ): Promise<{ executionId: string; data: Item[][] | null }> {
     if (depth >= MAX_SUB_WORKFLOW_DEPTH) {
       throw new Error(`Sub-workflows can be nested at most ${MAX_SUB_WORKFLOW_DEPTH} levels deep`);
@@ -1280,6 +1332,7 @@ export class ExecutionService {
       rootMode,
       depth: depth + 1,
       errorChain,
+      endUserId,
       inline: !detached,
       wait: !detached,
     });
@@ -1552,6 +1605,8 @@ export class ExecutionService {
           executionId: retryId,
           retryOf: row.id,
           userId: options.userId,
+          // P6-15 (C0): a retry acts for the person the original run acted for
+          endUserId: runOptions.endUserId,
           // P6 S1: a run with no workflow row keeps the project it was started in
           projectId: runOptions.projectId,
           inlineSource: runOptions.inlineSource,

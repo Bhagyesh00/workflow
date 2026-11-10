@@ -33,14 +33,15 @@ import type {
   CredentialSummary,
   ExecutionDetail,
   ExecutionSummary,
-  Member,
   ProjectIcon,
   ProjectRef,
   ProjectType,
+  ProvisioningConfig,
   PushEvent,
   Role,
   SecurityPolicy,
   Settings,
+  SsoOptions,
   Tag,
   Variable,
   VersionSummary,
@@ -59,6 +60,7 @@ import {
 } from './fixtures';
 import { registerAiRoutes } from './mock-ai';
 import { filterExecutionList, registerAnnotationRoutes } from './mock-annotations';
+import { registerApiKeyRoutes } from './mock-api-keys';
 import { registerAssistantRoutes } from './mock-assistant';
 import { registerAssistantConfirmRoutes } from './mock-assistant-confirm';
 import { registerAssistantDraftRoutes } from './mock-assistant-drafts';
@@ -70,13 +72,21 @@ import { DEMO_EVALUATION_CONCURRENCY_LIMIT, registerEvaluationRoutes } from './m
 import { filterWorkflowList, registerFolderRoutes } from './mock-folders';
 import { registerFormAuthRoutes } from './mock-form-auth';
 import { copy, HttpError, now, page } from './mock-http';
+import { registerLdapRoutes } from './mock-ldap';
 import { registerMcpRoutes } from './mock-mcp';
+import { registerMemberRoutes } from './mock-members';
+import { registerMfaRoutes } from './mock-mfa';
+import { registerPasswordRoutes } from './mock-password';
+import { registerPrivateCredentialRoutes } from './mock-private-credentials';
 import { registerProjectRoutes, visibleProjects } from './mock-projects';
+import { registerProvisioningRoutes, setDemoProvisioningConfig } from './mock-provisioning';
 import { registerPublishRoutes } from './mock-publish';
 import { registerReviewRoutes } from './mock-reviews';
 import { findCustomRole, registerRoleRoutes } from './mock-roles';
+import { registerScimRoutes } from './mock-scim';
 import { registerSecretRoutes } from './mock-secrets';
 import { demoShares, registerSharingRoutes } from './mock-sharing';
+import { registerSsoRoutes, setDemoSsoOptions } from './mock-sso';
 import {
   DEMO_MCP_TRIGGER_TYPE,
   demoHookFamily,
@@ -171,6 +181,14 @@ export interface DemoMembership {
   tenantId: string;
   userId: string;
   role: Role;
+  /** P6-20 (C0, optional; absent is today's answer): `active` when absent, `disabled` for a deactivated member */
+  status?: 'active' | 'pending' | 'disabled';
+  /** P6-20: the member's last request in this workspace (ISO time; absent or null: never) */
+  lastActiveAt?: string | null;
+  /** P6-02: the member came from a SCIM directory */
+  managedByScim?: boolean;
+  /** P6-13: the member may sign in with a password while SSO is on */
+  allowSsoManualLogin?: boolean;
 }
 
 /** P6-03: a project of the demo (a workspace's team projects and each member's personal project) */
@@ -283,6 +301,22 @@ export class MockBackend {
   requests: ApiRequest[] = [];
   /** state of the Phase 3 route modules (mock-folders, mock-annotations, mock-publish, mock-reviews) */
   ext: Record<string, unknown> = {};
+  /**
+   * P6-18 (C0): the users with two-factor sign-in on (global, as the server's `user_mfa`). `/auth/me` answers
+   * `mfaEnabled` from it and `/auth/login` asks for a code; mock-mfa.ts (L2) and `setDemoMfa` write it.
+   */
+  mfaEnabledUsers = new Set<string>();
+  /** P6-18 (C0): the workspaces that enforce two-factor sign-in; GET /settings answers `mfa.enforced`, mock-mfa.ts (L2) writes it */
+  mfaEnforcedTenants = new Set<string>();
+  /**
+   * P6-18 (C0): whether a sign-in code or recovery code of `userId` is good. The C0 default takes any 6-digit code
+   * or a non-empty recovery code; mock-mfa.ts (L2) replaces it with the demo's fixed secret.
+   */
+  mfaCheck: (userId: string, code: string | undefined, recoveryCode: string | undefined) => boolean = (
+    _userId,
+    code,
+    recoveryCode,
+  ) => (code !== undefined && /^\d{6}$/.test(code)) || (recoveryCode !== undefined && recoveryCode !== '');
   /** P3-13: what POST /workflows/from-url answers per URL (the demo never fetches) */
   private urlFixtures = new Map<string, unknown>();
   private tenantSettings = new Map<string, StoredTenantSettings>();
@@ -314,6 +348,16 @@ export class MockBackend {
     registerProjectRoutes(this);
     registerRoleRoutes(this);
     registerSharingRoutes(this);
+    // Phase 6 S2 (C0): members and API keys moved out of `registerRoutes` (FULL), the rest per lane
+    registerMemberRoutes(this);
+    registerApiKeyRoutes(this);
+    registerMfaRoutes(this);
+    registerPasswordRoutes(this);
+    registerSsoRoutes(this);
+    registerProvisioningRoutes(this);
+    registerLdapRoutes(this);
+    registerScimRoutes(this);
+    registerPrivateCredentialRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -694,8 +738,42 @@ export class MockBackend {
     }
   }
 
-  /** the workspace roles the member routes take: owner, admin, `member`, or a custom global role slug */
-  private assignableRole(value: unknown, tenantId: string): Role {
+  /**
+   * P6-18 (C0), tests and demo: turns two-factor sign-in on or off for the signed-in user (the first membership's
+   * user when signed out, as `setDemoRole`), or for the user with `email`. On, `/auth/login` answers 401
+   * `mfa_required` until the body carries `mfaCode` or `mfaRecoveryCode`.
+   */
+  setDemoMfa(enabled: boolean, email?: string): void {
+    const userId =
+      email !== undefined
+        ? this.users.find((u) => u.email === email.toLowerCase())?.id
+        : (this.session?.userId ?? this.memberships[0]?.userId);
+    if (!userId) throw new Error('No user to set two-factor sign-in on');
+    if (enabled) this.mfaEnabledUsers.add(userId);
+    else this.mfaEnabledUsers.delete(userId);
+  }
+
+  /**
+   * P6-01 (C0), tests and demo: what `GET /auth/sso-options` answers (state in mock-sso.ts, L11); null goes back
+   * to email and password.
+   */
+  setDemoSso(options: SsoOptions | null): void {
+    setDemoSsoOptions(this, options);
+  }
+
+  /**
+   * P6-11 (C0), tests and demo: what `GET /sso/provisioning/config` answers (state in mock-provisioning.ts, L9);
+   * null turns provisioning off.
+   */
+  setDemoProvisioning(config: ProvisioningConfig | null): void {
+    setDemoProvisioningConfig(this, config);
+  }
+
+  /**
+   * the workspace roles the member routes take: owner, admin, `member`, or a custom global role slug
+   * (P6-20: public for mock-members.ts)
+   */
+  assignableRole(value: unknown, tenantId: string): Role {
     const role = typeof value === 'string' ? value : '';
     if (role === 'owner' || role === 'admin' || role === 'member') return role;
     if (role && findCustomRole(this, tenantId, role, 'global')) return role;
@@ -1117,7 +1195,27 @@ export class MockBackend {
       const user = this.users.find((u) => u.email === String(body.email ?? '').toLowerCase());
       if (!user || user.password !== body.password)
         throw new HttpError(401, 'invalid_credentials', 'Wrong email or password');
-      const membership = this.memberships.find((m) => m.userId === user.id)!;
+      // P6-18 (C0, FULL): with two-factor sign-in on, the password alone answers 401 `mfa_required` and a bad
+      // code n8n's text; no session either way
+      if (this.mfaEnabledUsers.has(user.id)) {
+        const code = typeof body.mfaCode === 'string' && body.mfaCode !== '' ? body.mfaCode : undefined;
+        const recoveryCode =
+          typeof body.mfaRecoveryCode === 'string' && body.mfaRecoveryCode !== ''
+            ? body.mfaRecoveryCode
+            : undefined;
+        if (code === undefined && recoveryCode === undefined)
+          throw new HttpError(401, 'mfa_required', 'Enter the code from your authenticator app');
+        if (!this.mfaCheck(user.id, code, recoveryCode))
+          throw new HttpError(401, 'invalid_mfa', 'Invalid mfa token or recovery code');
+      }
+      // P6-01 (C0): `workspace` (a workspace slug) picks that membership; unknown or absent, the first
+      const workspace = typeof body.workspace === 'string' ? body.workspace : undefined;
+      const chosen = workspace
+        ? this.memberships.find(
+            (m) => m.userId === user.id && this.tenants.find((t) => t.id === m.tenantId)?.slug === workspace,
+          )
+        : undefined;
+      const membership = chosen ?? this.memberships.find((m) => m.userId === user.id)!;
       this.session = { userId: user.id, tenantId: membership.tenantId };
       return this.authResult();
     });
@@ -1129,6 +1227,10 @@ export class MockBackend {
       const result = this.authResult();
       return {
         ...result,
+        // P6-01, P6-18 (C0): the demo signs in by password only; `mfaEnabled` from `mfaEnabledUsers` (mock-mfa.ts)
+        authMethod: 'password',
+        mfaEnabled: this.mfaEnabledUsers.has(result.user.id),
+        ssoFenced: false,
         tenants: this.memberships
           .filter((m) => m.userId === result.user.id)
           .map((m) => ({ ...this.tenants.find((t) => t.id === m.tenantId)!, role: m.role })),
@@ -1180,6 +1282,10 @@ export class MockBackend {
           demo: true,
           aiBuilder: copy(this.options.aiBuilder ?? DEMO_AI_BUILDER),
           assistant: copy(this.options.assistant ?? DEMO_ASSISTANT),
+          // P6-17, P6-18, P6-21 (C0): the demo sends no mail, offers two-factor sign-in and the public API
+          mail: false,
+          mfa: true,
+          publicApi: true,
         },
         autosaveEnabled: true,
         evaluationConcurrencyLimit: DEMO_EVALUATION_CONCURRENCY_LIMIT,
@@ -1190,6 +1296,8 @@ export class MockBackend {
         ...(this.session
           ? { securityPolicy: copy(this.settingsOf(this.session.tenantId).securityPolicy) }
           : {}),
+        // P6-18 (C0): whether the workspace enforces two-factor sign-in
+        mfa: { enforced: this.session ? this.mfaEnforcedTenants.has(this.session.tenantId) : false },
       }),
     );
     // P6-33 (L12 owns the server route; FULL in the demo): the personal space policy and its counts
@@ -1776,85 +1884,6 @@ export class MockBackend {
       const v = variableInTenant(params[0]);
       requireVariableScope('delete', v.projectId);
       this.variables = this.variables.filter((x) => x !== v);
-      return { ok: true };
-    });
-
-    // --- members, api keys -----------------------------------------------------------------------
-    this.on('GET', '/members', (): Member[] => {
-      const { tenant } = this.auth();
-      return this.memberships
-        .filter((m) => m.tenantId === tenant.id)
-        .map((m) => {
-          const u = this.users.find((x) => x.id === m.userId)!;
-          return { userId: u.id, email: u.email, name: u.name, role: m.role };
-        });
-    });
-    // P6-03: the member routes take owner, admin, `member` and a custom global role slug (P6-39: not the old
-    // words); owner and admin only (`user:create`, `user:changeRole`, `user:delete`)
-    this.on('POST', '/members/invite', ({ body }) => {
-      const { tenant } = this.requireScope('user:create');
-      const role = body.role === undefined ? 'member' : this.assignableRole(body.role, tenant.id);
-      const token = newId();
-      this.invitations.push({
-        token,
-        tenantId: tenant.id,
-        email: String(body.email ?? '').toLowerCase(),
-        role,
-      });
-      const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
-      return { inviteUrl: `${origin}/invitation/${token}` };
-    });
-    this.on('PATCH', '/members/:userId', ({ params, body }) => {
-      const { tenant } = this.requireScope('user:changeRole');
-      const m = this.memberships.find((x) => x.tenantId === tenant.id && x.userId === params[0]);
-      if (!m) throw new HttpError(404, 'not_found', 'Member not found');
-      m.role = this.assignableRole(body.role, tenant.id);
-      const u = this.users.find((x) => x.id === m.userId)!;
-      return { userId: u.id, email: u.email, name: u.name, role: m.role };
-    });
-    this.on('DELETE', '/members/:userId', ({ params }) => {
-      const { tenant } = this.requireScope('user:delete');
-      this.memberships = this.memberships.filter(
-        (x) => !(x.tenantId === tenant.id && x.userId === params[0]),
-      );
-      return { ok: true };
-    });
-    this.on('GET', '/api-keys', () => {
-      const { tenant } = this.auth();
-      return this.apiKeys
-        .filter((k) => k.tenantId === tenant.id)
-        .map(({ id, name, prefix, createdAt, lastUsedAt, scopes }) => ({
-          id,
-          name,
-          prefix,
-          createdAt,
-          lastUsedAt,
-          scopes,
-        }));
-    });
-    this.on('POST', '/api-keys', ({ body }) => {
-      const { tenant } = this.auth();
-      const prefix = newId().slice(0, 8);
-      const key = {
-        id: newId(),
-        name: String(body.name ?? 'Key'),
-        prefix,
-        createdAt: now(),
-        lastUsedAt: null,
-        // empty means every scope
-        scopes: Array.isArray(body.scopes) ? body.scopes.map(String) : [],
-        tenantId: tenant.id,
-      };
-      this.apiKeys.push(key);
-      return {
-        id: key.id,
-        name: key.name,
-        key: `wfk_${prefix}_${newId().replace(/-/g, '')}`,
-        scopes: key.scopes,
-      };
-    });
-    this.on('DELETE', '/api-keys/:id', ({ params }) => {
-      this.apiKeys = this.apiKeys.filter((k) => k.id !== params[0]);
       return { ok: true };
     });
   }

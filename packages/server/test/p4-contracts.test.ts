@@ -418,6 +418,25 @@ describe('API key scopes', () => {
       'DELETE /roles/:slug': 'role:manage',
       'GET /settings/security-policy': 'securitySettings:manage',
       'PUT /settings/security-policy': 'securitySettings:manage',
+      // P6 S2: users, role mapping rules, LDAP and SSO settings (stubs from C0, filled by L5, L9, L10, L12)
+      'GET /users': 'user:list',
+      'GET /users/:id': 'user:read',
+      'POST /users': 'user:create',
+      'DELETE /users/:id': 'user:delete',
+      'PATCH /users/:id/role': 'user:changeRole',
+      'GET /role-mapping-rules': 'roleMappingRule:list',
+      'POST /role-mapping-rules': 'roleMappingRule:create',
+      'POST /role-mapping-rules/:id/move': 'roleMappingRule:update',
+      'PATCH /role-mapping-rules/:id': 'roleMappingRule:update',
+      'DELETE /role-mapping-rules/:id': 'roleMappingRule:delete',
+      'GET /settings/ldap': 'ldap:manage',
+      'PUT /settings/ldap': 'ldap:manage',
+      'GET /settings/ldap/sync': 'ldap:sync',
+      'POST /settings/ldap/sync': 'ldap:sync',
+      'GET /settings/sso/saml': 'saml:manage',
+      'PUT /settings/sso/saml': 'saml:manage',
+      'GET /settings/sso/oidc': 'oidc:manage',
+      'PUT /settings/sso/oidc': 'oidc:manage',
     });
   });
 

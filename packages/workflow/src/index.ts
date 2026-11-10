@@ -38,6 +38,8 @@ export * from './redact';
 export * from './subworkflow-extraction';
 export * from './tool-suspension';
 export * from './tool-variants';
+export * from './trigger-credential-gate';
+export * from './trigger-identity';
 export * from './utils';
 export * from './workflow';
 export * from './workflow-lint';

@@ -5,11 +5,13 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { errorMessage, isApiError } from '../../api/client';
 import { authApi } from '../../api/endpoints';
 import { queryKeys } from '../../api/queries';
-import type { AuthResult } from '../../api/types';
+import type { AuthResult, LoginBody, MfaLoginInput } from '../../api/types';
 import { Button } from '../../components/ui/Button';
 import { FormField, TextInput } from '../../components/ui/Field';
 import { Callout } from '../../components/ui/misc';
 import { AuthLayout } from './AuthLayout';
+import { MfaStep } from './MfaStep';
+import { SsoSignIn } from './SsoSignIn';
 
 /** Only same-app relative paths are accepted as post-login redirects. */
 export function safeRedirect(value: string | null): string {
@@ -37,13 +39,50 @@ function useAuthSuccess() {
 
 export function LoginPage() {
   const onSuccess = useAuthSuccess();
+  const [search] = useSearchParams();
+  const workspace = search.get('workspace') || undefined;
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const login = useMutation({ mutationFn: authApi.login, onSuccess });
+  // P6-18: the password matched and the account has MFA on: ask for the second step
+  const [mfaStep, setMfaStep] = useState(false);
+  const login = useMutation({
+    mutationFn: (body: LoginBody) => authApi.login(body),
+    onSuccess,
+    onError: (error) => {
+      if (isApiError(error, 401) && error.code === 'mfa_required') setMfaStep(true);
+    },
+  });
+  const credentials = (): LoginBody => ({
+    email: email.trim(),
+    password,
+    ...(workspace ? { workspace } : {}),
+  });
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    login.mutate({ email: email.trim(), password });
+    login.mutate(credentials());
   };
+  if (mfaStep) {
+    const stepError =
+      login.error && !(isApiError(login.error, 401) && login.error.code === 'mfa_required')
+        ? isApiError(login.error, 429)
+          ? 'Too many attempts. Wait a minute, then try again.'
+          : errorMessage(login.error)
+        : null;
+    return (
+      <AuthLayout title="Two-factor authentication" subtitle="Enter the code from your authenticator app.">
+        <MfaStep
+          pending={login.isPending}
+          error={stepError}
+          onSubmit={(input: MfaLoginInput) => login.mutate({ ...credentials(), ...input })}
+          onCancel={() => {
+            login.reset();
+            setPassword('');
+            setMfaStep(false);
+          }}
+        />
+      </AuthLayout>
+    );
+  }
   const failed = login.error
     ? isApiError(login.error, 401)
       ? 'That email and password do not match an account.'
@@ -64,6 +103,8 @@ export function LoginPage() {
         </>
       }
     >
+      {/* P6-01 (L6): the workspace's SSO button, or a straight redirect to the identity provider */}
+      <SsoSignIn workspace={workspace} redirect={safeRedirect(search.get('redirect'))} />
       <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
         {failed && <Callout tone="err">{failed}</Callout>}
         <FormField label="Email">
@@ -91,6 +132,13 @@ export function LoginPage() {
             />
           )}
         </FormField>
+        {/* P6-19 */}
+        <Link
+          to="/forgot-password"
+          className="-mt-2 self-end text-sm font-semibold text-brand hover:underline"
+        >
+          Forgot password?
+        </Link>
         <Button
           type="submit"
           variant="primary"

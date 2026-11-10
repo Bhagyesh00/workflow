@@ -202,6 +202,8 @@ describe('subpath exports', () => {
       './utils/send-and-wait': './src/utils/send-and-wait/index.ts',
       './utils/user-auth': './src/utils/user-auth.ts',
       './utils/document-text': './src/utils/document-text.ts',
+      './utils/workspace-signin': './src/utils/workspace-signin.ts',
+      './utils/connect-panel': './src/utils/connect-panel.ts',
     });
     for (const file of Object.values(pkg.exports)) expect(existsSync(resolve(root, file)), file).toBe(true);
   });

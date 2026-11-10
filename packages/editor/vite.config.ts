@@ -61,6 +61,10 @@ export default defineConfig(({ mode }) => ({
       '^/mcp-server/': proxyTarget,
       '^/mcp-oauth/': proxyTarget,
       '^/\\.well-known/': proxyTarget,
+      // P6-01, P6-02: SAML and OIDC sign-in routes and SCIM; regex keys, so the SPA's /settings/sso and
+      // /settings/scim stay on the editor
+      '^/sso/': proxyTarget,
+      '^/scim/': proxyTarget,
     },
   },
   build: {

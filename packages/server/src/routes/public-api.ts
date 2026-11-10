@@ -24,9 +24,13 @@ import { deleteExecution, executionListQuery, getExecution, listExecutions } fro
 import { PUBLIC_DATA_TABLE_ROUTES } from './public-data-tables';
 import { PUBLIC_EVALUATION_ROUTES } from './public-evaluations';
 import { PUBLIC_FOLDER_ROUTES } from './public-folders';
+import { PUBLIC_LDAP_ROUTES } from './public-ldap';
 import { PUBLIC_PROJECT_ROUTES } from './public-projects';
+import { PUBLIC_ROLE_MAPPING_ROUTES } from './public-role-mapping';
 import { PUBLIC_ROLE_ROUTES } from './public-roles';
 import { PUBLIC_SECURITY_POLICY_ROUTES } from './public-security-policy';
+import { PUBLIC_SSO_ROUTES } from './public-sso';
+import { PUBLIC_USER_ROUTES } from './public-users';
 import { createTag, projectVariableDTO, renameTag, tagDTO } from './resources';
 
 export interface PublicApiInput {
@@ -572,6 +576,11 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
   ...PUBLIC_PROJECT_ROUTES,
   ...PUBLIC_ROLE_ROUTES,
   ...PUBLIC_SECURITY_POLICY_ROUTES,
+  // P6 S2: users (P6-21), role mapping rules (P6-11), LDAP (P6-12), SSO config (P6-14)
+  ...PUBLIC_USER_ROUTES,
+  ...PUBLIC_ROLE_MAPPING_ROUTES,
+  ...PUBLIC_LDAP_ROUTES,
+  ...PUBLIC_SSO_ROUTES,
 ];
 
 /** JSON schema of credential data from the type's properties */
@@ -706,6 +715,56 @@ const COMPONENTS: Record<string, unknown> = {
       systemRole: { type: 'boolean' },
       roleType: { enum: ['global', 'project', 'workflow', 'credential', 'secretsProviderConnection'] },
       scopes: { type: 'array', items: { type: 'string' } },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+  /** P6-21: a member of the workspace (n8n's user fields; `role` with `includeRole=true`) */
+  User: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      email: { type: 'string', format: 'email' },
+      firstName: { type: ['string', 'null'] },
+      lastName: { type: ['string', 'null'] },
+      isPending: { type: 'boolean' },
+      role: { type: 'string' },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+      inviteAcceptUrl: { type: 'string', description: 'Only on a new invitation, when mail did not send it' },
+      emailSent: { type: 'boolean', description: 'Only on a new invitation' },
+    },
+  },
+  /** P6-14: the SAML or OIDC config (secrets blanked); a GET answer can be sent back as the PUT body */
+  SsoConfig: { type: 'object', additionalProperties: true },
+  /** P6-12: the LDAP config (the bind password blanked) */
+  LdapConfig: { type: 'object', additionalProperties: true },
+  /** P6-12: one LDAP sync run */
+  LdapSyncRun: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      runMode: { enum: ['live', 'dry'] },
+      status: { type: 'string' },
+      startedAt: { type: 'string', format: 'date-time' },
+      endedAt: { type: ['string', 'null'], format: 'date-time' },
+      scanned: { type: 'integer' },
+      created: { type: 'integer' },
+      updated: { type: 'integer' },
+      disabled: { type: 'integer' },
+      error: { type: ['string', 'null'] },
+    },
+  },
+  /** P6-11: a role mapping rule; `projectIds` for a project rule */
+  RoleMappingRule: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      type: { enum: ['instance', 'project'] },
+      expression: { type: 'string' },
+      role: { type: 'string' },
+      order: { type: 'integer' },
+      projectIds: { type: 'array', items: { type: 'string', format: 'uuid' } },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
     },
@@ -990,7 +1049,7 @@ export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown
       title: `${ctx.config.brand.name} Public API`,
       version: '1.0.0',
       description:
-        'Manage workflows, executions, credentials, tags, variables, projects and roles of one workspace. A key sees and changes only what its user may: the user scopes in each project and the key scopes both apply. Authenticate with an API key in the X-API-KEY header. Lists use cursor pagination: pass `nextCursor` as `cursor`.',
+        'Manage workflows, executions, credentials, tags, variables, projects, roles, users and sign-in settings of one workspace. A key sees and changes only what its user may: the user scopes in each project and the key scopes both apply. Authenticate with an API key in the X-API-KEY header. Lists use cursor pagination: pass `nextCursor` as `cursor`.',
     },
     servers: [{ url: `${ctx.config.baseUrl}/api/v1` }],
     security: [{ ApiKey: [] }],

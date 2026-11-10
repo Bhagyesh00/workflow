@@ -17,6 +17,7 @@ import {
   outputOf,
   realMember,
   resetDatabase,
+  sessionFor,
   signup,
   TEST_REDIS,
   TestClient,
@@ -266,11 +267,13 @@ describe('the one-time code', () => {
       context: () => ({ ...server.ctx, redis: undefined }),
     });
     const returnTo = `/form/${tenant.slug}/who`;
-    const once = await formAuth.issueCode(userId, returnTo);
+    // P6 S2: issueCode takes the caller's AuthContext (the SSO session-entry check reads it)
+    const { auth } = await sessionFor(server, tenant.id, userId);
+    const once = await formAuth.issueCode(auth, returnTo);
     expect(await formAuth.exchangeCode(once)).toBeTruthy();
     expect(await formAuth.exchangeCode(once)).toBeNull();
 
-    const late = await formAuth.issueCode(userId, returnTo);
+    const late = await formAuth.issueCode(auth, returnTo);
     const issuedAt = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt + 60_001);
     try {

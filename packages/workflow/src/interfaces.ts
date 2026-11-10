@@ -340,6 +340,8 @@ export interface NodeProperty {
   modes?: ResourceLocatorMode[];
   /** shown in the node settings tab rather than the parameters tab */
   isNodeSetting?: boolean;
+  /** a child type that extends this node type does not inherit this property */
+  doNotInherit?: boolean;
 }
 
 export interface NodeInputConfig {

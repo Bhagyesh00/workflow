@@ -43,6 +43,7 @@ import { createRepositories, isUniqueViolation, type Repositories } from '../rep
 import type { MessageBus } from './bus';
 import { assertCredentialsUsable } from './credential-usable';
 import { binaryDirOf, type ExecutionObserver, type ExecutionService } from './executions';
+import type { PrivateCredentialService } from './private-credentials';
 import { loadPublishedDefinition, publishedDefinition } from './published-workflow';
 import type { Leadership } from './queue';
 import { TEST_TRIGGER_TTL_MS, TEST_WEBHOOK_TTL_MS } from './test-webhooks';
@@ -207,6 +208,8 @@ export interface ActiveWorkflowDeps {
   triggerStartTimeoutMs?: number;
   /** how long a trigger listens for a test event (default 120 seconds) */
   testTriggerTtlMs?: number;
+  /** P6-15 (C0): the publish check of private credentials (context.ts passes it; a hand-built manager skips it) */
+  privateCredentials?: Pick<PrivateCredentialService, 'assertPublishable'>;
 }
 
 export class ActiveWorkflowManager {
@@ -495,6 +498,8 @@ export class ActiveWorkflowManager {
       throw new ApiError(400, 'activation_failed', 'The workflow could not be activated', issues);
     // P6 S1: every credential the version uses must be usable in the workflow's project
     await assertCredentialsUsable(this.deps, tenantId, row.projectId, definition);
+    // P6-15 (C0): private credentials need a trigger that knows the person; stub (L14) PASSES
+    await this.deps.privateCredentials?.assertPublishable(tenantId, definition);
 
     if (!row.active) {
       const limits = effectiveLimits(tenant.plan, tenant.settings as TenantSettings);

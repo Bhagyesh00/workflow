@@ -994,6 +994,8 @@ export class WorkflowService {
         agentRequest: input.agentRequest,
         pinData: Object.keys(pinData).length ? pinData : undefined,
         userId: actor.userId,
+        // P6-15 (C0): a manual run acts for the person who started it (a test webhook does not)
+        endUserId: actor.userId,
       });
     } catch (error) {
       await this.deps.executions.removeBinaryData(tenant.id, executionId);

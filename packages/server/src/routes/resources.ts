@@ -1,15 +1,16 @@
-/** /rest/tags, /rest/variables, /rest/members, /rest/invitations, /rest/api-keys, /rest/audit-log */
+/**
+ * /rest/tags, /rest/variables, /rest/audit-log. Members and invitations are in routes/members.ts, API keys in
+ * routes/api-keys.ts (moved in S2's C0).
+ */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import type { TagRow, VariableRow } from '../db/schema';
-import { API_KEY_SCOPES } from '../http/api-key-scopes';
-import { type AuthContext, requireAuth, requireScope } from '../http/auth';
+import { requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { page, paginationQuery } from '../http/pagination';
 import { idParams, tagSchema, variableCreateSchema, variableUpdateSchema } from '../http/schemas';
 import { isUniqueViolation } from '../repositories';
-import { type MemberRemovalChoice, removeMember } from '../services/member-removal';
 
 export const tagDTO = (
   t: Pick<TagRow, 'id' | 'name' | 'createdAt' | 'updatedAt'> & { usageCount?: number },
@@ -32,36 +33,10 @@ export const variableDTO = (v: VariableRow) => ({
 /** a variable on the editor's pages and `/rest/variables`: `projectId` is null for a global one */
 export const projectVariableDTO = (v: VariableRow) => ({ ...variableDTO(v), projectId: v.projectId });
 
-/** a workspace role in a member route: a system role or a custom global slug (checked against the roles) */
-const memberRoleSchema = z.string().trim().min(1).max(64);
-
 /** POST /variables: with `projectId` a project variable (`projectVariable:create` on it) */
 const variableBodySchema = variableCreateSchema.extend({ projectId: z.uuid().nullish() });
 /** PATCH /variables/:id: `projectId` moves the variable (a uuid: into that project, null: to global) */
 const variablePatchSchema = variableUpdateSchema.extend({ projectId: z.uuid().nullable().optional() });
-
-/**
- * DELETE /members/:userId: what happens to the member's personal work. The editor sends the choice in the
- * body; n8n's `?transferId=` also works. No choice (or both) is a 400.
- */
-const removalBodySchema = z
-  .object({ transferToProjectId: z.uuid().optional(), deleteData: z.literal(true).optional() })
-  .nullish();
-const removalQuerySchema = z.object({ transferId: z.uuid().optional() });
-
-function removalChoice(body: unknown, query: unknown): MemberRemovalChoice {
-  const fromBody = parse(removalBodySchema, body) ?? {};
-  const { transferId } = parse(removalQuerySchema, query ?? {});
-  const transferTo = fromBody.transferToProjectId ?? transferId;
-  if (transferTo !== undefined && fromBody.deleteData) {
-    throw ApiError.badRequest("Choose one: move the member's work to a project or delete it");
-  }
-  if (transferTo !== undefined) return { transferToProjectId: transferTo };
-  if (fromBody.deleteData) return { deleteData: true };
-  throw ApiError.badRequest(
-    "Say what happens to the member's work: send transferToProjectId to move it to a project, or deleteData: true to delete it",
-  );
-}
 
 export async function createTag(ctx: ServerContext, tenantId: string, name: string) {
   if (await ctx.repos.tags.getByName(tenantId, name))
@@ -110,22 +85,8 @@ export async function updateVariable(
   }
 }
 
-/**
- * A caller gives a workspace role only when it holds every scope of that role itself (an owner holds them
- * all). So a custom role with `user:changeRole` or `user:create` cannot hand out admin or a wider custom role.
- * `member` is the floor every workspace user starts from, so it can always be given.
- */
-async function assertGrantable(ctx: ServerContext, auth: AuthContext, role: string, action: string) {
-  if (auth.role === 'owner' || role === 'member') return;
-  const mine = await ctx.access.scopesForAuth(auth);
-  const given = await ctx.access.globalScopes(auth.tenant.id, role);
-  if ([...given].some((scope) => !mine.has(scope))) {
-    throw ApiError.forbidden(`Couldn't ${action}: the role gives scopes you don't have`);
-  }
-}
-
 export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext): void {
-  const { repos, auth: authService, config, variables } = ctx;
+  const { repos, variables } = ctx;
 
   // tags --------------------------------------------------------------------------------------
   app.get('/tags', async (request) => {
@@ -200,179 +161,6 @@ export function registerResourceRoutes(app: FastifyInstance, ctx: ServerContext)
       variableId: id,
     });
     await variables.delete(auth, id);
-    return { data: { ok: true } };
-  });
-
-  // members & invitations ---------------------------------------------------------------------
-  app.get('/members', async (request) => {
-    const auth = await requireScope(request, 'user:list');
-    const members = await repos.memberships.listForTenant(auth.tenant.id);
-    return {
-      data: members.map((m) => ({
-        userId: m.userId,
-        email: m.email,
-        name: m.name,
-        role: m.role,
-        joinedAt: m.joinedAt.toISOString(),
-      })),
-      nextCursor: null,
-    };
-  });
-
-  app.post('/members/invite', async (request) => {
-    const auth = await requireScope(request, 'user:create');
-    const body = parse(z.object({ email: z.email().max(254), role: memberRoleSchema }), request.body);
-    await authService.assertMemberRole(auth.tenant.id, body.role);
-    await assertGrantable(ctx, auth, body.role, 'invite the member');
-    const { invitation, token } = await authService.invite(
-      auth.tenant.id,
-      { id: auth.user.id, role: auth.role },
-      body.email,
-      body.role,
-    );
-    await repos.audit.add(auth.tenant.id, {
-      userId: auth.user.id,
-      action: 'member.invited',
-      resourceType: 'invitation',
-      resourceId: invitation.id,
-      metadata: { email: invitation.email, role: invitation.role },
-      ip: request.ip,
-    });
-    return {
-      data: {
-        id: invitation.id,
-        email: invitation.email,
-        role: invitation.role,
-        expiresAt: invitation.expiresAt.toISOString(),
-        // shown once: deliver it to the invitee (no mail transport is configured)
-        token,
-        // the editor's accept page (`/invitation/:token`)
-        inviteUrl: `${config.baseUrl}/invitation/${token}`,
-      },
-    };
-  });
-
-  app.patch('/members/:userId', async (request) => {
-    const auth = await requireScope(request, 'user:changeRole');
-    const { userId } = parse(z.object({ userId: z.uuid() }), request.params);
-    const { role } = parse(z.object({ role: memberRoleSchema }), request.body);
-    await authService.assertMemberRole(auth.tenant.id, role);
-    const target = await repos.memberships.get(auth.tenant.id, userId);
-    if (!target) throw ApiError.notFound('Member');
-    if ((target.role === 'owner' || role === 'owner') && auth.role !== 'owner') {
-      throw ApiError.forbidden('Only owners can grant or revoke the owner role');
-    }
-    if (
-      target.role === 'owner' &&
-      role !== 'owner' &&
-      (await repos.memberships.countOwners(auth.tenant.id)) <= 1
-    ) {
-      throw ApiError.conflict('A workspace needs at least one owner');
-    }
-    // as n8n (after the last owner check, so the only owner still hears why)
-    if (userId === auth.user.id) throw ApiError.forbidden('Cannot change your own global role');
-    await assertGrantable(ctx, auth, role, 'change the role');
-    await repos.memberships.updateRole(auth.tenant.id, userId, role);
-    await repos.audit.add(auth.tenant.id, {
-      userId: auth.user.id,
-      action: 'member.role_changed',
-      resourceType: 'user',
-      resourceId: userId,
-      metadata: { from: target.role, to: role },
-      ip: request.ip,
-    });
-    return { data: { userId, role } };
-  });
-
-  app.delete('/members/:userId', async (request) => {
-    const auth = await requireScope(request, 'user:delete');
-    const { userId } = parse(z.object({ userId: z.uuid() }), request.params);
-    if (!(await repos.memberships.get(auth.tenant.id, userId))) throw ApiError.notFound('Member');
-    await removeMember(ctx, auth, userId, removalChoice(request.body, request.query));
-    return { data: { ok: true } };
-  });
-
-  app.get('/invitations', async (request) => {
-    const auth = await requireScope(request, 'user:create');
-    const rows = await repos.invitations.listPending(auth.tenant.id);
-    return {
-      data: rows.map((r) => ({
-        id: r.id,
-        email: r.email,
-        role: r.role,
-        expiresAt: r.expiresAt.toISOString(),
-        createdAt: r.createdAt.toISOString(),
-      })),
-      nextCursor: null,
-    };
-  });
-
-  app.delete('/invitations/:id', async (request) => {
-    const auth = await requireScope(request, 'user:create');
-    const { id } = parse(idParams, request.params);
-    if (!(await repos.invitations.delete(auth.tenant.id, id))) throw ApiError.notFound('Invitation');
-    return { data: { ok: true } };
-  });
-
-  // API keys (own keys; they act with the creator's current role) ----------------------------
-  app.get('/api-keys', async (request) => {
-    const auth = requireAuth(request);
-    const rows = await repos.apiKeys.list(auth.tenant.id, auth.user.id);
-    return {
-      data: rows.map((r) => ({
-        id: r.id,
-        name: r.name,
-        prefix: r.prefix,
-        scopes: r.scopes,
-        lastUsedAt: r.lastUsedAt?.toISOString() ?? null,
-        createdAt: r.createdAt.toISOString(),
-      })),
-      nextCursor: null,
-    };
-  });
-
-  app.post('/api-keys', async (request) => {
-    const auth = await requireScope(request, 'apiKey:create');
-    const { name, scopes } = parse(
-      z.object({
-        name: z.string().trim().min(1).max(64),
-        scopes: z.array(z.enum(API_KEY_SCOPES)).max(API_KEY_SCOPES.length).optional(),
-      }),
-      request.body,
-    );
-    const key = await authService.createApiKey(auth.tenant.id, auth.user.id, name, [
-      ...new Set(scopes ?? []),
-    ]);
-    await repos.audit.add(auth.tenant.id, {
-      userId: auth.user.id,
-      action: 'apikey.created',
-      resourceType: 'api_key',
-      resourceId: key.id,
-      ip: request.ip,
-    });
-    return {
-      data: {
-        id: key.id,
-        name: key.name,
-        key: key.key,
-        prefix: key.prefix,
-        scopes: key.scopes,
-        createdAt: key.createdAt,
-      },
-    };
-  });
-
-  app.delete('/api-keys/:id', async (request) => {
-    const auth = requireAuth(request);
-    const { id } = parse(idParams, request.params);
-    if (!(await repos.apiKeys.delete(auth.tenant.id, auth.user.id, id))) throw ApiError.notFound('API key');
-    await repos.audit.add(auth.tenant.id, {
-      userId: auth.user.id,
-      action: 'apikey.deleted',
-      resourceType: 'api_key',
-      resourceId: id,
-      ip: request.ip,
-    });
     return { data: { ok: true } };
   });
 

@@ -175,6 +175,10 @@ export class TransferService {
     input: CredentialTransferInput,
   ): Promise<void> {
     const tenantId = auth.tenant.id;
+    // P6-15 (C0): first, a private credential's move rules (personal target, `credential:createEndUser`); stub (L14) PASSES
+    await this.deps
+      .context()
+      .privateCredentials.assertMovable(auth, credentialId, input.destinationProjectId);
     const row = await this.deps.repos.credentials.get(tenantId, credentialId);
     if (!row) throw ApiError.notFound('Credential');
     const destination = input.destinationProjectId;
@@ -197,6 +201,8 @@ export class TransferService {
         metadata: { from: row.projectId, to: destination },
       });
     });
+    // P6-15 (C0): stub (L14) PASSES
+    await this.deps.context().privateCredentials.afterAccessChange(tenantId, { credentialId });
   }
 
   async transferFolder(auth: AuthContext, folderId: string, input: FolderTransferInput): Promise<void> {

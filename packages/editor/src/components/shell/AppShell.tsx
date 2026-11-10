@@ -18,6 +18,7 @@ import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-route
 import {
   errorMessage,
   isApiError,
+  onMfaEnrollmentRequired,
   onTenantChanged,
   onUnauthorized,
   setCurrentTenant,
@@ -230,6 +231,13 @@ export function AppShell() {
         navigate(`/signin?redirect=${encodeURIComponent(location.pathname + location.search)}`);
       }),
     [navigate, location.pathname, location.search, queryClient],
+  );
+
+  // P6-18: the workspace enforces two-step sign-in and this user has none: keep the session and open
+  // the setup on the account page (MfaSection opens its dialog on `?mfa=setup`), not the sign-in page
+  useEffect(
+    () => onMfaEnrollmentRequired(() => navigate('/settings/account?mfa=setup', { replace: true })),
+    [navigate],
   );
 
   // another tab switched the session's workspace: follow it instead of writing into it blindly

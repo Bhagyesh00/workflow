@@ -4,6 +4,7 @@
  * with non-empty scopes gets 403 on a route whose scope it lacks and on a route with no scope; a key
  * with empty scopes keeps full access.
  */
+import { PROJECT_ROLE_SCOPES, type Scope } from '@workflow/workflow';
 import type { AuthContext } from './auth';
 import { ApiError } from './errors';
 
@@ -80,9 +81,28 @@ export const API_KEY_SCOPES = [
   'testRun:create',
   'testRun:read',
   'testRun:cancel',
+  // P6-01, P6-09 to P6-14: SSO, LDAP and role mapping on the public API
+  'saml:manage',
+  'oidc:manage',
+  'ldap:manage',
+  'ldap:sync',
+  'roleMappingRule:create',
+  'roleMappingRule:delete',
+  'roleMappingRule:list',
+  'roleMappingRule:update',
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];
+
+/**
+ * P6-21: the key scopes a user may give a key (and the key list offers), as n8n's `getApiKeyScopesForRole`:
+ * the role's global scopes that are key scopes, plus the key scopes a personal project owner holds, because
+ * every member works in their own personal project. In `API_KEY_SCOPES` order.
+ */
+export function apiKeyScopesForRole(scopes: ReadonlySet<Scope>): ApiKeyScope[] {
+  const personal = PROJECT_ROLE_SCOPES['project:personalOwner'];
+  return API_KEY_SCOPES.filter((scope) => scopes.has(scope as Scope) || personal.has(scope as Scope));
+}
 
 /**
  * Fails closed. A key with scopes gets 403 on a route whose scope it lacks and on a route with no

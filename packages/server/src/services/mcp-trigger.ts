@@ -404,7 +404,8 @@ export class McpTriggerService {
     }
     if (message.method === 'tools/call') {
       const base = (result.workflowData?.[0]?.[0]?.json ?? {}) as DataObject;
-      return this.callTool(input, message, base, sessionId, modern);
+      // P6-15 (C0): the run acts for the user of a verified OAuth token (the node's `triggerUserId`), else nobody
+      return this.callTool(input, message, base, sessionId, modern, result.triggerUserId);
     }
     return { answer: mcpError(message.id, MCP_ERRORS.METHOD_NOT_FOUND, TEXTS.methodNotFound) };
   }
@@ -449,6 +450,7 @@ export class McpTriggerService {
     base: DataObject,
     sessionId: string | undefined,
     modern: boolean,
+    endUserId?: string,
   ): Promise<Answered> {
     const params = message.params ?? {};
     const toolName = params.name;
@@ -498,6 +500,7 @@ export class McpTriggerService {
           startNode: input.node.name,
           triggerItems: JSON.parse(JSON.stringify([item])),
           userId: input.userId,
+          endUserId,
           wait: true,
         });
       } catch (error) {

@@ -20,9 +20,14 @@ import { PageLoader } from './components/ui/misc';
 import { Toaster } from './components/ui/Toaster';
 import { applyTheme } from './lib/brand';
 import { AcceptInvitationPage, LoginPage, SignupPage } from './pages/auth/AuthPages';
+import { ConfirmEmailChangePage } from './pages/auth/ConfirmEmailChangePage';
+import { CredentialConnectPage } from './pages/auth/CredentialConnectPage';
+import { ForgotPasswordPage } from './pages/auth/ForgotPasswordPage';
 import { FormSignInPage } from './pages/auth/FormSignInPage';
+import { ResetPasswordPage } from './pages/auth/ResetPasswordPage';
 import { NotFoundPage, RouteErrorPage } from './pages/ErrorPages';
 import { InboxPage } from './pages/InboxPage';
+import { LdapSettingsPage } from './pages/LdapSettingsPage';
 import {
   ProjectLayout,
   type ProjectPageKind,
@@ -32,6 +37,7 @@ import {
 import { ProjectSettingsPage } from './pages/ProjectSettingsPage';
 import { ReviewDetailPage } from './pages/ReviewDetailPage';
 import { RoleEditorPage, type RoleKind, RolesPage } from './pages/RolesPages';
+import { ScimSettingsPage } from './pages/ScimSettingsPage';
 import { SecretsSettingsPage } from './pages/SecretsSettingsPage';
 import { SecuritySettingsPage } from './pages/SecuritySettingsPage';
 import {
@@ -41,6 +47,10 @@ import {
   SettingsLayout,
   VariablesSettingsPage,
 } from './pages/SettingsPages';
+import { AuthenticationSettingsPage } from './pages/sso/AuthenticationSettingsPage';
+import { RoleProvisioningPanel } from './pages/sso/RoleProvisioningPanel';
+import { SamlOnboardingPage } from './pages/sso/SamlOnboardingPage';
+import { SsoSettingsPage } from './pages/sso/SsoSettingsPage';
 import { useUiStore } from './stores/ui-store';
 
 // the canvas, node details view and code editors load on demand
@@ -144,6 +154,14 @@ function ShellRoot() {
 export const routes: RouteObject[] = [
   { path: '/signin', element: <LoginPage />, errorElement: <RouteErrorPage /> },
   { path: '/signup', element: <SignupPage />, errorElement: <RouteErrorPage /> },
+  // P6-19: password reset and email change; the token is read from the query once, then sent in a body
+  { path: '/forgot-password', element: <ForgotPasswordPage />, errorElement: <RouteErrorPage /> },
+  { path: '/reset-password', element: <ResetPasswordPage />, errorElement: <RouteErrorPage /> },
+  { path: '/confirm-email-change', element: <ConfirmEmailChangePage />, errorElement: <RouteErrorPage /> },
+  // P6-13: after a SAML sign-in that carried no name
+  { path: '/saml/onboarding', element: <SamlOnboardingPage />, errorElement: <RouteErrorPage /> },
+  // P6-87: connect or disconnect your own account on a private credential, then back to the form or chat
+  { path: '/credential-connect/:id', element: <CredentialConnectPage />, errorElement: <RouteErrorPage /> },
   { path: '/invitation/:token', element: <AcceptInvitationPage />, errorElement: <RouteErrorPage /> },
   // links sent before the server emitted /invitation/:token
   { path: '/invitations/:token', element: <AcceptInvitationPage />, errorElement: <RouteErrorPage /> },
@@ -268,6 +286,12 @@ export const routes: RouteObject[] = [
           { path: 'api-keys', element: <ApiKeysSettingsPage /> },
           { path: 'variables', element: <VariablesSettingsPage /> },
           { path: 'security', element: <SecuritySettingsPage /> },
+          // P6-13: the hub and its pages (each gates itself by scope)
+          { path: 'authentication', element: <AuthenticationSettingsPage /> },
+          { path: 'sso', element: <SsoSettingsPage /> },
+          { path: 'ldap', element: <LdapSettingsPage /> },
+          { path: 'provisioning', element: <RoleProvisioningPanel /> },
+          { path: 'scim', element: <ScimSettingsPage /> },
           { path: 'external-secrets', element: <SecretsSettingsPage /> },
           {
             path: 'ai',

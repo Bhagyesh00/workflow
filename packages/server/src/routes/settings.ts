@@ -94,7 +94,12 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
           executionsMode: config.executionsMode,
           binaryDataMode: config.binaryData.mode,
           oauth2: true,
-          publicApi: true,
+          /** off with PUBLIC_API_DISABLED (then /api/v1 answers 404) */
+          publicApi: !config.publicApiDisabled,
+          /** P6-17: mail is set up (invites, resets and share mails go out) */
+          mail: ctx.mailer.isConfigured(),
+          /** P6-18: MFA can be set up (MFA_ENABLED) */
+          mfa: config.mfaEnabled,
           versionHistory: true,
           versionDiff: true,
           workflowValidation: true,
@@ -109,6 +114,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
           : {}),
         autosaveEnabled: !config.autosaveDisabled,
         workflowReviews: { enabled: tenantSettings.workflowReviews?.enabled === true },
+        /** P6-18: the workspace enforces two-factor sign-in (POST /settings/mfa-enforce writes it) */
+        mfa: { enforced: tenantSettings.mfa?.enforced === true },
         /** P6-33: the personal space policy, read from the same key as the access service (absent = on) */
         securityPolicy: {
           personalSpacePublishing: tenantSettings.securityPolicy?.personalSpacePublishing !== false,

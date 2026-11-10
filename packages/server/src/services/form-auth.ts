@@ -5,6 +5,7 @@
 import { randomBytes } from 'node:crypto';
 import { CHAT_TOKEN_KINDS, type FormAuthHelper, type FormUser } from '@workflow/workflow';
 import type { ServiceDeps } from '../context';
+import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { sha256 } from './auth';
 
@@ -86,14 +87,19 @@ export class FormAuthService implements FormAuthHelper {
     return false;
   }
 
-  /** a one-time code, good for 60 seconds, for a member of the workspace the form belongs to */
-  async issueCode(userId: string, returnTo: string): Promise<string> {
+  /**
+   * a one-time code, good for 60 seconds, for a member of the workspace the form belongs to; the session must
+   * be allowed into that workspace (P6-01: SSO fences a session of another workspace)
+   */
+  async issueCode(auth: AuthContext, returnTo: string): Promise<string> {
+    const userId = auth.user.id;
     const path = returnTo.split('?')[0];
     const tenantId = await this.tenantOfForm(path);
     if (!tenantId || !(await this.deps.repos.memberships.get(tenantId, userId))) {
       // an unknown form and someone else's form look the same
       throw new ApiError(403, 'forbidden', "You aren't a member of the workspace this form belongs to");
     }
+    await this.deps.context().ssoLogin.assertSessionEntry(auth, tenantId);
     const code = randomBytes(32).toString('base64url');
     await this.keep(code, { userId, tenantId, path });
     return code;

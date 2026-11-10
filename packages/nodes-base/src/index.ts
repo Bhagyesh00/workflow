@@ -247,4 +247,6 @@ export {
   SINGLE_VALUE_OPERATIONS,
 } from './utils/filter';
 export { parseOAuthResponse, signOAuth1Request } from './utils/oauth1';
+export { createSmtpTransport } from './utils/smtp-transport';
+export { base32Decode, totp } from './utils/totp';
 export { verifyWebhookSignature } from './utils/webhook-signature';

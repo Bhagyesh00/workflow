@@ -18,6 +18,14 @@ const signupSchema = z.object({
 const loginSchema = z.object({
   email: z.string().trim().min(1).max(254),
   password: z.string().min(1).max(256),
+  /** P6-01: the workspace slug of the sign-in page */
+  workspace: z.string().trim().min(1).max(64).optional(),
+  /** P6-18: the second step; a missing code answers 401 `mfa_required` when MFA is on */
+  mfaCode: z
+    .string()
+    .regex(/^\d{6}$/, 'The MFA code must be 6 digits')
+    .optional(),
+  mfaRecoveryCode: z.string().trim().min(1).max(64).optional(),
 });
 
 const acceptSchema = z.object({
@@ -93,12 +101,22 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: ServerContext): vo
 
   app.get('/auth/me', async (request) => {
     const current = requireAuth(request);
-    const tenants = await repos.memberships.listForUser(current.user.id);
+    const [tenants, mfaEnabled] = await Promise.all([
+      repos.memberships.listForUser(current.user.id),
+      repos.userMfa.isEnabled(current.user.id),
+    ]);
+    const authMethod = current.authMethod ?? 'password';
     return {
       data: {
         ...authResponse(current).data,
         tenants: tenants.map((t) => ({ id: t.id, name: t.name, slug: t.slug, role: t.role })),
         globalScopes: await globalScopes(current.tenant.id, current.role),
+        /** P6-01: how this session signed in */
+        authMethod,
+        /** P6-18 */
+        mfaEnabled,
+        /** P6-01: account-wide changes are refused (`assertGlobalAccountChange`) */
+        ssoFenced: authMethod !== 'password',
       },
     };
   });
@@ -107,7 +125,7 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: ServerContext): vo
     const current = requireAuth(request);
     const { tenantId } = parse(z.object({ tenantId: z.uuid() }), request.body);
     if (!current.sessionId) throw ApiError.unauthorized();
-    const { tenant, role } = await auth.switchTenant(current.sessionId, current.user.id, tenantId);
+    const { tenant, role } = await auth.switchTenant(current, tenantId);
     const response = authResponse({ user: current.user, tenant, role });
     return { data: { ...response.data, globalScopes: await globalScopes(tenant.id, role) } };
   });

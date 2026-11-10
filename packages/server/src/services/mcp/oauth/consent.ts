@@ -64,6 +64,8 @@ async function loadFlow(ctx: ServerContext, auth: AuthContext, token: string): P
   // the flow's workspace, not the session's current one
   const membership = await ctx.repos.memberships.get(flow.tenantId, auth.user.id);
   if (!membership) throw ApiError.forbidden(MCP_CONSENT_TEXTS.notMember);
+  // P6-01: SSO may fence a session of another workspace (details and approve both come through here)
+  await ctx.ssoLogin.assertSessionEntry(auth, flow.tenantId);
   const tenant = await ctx.repos.tenants.get(flow.tenantId);
   if (!tenant) throw ApiError.badRequest(MCP_CONSENT_TEXTS.invalidFlow);
   // the access switch gates only the tenant server's resource, not a trigger's

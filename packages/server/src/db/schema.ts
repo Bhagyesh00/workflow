@@ -69,6 +69,8 @@ export const users = pgTable(
     passwordHash: text('password_hash').notNull(),
     createdAt: createdAt(),
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+    /** P6-02: the workspace whose SCIM client created this user; only it may change name and email */
+    managedByTenantId: uuid('managed_by_tenant_id').references(() => tenants.id, { onDelete: 'set null' }),
   },
   (t) => [uniqueIndex('users_email_lower_idx').on(sql`lower(${t.email})`)],
 );
@@ -84,8 +86,22 @@ export const memberships = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     role: text('role').$type<Role>().notNull(),
     createdAt: createdAt(),
+    /** P6-01: this member may still sign in with a password while SSO is on */
+    allowSsoManualLogin: boolean('allow_sso_manual_login').notNull().default(false),
+    /** P6-20: last request of this member in this workspace, written at most once a day */
+    lastActiveAt: timestamp('last_active_at', { withTimezone: true }),
+    /** P6-20: set while the member is disabled; a disabled member cannot sign in to this workspace */
+    disabledAt: timestamp('disabled_at', { withTimezone: true }),
+    /** P6-02: the SCIM client's id for this member, unique per workspace */
+    externalId: text('external_id'),
   },
-  (t) => [primaryKey({ columns: [t.tenantId, t.userId] }), index('memberships_user_idx').on(t.userId)],
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.userId] }),
+    index('memberships_user_idx').on(t.userId),
+    uniqueIndex('memberships_tenant_external_id_idx')
+      .on(t.tenantId, t.externalId)
+      .where(sql`${t.externalId} is not null`),
+  ],
 );
 
 /** project icon as n8n stores it: an icon name or an emoji */
@@ -199,6 +215,13 @@ export const sessions = pgTable(
     ip: text('ip'),
     userAgent: text('user_agent'),
     createdAt: createdAt(),
+    /** P6-01: how the session was opened; SSO sessions are fenced from global account changes */
+    authMethod: text('auth_method')
+      .$type<'password' | 'saml' | 'oidc' | 'ldap'>()
+      .notNull()
+      .default('password'),
+    /** P6-18: the second factor was checked when the session opened (or the IdP did it, for SSO) */
+    mfaVerified: boolean('mfa_verified').notNull().default(false),
   },
   (t) => [index('sessions_user_idx').on(t.userId), index('sessions_expires_idx').on(t.expiresAt)],
 );
@@ -242,6 +265,8 @@ export const apiKeys = pgTable(
      * server); a key works only on its own audience
      */
     audience: text('audience').notNull().default('public-api'),
+    /** P6-21: the key stops working after this time; null never expires */
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
   },
   (t) => [
     index('api_keys_tenant_idx').on(t.tenantId),
@@ -434,6 +459,8 @@ export const credentials = pgTable(
     projectId: uuid('project_id').notNull(),
     /** usable by every project of the workspace (n8n's `isGlobal`) */
     isGlobal: boolean('is_global').notNull().default(false),
+    /** P6-15: a private credential, each user connects their own account (rows in `credential_user_entries`) */
+    isResolvable: boolean('is_resolvable').notNull().default(false),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -474,6 +501,8 @@ export const executions = pgTable(
     /** the workflow version that ran (no FK: versions can be pruned) */
     workflowVersionId: uuid('workflow_version_id'),
     createdAt: createdAt(),
+    /** P6-15: the run used a user's own connection of a private credential (its data stays hidden) */
+    usedPrivateCredentials: boolean('used_private_credentials').notNull().default(false),
   },
   (t) => [
     index('executions_tenant_created_idx').on(t.tenantId, t.createdAt, t.id),
@@ -1360,6 +1389,234 @@ export const assistantMcpConnections = pgTable(
   (t) => [unique('assistant_mcp_connections_tenant_name_unique').on(t.tenantId, t.name)],
 );
 
+/**
+ * P6-01: a workspace's sign-in method and its SAML, OIDC and LDAP settings, one row per workspace.
+ * Secrets (`oidc_secret_enc`, `ldap_password_enc`) are CredentialCipher payloads, never plain text.
+ */
+export const tenantAuthSettings = pgTable(
+  'tenant_auth_settings',
+  {
+    tenantId: uuid('tenant_id')
+      .primaryKey()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    method: text('method').$type<'email' | 'saml' | 'oidc' | 'ldap'>().notNull().default('email'),
+    saml: jsonb('saml').$type<Record<string, unknown>>(),
+    /** the identity provider's metadata XML as saved */
+    samlMetadata: text('saml_metadata'),
+    oidc: jsonb('oidc').$type<Record<string, unknown>>(),
+    oidcSecretEnc: text('oidc_secret_enc'),
+    ldap: jsonb('ldap').$type<Record<string, unknown>>(),
+    ldapPasswordEnc: text('ldap_password_enc'),
+    /** P6-11: which claims drive workspace and project roles */
+    provisioning: jsonb('provisioning').$type<Record<string, unknown>>(),
+    /** create a member on the first SSO sign-in (just in time) */
+    jit: boolean('jit').notNull().default(true),
+    updatedAt: updatedAt(),
+  },
+  (t) => [check('tenant_auth_settings_method_check', sql`${t.method} in ('email', 'saml', 'oidc', 'ldap')`)],
+);
+
+/** P6-01: the SAML, OIDC or LDAP identity a member signs in with, unique per workspace and provider */
+export const authIdentities = pgTable(
+  'auth_identities',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    providerType: text('provider_type').$type<'saml' | 'oidc' | 'ldap'>().notNull(),
+    /** the provider's id for the person (SAML NameID, OIDC `sub`, LDAP login id) */
+    providerId: text('provider_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.providerType, t.providerId] }),
+    foreignKey({
+      name: 'auth_identities_membership_fk',
+      columns: [t.tenantId, t.userId],
+      foreignColumns: [memberships.tenantId, memberships.userId],
+    }).onDelete('cascade'),
+    index('auth_identities_tenant_user_idx').on(t.tenantId, t.userId),
+    check('auth_identities_provider_type_check', sql`${t.providerType} in ('saml', 'oidc', 'ldap')`),
+  ],
+);
+
+/**
+ * P6-18: a user's authenticator (TOTP) secret and recovery codes. Global like `users`, so no tenant_id and no
+ * RLS. `secret_enc` is a CredentialCipher payload (binding `user:<id>`); recovery codes are SHA-256 hex.
+ */
+export const userMfa = pgTable('user_mfa', {
+  userId: uuid('user_id')
+    .primaryKey()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  secretEnc: text('secret_enc').notNull(),
+  recoveryHashes: text('recovery_hashes').array().notNull().default(sql`'{}'`),
+  /** null while setup is not finished */
+  enabledAt: timestamp('enabled_at', { withTimezone: true }),
+  /** the last TOTP time step used, so a code works once */
+  lastStep: bigint('last_step', { mode: 'number' }),
+  createdAt: createdAt(),
+});
+
+/**
+ * P6-19: password reset and email change tokens, global like `users`. Only the SHA-256 of a token is
+ * stored; `used_at` makes it single use.
+ */
+export const userTokens = pgTable(
+  'user_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: text('kind').$type<'password_reset' | 'email_change'>().notNull(),
+    tokenHash: text('token_hash').notNull().unique(),
+    /** what the token carries, for example the new email address */
+    data: jsonb('data').$type<Record<string, unknown>>(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('user_tokens_user_kind_idx').on(t.userId, t.kind),
+    check('user_tokens_kind_check', sql`${t.kind} in ('password_reset', 'email_change')`),
+  ],
+);
+
+/**
+ * P6-11: role mapping rules. An `instance` rule gives a workspace role, a `project` rule a project role in the
+ * projects listed in `role_mapping_rule_projects`, when its expression matches the SSO claims. Rules run by
+ * `order`, unique per workspace and type.
+ */
+export const roleMappingRules = pgTable(
+  'role_mapping_rules',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    type: text('type').$type<'instance' | 'project'>().notNull(),
+    expression: text('expression').notNull(),
+    /** a workspace role slug for `instance` rules, a project role slug for `project` rules */
+    role: text('role').notNull(),
+    order: integer('order').notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique('role_mapping_rules_tenant_id_unique').on(t.tenantId, t.id),
+    unique('role_mapping_rules_tenant_type_order_unique').on(t.tenantId, t.type, t.order),
+    check('role_mapping_rules_type_check', sql`${t.type} in ('instance', 'project')`),
+  ],
+);
+
+/** P6-11: the projects a `project` role mapping rule applies to; both ends inside the tenant */
+export const roleMappingRuleProjects = pgTable(
+  'role_mapping_rule_projects',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    ruleId: uuid('rule_id').notNull(),
+    projectId: uuid('project_id').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.ruleId, t.projectId] }),
+    foreignKey({
+      name: 'role_mapping_rule_projects_rule_fk',
+      columns: [t.tenantId, t.ruleId],
+      foreignColumns: [roleMappingRules.tenantId, roleMappingRules.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'role_mapping_rule_projects_project_fk',
+      columns: [t.tenantId, t.projectId],
+      foreignColumns: [projects.tenantId, projects.id],
+    }).onDelete('cascade'),
+    index('role_mapping_rule_projects_tenant_project_idx').on(t.tenantId, t.projectId),
+  ],
+);
+
+/**
+ * P6-12: one row per directory sync run (LDAP today), per workspace. `run_mode` is `dry` or `live`, `status`
+ * `success` or `error`, as n8n's sync history.
+ */
+export const authProviderSyncHistory = pgTable(
+  'auth_provider_sync_history',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    providerType: text('provider_type').notNull(),
+    runMode: text('run_mode').notNull(),
+    status: text('status').notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().default(nowMs),
+    endedAt: timestamp('ended_at', { withTimezone: true }),
+    scanned: integer('scanned').notNull().default(0),
+    created: integer('created').notNull().default(0),
+    updated: integer('updated').notNull().default(0),
+    disabled: integer('disabled').notNull().default(0),
+    error: text('error'),
+  },
+  (t) => [index('auth_provider_sync_history_tenant_started_idx').on(t.tenantId, t.startedAt.desc())],
+);
+
+/** P6-02: a workspace's SCIM bearer token, one per workspace; only its SHA-256 and a short hint are stored */
+export const scimTokens = pgTable('scim_tokens', {
+  tenantId: uuid('tenant_id')
+    .primaryKey()
+    .references(() => tenants.id, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash').notNull().unique(),
+  /** the last characters of the token, shown in the settings page */
+  tokenHint: text('token_hint').notNull(),
+  createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: createdAt(),
+});
+
+/**
+ * P6-15: one user's own connection of a private credential (`credentials.is_resolvable`). `data_enc` is a
+ * CredentialCipher payload. Both ends stay inside the tenant; removing the member removes the row.
+ */
+export const credentialUserEntries = pgTable(
+  'credential_user_entries',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    credentialId: uuid('credential_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    dataEnc: text('data_enc').notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.credentialId, t.userId] }),
+    foreignKey({
+      name: 'credential_user_entries_credential_fk',
+      columns: [t.tenantId, t.credentialId],
+      foreignColumns: [credentials.tenantId, credentials.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'credential_user_entries_membership_fk',
+      columns: [t.tenantId, t.userId],
+      foreignColumns: [memberships.tenantId, memberships.userId],
+    }).onDelete('cascade'),
+    index('credential_user_entries_tenant_user_idx').on(t.tenantId, t.userId),
+  ],
+);
+
+/**
+ * P6-16: a workspace's RSA keys for JWE token responses of OAuth2 credentials (`jweEnabled`), served as JWKS
+ * at `/.well-known/jwks/:slug.json`. `private_enc` is a CredentialCipher payload (binding `jwe:<kid>`).
+ */
+export const oauthJweKeys = pgTable(
+  'oauth_jwe_keys',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    kid: text('kid').notNull(),
+    privateEnc: text('private_enc').notNull(),
+    publicJwk: jsonb('public_jwk').$type<Record<string, unknown>>().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.kid] })],
+);
+
 export type { LegacyRole, Role, SystemRole } from './role-types';
 
 export type TenantRow = typeof tenants.$inferSelect;
@@ -1392,3 +1649,13 @@ export type AnnotationTagRow = typeof annotationTags.$inferSelect;
 export type ExecutionAnnotationRow = typeof executionAnnotations.$inferSelect;
 export type PublishHistoryRow = typeof workflowPublishHistory.$inferSelect;
 export type WorkflowReviewRequestRow = typeof workflowReviewRequests.$inferSelect;
+export type TenantAuthSettingsRow = typeof tenantAuthSettings.$inferSelect;
+export type AuthIdentityRow = typeof authIdentities.$inferSelect;
+export type UserMfaRow = typeof userMfa.$inferSelect;
+export type UserTokenRow = typeof userTokens.$inferSelect;
+export type RoleMappingRuleRow = typeof roleMappingRules.$inferSelect;
+export type RoleMappingRuleProjectRow = typeof roleMappingRuleProjects.$inferSelect;
+export type AuthProviderSyncHistoryRow = typeof authProviderSyncHistory.$inferSelect;
+export type ScimTokenRow = typeof scimTokens.$inferSelect;
+export type CredentialUserEntryRow = typeof credentialUserEntries.$inferSelect;
+export type OAuthJweKeyRow = typeof oauthJweKeys.$inferSelect;

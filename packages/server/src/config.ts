@@ -227,6 +227,41 @@ const envSchema = z.object({
   AI_MODEL_STREAM_IDLE_TIMEOUT_MS: int(90_000),
   /** P5-67: a model stream with no output this long (ms) after the request is a stall; 0 = off */
   AI_MODEL_STREAM_FIRST_OUTPUT_TIMEOUT_MS: int(180_000),
+  /** P6-17: mail of the user management (n8n's N8N_EMAIL_MODE, N8N_SMTP_*); '' turns mail off */
+  EMAIL_MODE: z.enum(['', 'smtp']).default('smtp'),
+  SMTP_HOST: z.string().default(''),
+  SMTP_PORT: int(465, 1),
+  SMTP_SSL: bool(true),
+  SMTP_STARTTLS: bool(true),
+  SMTP_USER: z.string().default(''),
+  SMTP_PASS: z.string().default(''),
+  SMTP_SENDER: z.string().default(''),
+  /** P6-17: a service account (client email) and its private key; the token is fetched through ctx.http */
+  SMTP_OAUTH_SERVICE_CLIENT: z.string().default(''),
+  SMTP_OAUTH_PRIVATE_KEY: z.string().default(''),
+  /** P6-17: a file that replaces one mail template (n8n's N8N_UM_EMAIL_TEMPLATES_*); values stay escaped */
+  UM_EMAIL_TEMPLATES_INVITE: z.string().default(''),
+  UM_EMAIL_TEMPLATES_PWRESET: z.string().default(''),
+  UM_EMAIL_TEMPLATES_WORKFLOW_SHARED: z.string().default(''),
+  UM_EMAIL_TEMPLATES_CREDENTIALS_SHARED: z.string().default(''),
+  UM_EMAIL_TEMPLATES_PROJECT_SHARED: z.string().default(''),
+  UM_EMAIL_TEMPLATES_WORKFLOW_FAILURE: z.string().default(''),
+  UM_EMAIL_TEMPLATES_API_KEY_REVOKED: z.string().default(''),
+  UM_EMAIL_TEMPLATES_MCP_CLIENT_REVOKED: z.string().default(''),
+  UM_EMAIL_TEMPLATES_EMAIL_CHANGE_REQUESTED: z.string().default(''),
+  UM_EMAIL_TEMPLATES_EMAIL_CHANGE_COMPLETED: z.string().default(''),
+  /** P6-20: when true, an invite answers no link; the link goes out only by mail */
+  INVITE_LINKS_EMAIL_ONLY: bool(false),
+  /** P6-18: when false, MFA cannot be set up and is not asked at sign-in */
+  MFA_ENABLED: bool(true),
+  /** when true, /api/v1 is not registered (404) */
+  PUBLIC_API_DISABLED: bool(false),
+  /** the session cookie and row lifetime in hours (n8n: 336, 14 days) */
+  USER_MANAGEMENT_JWT_DURATION_HOURS: z.coerce.number().positive().default(336),
+  /** P6-02: the SCIM rate limit, requests per window and workspace (L13 sets the window) */
+  SCIM_RATE_LIMIT: int(600, 1),
+  /** P6-01: when true, the sign-in page sends a workspace with SSO on to its identity provider */
+  SSO_REDIRECT_LOGIN_TO_SSO: bool(true),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -364,6 +399,55 @@ export interface Config {
     /** ms; 0 = off */
     streamFirstOutputTimeoutMs: number;
   };
+  /** P6-17: EMAIL_MODE, SMTP_*, UM_EMAIL_TEMPLATES_* (the Mailer reads it) */
+  mail: MailConfig;
+  /** P6-18: MFA_ENABLED */
+  mfaEnabled: boolean;
+  /** PUBLIC_API_DISABLED */
+  publicApiDisabled: boolean;
+  /** USER_MANAGEMENT_JWT_DURATION_HOURS in ms; session rows and the cookie live this long */
+  sessionTtlMs: number;
+  /** P6-02: SCIM_RATE_LIMIT, requests per window and workspace */
+  scimRateLimit: number;
+  /** P6-01: SSO_REDIRECT_LOGIN_TO_SSO */
+  ssoRedirectLogin: boolean;
+  /** P6-20: INVITE_LINKS_EMAIL_ONLY */
+  inviteLinksEmailOnly: boolean;
+}
+
+/** P6-17: the mail templates a file may replace (UM_EMAIL_TEMPLATES_*) */
+export type MailTemplateName =
+  | 'invite'
+  | 'passwordReset'
+  | 'workflowShared'
+  | 'credentialShared'
+  | 'projectShared'
+  | 'workflowFailure'
+  | 'apiKeyRevoked'
+  | 'mcpClientRevoked'
+  | 'emailChangeRequested'
+  | 'emailChangeCompleted';
+
+export interface MailConfig {
+  /** EMAIL_MODE; '' turns mail off */
+  mode: '' | 'smtp';
+  smtp: {
+    /** '' = not set up */
+    host: string;
+    port: number;
+    ssl: boolean;
+    startTls: boolean;
+    user: string;
+    pass: string;
+    /** the From address */
+    sender: string;
+    /** SMTP_OAUTH_SERVICE_CLIENT, '' = none */
+    oauthServiceClient: string;
+    /** SMTP_OAUTH_PRIVATE_KEY, '' = none; never logged */
+    oauthPrivateKey: string;
+  };
+  /** a file path per template; an absent key keeps the built-in template */
+  templates: Partial<Record<MailTemplateName, string>>;
 }
 
 export class ConfigError extends Error {
@@ -545,7 +629,48 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       streamIdleTimeoutMs: e.AI_MODEL_STREAM_IDLE_TIMEOUT_MS,
       streamFirstOutputTimeoutMs: e.AI_MODEL_STREAM_FIRST_OUTPUT_TIMEOUT_MS,
     },
+    mail: {
+      mode: e.EMAIL_MODE,
+      smtp: {
+        host: e.SMTP_HOST,
+        port: e.SMTP_PORT,
+        ssl: e.SMTP_SSL,
+        startTls: e.SMTP_STARTTLS,
+        user: e.SMTP_USER,
+        pass: e.SMTP_PASS,
+        sender: e.SMTP_SENDER,
+        oauthServiceClient: e.SMTP_OAUTH_SERVICE_CLIENT,
+        oauthPrivateKey: e.SMTP_OAUTH_PRIVATE_KEY,
+      },
+      templates: mailTemplates({
+        invite: e.UM_EMAIL_TEMPLATES_INVITE,
+        passwordReset: e.UM_EMAIL_TEMPLATES_PWRESET,
+        workflowShared: e.UM_EMAIL_TEMPLATES_WORKFLOW_SHARED,
+        credentialShared: e.UM_EMAIL_TEMPLATES_CREDENTIALS_SHARED,
+        projectShared: e.UM_EMAIL_TEMPLATES_PROJECT_SHARED,
+        workflowFailure: e.UM_EMAIL_TEMPLATES_WORKFLOW_FAILURE,
+        apiKeyRevoked: e.UM_EMAIL_TEMPLATES_API_KEY_REVOKED,
+        mcpClientRevoked: e.UM_EMAIL_TEMPLATES_MCP_CLIENT_REVOKED,
+        emailChangeRequested: e.UM_EMAIL_TEMPLATES_EMAIL_CHANGE_REQUESTED,
+        emailChangeCompleted: e.UM_EMAIL_TEMPLATES_EMAIL_CHANGE_COMPLETED,
+      }),
+    },
+    mfaEnabled: e.MFA_ENABLED,
+    publicApiDisabled: e.PUBLIC_API_DISABLED,
+    sessionTtlMs: Math.round(e.USER_MANAGEMENT_JWT_DURATION_HOURS * 60 * 60 * 1000),
+    scimRateLimit: e.SCIM_RATE_LIMIT,
+    ssoRedirectLogin: e.SSO_REDIRECT_LOGIN_TO_SSO,
+    inviteLinksEmailOnly: e.INVITE_LINKS_EMAIL_ONLY,
   };
+}
+
+/** the set template files, resolved; an empty value keeps the built-in template */
+function mailTemplates(files: Record<MailTemplateName, string>): MailConfig['templates'] {
+  const out: MailConfig['templates'] = {};
+  for (const [name, file] of Object.entries(files) as [MailTemplateName, string][]) {
+    if (file.trim()) out[name] = path.resolve(file.trim());
+  }
+  return out;
 }
 
 /**

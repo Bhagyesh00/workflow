@@ -66,7 +66,28 @@ export const queryKeys = {
     destinationProjectId: string,
   ) => ['transfer-preview', resource, id, destinationProjectId] as const,
   members: ['members'] as const,
+  /** P6-20: a filtered page; invalidating `members` refreshes it too (prefix match) */
+  memberList: (query: object = {}) => ['members', 'list', query] as const,
   apiKeys: ['api-keys'] as const,
+  /** P6-21: the All keys tab; invalidating `apiKeys` refreshes it too (prefix match) */
+  apiKeysAll: (query: object = {}) => ['api-keys', 'all', query] as const,
+  apiKeyScopes: ['api-keys', 'scopes'] as const,
+  /** P6-01: the sign-in page's method per workspace slug ('' = none given) */
+  ssoOptions: (workspace = '') => ['sso-options', workspace] as const,
+  /** P6-01, P6-09..P6-13: invalidating `sso` refreshes every SSO query (prefix match); `mfaApi.setup`
+   *  makes a new secret on each call, so it has no key */
+  sso: ['sso'] as const,
+  ssoMethod: ['sso', 'method'] as const,
+  samlConfig: ['sso', 'saml'] as const,
+  oidcConfig: ['sso', 'oidc'] as const,
+  provisioningConfig: ['sso', 'provisioning'] as const,
+  roleMappingRules: ['sso', 'role-mapping-rules'] as const,
+  /** P6-12 */
+  ldapConfig: ['ldap', 'config'] as const,
+  ldapSyncRuns: ['ldap', 'sync'] as const,
+  /** P6-02 */
+  scimConfig: ['scim', 'config'] as const,
+  scimTransferTargets: ['scim', 'transfer-targets'] as const,
   folders: (query: object = {}) => ['folders', query] as const,
   folder: (id: string) => ['folder', id] as const,
   favorites: ['favorites'] as const,
