@@ -1,12 +1,14 @@
 /**
  * Public API LDAP (P6-12, L10), n8n's LDAP public controller: GET and PUT `/settings/ldap` (`ldap:manage`),
  * GET `/settings/ldap/sync` (the history) and POST `/settings/ldap/sync` (a run) (`ldap:sync`).
- * PUBLIC_LDAP_ROUTES is final and shaped as PUBLIC_ROLE_ROUTES (public-api.ts spreads it); the handlers
- * throw until L10 (stub (L10)).
+ * PUBLIC_LDAP_ROUTES is final and shaped as PUBLIC_ROLE_ROUTES (public-api.ts spreads it). The handlers call
+ * the same `LdapService` as /rest/ldap; the history is paged with `limit` and `cursor`.
  */
 import { z } from 'zod';
 import type { ServerContext } from '../context';
+import { syncRunDto } from '../services/sso/ldap';
 import type { ApiRoute, PublicApiInput } from './public-api';
+import { decodeCursor, encodeCursor } from './public-data-tables';
 
 type Handler = (ctx: ServerContext, input: PublicApiInput) => Promise<unknown>;
 
@@ -18,15 +20,22 @@ const historyQuery = z.object({
 });
 const syncBody = z.object({ type: z.enum(['live', 'dry']).default('live') });
 
-const notImplemented: Handler = async () => {
-  throw new Error('not implemented (L10)');
-};
-
 export const publicLdapHandlers: Record<'getConfig' | 'saveConfig' | 'history' | 'sync', Handler> = {
-  getConfig: notImplemented,
-  saveConfig: notImplemented,
-  history: notImplemented,
-  sync: notImplemented,
+  getConfig: async (ctx, { auth }) => ({ data: await ctx.ldap.getConfig(auth.tenant.id) }),
+  saveConfig: async (ctx, { auth, body }) => ({
+    data: await ctx.ldap.saveConfig(auth.tenant.id, body, auth.user.id),
+  }),
+  history: async (ctx, { auth, query }) => {
+    const skip = decodeCursor(query.cursor);
+    const page = await ctx.ldap.history(auth.tenant.id, { take: query.limit, skip });
+    return {
+      data: page.rows.map(syncRunDto),
+      nextCursor: page.more ? encodeCursor(skip + page.rows.length) : null,
+    };
+  },
+  sync: async (ctx, { auth, body }) => ({
+    data: syncRunDto(await ctx.ldap.sync(auth.tenant.id, body.type, auth.user.id)),
+  }),
 };
 
 const row = (name: keyof typeof publicLdapHandlers, fields: Omit<ApiRoute, 'handler' | 'tag'>): ApiRoute => ({
