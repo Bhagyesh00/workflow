@@ -74,7 +74,8 @@ export function AuthenticationSettingsPage() {
     },
   ].filter((row) => row.visible);
 
-  if (rows.length === 0 || !anyMethod) {
+  // a role may hold only provisioning, SCIM or two-factor: the hub lists the rows it may open
+  if (rows.length === 0) {
     return (
       <Panel title="Authentication">
         <p className="px-5 py-4 text-sm text-ink-2">

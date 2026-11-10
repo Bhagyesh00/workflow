@@ -33,8 +33,13 @@ export function SettingsLayout() {
     { to: '/settings/api-keys', label: 'API keys' },
     { to: '/settings/variables', label: 'Variables' },
     { to: '/settings/security', label: 'Security' },
-    // P6-13: SSO, LDAP, MFA, provisioning and SCIM, for whoever may set up a sign-in method
-    ...(can('saml:manage') || can('oidc:manage') || can('ldap:manage')
+    // P6-13: SSO, LDAP, MFA, provisioning and SCIM, for whoever holds the scope of one of the hub's rows
+    ...(can('saml:manage') ||
+    can('oidc:manage') ||
+    can('ldap:manage') ||
+    can('provisioning:manage') ||
+    can('scim:manage') ||
+    can('securitySettings:manage')
       ? [{ to: '/settings/authentication', label: 'Authentication' }]
       : []),
     // P6-45: each link by the scope its page needs (owner and admin hold all three)

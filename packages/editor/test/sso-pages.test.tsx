@@ -7,6 +7,7 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { addDemoRole } from '../src/demo/mock-roles';
 import { backend, signedIn } from './backend';
 import { renderApp } from './utils';
 
@@ -61,6 +62,32 @@ describe('Authentication hub', () => {
     ).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'Authentication' })).toBeNull();
     expect(screen.queryByRole('link', { name: /Single sign-on/ })).toBeNull();
+  });
+
+  it('lists only the rows a role holds the scope for, with the nav link, when it holds no sign-in method scope', async () => {
+    const mock = signedIn();
+    addDemoRole(mock, {
+      tenantId: mock.auth().tenant.id,
+      slug: 'global:idp-operator',
+      displayName: 'IdP operator',
+      description: null,
+      systemRole: false,
+      roleType: 'global',
+      scopes: ['scim:manage', 'provisioning:manage'],
+    });
+    mock.setDemoRole('global:idp-operator');
+    const first = renderApp('/settings/account');
+    const link = await screen.findByRole('link', { name: 'Authentication' }, T);
+    expect(link.getAttribute('href')).toBe('/settings/authentication');
+    first.unmount();
+    renderApp('/settings/authentication');
+    expect(await screen.findByText('SCIM', undefined, T)).toBeTruthy();
+    const links = (await screen.findAllByRole('link', {}, T)).map((a) => a.getAttribute('href'));
+    expect(links).toContain('/settings/scim');
+    expect(links).toContain('/settings/provisioning');
+    expect(links).not.toContain('/settings/sso');
+    expect(links).not.toContain('/settings/ldap');
+    expect(screen.queryByText(/don't have access to the authentication settings/)).toBeNull();
   });
 
   it('shows a member who opens the SSO page no form', async () => {
@@ -276,25 +303,82 @@ describe('SSO demo routes', () => {
 });
 
 describe('SAML onboarding page', () => {
-  it('asks a person without a name for one, saves it and goes to the app', async () => {
+  /**
+   * The demo signs in by password only. These make `/auth/me` name a SAML session and make `PATCH /auth/me`
+   * answer what the server answers a SAML session: 403 `sso_session_fenced`, except a name when the person has
+   * no other workspace (the server's `updateProfile`).
+   */
+  function asSamlSession(options: { otherWorkspace: boolean }) {
+    const demo = backend();
+    const handle = demo.handle.bind(demo);
+    vi.spyOn(demo, 'handle').mockImplementation(async (request) => {
+      if (request.path === '/auth/me' && request.method === 'PATCH' && options.otherWorkspace) {
+        return {
+          status: 403,
+          body: {
+            error: { code: 'sso_session_fenced', message: 'This session signed in with single sign-on' },
+          },
+        };
+      }
+      const res = await handle(request);
+      if (request.path === '/auth/me' && request.method === 'GET' && res.status === 200) {
+        const data = (res.body as { data: Record<string, unknown> }).data;
+        return { ...res, body: { data: { ...data, authMethod: 'saml', ssoFenced: true } } };
+      }
+      return res;
+    });
+  }
+
+  it('asks a SAML session for a name even when the server gave it the email name, saves it and goes to the app', async () => {
     const user = userEvent.setup();
     const demo = signedIn();
-    demo.auth().user.name = '';
+    // the server names a person without a name claim after the first part of the email
+    demo.auth().user.name = 'owner';
+    asSamlSession({ otherWorkspace: false });
     const { router } = renderApp('/saml/onboarding');
     expect(await screen.findByText('Add your name', undefined, T)).toBeTruthy();
     const button = screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     await user.type(screen.getByLabelText(/Your name/), 'Sam Saml');
     await user.click(button);
-    await waitFor(() => expect(router.state.location.pathname).toBe('/'), T);
+    await waitFor(() => expect(router.state.location.pathname).toMatch(/\/workflows$/), T);
     expect(backend().auth().user.name).toBe('Sam Saml');
     expect(backend().requests.some((r) => r.path === '/auth/me' && r.method === 'PATCH')).toBe(true);
   });
 
-  it('sends a person who has a name to the app and a signed-out visitor to sign-in', async () => {
+  it('goes to the page the person came for (next) after Continue and after Skip, and drops an unsafe next', async () => {
+    const user = userEvent.setup();
+    signedIn();
+    asSamlSession({ otherWorkspace: false });
+    const first = renderApp('/saml/onboarding?next=%2Fsettings%2Faccount');
+    await user.type(await screen.findByLabelText(/Your name/, undefined, T), 'Sam Saml');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(first.router.state.location.pathname).toBe('/settings/account'), T);
+    first.unmount();
+    const second = renderApp('/saml/onboarding?next=%2Fsettings%2Fmembers');
+    await user.click(await screen.findByRole('link', { name: 'Skip for now' }, T));
+    await waitFor(() => expect(second.router.state.location.pathname).toBe('/settings/members'), T);
+    second.unmount();
+    const third = renderApp('/saml/onboarding?next=%2F%2Fevil.example.com');
+    await user.click(await screen.findByRole('link', { name: 'Skip for now' }, T));
+    await waitFor(() => expect(third.router.state.location.pathname).toMatch(/\/workflows$/), T);
+  });
+
+  it('shows the server refusal of a person with another workspace and still lets them skip', async () => {
+    const user = userEvent.setup();
+    signedIn();
+    asSamlSession({ otherWorkspace: true });
+    renderApp('/saml/onboarding');
+    await user.type(await screen.findByLabelText(/Your name/, undefined, T), 'Sam Saml');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByText(/signed in with single sign-on/, undefined, T)).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Skip for now' })).toBeTruthy();
+  });
+
+  it('sends a password session to the app and a signed-out visitor to sign-in', async () => {
     signedIn();
     const first = renderApp('/saml/onboarding');
-    await waitFor(() => expect(first.router.state.location.pathname).toBe('/'), T);
+    await waitFor(() => expect(first.router.state.location.pathname).toMatch(/\/workflows$/), T);
     first.unmount();
     backend().session = null;
     const second = renderApp('/saml/onboarding');
