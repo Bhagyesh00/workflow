@@ -150,6 +150,30 @@ describe('POST /members/invite with a list', () => {
     ]);
   });
 
+  it('the same email twice in one list is invited once; the repeat answers an error and the first link works', async () => {
+    const owner = await ws(server);
+    const email = addr();
+    const rows = await owner.client.data<any[]>(
+      owner.client.post('/rest/members/invite', [
+        { email, role: 'member' },
+        { email: email.toUpperCase(), role: 'admin' },
+        { email, role: 'member' },
+      ]),
+    );
+    expect(rows[0]).toMatchObject({ email, role: 'member', error: '', id: expect.any(String) });
+    for (const repeat of rows.slice(1)) {
+      expect(repeat).toMatchObject({
+        id: null,
+        emailSent: false,
+        error: 'This email is already in the list',
+      });
+      expect(repeat.inviteAcceptUrl).toBeUndefined();
+    }
+    const pending = await server.ctx.repos.invitations.listPending(owner.tenant.id);
+    expect(pending.map((p) => p.id)).toEqual([rows[0].id]);
+    expect((await accept(server, tokenOf(rows[0].inviteAcceptUrl))).statusCode).toBe(200);
+  });
+
   it('a bad email or an empty list is a 400 before anything is made', async () => {
     const owner = await ws(server);
     expect(

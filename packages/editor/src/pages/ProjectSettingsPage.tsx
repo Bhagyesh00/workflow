@@ -117,7 +117,7 @@ export function ProjectSettingsPage({ projectId }: ProjectSettingsPageProps) {
   const projectRoles = roles.data?.project ?? [];
   const assignable = projectRoles.filter((r) => r.slug !== 'project:personalOwner');
   const taken = new Set([...detail.relations.map((r) => r.id), ...detail.implicitMembers.map((m) => m.id)]);
-  const addable = (users.data ?? []).filter((m) => !taken.has(m.userId));
+  const addable = (users.data ?? []).filter((m) => m.status !== 'pending' && !taken.has(m.userId));
   const trimmed = name.trim();
   const dirty =
     trimmed !== detail.name ||

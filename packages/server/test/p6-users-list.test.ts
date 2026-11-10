@@ -3,7 +3,7 @@
  * pending invitations among the rows, `status` and `statusCounts` for callers with `user:create` only, the
  * 2FA, last active, disabled and SCIM columns, and no row of another workspace.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { userMfa } from '../src/db/schema';
 import {
@@ -234,6 +234,25 @@ describe('GET /members', () => {
     await owner.client.data(owner.client.patch(`/rest/members/${hr.user.id}`, { role: 'global:people' }));
     const { body } = await list(hr.client, '?status=active');
     expect(body.statusCounts).toEqual({ active: 2, pending: 0, disabled: 0 });
+  });
+
+  it('answers every row with no paging, past 250 (the project picker and the access CSV read it so)', async () => {
+    const owner = await ws();
+    const expiresAt = new Date(Date.now() + 86_400_000);
+    for (let i = 0; i < 260; i++) {
+      await repos().invitations.create({
+        tenantId: owner.tenant.id,
+        email: `bulk-${i}-${tag()}@example.com`,
+        role: 'member',
+        tokenHash: createHash('sha256').update(randomUUID()).digest('hex'),
+        invitedBy: owner.user.id,
+        expiresAt,
+      });
+    }
+    const { rows, body } = await list(owner.client);
+    expect(body.count).toBe(261);
+    expect(rows).toHaveLength(261);
+    expect(new Set(rows.map((r) => r.userId)).size).toBe(261);
   });
 
   it('shows no member or invitation of another workspace', async () => {

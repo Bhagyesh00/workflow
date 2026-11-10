@@ -79,7 +79,21 @@ export class MemberService {
   ): Promise<MemberInviteResult[]> {
     await this.deps.context().ssoLogin.assertInviteAllowed(auth.tenant.id);
     const results: MemberInviteResult[] = [];
+    // a repeat of an email would find the invitation the first row just made and kill its link
+    const seen = new Set<string>();
     for (const invite of invites) {
+      const email = invite.email.trim().toLowerCase();
+      if (seen.has(email)) {
+        results.push({
+          id: null,
+          email,
+          role: invite.role,
+          emailSent: false,
+          error: 'This email is already in the list',
+        });
+        continue;
+      }
+      seen.add(email);
       try {
         results.push((await this.inviteRow(auth, invite, meta)).result);
       } catch (error) {

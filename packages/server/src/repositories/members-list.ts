@@ -137,7 +137,7 @@ export class MembersListRepository {
     const dir = query.sort?.dir === 'desc' ? 'DESC' : 'ASC';
     // ties and nulls fall back to the email and the id, so a page boundary is stable
     const order = sql.raw(`${sortColumn} ${dir} NULLS LAST, lower(r.email) ASC, r.id ASC`);
-    const take = Math.max(1, Math.min(Math.trunc(query.take), 250));
+    const take = Math.max(1, Math.min(Math.trunc(query.take), 1000));
     const skip = Math.max(0, Math.trunc(query.skip));
     const page = await this.db.execute<RawRow>(sql`
       SELECT r.id, r.kind, r.email, r.name, r.role, r.status, r.mfa_enabled, r.allow_sso_manual_login,

@@ -95,6 +95,17 @@ describe('project settings page', () => {
     expect(await screen.findByText('new@example.com')).toBeTruthy();
   });
 
+  it('the add picker leaves out a pending invitation (its id is an invitation id)', async () => {
+    const { demo, tenantId, project } = setup();
+    demo.invitations.push({ token: 'tok-pending', tenantId, email: 'waiting@example.com', role: 'member' });
+    demo.users.push({ id: 'u-new', email: 'new@example.com', name: 'Nina New', password: 'x' });
+    demo.memberships.push({ tenantId, userId: 'u-new', role: 'member' });
+    renderApp(`/projects/${project.id}/settings`);
+    const pick = (await screen.findByLabelText('Add a member', {}, T)) as HTMLSelectElement;
+    await waitFor(() => expect(within(pick).queryByText(/new@example.com/)).toBeTruthy());
+    expect(within(pick).queryByText(/waiting@example.com/)).toBeNull();
+  });
+
   it('a project viewer sees the settings read only: no Save, no member controls, no danger zone', async () => {
     const { demo, tenantId, project } = setup();
     demo.projectRelations.push({
