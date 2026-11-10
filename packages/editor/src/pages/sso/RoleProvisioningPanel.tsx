@@ -24,8 +24,8 @@ import { Panel } from '../settings/Panel';
 type Mode = 'manual' | 'instance' | 'project';
 type Mapping = 'claims' | 'rules';
 
-/** the server also answers and takes the default condition: a workspace role, `block` or null */
-type Config = ProvisioningConfig & { defaultInstanceRole?: string | null };
+/** the server also answers and takes the default condition (`defaultInstanceRole`) */
+type Config = ProvisioningConfig;
 
 const BLOCK = 'block';
 const KEEP = '';

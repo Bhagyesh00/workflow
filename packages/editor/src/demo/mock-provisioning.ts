@@ -20,12 +20,9 @@ export const DEMO_PROVISIONING_OFF: ProvisioningConfig = {
   scopesProjectsRolesClaimName: 'projects',
 };
 
-/** the config as the server answers it: the default condition is a workspace role slug, `block` or null */
-export type DemoProvisioningConfig = ProvisioningConfig & { defaultInstanceRole?: string | null };
-
 interface ProvisioningState {
   /** what `setDemoProvisioning` set (null: provisioning off) */
-  config: DemoProvisioningConfig | null;
+  config: ProvisioningConfig | null;
   rules: Map<string, RoleMappingRule[]>;
 }
 
@@ -39,7 +36,7 @@ function state(backend: MockBackend): ProvisioningState {
 }
 
 /** the provisioning config of the demo, as `GET /sso/provisioning/config` answers it */
-export function demoProvisioningConfig(backend: MockBackend): DemoProvisioningConfig {
+export function demoProvisioningConfig(backend: MockBackend): ProvisioningConfig {
   return copy(state(backend).config ?? { ...DEMO_PROVISIONING_OFF, defaultInstanceRole: null });
 }
 
@@ -130,7 +127,7 @@ export function registerProvisioningRoutes(backend: MockBackend): void {
   backend.on('PATCH', '/sso/provisioning/config', ({ body }) => {
     const { tenant } = backend.requireScope('provisioning:manage');
     const before = demoProvisioningConfig(backend);
-    const next: DemoProvisioningConfig = { ...before };
+    const next: ProvisioningConfig = { ...before };
     for (const key of [
       'scopesProvisionInstanceRole',
       'scopesProvisionProjectRoles',

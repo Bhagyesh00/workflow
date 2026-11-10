@@ -605,6 +605,64 @@ describe('managed roles', () => {
   });
 });
 
+describe('deleting a role and moving its holders', () => {
+  it('is refused while workspace roles are provisioned, and free of the lock otherwise', async () => {
+    const owner = await signup();
+    const role = await owner.client.data<{ slug: string }>(
+      owner.client.post('/rest/roles', {
+        displayName: `Ops ${suffix()}`,
+        roleType: 'global',
+        scopes: ['user:list'],
+      }),
+    );
+    const holder = await realMember(owner);
+    await server.ctx.repos.memberships.updateRole(owner.tenant.id, holder.user.id, role.slug);
+    await oidcOn(owner, { scopesProvisionInstanceRole: true });
+    const refused = await owner.client.delete(
+      `/rest/roles/${encodeURIComponent(role.slug)}?reassignRoleSlug=member`,
+    );
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.code).toBe('roles_managed_by_sso');
+    expect(await roleOf(owner, holder.user.id)).toBe(role.slug);
+    expect(await server.ctx.repos.roles.get(owner.tenant.id, role.slug)).toBeDefined();
+  });
+
+  it('strips the key scopes, cleans private credentials and audits each member moved', async () => {
+    const owner = await signup();
+    const role = await owner.client.data<{ slug: string }>(
+      owner.client.post('/rest/roles', {
+        displayName: `Ops ${suffix()}`,
+        roleType: 'global',
+        scopes: ['user:list', 'user:changeRole'],
+      }),
+    );
+    const holder = await realMember(owner);
+    await server.ctx.repos.memberships.updateRole(owner.tenant.id, holder.user.id, role.slug);
+    const key = await server.ctx.repos.apiKeys.create({
+      tenantId: owner.tenant.id,
+      userId: holder.user.id,
+      name: `key-${suffix()}`,
+      prefix: 'abcd1234',
+      keyHash: randomUUID(),
+      scopes: ['user:list', 'user:changeRole'],
+      audience: 'public-api',
+    });
+    const afterAccessChange = vi.spyOn(server.ctx.privateCredentials, 'afterAccessChange');
+    const ok = await owner.client.delete(
+      `/rest/roles/${encodeURIComponent(role.slug)}?reassignRoleSlug=member`,
+    );
+    expect(ok.statusCode).toBe(200);
+    expect(await roleOf(owner, holder.user.id)).toBe('member');
+    const keys = await server.ctx.repos.apiKeys.list(owner.tenant.id, holder.user.id);
+    expect(keys.find((row) => row.id === key.id)?.scopes).toEqual(['user:list']);
+    expect(afterAccessChange).toHaveBeenCalledWith(owner.tenant.id, { userId: holder.user.id });
+    const changed = (await server.ctx.repos.audit.list(owner.tenant.id, 100)).find(
+      (row) => row.action === 'member.role_changed' && row.resourceId === holder.user.id,
+    );
+    expect(changed?.metadata).toMatchObject({ from: role.slug, to: 'member' });
+  });
+});
+
 describe('deleting a role that a rule gives', () => {
   it('is a 409 that names the rules and the default condition, until they are gone', async () => {
     const owner = await signup();

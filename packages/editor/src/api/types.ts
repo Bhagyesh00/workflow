@@ -1637,6 +1637,8 @@ export interface ProvisioningConfig {
   scopesName: string;
   scopesInstanceRoleClaimName: string;
   scopesProjectsRolesClaimName: string;
+  /** the default condition: a workspace role slug, 'block' (deny access) or null (keep the role they have) */
+  defaultInstanceRole?: string | null;
 }
 
 /** one row of GET /sso/role-mapping-rules (P6-11, `roleMappingRule:list`) */

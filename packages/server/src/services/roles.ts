@@ -407,6 +407,8 @@ export class RoleService {
     }
     if (held && reassignTo) {
       if (actor && !(await this.access.scopesForAuth(actor)).has('user:changeRole')) throw missingScope();
+      // P6-11: moving the holders changes workspace roles, so the provisioning lock applies as for a manual role edit
+      await this.deps.context().provisioning.assertInstanceRolesEditable(tenantId);
       const target =
         reassignTo === slug || reassignTo === 'owner' ? undefined : await this.find(tenantId, reassignTo);
       if (target?.roleType !== 'global') {
@@ -423,19 +425,39 @@ export class RoleService {
       }
     }
 
-    await this.deps.database.db.transaction(async (tx) => {
+    const movedUserIds = await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
-      const moved = held && reassignTo ? await repos.roles.reassignMembers(tenantId, slug, reassignTo) : 0;
+      const moved = held && reassignTo ? await repos.roles.reassignMembers(tenantId, slug, reassignTo) : [];
       if (!(await repos.roles.delete(tenantId, slug))) throw ApiError.notFound(`Role "${slug}"`);
+      // as `changeMemberRole`: one `member.role_changed` per member moved
+      for (const userId of moved) {
+        await repos.audit.add(tenantId, {
+          userId: actor?.user.id ?? null,
+          action: 'member.role_changed',
+          resourceType: 'user',
+          resourceId: userId,
+          metadata: { from: slug, to: reassignTo, reason: 'role_deleted' },
+        });
+      }
       await this.audit(
         actor,
         tenantId,
         'role.deleted',
         slug,
-        { roleType: existing.roleType, reassignedTo: reassignTo ?? null, moved },
+        { roleType: existing.roleType, reassignedTo: reassignTo ?? null, moved: moved.length },
         repos,
       );
+      return moved;
     });
+    if (reassignTo) {
+      const context = this.deps.context();
+      for (const userId of movedUserIds) {
+        // P6-21: strips the key scopes the new role does not give
+        await context.apiKeys.onRoleChange(tenantId, userId, reassignTo);
+        // P6-15: deletes private credential entries the member can no longer reach
+        await context.privateCredentials.afterAccessChange(tenantId, { userId });
+      }
+    }
     return customRole(existing);
   }
 

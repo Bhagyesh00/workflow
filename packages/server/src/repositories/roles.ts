@@ -217,9 +217,9 @@ export class RoleRepository {
 
   /**
    * Moves every member holding workspace role `from` to `to`, and every invitation not yet accepted that
-   * gives it; returns how many members moved.
+   * gives it; returns the ids of the members moved.
    */
-  async reassignMembers(tenantId: string, from: string, to: string): Promise<number> {
+  async reassignMembers(tenantId: string, from: string, to: string): Promise<string[]> {
     const rows = await this.db
       .update(memberships)
       .set({ role: to })
@@ -231,6 +231,6 @@ export class RoleRepository {
       .where(
         and(eq(invitations.tenantId, tenantId), eq(invitations.role, from), isNull(invitations.acceptedAt)),
       );
-    return rows.length;
+    return rows.map((row) => row.userId);
   }
 }
