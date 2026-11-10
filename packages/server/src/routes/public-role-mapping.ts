@@ -3,12 +3,13 @@
  * GET and POST `/role-mapping-rules`, POST `/role-mapping-rules/:id/move`, PATCH and DELETE
  * `/role-mapping-rules/:id`, with `roleMappingRule:list`, `:create`, `:update` and `:delete`.
  * PUBLIC_ROLE_MAPPING_ROUTES is final and shaped as PUBLIC_ROLE_ROUTES (public-api.ts spreads it); the
- * handlers throw until L9 (stub (L9)).
+ * handlers call `ctx.provisioning`, which checks the expression, the role and the projects of the workspace.
  */
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import { idParams } from '../http/schemas';
 import type { ApiRoute, PublicApiInput } from './public-api';
+import { decodeCursor, paged } from './public-data-tables';
 
 type Handler = (ctx: ServerContext, input: PublicApiInput) => Promise<unknown>;
 
@@ -26,16 +27,26 @@ const ruleBody = z.object({
 const rulePatch = ruleBody.partial().omit({ type: true });
 const moveBody = z.object({ order: z.number().int().min(0) });
 
-const notImplemented: Handler = async () => {
-  throw new Error('not implemented (L9)');
-};
-
 export const publicRoleMappingHandlers: Record<'list' | 'create' | 'move' | 'update' | 'remove', Handler> = {
-  list: notImplemented,
-  create: notImplemented,
-  move: notImplemented,
-  update: notImplemented,
-  remove: notImplemented,
+  list: async (ctx, { auth, query }) => {
+    const skip = decodeCursor(query.cursor);
+    const all = await ctx.provisioning.listRules(auth.tenant.id, query.type);
+    return paged({ count: all.length, data: all.slice(skip, skip + query.limit) }, skip, (rule) => rule);
+  },
+  create: async (ctx, { auth, body }) => ({
+    data: await ctx.provisioning.createRule(auth.tenant.id, auth.user.id, body),
+  }),
+  move: async (ctx, { auth, params, body }) => {
+    await ctx.provisioning.moveRule(auth.tenant.id, auth.user.id, params.id, body.order);
+    return { data: await ctx.provisioning.getRule(auth.tenant.id, params.id) };
+  },
+  update: async (ctx, { auth, params, body }) => ({
+    data: await ctx.provisioning.updateRule(auth.tenant.id, auth.user.id, params.id, body),
+  }),
+  remove: async (ctx, { auth, params }) => {
+    await ctx.provisioning.deleteRule(auth.tenant.id, auth.user.id, params.id);
+    return { data: { ok: true } };
+  },
 };
 
 const row = (

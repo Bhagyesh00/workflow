@@ -4,8 +4,8 @@
  * `role:manageProject` for project roles; scopes come from the allow lists (`customRoleAllowedScopes`);
  * a global custom role gets n8n's baseline. Texts as n8n: "Cannot delete system roles", "Cannot delete
  * role assigned to users" (unless `reassignRoleSlug`, global roles only, `user:changeRole`), "Cannot
- * update system roles", `A role with the name "..." already exists`. S3's P6-11 adds `roleDeletionCheck`
- * to `delete`.
+ * update system roles", `A role with the name "..." already exists`. P6-11: `delete` asks the provisioning for the
+ * rules that give the role (409 naming them).
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -387,6 +387,15 @@ export class RoleService {
     const existing = await this.repos.roles.get(tenantId, slug);
     if (!existing) throw ApiError.notFound(`Role "${slug}"`);
     if (actor) await this.assertManage(actor, existing.roleType);
+
+    // P6-11: a role that a role mapping rule or the default condition gives cannot go; the 409 names them
+    const blockers = await this.deps.context().provisioning.ruleBlockers(tenantId, slug);
+    if (blockers.length > 0) {
+      const named = blockers
+        .map((blocker) => (blocker.id === 'default' ? 'the default condition' : `rule ${blocker.id}`))
+        .join(', ');
+      throw ApiError.conflict(`Cannot delete a role that role mapping rules give: ${named}`, { rules: blockers });
+    }
 
     // as n8n: a holder of the role cannot move its holders, itself among them, to another role
     const reassignTo = actor?.role === slug ? undefined : options.reassignRoleSlug;
