@@ -5,7 +5,8 @@
  * `/ServiceProviderConfig`, `/ResourceTypes`, `/Schemas`. Bodies are `application/scim+json` (own parser,
  * 1 MB).
  * Every call checks the token first (401), then that SCIM is on (403) and that SSO is on (403); errors are
- * answered in the SCIM error shape. `SCIM_RATE_LIMIT` calls per IP per 5 minutes on each route (0 = off).
+ * answered in the SCIM error shape. `SCIM_RATE_LIMIT` calls per IP per 5 minutes across all SCIM routes
+ * (0 = off).
  */
 import { redactSecrets } from '@workflow/workflow';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -124,7 +125,9 @@ export async function scimPlugin(app: FastifyInstance, opts: { ctx: ServerContex
           keyGenerator: (request: FastifyRequest) => `scim:${request.ip}`,
         }
       : false;
-  const route = { config: { rateLimit } };
+  // one budget per IP across every SCIM route (a route's own config.rateLimit gets its own store)
+  if (rateLimit) app.addHook('onRequest', app.rateLimit(rateLimit));
+  const route = {};
 
   const send = (reply: FastifyReply, result: ScimReply) => {
     reply.status(result.status).type(SCIM_CONTENT_TYPE);

@@ -439,6 +439,57 @@ describe('a user the workspace does not manage', () => {
   });
 });
 
+describe('a user the workspace made who also belongs to another workspace', () => {
+  it('Okta and Entra: PATCH and PUT keep the global email and name; active and externalId still apply', async () => {
+    const ws = await workspace();
+    const other = await signup(server.app, { remoteAddress: nextIp() });
+    const userName = email('shared');
+    const user = await created(ws, oktaUser(userName));
+    expect(await repos().users.get(user.id)).toMatchObject({ managedByTenantId: ws.tenant.id });
+    // the person later joins another workspace
+    await repos().memberships.add(other.tenant.id, user.id, 'member');
+    const original = { email: userName, name: 'Ada Lovelace' };
+
+    const okta = await scim('PATCH', `/Users/${user.id}`, ws.token, {
+      Operations: [
+        { op: 'replace', path: 'emails[type eq "work"].value', value: email('x') },
+        { op: 'replace', path: 'name.givenName', value: 'Other' },
+        { op: 'replace', path: 'active', value: false },
+        { op: 'add', path: 'externalId', value: 'okta-moved' },
+      ],
+    });
+    expect(okta.statusCode).toBe(200);
+    expect(okta.json()).toMatchObject({
+      userName: original.email,
+      active: false,
+      externalId: 'okta-moved',
+    });
+    expect(await repos().users.get(user.id)).toMatchObject(original);
+
+    const entra = await scim('PATCH', `/Users/${user.id}`, ws.token, {
+      Operations: [
+        { op: 'Replace', value: { userName: email('y'), displayName: 'Changed', active: 'True' } },
+      ],
+    });
+    expect(entra.statusCode).toBe(200);
+    expect(entra.json()).toMatchObject({
+      userName: original.email,
+      displayName: original.name,
+      active: true,
+    });
+
+    // a name that clashes with another account is no 409 either: nothing is written
+    const clash = await scim('PUT', `/Users/${user.id}`, ws.token, {
+      userName: other.user.email,
+      name: { givenName: 'Nope', familyName: 'Nope' },
+      active: true,
+      externalId: 'okta-moved',
+    });
+    expect(clash.statusCode).toBe(200);
+    expect(await repos().users.get(user.id)).toMatchObject(original);
+  });
+});
+
 describe('the owner guard', () => {
   it('403 for an email change, a deactivation and a delete of the owner; name and id changes pass', async () => {
     const ws = await workspace();
@@ -459,6 +510,31 @@ describe('the owner guard', () => {
     expect(
       (await scim('PATCH', `/Users/${ownerId}`, ws.token, { Operations: [{ op: 'replace', path: 'active', value: true }] })).statusCode,
     ).toBe(200);
+  });
+
+  it('403 for an externalId change and a rename of the owner; nothing is linked or written', async () => {
+    const ws = await workspace();
+    const ownerId = ws.user.id;
+    const before = await repos().users.get(ownerId);
+    const link = await scim('PATCH', `/Users/${ownerId}`, ws.token, {
+      Operations: [{ op: 'replace', path: 'externalId', value: 'attacker-subject' }],
+    });
+    expect(link.statusCode).toBe(403);
+    expect(await repos().sso.getIdentity(ws.tenant.id, 'saml', 'attacker-subject')).toBeUndefined();
+    expect(await repos().memberships.getByExternalId(ws.tenant.id, 'attacker-subject')).toBeUndefined();
+    // an owner who was made by SCIM and promoted afterwards is not renamed either
+    await repos().users.setManagedBy(ownerId, ws.tenant.id);
+    const rename = await scim('PATCH', `/Users/${ownerId}`, ws.token, {
+      Operations: [{ op: 'replace', path: 'name.givenName', value: 'Renamed' }],
+    });
+    expect(rename.statusCode).toBe(403);
+    const put = await scim('PUT', `/Users/${ownerId}`, ws.token, {
+      userName: before?.email,
+      displayName: 'Renamed',
+      externalId: 'x',
+    });
+    expect(put.statusCode).toBe(403);
+    expect(await repos().users.get(ownerId)).toMatchObject({ email: before?.email, name: before?.name });
   });
 
   it('an admin can be deactivated; the owner stays reachable for the same call with the same email', async () => {
@@ -488,6 +564,34 @@ describe('rate limit', () => {
       expect(over.json()).toMatchObject({ status: '429', schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'] });
       // another address has its own count
       expect((await call('10.9.9.10')).statusCode).toBe(200);
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it('counts one budget per IP across all SCIM routes', async () => {
+    const limited = await createTestServer({ SCIM_RATE_LIMIT: '3' }, { startMain: false, reset: false });
+    try {
+      const owner = await signup(limited.app, { remoteAddress: nextIp() });
+      await ssoOn(limited, owner.tenant.id, 'saml');
+      await limited.ctx.repos.scim.patchSettings(owner.tenant.id, { enabled: true });
+      const { token } = await mintScimToken(limited.ctx.scim.deps, owner.tenant.id, owner.user.id);
+      const call = (url: string) =>
+        limited.app.inject({
+          method: 'GET',
+          url: `/scim/v2${url}`,
+          remoteAddress: '10.9.8.7',
+          headers: { authorization: `Bearer ${token}` },
+        });
+      expect((await call('/Users')).statusCode).toBe(200);
+      expect((await call('/Users')).statusCode).toBe(200);
+      expect((await call('/ServiceProviderConfig')).statusCode).toBe(200);
+      const over = await call('/ServiceProviderConfig');
+      expect(over.statusCode).toBe(429);
+      expect(over.json()).toMatchObject({
+        status: '429',
+        schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'],
+      });
     } finally {
       await limited.close();
     }

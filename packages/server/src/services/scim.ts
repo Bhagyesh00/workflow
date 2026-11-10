@@ -354,26 +354,31 @@ export class ScimService {
     const { repos } = this.deps;
     const ctx = this.deps.context();
     const emailChanged = changes.email !== undefined && changes.email !== member.email.toLowerCase();
-    if (member.role === 'owner' && (emailChanged || changes.active === false)) {
+    // name and email are global to the account, so they change only for a user this workspace made
+    // and only while no other workspace has the person; the rest take `active` and `externalId`
+    const managed =
+      member.managedByTenantId === tenant.id &&
+      (await repos.sso.otherMembershipCount(member.userId, tenant.id)) === 0;
+    const newName = managed ? nameFrom(member.name, changes, member.email) : undefined;
+    const nameChanged = newName !== undefined && newName !== member.name;
+    const externalChanged = changes.externalId !== undefined && changes.externalId !== member.externalId;
+    // the owner is never changed through SCIM: no email, name or IdP id change, no deactivation
+    const ownerChanged = emailChanged || nameChanged || externalChanged || changes.active === false;
+    if (member.role === 'owner' && ownerChanged) {
       throw new ScimError(403, "The workspace owner can't be changed or deactivated through SCIM");
     }
-    // name and email change only for users this workspace made; the rest take `active` and `externalId`
-    const managed = member.managedByTenantId === tenant.id;
     if (managed && emailChanged) {
       const other = await repos.users.getByEmail(changes.email as string);
       if (other && other.id !== member.userId) {
         throw new ScimError(409, 'User with this userName already exists', 'uniqueness');
       }
     }
-    const externalChanged = changes.externalId !== undefined && changes.externalId !== member.externalId;
     if (externalChanged && changes.externalId) {
       const other = await repos.memberships.getByExternalId(tenant.id, changes.externalId);
       if (other && other.userId !== member.userId) {
         throw new ScimError(409, 'User with this externalId already exists', 'uniqueness');
       }
     }
-    const newName = managed ? nameFrom(member.name, changes, member.email) : undefined;
-    const nameChanged = newName !== undefined && newName !== member.name;
     const method = externalChanged ? await ctx.ssoSettings.activeMethod(tenant.id) : 'email';
     let wrote = false;
     try {
