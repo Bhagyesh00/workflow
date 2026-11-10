@@ -49,8 +49,14 @@ function expiryOf(seconds: number | null | undefined): Date | null {
   return at;
 }
 
+/** n8n turns the key routes that mint a secret off with the public API; list and delete stay, so old keys can be cleaned up */
+const PUBLIC_API_OFF = 'The public API is turned off on this workspace';
+
 export function registerApiKeyRoutes(app: FastifyInstance, ctx: ServerContext): void {
   const { repos, auth: authService, apiKeys } = ctx;
+  const assertPublicApiOn = (): void => {
+    if (ctx.config.publicApiDisabled) throw new ApiError(404, 'not_found', PUBLIC_API_OFF);
+  };
 
   app.get('/api-keys', async (request) => {
     const query = parse(
@@ -82,6 +88,7 @@ export function registerApiKeyRoutes(app: FastifyInstance, ctx: ServerContext): 
 
   app.post('/api-keys', async (request) => {
     const auth = await requireScope(request, 'apiKey:create');
+    assertPublicApiOn();
     const { name, scopes, expiresAt } = parse(
       z.object({
         name: label,
@@ -117,7 +124,8 @@ export function registerApiKeyRoutes(app: FastifyInstance, ctx: ServerContext): 
 
   // P6-21: the owner's own key: name and scopes; session only (the key's owner), as n8n
   app.patch('/api-keys/:id', async (request) => {
-    const auth = requireAuth(request);
+    const auth = await requireScope(request, 'apiKey:update');
+    assertPublicApiOn();
     const { id } = parse(idParams, request.params);
     const body = parse(
       z
@@ -130,7 +138,8 @@ export function registerApiKeyRoutes(app: FastifyInstance, ctx: ServerContext): 
 
   // P6-21: a new secret on the same row, shown once; the owner's own key, session only
   app.post('/api-keys/:id/rotate', async (request) => {
-    const auth = requireAuth(request);
+    const auth = await requireScope(request, 'apiKey:update');
+    assertPublicApiOn();
     const { id } = parse(idParams, request.params);
     const rotated = await apiKeys.rotate(auth, id);
     return {

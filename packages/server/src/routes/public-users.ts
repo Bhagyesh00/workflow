@@ -5,6 +5,7 @@
  * `/users/:id/role` (today's PATCH `/members/:userId` checks, then `changeMemberRole`).
  * PUBLIC_USER_ROUTES is final and shaped as PUBLIC_ROLE_ROUTES (public-api.ts spreads it).
  */
+import { GLOBAL_ROLE_SLUGS } from '@workflow/workflow';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import type { Role } from '../db/schema';
@@ -37,8 +38,11 @@ const inviteBody = z
 const getQuery = z.object({ includeRole: z.stringbool().optional() });
 const deleteQuery = z.object({ transferId: z.uuid().optional() });
 
-/** n8n names a global role `global:member`; ours is the bare slug (a custom global slug passes as is) */
-const roleSlug = (name: string): string => name.replace(/^global:/, '');
+/** n8n names a global role `global:member`; ours is the bare slug for a system role. A custom workspace role's slug is itself `global:<name>-<hex>`, so it passes as is. */
+function roleSlug(name: string): string {
+  const bare = name.replace(/^global:/, '');
+  return (GLOBAL_ROLE_SLUGS as readonly string[]).includes(bare) ? bare : name;
+}
 
 /** n8n's user fields: the one `name` of ours is split at its first space */
 function userDto(

@@ -48,8 +48,13 @@ const api = (
     payload: payload as object,
   });
 
+let keyCount = 0;
+/** a label is unique per user since P6-21, so each key gets its own */
 async function keyOf(client: TestClient, scopes?: string[]): Promise<string> {
-  const made = await client.data(client.post('/rest/api-keys', { name: 'k', ...(scopes ? { scopes } : {}) }));
+  keyCount += 1;
+  const made = await client.data(
+    client.post('/rest/api-keys', { name: `k${keyCount}`, ...(scopes ? { scopes } : {}) }),
+  );
   return made.key as string;
 }
 

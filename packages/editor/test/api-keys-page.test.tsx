@@ -49,6 +49,26 @@ describe('API keys page (P6-21)', () => {
     expect(await screen.findByText(/· expires /, {}, T)).toBeTruthy();
   });
 
+  it('the new key leaves the mutation cache when its dialog closes', async () => {
+    const user = userEvent.setup();
+    signedIn();
+    const { queryClient } = renderApp('/settings/api-keys');
+    await user.type(await screen.findByLabelText('New key name', {}, T), 'Cache');
+    await user.click(screen.getByRole('button', { name: 'Create key' }));
+    const key = (await screen.findByTestId('new-api-key', {}, T)).textContent ?? '';
+    expect(key.length).toBeGreaterThan(10);
+    const cached = () =>
+      JSON.stringify(
+        queryClient
+          .getMutationCache()
+          .getAll()
+          .map((m) => m.state.data),
+      );
+    expect(cached()).toContain(key);
+    await user.click(screen.getByRole('button', { name: 'I copied it' }));
+    await waitFor(() => expect(cached()).not.toContain(key), T);
+  });
+
   it('a custom date in the past keeps Create disabled', async () => {
     const user = userEvent.setup();
     signedIn();
@@ -124,5 +144,27 @@ describe('API keys page (P6-21)', () => {
     await user.click(screen.getByRole('button', { name: 'Delete Sams' }));
     await user.click(await screen.findByRole('button', { name: 'Delete key' }));
     await waitFor(() => expect(backend().apiKeys.some((k) => k.id === 'k-Sams')).toBe(false), T);
+  });
+
+  it('shows a page state, not the create, edit and rotate controls, when the public API is off', async () => {
+    const demo = signedIn();
+    seedKey(demo.session!.userId, 'Old');
+    const handle = demo.handle.bind(demo);
+    demo.handle = async (request) => {
+      const response = await handle(request);
+      if (request.method === 'GET' && request.path === '/settings') {
+        const body = response.body as { data: { features: Record<string, unknown> } };
+        body.data.features.publicApi = false;
+      }
+      return response;
+    };
+    renderApp('/settings/api-keys');
+    expect(await screen.findByText(/public API is turned off on this workspace/, {}, T)).toBeTruthy();
+    expect(await screen.findByText('Old', {}, T)).toBeTruthy();
+    expect(screen.queryByLabelText('New key name')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create key' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit Old' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Rotate Old' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Delete Old' })).toBeTruthy();
   });
 });

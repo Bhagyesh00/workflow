@@ -216,17 +216,15 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     file: 'api-keys.ts',
     method: 'PATCH',
     path: '/rest/api-keys/:id',
-    scope: null,
+    scope: 'apiKey:update',
     target: 'apiKey',
-    access: 'auth',
   },
   {
     file: 'api-keys.ts',
     method: 'POST',
     path: '/rest/api-keys/:id/rotate',
-    scope: null,
+    scope: 'apiKey:update',
     target: 'apiKey',
-    access: 'auth',
   },
   // app.ts
   { file: 'app.ts', method: 'OPTIONS', path: '/rest/*', scope: null, target: 'none', access: 'public' },
@@ -2814,7 +2812,7 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'saml:manage',
     target: 'tenant',
     change:
-      'any of saml:manage, oidc:manage, ldap:manage (`requireAnyScope`); every allowed role holds all three',
+      'any of saml:manage, oidc:manage, ldap:manage (`requireAnyScope`), then the scope of the method turned on, or of the current one when turning it off (`requireScope`); every allowed role holds all three',
   },
   {
     file: 'sso-settings.ts',

@@ -405,3 +405,61 @@ describe('MCP keys', () => {
     expect(still).toHaveLength(1);
   });
 });
+
+describe('edit and rotate need apiKey:update', () => {
+  it('a member whose custom role holds apiKey:create but not apiKey:update can make a key, not edit or rotate it', async () => {
+    const owner = await signup(server.app);
+    await server.ctx.repos.roles.create(owner.tenant.id, {
+      slug: 'global:maker',
+      displayName: 'Maker',
+      roleType: 'global',
+      scopes: ['apiKey:create'],
+    });
+    const maker = await memberAs(owner, 'global:maker', { email: 'maker@example.com' });
+    const key = await made(maker.client);
+    const edit = await maker.client.patch(`/rest/api-keys/${key.id}`, { name: 'renamed' });
+    expect(edit.statusCode).toBe(403);
+    expect(edit.json().error.message).toBe(MISSING);
+    const rotate = await maker.client.post(`/rest/api-keys/${key.id}/rotate`);
+    expect(rotate.statusCode).toBe(403);
+    const [row] = await server.ctx.database.db.select().from(apiKeys).where(eq(apiKeys.id, key.id));
+    expect(row.name).toBe(key.name);
+    expect(row.prefix).toBe(key.prefix);
+  });
+
+  it('a default member, who holds apiKey:update, edits and rotates their own key', async () => {
+    const owner = await signup(server.app);
+    const member = await realMember(owner);
+    const key = await made(member.client);
+    expect((await member.client.patch(`/rest/api-keys/${key.id}`, { name: label() })).statusCode).toBe(200);
+    expect((await member.client.post(`/rest/api-keys/${key.id}/rotate`)).statusCode).toBe(200);
+  });
+});
+
+describe('the public API is off', () => {
+  let off: TestServer;
+  beforeAll(async () => {
+    off = await createTestServer(
+      { LOGIN_RATE_LIMIT_MAX: '1000', PUBLIC_API_DISABLED: 'true' },
+      { reset: false, startMain: false },
+    );
+  });
+  afterAll(async () => {
+    await off.close();
+  });
+
+  it('creating, editing and rotating a key answer 404; listing and deleting still work', async () => {
+    const owner = await signup(off.app);
+    const old = await off.ctx.auth.createApiKey(owner.tenant.id, owner.user.id, 'old');
+    const create = await owner.client.post('/rest/api-keys', { name: label() });
+    expect(create.statusCode).toBe(404);
+    expect(create.json().error.message).toMatch(/public API is turned off/);
+    expect((await owner.client.patch(`/rest/api-keys/${old.id}`, { name: 'new' })).statusCode).toBe(404);
+    expect((await owner.client.post(`/rest/api-keys/${old.id}/rotate`)).statusCode).toBe(404);
+    const listed = await owner.client.data<Array<{ id: string; name: string }>>(
+      owner.client.get('/rest/api-keys'),
+    );
+    expect(listed.map((k) => [k.id, k.name])).toEqual([[old.id, 'old']]);
+    expect((await owner.client.delete(`/rest/api-keys/${old.id}`)).statusCode).toBe(200);
+  });
+});

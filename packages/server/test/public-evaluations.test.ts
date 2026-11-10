@@ -39,8 +39,11 @@ const newOwner = () =>
     remoteAddress: `10.62.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250)}`,
   });
 
+let keyCount = 0;
+/** a label is unique per user since P6-21, so each key gets its own */
 async function keyFor(owner: Owner, scopes: string[]) {
-  const key = await owner.client.data(owner.client.post('/rest/api-keys', { name: 'k', scopes }));
+  keyCount += 1;
+  const key = await owner.client.data(owner.client.post('/rest/api-keys', { name: `k${keyCount}`, scopes }));
   return key.key as string;
 }
 

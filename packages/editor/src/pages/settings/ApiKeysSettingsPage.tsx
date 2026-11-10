@@ -7,7 +7,7 @@ import { Check, Copy, KeyRound, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-r
 import { type FormEvent, useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { apiKeysApi } from '../../api/endpoints';
-import { queryKeys } from '../../api/queries';
+import { queryKeys, useSettings } from '../../api/queries';
 import type { ApiKey } from '../../api/types';
 import { ApiKeyScopesField } from '../../components/settings/ApiKeyScopesField';
 import { Button, IconButton } from '../../components/ui/Button';
@@ -139,6 +139,8 @@ export function ApiKeysSettingsPage() {
   const queryClient = useQueryClient();
   const { can } = usePermissions();
   const canManage = can('apiKey:manage');
+  // the server answers 404 for create, edit and rotate when the public API is off; list and delete stay
+  const publicApiOff = useSettings().features.publicApi === false;
   const [tab, setTab] = useState<'mine' | 'all'>('mine');
   const [ownerFilter, setOwnerFilter] = useState('');
   const [labelFilter, setLabelFilter] = useState('');
@@ -147,7 +149,11 @@ export function ApiKeysSettingsPage() {
   const allKeys = useQuery({
     queryKey: queryKeys.apiKeysAll({ ownerId: ownerFilter, label: labelFilter }),
     queryFn: ({ signal }) =>
-      apiKeysApi.listAll({ signal, ownerId: ownerFilter || undefined, label: labelFilter.trim() || undefined }),
+      apiKeysApi.listAll({
+        signal,
+        ownerId: ownerFilter || undefined,
+        label: labelFilter.trim() || undefined,
+      }),
     enabled: showAll,
   });
   // the owner menu lists the owners of every key
@@ -158,7 +164,9 @@ export function ApiKeysSettingsPage() {
   });
   const ownerOptions = [
     ...new Map(
-      (owners.data ?? []).filter((k) => k.ownerId).map((k) => [k.ownerId as string, k.ownerName ?? k.ownerId]),
+      (owners.data ?? [])
+        .filter((k) => k.ownerId)
+        .map((k) => [k.ownerId as string, k.ownerName ?? k.ownerId]),
     ),
   ];
   const [name, setName] = useState('');
@@ -175,6 +183,8 @@ export function ApiKeysSettingsPage() {
   const [copied, setCopied] = useState(false);
   const refresh = () => queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys });
   const create = useMutation({
+    // the shown key leaves the mutation cache once its dialog closes
+    gcTime: 0,
     mutationFn: () => {
       const expiresAt = expiryFor(expiry, customDate);
       return apiKeysApi.create(name.trim(), scopes, expiresAt ?? undefined);
@@ -192,6 +202,10 @@ export function ApiKeysSettingsPage() {
     },
     onError: (error) => toast.error('Could not create the key', errorMessage(error)),
   });
+  const closeCreated = () => {
+    setCreated(null);
+    create.reset();
+  };
   const remove = async (row: ApiKey, byAdmin: boolean) => {
     const ok = await confirmDialog({
       title: `Delete “${row.name}”?`,
@@ -245,7 +259,9 @@ export function ApiKeysSettingsPage() {
         icon={<KeyRound size={20} />}
         title="No API keys"
         description={
-          mine ? 'Create one to automate this workspace from scripts and CI.' : 'No key matches these filters.'
+          mine
+            ? 'Create one to automate this workspace from scripts and CI.'
+            : 'No key matches these filters.'
         }
       />
     ) : (
@@ -255,8 +271,8 @@ export function ApiKeysSettingsPage() {
             key={k.id}
             row={k}
             showOwner={!mine}
-            onEdit={mine ? () => setEditing(k) : undefined}
-            onRotate={mine ? () => void rotate(k) : undefined}
+            onEdit={mine && !publicApiOff ? () => setEditing(k) : undefined}
+            onRotate={mine && !publicApiOff ? () => void rotate(k) : undefined}
             onRemove={() => void remove(k, !mine)}
           />
         ))}
@@ -282,60 +298,71 @@ export function ApiKeysSettingsPage() {
       )}
       {!showAll ? (
         <>
-          <form onSubmit={submit} className="flex flex-col gap-3 border-b border-line px-5 py-4">
-            <div className="flex flex-wrap items-end gap-2">
-              <FormField label="New key name" className="min-w-48 flex-1">
-                {(id) => (
-                  <TextInput
-                    id={id}
-                    placeholder="Deploy pipeline"
-                    maxLength={50}
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                  />
-                )}
-              </FormField>
-              <FormField label="Expiration">
-                {(id) => (
-                  <Select id={id} value={expiry} onChange={(e) => setExpiry(e.target.value as ExpiryChoice)}>
-                    {EXPIRY_CHOICES.map((c) => (
-                      <option key={c.value} value={c.value}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </Select>
-                )}
-              </FormField>
-              {expiry === 'custom' && (
-                <FormField label="Expires on">
+          {publicApiOff ? (
+            <Callout tone="warn" className="m-4">
+              The public API is turned off on this workspace. You can't create, edit or rotate keys. You can
+              still delete the ones you have.
+            </Callout>
+          ) : (
+            <form onSubmit={submit} className="flex flex-col gap-3 border-b border-line px-5 py-4">
+              <div className="flex flex-wrap items-end gap-2">
+                <FormField label="New key name" className="min-w-48 flex-1">
                   {(id) => (
                     <TextInput
                       id={id}
-                      type="date"
-                      value={customDate}
-                      onChange={(e) => setCustomDate(e.target.value)}
+                      placeholder="Deploy pipeline"
+                      maxLength={50}
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
                     />
                   )}
                 </FormField>
-              )}
-              <Button
-                type="submit"
-                variant="primary"
-                icon={<Plus size={15} />}
-                loading={create.isPending}
-                disabled={blocked}
-              >
-                Create key
-              </Button>
-            </div>
-            <ApiKeyScopesField
-              key={scopeFormKey}
-              value={scopes}
-              onChange={setScopes}
-              onModeChange={setOnlyPicked}
-              disabled={create.isPending}
-            />
-          </form>
+                <FormField label="Expiration">
+                  {(id) => (
+                    <Select
+                      id={id}
+                      value={expiry}
+                      onChange={(e) => setExpiry(e.target.value as ExpiryChoice)}
+                    >
+                      {EXPIRY_CHOICES.map((c) => (
+                        <option key={c.value} value={c.value}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </Select>
+                  )}
+                </FormField>
+                {expiry === 'custom' && (
+                  <FormField label="Expires on">
+                    {(id) => (
+                      <TextInput
+                        id={id}
+                        type="date"
+                        value={customDate}
+                        onChange={(e) => setCustomDate(e.target.value)}
+                      />
+                    )}
+                  </FormField>
+                )}
+                <Button
+                  type="submit"
+                  variant="primary"
+                  icon={<Plus size={15} />}
+                  loading={create.isPending}
+                  disabled={blocked}
+                >
+                  Create key
+                </Button>
+              </div>
+              <ApiKeyScopesField
+                key={scopeFormKey}
+                value={scopes}
+                onChange={setScopes}
+                onModeChange={setOnlyPicked}
+                disabled={create.isPending}
+              />
+            </form>
+          )}
           {list(keys.data, keys.isLoading, keys.error, true)}
         </>
       ) : (
@@ -370,12 +397,12 @@ export function ApiKeysSettingsPage() {
       {editing && <EditKeyDialog keyRow={editing} onClose={() => setEditing(null)} />}
       <Dialog
         open={Boolean(created)}
-        onClose={() => setCreated(null)}
+        onClose={closeCreated}
         title="Copy your new key"
         description="This is the only time the key is shown. Store it somewhere safe."
         size="sm"
         footer={
-          <Button variant="primary" onClick={() => setCreated(null)}>
+          <Button variant="primary" onClick={closeCreated}>
             I copied it
           </Button>
         }

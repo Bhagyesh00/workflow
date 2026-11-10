@@ -313,6 +313,33 @@ describe('PATCH /users/:id/role', () => {
     });
   });
 
+  it('takes a custom workspace role by its full slug, on a change and on an invite', async () => {
+    const { owner, ownerKey } = await setup();
+    await server.ctx.repos.roles.create(owner.tenant.id, {
+      slug: 'global:auditor-1a2b3c',
+      displayName: 'Auditor',
+      roleType: 'global',
+      scopes: ['workflow:read'],
+    });
+    const member = await realMember(owner);
+    const change = await api(ownerKey, 'PATCH', `/users/${member.user.id}/role`, {
+      newRoleName: 'global:auditor-1a2b3c',
+    });
+    expect(change.statusCode).toBe(200);
+    expect(await server.ctx.repos.memberships.get(owner.tenant.id, member.user.id)).toEqual({
+      role: 'global:auditor-1a2b3c',
+    });
+    const invite = await api(ownerKey, 'POST', '/users', [
+      { email: 'auditor@example.com', role: 'global:auditor-1a2b3c' },
+    ]);
+    expect(invite.statusCode).toBe(201);
+    expect(invite.json().data[0].error).toBeUndefined();
+    const pending = await owner.client.data<Array<{ email: string; role: string }>>(
+      owner.client.get('/rest/invitations'),
+    );
+    expect(pending.find((p) => p.email === 'auditor@example.com')?.role).toBe('global:auditor-1a2b3c');
+  });
+
   it('is refused when the workspace manages roles itself (assertInstanceRolesEditable throws)', async () => {
     const { owner, ownerKey } = await setup();
     const member = await realMember(owner);
