@@ -1,6 +1,6 @@
 /** Sign in, create a workspace, accept an invitation. */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { errorMessage, isApiError } from '../../api/client';
 import { authApi } from '../../api/endpoints';
@@ -11,7 +11,7 @@ import { FormField, TextInput } from '../../components/ui/Field';
 import { Callout } from '../../components/ui/misc';
 import { AuthLayout } from './AuthLayout';
 import { MfaStep } from './MfaStep';
-import { SsoSignIn } from './SsoSignIn';
+import { SsoSignIn, useSsoRedirecting } from './SsoSignIn';
 
 /** Only same-app relative paths are accepted as post-login redirects. */
 export function safeRedirect(value: string | null): string {
@@ -37,10 +37,22 @@ function useAuthSuccess() {
   };
 }
 
+/** P6-01: the workspace field asks the SSO options this long after the last key */
+const WORKSPACE_SETTLE_MS = 400;
+
 export function LoginPage() {
   const onSuccess = useAuthSuccess();
   const [search] = useSearchParams();
-  const workspace = search.get('workspace') || undefined;
+  // P6-01: the workspace slug, from the link (`?workspace=`) or typed in the field
+  const [workspaceInput, setWorkspaceInput] = useState(search.get('workspace') ?? '');
+  const [workspaceAsked, setWorkspaceAsked] = useState(search.get('workspace')?.trim() || undefined);
+  useEffect(() => {
+    const value = workspaceInput.trim() || undefined;
+    const timer = setTimeout(() => setWorkspaceAsked(value), WORKSPACE_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [workspaceInput]);
+  const workspace = workspaceInput.trim() || undefined;
+  const redirecting = useSsoRedirecting(workspaceAsked);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   // P6-18: the password matched and the account has MFA on: ask for the second step
@@ -103,52 +115,68 @@ export function LoginPage() {
         </>
       }
     >
-      {/* P6-01 (L6): the workspace's SSO button, or a straight redirect to the identity provider */}
-      <SsoSignIn workspace={workspace} redirect={safeRedirect(search.get('redirect'))} />
-      <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
-        {failed && <Callout tone="err">{failed}</Callout>}
-        <FormField label="Email">
-          {(id) => (
-            <TextInput
-              id={id}
-              type="email"
-              autoComplete="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              data-autofocus
-            />
-          )}
-        </FormField>
-        <FormField label="Password">
-          {(id) => (
-            <TextInput
-              id={id}
-              type="password"
-              autoComplete="current-password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          )}
-        </FormField>
-        {/* P6-19 */}
-        <Link
-          to="/forgot-password"
-          className="-mt-2 self-end text-sm font-semibold text-brand hover:underline"
-        >
-          Forgot password?
-        </Link>
-        <Button
-          type="submit"
-          variant="primary"
-          size="lg"
-          loading={login.isPending}
-          disabled={!email || !password}
-        >
-          Sign in
-        </Button>
-      </form>
+      {redirecting ? (
+        // P6-01: straight to the identity provider (`SSO_REDIRECT_LOGIN_TO_SSO`), with the password link
+        <SsoSignIn workspace={workspaceAsked} redirect={safeRedirect(search.get('redirect'))} />
+      ) : (
+        <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
+          {failed && <Callout tone="err">{failed}</Callout>}
+          <FormField label="Workspace" hint="Your workspace's short name. Single sign-on needs it.">
+            {(id) => (
+              <TextInput
+                id={id}
+                autoComplete="organization"
+                spellCheck={false}
+                value={workspaceInput}
+                onChange={(e) => setWorkspaceInput(e.target.value)}
+              />
+            )}
+          </FormField>
+          {/* P6-01: the workspace's SSO button and `?ssoError=` */}
+          <SsoSignIn workspace={workspaceAsked} redirect={safeRedirect(search.get('redirect'))} />
+          <FormField label="Email">
+            {(id) => (
+              <TextInput
+                id={id}
+                type="email"
+                autoComplete="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                data-autofocus
+              />
+            )}
+          </FormField>
+          <FormField label="Password">
+            {(id) => (
+              <TextInput
+                id={id}
+                type="password"
+                autoComplete="current-password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            )}
+          </FormField>
+          {/* P6-19 */}
+          <Link
+            to="/forgot-password"
+            className="-mt-2 self-end text-sm font-semibold text-brand hover:underline"
+          >
+            Forgot password?
+          </Link>
+          <Button
+            type="submit"
+            variant="primary"
+            size="lg"
+            loading={login.isPending}
+            disabled={!email || !password}
+          >
+            Sign in
+          </Button>
+        </form>
+      )}
     </AuthLayout>
   );
 }
