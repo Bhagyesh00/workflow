@@ -110,6 +110,7 @@ export class Pruner {
     await this.sweepActivationBinaryData(now);
     await this.repos.sessions.deleteExpired();
     await this.repos.idempotency.prune(new Date(now.getTime() - DAY));
+    await this.repos.publicIdempotency.prune(new Date(now.getTime() - DAY));
     if (total) this.logger.info({ deleted: total }, 'Pruned old executions');
     return total;
   }

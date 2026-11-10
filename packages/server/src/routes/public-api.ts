@@ -2,6 +2,7 @@
  * Public API `/api/v1` (X-API-KEY). Routes are declared in one table that drives both the Fastify
  * registration and the OpenAPI 3.1 document at `/api/v1/openapi.json`.
  */
+import { createHash } from 'node:crypto';
 import type { NodeProperty, Scope } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -19,6 +20,12 @@ import {
   workflowUpdateSchema,
 } from '../http/schemas';
 import type { AccessTarget } from '../services/access';
+import {
+  beginIdempotent,
+  finishIdempotent,
+  type IdempotencyKeyRef,
+  releaseIdempotent,
+} from '../services/public-api-idempotency';
 import { createCredential, deleteCredential } from './credentials';
 import { deleteExecution, executionListQuery, getExecution, listExecutions, viewerOf } from './executions';
 import { PUBLIC_AUDIT_ROUTES } from './public-audit';
@@ -1239,6 +1246,46 @@ async function checkAccess(
   return undefined;
 }
 
+/** the last path segments that never take an `Idempotency-Key` (calls that are safe to repeat) */
+const IDEMPOTENCY_EXEMPT_SEGMENTS = new Set([
+  'activate',
+  'deactivate',
+  'disconnect',
+  'publish',
+  'unpublish',
+  'archive',
+  'unarchive',
+  'transfer',
+  'test',
+  'test-trace',
+]);
+
+/**
+ * P6-82: the `Idempotency-Key` of a POST call. No header, a blank one or an exempt path is no key; a header that
+ * is not 1 to 128 visible ASCII characters (after a trim) is a 400. The fingerprint is a hash of method, path,
+ * query and the parsed body (Fastify keeps no raw body, so keys in another order count as another body).
+ */
+function idempotencyOf(
+  request: FastifyRequest,
+  auth: AuthContext,
+): { ref: IdempotencyKeyRef; fingerprint: string } | undefined {
+  if (request.method !== 'POST') return undefined;
+  const header = request.headers['idempotency-key'];
+  const raw = Array.isArray(header) ? header.join(',') : header;
+  const key = raw?.trim();
+  if (!key) return undefined;
+  const [path = ''] = request.url.split('?');
+  const last = path.replace(/\/+$/, '').split('/').pop() ?? '';
+  if (IDEMPOTENCY_EXEMPT_SEGMENTS.has(last)) return undefined;
+  if (key.length > 128 || !/^[ -~]+$/.test(key)) {
+    throw ApiError.badRequest('Idempotency-Key must be 1 to 128 visible ASCII characters.');
+  }
+  const fingerprint = createHash('sha256')
+    .update(JSON.stringify([request.method, request.url, request.body ?? null]))
+    .digest('hex');
+  return { ref: { tenantId: auth.tenant.id, userId: auth.user.id, key }, fingerprint };
+}
+
 export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerContext }): Promise<void> {
   const { ctx } = opts;
   let document: Record<string, unknown> | undefined;
@@ -1280,8 +1327,28 @@ export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerC
           query: route.query ? parse(route.query, request.query) : {},
           body: route.body ? parse(route.body, request.body ?? {}) : undefined,
         };
-        const result = await route.handler(ctx, input);
+        const idem = idempotencyOf(request, auth);
+        if (idem) {
+          const begun = await beginIdempotent(ctx.serviceDeps, idem.ref, idem.fingerprint);
+          if (begun.kind === 'replay') return reply.status(begun.statusCode).send(begun.body);
+        }
+        let result: unknown;
+        try {
+          result = await route.handler(ctx, input);
+        } catch (error) {
+          // an error releases the key, so the caller can retry it
+          if (idem) await releaseIdempotent(ctx.serviceDeps, idem.ref).catch(() => {});
+          throw error;
+        }
         if (route.status) reply.status(route.status);
+        if (idem) {
+          try {
+            await finishIdempotent(ctx.serviceDeps, idem.ref, route.status ?? 200, result);
+          } catch (error) {
+            await releaseIdempotent(ctx.serviceDeps, idem.ref).catch(() => {});
+            throw error;
+          }
+        }
         return result;
       },
     });
