@@ -43,7 +43,11 @@ type Owner = Awaited<ReturnType<typeof signup>>;
 /** SSO and SCIM on, with the policy; returns the token */
 async function turnOn(
   owner: Owner,
-  policy: { onDelete?: 'disable' | 'delete'; dataAction?: 'transfer' | 'delete'; transferProjectId?: string | null } = {},
+  policy: {
+    onDelete?: 'disable' | 'delete';
+    dataAction?: 'transfer' | 'delete';
+    transferProjectId?: string | null;
+  } = {},
 ) {
   await ssoOn(server, owner.tenant.id, 'saml');
   await repos().scim.patchSettings(owner.tenant.id, { enabled: true, ...policy });
@@ -148,7 +152,9 @@ describe('deactivation', () => {
   it('active true enables the member again: a new session and the old key work', async () => {
     const { a, token, user } = await twoWorkspaces();
     const key = await server.ctx.auth.createApiKey(a.tenant.id, user.id, 'again');
-    await scim('PATCH', `/Users/${user.id}`, token, { Operations: [{ op: 'replace', value: { active: 'False' } }] });
+    await scim('PATCH', `/Users/${user.id}`, token, {
+      Operations: [{ op: 'replace', value: { active: 'False' } }],
+    });
     expect(await repos().memberships.get(a.tenant.id, user.id)).toBeUndefined();
     const on = await scim('PATCH', `/Users/${user.id}`, token, {
       Operations: [{ op: 'replace', path: 'active', value: 'True' }],
@@ -178,7 +184,9 @@ describe('DELETE with the policy disable (the default)', () => {
     // gone from nowhere: SCIM still finds it, inactive
     expect((await scim('GET', `/Users/${user.id}`, token)).json().active).toBe(false);
     const audit = await repos().audit.list(a.tenant.id, 50);
-    expect(audit.find((r) => r.action === 'scim.user_deleted')).toMatchObject({ metadata: { result: 'disabled' } });
+    expect(audit.find((r) => r.action === 'scim.user_deleted')).toMatchObject({
+      metadata: { result: 'disabled' },
+    });
   });
 });
 
@@ -249,7 +257,11 @@ describe('DELETE with the policy delete', () => {
     const ownerHome = (await repos().projects.getPersonal(a.tenant.id, a.user.id))!;
 
     const first = await createUser(token);
-    const w1 = await workflowIn(server, a.tenant.id, (await repos().projects.getPersonal(a.tenant.id, first.id))!.id);
+    const w1 = await workflowIn(
+      server,
+      a.tenant.id,
+      (await repos().projects.getPersonal(a.tenant.id, first.id))!.id,
+    );
     expect((await scim('DELETE', `/Users/${first.id}`, token)).statusCode).toBe(204);
     expect((await repos().workflows.get(a.tenant.id, w1.id))?.projectId).toBe(ownerHome.id);
 
@@ -280,12 +292,20 @@ describe('DELETE with the policy delete', () => {
     const token = await turnOn(a, { onDelete: 'delete', dataAction: 'delete' });
     const admin = await createUser(token);
     await repos().memberships.updateRole(a.tenant.id, admin.id, 'admin');
-    const workflow = await workflowIn(server, a.tenant.id, (await repos().projects.getPersonal(a.tenant.id, admin.id))!.id);
+    const workflow = await workflowIn(
+      server,
+      a.tenant.id,
+      (await repos().projects.getPersonal(a.tenant.id, admin.id))!.id,
+    );
     expect((await scim('DELETE', `/Users/${admin.id}`, token)).statusCode).toBe(204);
     expect((await repos().memberships.getIncludingDisabled(a.tenant.id, admin.id))?.disabledAt).toBeTruthy();
     expect(await repos().workflows.get(a.tenant.id, workflow.id)).toBeDefined();
 
-    const ownerWork = await workflowIn(server, a.tenant.id, (await repos().projects.getPersonal(a.tenant.id, a.user.id))!.id);
+    const ownerWork = await workflowIn(
+      server,
+      a.tenant.id,
+      (await repos().projects.getPersonal(a.tenant.id, a.user.id))!.id,
+    );
     expect((await scim('DELETE', `/Users/${a.user.id}`, token)).statusCode).toBe(403);
     expect(await repos().memberships.get(a.tenant.id, a.user.id)).toEqual({ role: 'owner' });
     expect(await repos().workflows.get(a.tenant.id, ownerWork.id)).toBeDefined();

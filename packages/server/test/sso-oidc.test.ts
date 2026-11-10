@@ -134,9 +134,10 @@ function errorOf(location: string): string | null {
 const sessionOf = (cookies: Record<string, string>) => cookies.wf_session ?? '';
 
 async function userCount(email: string): Promise<number> {
-  const { rows } = await server.ctx.database.pool.query('select count(*)::int as n from users where email = $1', [
-    email,
-  ]);
+  const { rows } = await server.ctx.database.pool.query(
+    'select count(*)::int as n from users where email = $1',
+    [email],
+  );
   return rows[0].n;
 }
 
@@ -425,7 +426,9 @@ describe('the egress guard', () => {
   });
 
   it('a discovery answering 302 to a blocked host is refused', async () => {
-    const idp = await startFakeOidcIdp({ discoveryRedirect: 'http://10.0.0.5/.well-known/openid-configuration' });
+    const idp = await startFakeOidcIdp({
+      discoveryRedirect: 'http://10.0.0.5/.well-known/openid-configuration',
+    });
     idps.push(idp);
     const owner = await signup(server.app, { remoteAddress: nextAddress() });
     const res = await owner.client.post('/rest/sso/oidc/config', {
@@ -491,7 +494,7 @@ describe('the verified email', () => {
     expect(sessionOf(yes.cookies)).not.toBe('');
   });
 
-  it("a person whose email has an account elsewhere is not linked by email alone", async () => {
+  it('a person whose email has an account elsewhere is not linked by email alone', async () => {
     const other = await signup(server.app, { remoteAddress: nextAddress() });
     const w = await workspace();
     const res = await signIn(w, { person: person({ email: other.user.email }) });
@@ -660,7 +663,7 @@ describe('the test flow', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it("a login cookie does not run as a test once the method is off", async () => {
+  it('a login cookie does not run as a test once the method is off', async () => {
     const w = await workspace({ loginEnabled: false });
     // a login-flow cookie (test: false) with the method off is refused: only the test flow runs while off
     await server.ctx.repos.sso.upsert(w.tenantId, { method: 'oidc' });
@@ -676,7 +679,10 @@ describe('logout', () => {
   async function signedIn(w: Workspace, who = person()) {
     const res = await signIn(w, { person: who });
     const client = new TestClient(server.app, ORIGIN, nextAddress());
-    client.cookie = cookieHeader({ wf_session: sessionOf(res.cookies), wf_oidc_idt: res.cookies.wf_oidc_idt ?? '' });
+    client.cookie = cookieHeader({
+      wf_session: sessionOf(res.cookies),
+      wf_oidc_idt: res.cookies.wf_oidc_idt ?? '',
+    });
     return { res, client };
   }
 
@@ -754,13 +760,16 @@ describe('logout', () => {
     expect(out.json().data.url).toBeNull();
   });
 
-  it("does not use a cookie from another person, and needs a session", async () => {
+  it('does not use a cookie from another person, and needs a session', async () => {
     const w = await workspace({ rpInitiatedLogoutEnabled: true });
     const first = await signedIn(w);
     const second = await signedIn(w);
     // person two's session with person one's id token cookie: no hint is built
     const mixed = new TestClient(server.app, ORIGIN, nextAddress());
-    mixed.cookie = cookieHeader({ wf_session: sessionOf(second.res.cookies), wf_oidc_idt: first.res.cookies.wf_oidc_idt });
+    mixed.cookie = cookieHeader({
+      wf_session: sessionOf(second.res.cookies),
+      wf_oidc_idt: first.res.cookies.wf_oidc_idt,
+    });
     const out = await mixed.post('/rest/sso/oidc/logout');
     expect(out.statusCode).toBe(200);
     expect(out.json().data.url).toBeNull();

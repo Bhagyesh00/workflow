@@ -14,12 +14,12 @@ import { type FakeOidcIdp, startFakeOidcIdp } from './fakes/oidc-idp';
 import { FakeSamlIdp } from './fakes/saml-idp';
 import {
   BASE_URL,
+  signup as baseSignup,
   createTestServer,
   projectIn,
   realMember,
   resetDatabase,
   sessionFor,
-  signup as baseSignup,
   ssoOn,
   type TestServer,
 } from './helpers';
@@ -27,7 +27,10 @@ import {
 let server: TestServer;
 
 beforeAll(async () => {
-  server = await createTestServer({ LOGIN_RATE_LIMIT_MAX: '1000' }, { startMain: false, allowInsecureIdp: true });
+  server = await createTestServer(
+    { LOGIN_RATE_LIMIT_MAX: '1000' },
+    { startMain: false, allowInsecureIdp: true },
+  );
 }, 120_000);
 afterAll(async () => {
   await server?.close();
@@ -40,7 +43,10 @@ beforeEach(async () => {
 let ip = 1;
 /** signup allows 20 calls an hour per IP: each call comes from its own address */
 const signup = () =>
-  baseSignup(server.app, { remoteAddress: `127.9.${Math.floor(ip / 250)}.${(ip++ % 250) + 1}`, projects: 'real' });
+  baseSignup(server.app, {
+    remoteAddress: `127.9.${Math.floor(ip / 250)}.${(ip++ % 250) + 1}`,
+    projects: 'real',
+  });
 
 type Owner = Awaited<ReturnType<typeof signup>>;
 
@@ -195,7 +201,9 @@ describe('the config', () => {
     );
     const off = await configure(owner, { scopesProvisionInstanceRole: false });
     expect(off).toMatchObject({ scopesProvisionInstanceRole: false, scopesProvisionProjectRoles: false });
-    const rules = await owner.client.data<Array<{ type: string }>>(owner.client.get('/rest/sso/role-mapping-rules'));
+    const rules = await owner.client.data<Array<{ type: string }>>(
+      owner.client.get('/rest/sso/role-mapping-rules'),
+    );
     expect(rules.map((rule) => rule.type)).toEqual(['instance']);
     const audit = (await server.ctx.repos.audit.list(owner.tenant.id, 50)).find(
       (row) => row.action === 'provisioning.updated' && (row.metadata as any)?.projectRulesDeleted,
@@ -222,7 +230,7 @@ describe('claim mode, workspace roles', () => {
     expect(await roleOf(owner, member.user.id)).toBe('admin');
   });
 
-  it('a custom global role works; the claim names are the workspace\'s own', async () => {
+  it("a custom global role works; the claim names are the workspace's own", async () => {
     const owner = await signup();
     const role = await customGlobalRole(owner);
     const member = await realMember(owner);
@@ -269,9 +277,10 @@ describe('claim mode, workspace roles', () => {
     await oidcOn(owner, { scopesProvisionInstanceRole: true, defaultInstanceRole: 'block' });
     const email = newEmail('blocked');
     await expectRefused(signIn(owner, email, {}), 'sso_access_blocked');
-    const { rows } = await server.ctx.database.pool.query('select count(*)::int as n from users where email = $1', [
-      email,
-    ]);
+    const { rows } = await server.ctx.database.pool.query(
+      'select count(*)::int as n from users where email = $1',
+      [email],
+    );
     expect(rows[0].n).toBe(0);
     const failed = (await server.ctx.repos.audit.list(owner.tenant.id, 50)).find(
       (row) => row.action === 'auth.sso_login_failed',
@@ -331,8 +340,14 @@ describe('claim mode, project roles', () => {
     expect(
       await server.ctx.repos.projects.relations.get(other.tenant.id, foreign.id, member.user.id),
     ).toBeUndefined();
-    expect(afterAccessChange).toHaveBeenCalledWith(owner.tenant.id, { userId: member.user.id, projectId: a.id });
-    expect(afterAccessChange).toHaveBeenCalledWith(owner.tenant.id, { userId: member.user.id, projectId: b.id });
+    expect(afterAccessChange).toHaveBeenCalledWith(owner.tenant.id, {
+      userId: member.user.id,
+      projectId: a.id,
+    });
+    expect(afterAccessChange).toHaveBeenCalledWith(owner.tenant.id, {
+      userId: member.user.id,
+      projectId: b.id,
+    });
     // the personal project stays
     expect(relations.some((relation) => relation.role === 'project:personalOwner')).toBe(true);
   });
@@ -347,7 +362,9 @@ describe('claim mode, project roles', () => {
       'project:editor',
     );
     await signIn(owner, member.email, { instance_role: 'member' });
-    expect(await server.ctx.repos.projects.relations.get(owner.tenant.id, a.id, member.user.id)).toBeUndefined();
+    expect(
+      await server.ctx.repos.projects.relations.get(owner.tenant.id, a.id, member.user.id),
+    ).toBeUndefined();
   });
 });
 
@@ -365,12 +382,26 @@ describe('rule mode', () => {
       defaultInstanceRole: 'block',
     });
     await owner.client.data(
-      rule(owner, { type: 'instance', expression: "{{ $claims.groups.includes('wf-admins') }}", role: 'admin' }),
+      rule(owner, {
+        type: 'instance',
+        expression: "{{ $claims.groups.includes('wf-admins') }}",
+        role: 'admin',
+      }),
     );
     await owner.client.data(
-      rule(owner, { type: 'instance', expression: "{{ $claims.groups.includes('wf-staff') }}", role: role.slug }),
+      rule(owner, {
+        type: 'instance',
+        expression: "{{ $claims.groups.includes('wf-staff') }}",
+        role: role.slug,
+      }),
     );
-    await owner.client.data(rule(owner, { type: 'instance', expression: "{{ $claims.groups.includes('wf-staff') }}", role: 'admin' }));
+    await owner.client.data(
+      rule(owner, {
+        type: 'instance',
+        expression: "{{ $claims.groups.includes('wf-staff') }}",
+        role: 'admin',
+      }),
+    );
 
     await signIn(owner, member.email, { groups: ['wf-staff', 'wf-admins'] });
     expect(await roleOf(owner, member.user.id)).toBe('admin');
@@ -392,7 +423,11 @@ describe('rule mode', () => {
     expect(ownerRule.statusCode).toBe(400);
     const unknown = await rule(owner, { type: 'instance', expression: '{{ true }}', role: 'global:nope' });
     expect(unknown.statusCode).toBe(400);
-    const projectRole = await rule(owner, { type: 'instance', expression: '{{ true }}', role: 'project:editor' });
+    const projectRole = await rule(owner, {
+      type: 'instance',
+      expression: '{{ true }}',
+      role: 'project:editor',
+    });
     expect(projectRole.statusCode).toBe(400);
     const instanceWithProjects = await rule(owner, {
       type: 'instance',
@@ -401,7 +436,11 @@ describe('rule mode', () => {
       projectIds: [randomUUID()],
     });
     expect(instanceWithProjects.statusCode).toBe(400);
-    const noProjects = await rule(owner, { type: 'project', expression: '{{ true }}', role: 'project:editor' });
+    const noProjects = await rule(owner, {
+      type: 'project',
+      expression: '{{ true }}',
+      role: 'project:editor',
+    });
     expect(noProjects.statusCode).toBe(400);
     expect((await server.ctx.repos.roleMapping.list(owner.tenant.id)).length).toBe(0);
   });
@@ -418,7 +457,12 @@ describe('rule mode', () => {
       ids.push(made.id);
     }
     const projectRule = await owner.client.data(
-      rule(owner, { type: 'project', expression: '{{ true }}', role: 'project:viewer', projectIds: [project.id] }),
+      rule(owner, {
+        type: 'project',
+        expression: '{{ true }}',
+        role: 'project:viewer',
+        projectIds: [project.id],
+      }),
     );
     // its own list starts at 0
     expect(projectRule.order).toBe(0);
@@ -484,9 +528,7 @@ describe('rule mode', () => {
       scopesProvisionProjectRoles: true,
       scopesUseExpressionMapping: true,
     });
-    await owner.client.data(
-      rule(owner, { type: 'instance', expression: '{{ true }}', role: 'member' }),
-    );
+    await owner.client.data(rule(owner, { type: 'instance', expression: '{{ true }}', role: 'member' }));
     await owner.client.data(
       rule(owner, {
         type: 'project',
@@ -522,7 +564,9 @@ describe('rule mode', () => {
     await oidcOn(owner, { scopesProvisionInstanceRole: true, scopesProvisionProjectRoles: true });
     await signIn(owner, person.email, { instance_role: 'admin', projects: [`${a.id}:project:editor`] });
     expect(await roleOf(owner, person.user.id)).toBe('admin');
-    expect(await server.ctx.repos.projects.relations.get(owner.tenant.id, a.id, person.user.id)).toBeUndefined();
+    expect(
+      await server.ctx.repos.projects.relations.get(owner.tenant.id, a.id, person.user.id),
+    ).toBeUndefined();
   });
 });
 
@@ -531,12 +575,16 @@ describe('tenants', () => {
     const a = await signup();
     const b = await signup();
     const made = await a.client.data(
-      a.client.post('/rest/sso/role-mapping-rules', { type: 'instance', expression: '{{ true }}', role: 'admin' }),
+      a.client.post('/rest/sso/role-mapping-rules', {
+        type: 'instance',
+        expression: '{{ true }}',
+        role: 'admin',
+      }),
     );
     expect(await b.client.data(b.client.get('/rest/sso/role-mapping-rules'))).toEqual([]);
-    expect((await b.client.patch(`/rest/sso/role-mapping-rules/${made.id}`, { role: 'member' })).statusCode).toBe(
-      404,
-    );
+    expect(
+      (await b.client.patch(`/rest/sso/role-mapping-rules/${made.id}`, { role: 'member' })).statusCode,
+    ).toBe(404);
     expect(
       (await b.client.post(`/rest/sso/role-mapping-rules/${made.id}/move`, { position: 0 })).statusCode,
     ).toBe(404);
@@ -544,7 +592,11 @@ describe('tenants', () => {
     expect(await server.ctx.repos.roleMapping.get(b.tenant.id, made.id)).toBeUndefined();
     expect(await server.ctx.repos.roleMapping.get(a.tenant.id, made.id)).toBeTruthy();
     // and B's sign-in never reads A's rules
-    await oidcOn(b, { scopesProvisionInstanceRole: true, scopesUseExpressionMapping: true, defaultInstanceRole: 'block' });
+    await oidcOn(b, {
+      scopesProvisionInstanceRole: true,
+      scopesUseExpressionMapping: true,
+      defaultInstanceRole: 'block',
+    });
     await expectRefused(signIn(b, newEmail('b'), {}), 'sso_access_blocked');
   });
 
@@ -588,15 +640,25 @@ describe('managed roles', () => {
     const member = await realMember(owner);
     // email sign-in: nothing is managed even with the flags on
     await configure(owner, { scopesProvisionInstanceRole: true, scopesProvisionProjectRoles: true });
-    await expect(server.ctx.provisioning.assertInstanceRolesEditable(owner.tenant.id)).resolves.toBeUndefined();
+    await expect(
+      server.ctx.provisioning.assertInstanceRolesEditable(owner.tenant.id),
+    ).resolves.toBeUndefined();
     await oidcOn(owner, { scopesProvisionInstanceRole: true, scopesProvisionProjectRoles: false });
-    await expectRefused(server.ctx.provisioning.assertInstanceRolesEditable(owner.tenant.id), 'roles_managed_by_sso');
-    await expect(server.ctx.provisioning.assertProjectRolesEditable(owner.tenant.id)).resolves.toBeUndefined();
+    await expectRefused(
+      server.ctx.provisioning.assertInstanceRolesEditable(owner.tenant.id),
+      'roles_managed_by_sso',
+    );
+    await expect(
+      server.ctx.provisioning.assertProjectRolesEditable(owner.tenant.id),
+    ).resolves.toBeUndefined();
     const refused = await owner.client.patch(`/rest/members/${member.user.id}`, { role: 'admin' });
     expect(refused.statusCode).toBe(400);
     expect(await roleOf(owner, member.user.id)).toBe('member');
     await oidcOn(owner, { scopesProvisionInstanceRole: true, scopesProvisionProjectRoles: true });
-    await expectRefused(server.ctx.provisioning.assertProjectRolesEditable(owner.tenant.id), 'roles_managed_by_sso');
+    await expectRefused(
+      server.ctx.provisioning.assertProjectRolesEditable(owner.tenant.id),
+      'roles_managed_by_sso',
+    );
     const project = await projectIn(server, owner.tenant.id, `P ${suffix()}`);
     const add = await owner.client.post(`/rest/projects/${project.id}/users`, {
       relations: [{ userId: member.user.id, role: 'project:editor' }],
@@ -694,9 +756,16 @@ describe('deleting a role that a rule gives', () => {
     const session = await sessionFor(server, owner.tenant.id, owner.user.id);
     const other = await customGlobalRole(owner);
     await owner.client.data(
-      owner.client.post('/rest/sso/role-mapping-rules', { type: 'instance', expression: '{{ true }}', role: other.slug }),
+      owner.client.post('/rest/sso/role-mapping-rules', {
+        type: 'instance',
+        expression: '{{ true }}',
+        role: other.slug,
+      }),
     );
-    await expectRefused(server.ctx.roles.delete(owner.tenant.id, other.slug, { actor: session.auth }), 'conflict');
+    await expectRefused(
+      server.ctx.roles.delete(owner.tenant.id, other.slug, { actor: session.auth }),
+      'conflict',
+    );
   });
 });
 

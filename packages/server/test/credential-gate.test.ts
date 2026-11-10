@@ -117,7 +117,6 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const repos = () => server.ctx.repos;
 const hostOf = (s: TestServer) => new URL(s.ctx.config.baseUrl).host;
 
 let signups = 0;
@@ -156,7 +155,9 @@ async function privateCredential(client: TestClient, name = 'Mail') {
 
 /** the per user flow: authorize as `client`, then the provider sends that browser back with `code` */
 async function connect(client: TestClient, credentialId: string, code: string) {
-  const { url } = await client.data<{ url: string }>(client.post(`/rest/credentials/${credentialId}/authorize`));
+  const { url } = await client.data<{ url: string }>(
+    client.post(`/rest/credentials/${credentialId}/authorize`),
+  );
   const state = new URL(url).searchParams.get('state')!;
   const res = await client.get(`/rest/oauth2/callback?code=${code}&state=${encodeURIComponent(state)}`);
   expect(res.statusCode).toBe(200);
@@ -172,11 +173,20 @@ async function activate(client: TestClient, id: string) {
 }
 
 function webhookNode(path: string, parameters: DataObject = {}) {
-  return node('Webhook', 'core.webhook', { httpMethod: 'POST', path, authentication: 'n8nOAuth2', ...parameters });
+  return node('Webhook', 'core.webhook', {
+    httpMethod: 'POST',
+    path,
+    authentication: 'n8nOAuth2',
+    ...parameters,
+  });
 }
 
 /** a published Webhook with workspace sign-in feeding a node that uses the private credential */
-async function webhookWorkflow(s: Setup, credential: { id: string; name: string }, parameters: DataObject = {}) {
+async function webhookWorkflow(
+  s: Setup,
+  credential: { id: string; name: string },
+  parameters: DataObject = {},
+) {
   const path = `gate-${randomUUID().slice(0, 8)}`;
   const wf = await createWorkflow(s.owner.client, {
     name: `Webhook ${path}`,
@@ -272,14 +282,16 @@ const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
 async function lastWho(s: Setup, workflowId: string): Promise<string | undefined> {
   const [run] = await executionsOf(server.ctx, s.tenantId, workflowId);
   await waitForExecution(server.ctx, s.tenantId, run.id, ['success']);
-  const execution = await s.owner.client.data<{ state: unknown }>(s.owner.client.get(`/rest/executions/${run.id}`));
+  const execution = await s.owner.client.data<{ state: unknown }>(
+    s.owner.client.get(`/rest/executions/${run.id}`),
+  );
   return outputOf(execution.state, 'Who')[0]?.who as string | undefined;
 }
 
 // ---------------------------------------------------------------------------------------------
 
 describe('the gate service', () => {
-  it('lists the private credentials the trigger reaches, sub-nodes included, and checks the user\'s entries', async () => {
+  it("lists the private credentials the trigger reaches, sub-nodes included, and checks the user's entries", async () => {
     const s = await setup();
     const mail = await privateCredential(s.owner.client, 'Mail');
     const calendar = await privateCredential(s.owner.client, 'Calendar');
@@ -296,18 +308,34 @@ describe('the gate service', () => {
         // a sub-node of A, feeding it over a non-main connection
         node('Model', 'test.whoAmI', {}, [0, 0], { credentials: ref(calendar) }),
         // not reached from the trigger
-        node('Island', 'test.whoAmI', {}, [0, 0], { credentials: ref(await privateCredential(s.owner.client, 'Island')) }),
+        node('Island', 'test.whoAmI', {}, [0, 0], {
+          credentials: ref(await privateCredential(s.owner.client, 'Island')),
+        }),
         // reached, but disabled
-        node('Off', 'test.whoAmI', {}, [0, 0], { credentials: ref(await privateCredential(s.owner.client, 'Off')), disabled: true }),
+        node('Off', 'test.whoAmI', {}, [0, 0], {
+          credentials: ref(await privateCredential(s.owner.client, 'Off')),
+          disabled: true,
+        }),
       ],
       connections: {
         Hook: { main: [[{ node: 'A', type: 'main', index: 0 }]] },
-        A: { main: [[{ node: 'Fixed', type: 'main', index: 0 }, { node: 'Off', type: 'main', index: 0 }]] },
+        A: {
+          main: [
+            [
+              { node: 'Fixed', type: 'main', index: 0 },
+              { node: 'Off', type: 'main', index: 0 },
+            ],
+          ],
+        },
         Model: { ai_languageModel: [[{ node: 'A', type: 'ai_languageModel', index: 0 }]] },
       },
     } as unknown as WorkflowDefinition;
 
-    expect(reachableNodes(definition, 'Hook').map((n) => n.name).sort()).toEqual(['A', 'Fixed', 'Hook', 'Model']);
+    expect(
+      reachableNodes(definition, 'Hook')
+        .map((n) => n.name)
+        .sort(),
+    ).toEqual(['A', 'Fixed', 'Hook', 'Model']);
     const gate = server.ctx.credentialGate;
     const before = await gate.check(s.tenantId, definition, s.team, 'Hook', s.editor.user.id);
     expect(before.readyToExecute).toBe(false);
@@ -350,7 +378,10 @@ describe('the gate service', () => {
     const mail = await privateCredential(s.owner.client, 'ByName');
     const named = {
       name: 'n',
-      nodes: [node('Hook', 'core.webhook', {}), node('A', 'test.whoAmI', {}, [0, 0], { credentials: { oAuth2Api: { id: null, name: 'ByName' } } })],
+      nodes: [
+        node('Hook', 'core.webhook', {}),
+        node('A', 'test.whoAmI', {}, [0, 0], { credentials: { oAuth2Api: { id: null, name: 'ByName' } } }),
+      ],
       connections: chain('Hook', 'A'),
     } as unknown as WorkflowDefinition;
     const result = await server.ctx.credentialGate.check(s.tenantId, named, s.team, 'Hook', s.editor.user.id);
@@ -451,7 +482,11 @@ describe('the gate service', () => {
   });
 
   it('builds the connect link as a plain address: the credential, the action and the return path, nothing else', () => {
-    const helper = server.ctx.credentialGate.forRun('t', { name: 'x', nodes: [], connections: {} } as never, 'p');
+    const helper = server.ctx.credentialGate.forRun(
+      't',
+      { name: 'x', nodes: [], connections: {} } as never,
+      'p',
+    );
     const url = new URL(helper.connectPageUrl('cred-1', 'disconnect', '/form/acme/who'));
     expect(url.origin).toBe(new URL(server.ctx.config.baseUrl).origin);
     expect(url.pathname).toBe('/credential-connect/cred-1');
@@ -462,7 +497,7 @@ describe('the gate service', () => {
 });
 
 describe('Webhook with workspace sign-in: Bearer', () => {
-  it('answers 428 with the credentials to connect, starts no run, then runs with the user\'s own token', async () => {
+  it("answers 428 with the credentials to connect, starts no run, then runs with the user's own token", async () => {
     const s = await setup();
     const credential = await privateCredential(s.owner.client);
     const hook = await webhookWorkflow(s, credential);
@@ -514,7 +549,9 @@ describe('Webhook with workspace sign-in: Bearer', () => {
     const hook = await webhookWorkflow(s, credential);
     await connect(s.editor.client, credential.id, 'bea');
     const token = await tokenFor(server, s.slug, s.editor, resourceOf(server, s.slug, hook.path));
-    vi.spyOn(server.ctx.credentialGate, 'check').mockRejectedValue(new Error('connection to db-host:5432 refused'));
+    vi.spyOn(server.ctx.credentialGate, 'check').mockRejectedValue(
+      new Error('connection to db-host:5432 refused'),
+    );
     const res = await send(server, 'POST', hook.urlPath, bearer(token), {});
     expect(res.statusCode).toBe(503);
     expect(res.json()).toEqual({ status: 'credential_readiness_check_failed' });
@@ -533,7 +570,12 @@ describe('Webhook with workspace sign-in: Bearer', () => {
     const other = await send(server, 'POST', two.urlPath, bearer(tokenOne), {});
     expect(other.statusCode).toBe(401);
     expect(String(other.headers['www-authenticate'])).toContain('error="invalid_token"');
-    const serverToken = await tokenFor(server, s.slug, s.editor, `${server.ctx.config.mcp.baseUrl}/mcp-server/${s.slug}/http`);
+    const serverToken = await tokenFor(
+      server,
+      s.slug,
+      s.editor,
+      `${server.ctx.config.mcp.baseUrl}/mcp-server/${s.slug}/http`,
+    );
     expect((await send(server, 'POST', two.urlPath, bearer(serverToken), {})).statusCode).toBe(401);
     expect(await executionsOf(server.ctx, s.tenantId, two.id)).toHaveLength(0);
   });
@@ -544,14 +586,19 @@ describe('Webhook with workspace sign-in: Bearer', () => {
     const hook = await webhookWorkflow(s, credential);
     const stranger = await setup();
     const strangerHook = await webhookWorkflow(stranger, await privateCredential(stranger.owner.client));
-    const foreign = await tokenFor(server, stranger.slug, stranger.owner, resourceOf(server, stranger.slug, strangerHook.path));
+    const foreign = await tokenFor(
+      server,
+      stranger.slug,
+      stranger.owner,
+      resourceOf(server, stranger.slug, strangerHook.path),
+    );
     const res = await send(server, 'POST', hook.urlPath, bearer(foreign), {});
     expect(res.statusCode).toBe(401);
     expect(await executionsOf(server.ctx, s.tenantId, hook.id)).toHaveLength(0);
     // and the stranger's authorize for this tenant's webhook is no resource of theirs
-    await expect(tokenFor(server, stranger.slug, stranger.owner, resourceOf(server, s.slug, hook.path))).rejects.toThrow(
-      /invalid_target/,
-    );
+    await expect(
+      tokenFor(server, stranger.slug, stranger.owner, resourceOf(server, s.slug, hook.path)),
+    ).rejects.toThrow(/invalid_target/);
   });
 
   it('asks for a token with the challenge, and a wrong one is 401', async () => {
@@ -600,7 +647,7 @@ describe('the resource follows config.mcp.baseUrl', () => {
     await split?.close();
   });
 
-  it('builds the Webhook resource and its metadata on MCP_BASE_URL, not on the Webhook URL\'s base URL', async () => {
+  it("builds the Webhook resource and its metadata on MCP_BASE_URL, not on the Webhook URL's base URL", async () => {
     expect(split.ctx.config.baseUrl).not.toBe(OTHER);
     expect(split.ctx.config.mcp.baseUrl).toBe(OTHER);
     const s = await setup(split);
@@ -670,7 +717,9 @@ describe('/rest/form-auth/code for a webhook', () => {
   it('takes the path of a Webhook with workspace sign-in only, and mints a webhook-user token', async () => {
     const s = await setup();
     const signed = await createWorkflow(s.owner.client, { nodes: [webhookNode('signed')] });
-    const plain = await createWorkflow(s.owner.client, { nodes: [webhookNode('plain', { authentication: 'none' })] });
+    const plain = await createWorkflow(s.owner.client, {
+      nodes: [webhookNode('plain', { authentication: 'none' })],
+    });
     for (const wf of [signed, plain]) await activate(s.owner.client, wf.id);
 
     // any member may ask for the webhook that has the sign-in
@@ -697,18 +746,22 @@ describe('/rest/form-auth/code for a webhook', () => {
     expect((await codeFor(s.editor.client, `/webhook-test/${s.slug}/signed`)).statusCode).toBe(403);
   });
 
-  it('refuses another workspace\'s webhook as it does a form, and a path with a way out', async () => {
+  it("refuses another workspace's webhook as it does a form, and a path with a way out", async () => {
     const s = await setup();
     const other = await setup();
     const wf = await createWorkflow(other.owner.client, { nodes: [webhookNode('theirs')] });
     await activate(other.owner.client, wf.id);
     expect((await codeFor(s.editor.client, `/webhook/${other.slug}/theirs`)).statusCode).toBe(403);
-    for (const path of [`/webhook/${s.slug}/../../rest/me`, `/webhook/${s.slug}/%2e%2e/x`, 'https://evil.example/webhook/a/b']) {
+    for (const path of [
+      `/webhook/${s.slug}/../../rest/me`,
+      `/webhook/${s.slug}/%2e%2e/x`,
+      'https://evil.example/webhook/a/b',
+    ]) {
       expect((await codeFor(s.editor.client, path)).statusCode).toBe(400);
     }
   });
 
-  it('still takes a Chat Trigger\'s /chat path, with a chat-user token', async () => {
+  it("still takes a Chat Trigger's /chat path, with a chat-user token", async () => {
     const s = await setup();
     const res = await codeFor(s.editor.client, `/webhook/${s.slug}/chat-id/chat`);
     expect(res.statusCode).toBe(200);
@@ -736,7 +789,10 @@ describe('/rest/form-auth/code for a webhook', () => {
     expect(cookie?.path).toBe(hook.urlPath);
     expect(cookie?.httpOnly).toBe(true);
 
-    const opened = await send(server, 'GET', hook.urlPath, { ...html, cookie: `${cookie!.name}=${cookie!.value}` });
+    const opened = await send(server, 'GET', hook.urlPath, {
+      ...html,
+      cookie: `${cookie!.name}=${cookie!.value}`,
+    });
     expect(opened.statusCode).toBe(200);
     expect(await lastWho(s, hook.id)).toBe('bea');
 
@@ -748,12 +804,18 @@ describe('/rest/form-auth/code for a webhook', () => {
 
   it('gates a browser that has not connected: 428, no run', async () => {
     const s = await setup();
-    const hook = await webhookWorkflow(s, await privateCredential(s.owner.client), { httpMethod: 'GET', oauthClient: 'auto' });
+    const hook = await webhookWorkflow(s, await privateCredential(s.owner.client), {
+      httpMethod: 'GET',
+      oauthClient: 'auto',
+    });
     const token = server.ctx.formTokens.sign(
       { kind: WEBHOOK_TOKEN_KIND, tenantId: s.tenantId, workflowId: hook.id, userId: s.editor.user.id },
       3600,
     );
-    const res = await send(server, 'GET', hook.urlPath, { accept: 'text/html', cookie: `ncb-form-auth-wf-${hook.id}=${token}` });
+    const res = await send(server, 'GET', hook.urlPath, {
+      accept: 'text/html',
+      cookie: `ncb-form-auth-wf-${hook.id}=${token}`,
+    });
     expect(res.statusCode).toBe(428);
     expect(await executionsOf(server.ctx, s.tenantId, hook.id)).toHaveLength(0);
   });

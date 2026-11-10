@@ -181,7 +181,9 @@ async function privateCredential(client: TestClient, name = 'Mail') {
 
 /** the per user flow: authorize as `client`, then the provider sends that browser back with `code` */
 async function connect(client: TestClient, credentialId: string, code: string, callbackClient = client) {
-  const { url } = await client.data<{ url: string }>(client.post(`/rest/credentials/${credentialId}/authorize`));
+  const { url } = await client.data<{ url: string }>(
+    client.post(`/rest/credentials/${credentialId}/authorize`),
+  );
   const state = new URL(url).searchParams.get('state')!;
   return callbackClient.get(`/rest/oauth2/callback?code=${code}&state=${encodeURIComponent(state)}`);
 }
@@ -333,7 +335,8 @@ describe('private credentials: connect', () => {
       oauth_token: 'at-v2',
     });
     expect(
-      server.ctx.credentials.decrypt((await repos().credentials.get(tenantId, privateOne.id))!).oauthTokenData,
+      server.ctx.credentials.decrypt((await repos().credentials.get(tenantId, privateOne.id))!)
+        .oauthTokenData,
     ).toBeUndefined();
 
     const fixed = await owner.client.data<{ id: string }>(
@@ -356,7 +359,9 @@ describe('private credentials: connect', () => {
 
 /** starts the OAuth1 per user flow as `client` and reads the signed state back from the provider */
 async function lastOAuth1State(client: TestClient, credentialId: string): Promise<string> {
-  const { url } = await client.data<{ url: string }>(client.post(`/rest/credentials/${credentialId}/authorize`));
+  const { url } = await client.data<{ url: string }>(
+    client.post(`/rest/credentials/${credentialId}/authorize`),
+  );
   expect(url).toContain('oauth_token=rt-1');
   return new URL(lastCallbackUrl).searchParams.get('state')!;
 }
@@ -415,8 +420,8 @@ describe('private credentials: runs', () => {
       expect.objectContaining({ refresh_token: 'refresh-bea' }),
     ]);
     const after = await entryOf(tenantId, credential.id, member.user.id);
-    expect(String((after?.oauthTokenData as DataObject).access_token)).toMatch(/^renewed-bea-/);
-    expect((after?.oauthTokenData as DataObject).refresh_token).toBe('refresh-bea');
+    expect(String((after?.oauthTokenData as DataObject | undefined)?.access_token)).toMatch(/^renewed-bea-/);
+    expect((after?.oauthTokenData as DataObject | undefined)?.refresh_token).toBe('refresh-bea');
     expect(await entryOf(tenantId, credential.id, owner.user.id)).toEqual(ownerBefore);
     expect((await repos().credentials.get(tenantId, credential.id))!.dataEnc).toBe(sharedBefore);
   });
@@ -594,7 +599,9 @@ describe('private credentials: create and switch', () => {
     );
     const toggle = await member.client.patch(`/rest/credentials/${fixed.id}`, { isResolvable: true });
     expect(toggle.statusCode).toBe(403);
-    const toggled = await owner.client.data(owner.client.patch(`/rest/credentials/${fixed.id}`, { isResolvable: true }));
+    const toggled = await owner.client.data(
+      owner.client.patch(`/rest/credentials/${fixed.id}`, { isResolvable: true }),
+    );
     expect(toggled).toMatchObject({ isResolvable: true, connectedCount: 0, connectedByMe: false });
     // deleting a private one needs credential:createEndUser too
     expect((await member.client.delete(`/rest/credentials/${fixed.id}`)).statusCode).toBe(403);

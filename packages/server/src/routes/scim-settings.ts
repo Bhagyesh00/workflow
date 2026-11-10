@@ -36,7 +36,10 @@ export function registerScimSettingsRoutes(app: FastifyInstance, ctx: ServerCont
 
   /** the projects that can take a removed user's work: team projects and active members' personal ones */
   async function targets(tenantId: string) {
-    const [all, members] = await Promise.all([repos.projects.listAll(tenantId), repos.memberships.listForTenant(tenantId)]);
+    const [all, members] = await Promise.all([
+      repos.projects.listAll(tenantId),
+      repos.memberships.listForTenant(tenantId),
+    ]);
     const active = new Set(members.filter((m) => !m.disabledAt).map((m) => m.userId));
     return all
       .filter((p) => p.type === 'team' || (p.ownerUserId !== null && active.has(p.ownerUserId)))
@@ -52,9 +55,7 @@ export function registerScimSettingsRoutes(app: FastifyInstance, ctx: ServerCont
     const auth = await requireScope(request, 'scim:manage');
     const { enabled } = parse(configBody, request.body);
     if (enabled && !(await ctx.ssoSettings.isSsoActive(auth.tenant.id))) {
-      throw ApiError.badRequest(
-        'Turn on SAML or OIDC single sign-on before you enable SCIM provisioning.',
-      );
+      throw ApiError.badRequest('Turn on SAML or OIDC single sign-on before you enable SCIM provisioning.');
     }
     await repos.scim.patchSettings(auth.tenant.id, { enabled });
     return { data: await configOf(auth.tenant.id) };

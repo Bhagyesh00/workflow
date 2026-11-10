@@ -41,7 +41,8 @@ export function usePrivateAllowed(
 ): { allowed: boolean; reason?: string } {
   const me = useMe().data;
   if (!project || project.type === 'personal') return { allowed: false, reason: PRIVATE_PERSONAL_REASON };
-  if (!canWith(me, 'credential:createEndUser', project)) return { allowed: false, reason: PRIVATE_SCOPE_REASON };
+  if (!canWith(me, 'credential:createEndUser', project))
+    return { allowed: false, reason: PRIVATE_SCOPE_REASON };
   return { allowed: true };
 }
 

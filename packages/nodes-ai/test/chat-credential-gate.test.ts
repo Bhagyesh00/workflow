@@ -16,10 +16,10 @@ import {
   Workflow,
 } from '@workflow/workflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { injectChatConnectBar, renderChatConnectBar } from '../src/nodes/trigger/chat-page';
 import { ChatTriggerNode } from '../src/nodes/trigger/ChatTrigger.node';
-import { checkWorkspaceSignIn, MCP_SIGNIN_TEXTS } from '../src/nodes/trigger/mcp-trigger-signin';
+import { injectChatConnectBar, renderChatConnectBar } from '../src/nodes/trigger/chat-page';
 import { McpTriggerNode } from '../src/nodes/trigger/McpTrigger.node';
+import { checkWorkspaceSignIn, MCP_SIGNIN_TEXTS } from '../src/nodes/trigger/mcp-trigger-signin';
 import { node, nodeTypes, services } from './harness';
 
 const USER = { id: 'u1', email: 'ann@example.com', firstName: 'Ann', lastName: 'Lee' };
@@ -30,7 +30,10 @@ const formTokens: NonNullable<ExecutionServices['formTokens']> = {
   sign: (payload) => `tok:${JSON.stringify(payload)}`,
   verify: (token) => (token.startsWith('tok:') ? (JSON.parse(token.slice(4)) as DataObject) : null),
 };
-const userToken = formTokens.sign({ kind: 'chat-user', tenantId: 't1', workflowId: 'wf-1', userId: USER.id }, 60);
+const userToken = formTokens.sign(
+  { kind: 'chat-user', tenantId: 't1', workflowId: 'wf-1', userId: USER.id },
+  60,
+);
 
 let result: CredentialGateResult;
 let check: ReturnType<typeof vi.fn<CredentialGateHelper['check']>>;
@@ -45,7 +48,10 @@ const entry = (id: string, name: string, status: 'configured' | 'missing', type 
 });
 
 beforeEach(() => {
-  result = { readyToExecute: false, credentials: [entry('c1', 'Calendar', 'missing'), entry('c2', 'Drive', 'configured')] };
+  result = {
+    readyToExecute: false,
+    credentials: [entry('c1', 'Calendar', 'missing'), entry('c2', 'Drive', 'configured')],
+  };
   check = vi.fn<CredentialGateHelper['check']>(async () => result);
   gate = {
     check,
@@ -197,7 +203,12 @@ describe('the MCP Server Trigger', () => {
       canExecute: async () => true,
       challenge: (resource) => `Bearer resource_metadata="https://m.example${resource}"`,
     };
-    const trigger = node('MCP', 'ai.mcpTrigger', { path: 'p', authentication: 'n8nOAuth2', ...parameters }, { webhookId: 'w' });
+    const trigger = node(
+      'MCP',
+      'ai.mcpTrigger',
+      { path: 'p', authentication: 'n8nOAuth2', ...parameters },
+      { webhookId: 'w' },
+    );
     const workflow = new Workflow({ id: 'wf-1', name: 'mcp', nodes: [trigger], connections: {} }, nodeTypes);
     const ctx = createWebhookContext(
       {
@@ -234,7 +245,7 @@ describe('the MCP Server Trigger', () => {
     expect(r.triggerUserId).toBeUndefined();
   });
 
-  it('keeps its sign-in import path: the code lives in nodes-base and the texts are the trigger\'s', () => {
+  it("keeps its sign-in import path: the code lives in nodes-base and the texts are the trigger's", () => {
     expect(typeof checkWorkspaceSignIn).toBe('function');
     expect(MCP_SIGNIN_TEXTS.required).toContain('MCP server');
   });

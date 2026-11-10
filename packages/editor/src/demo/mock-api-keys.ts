@@ -23,7 +23,8 @@ function givable(backend: MockBackend, role: string, tenantId: string): Set<stri
 
 function assertLabel(label: unknown): string {
   const value = typeof label === 'string' ? label.trim() : '';
-  if (!value || value.length > 50 || /[<>]/.test(value)) throw new HttpError(400, 'bad_request', 'Invalid label');
+  if (!value || value.length > 50 || /[<>]/.test(value))
+    throw new HttpError(400, 'bad_request', 'Invalid label');
   return value;
 }
 
@@ -49,7 +50,13 @@ function assertExpiry(value: unknown): number | null {
 
 const expiryOf = (key: Row): number | null => (typeof key.expiresAt === 'number' ? key.expiresAt : null);
 
-function assertLabelFree(backend: MockBackend, tenantId: string, userId: string, label: string, exceptId?: string) {
+function assertLabelFree(
+  backend: MockBackend,
+  tenantId: string,
+  userId: string,
+  label: string,
+  exceptId?: string,
+) {
   const taken = backend.apiKeys.some(
     (k) => k.tenantId === tenantId && k.userId === userId && k.id !== exceptId && k.name === label,
   );
@@ -72,7 +79,8 @@ export function registerApiKeyRoutes(backend: MockBackend): void {
         : {}),
     };
   };
-  const own = (key: Row, tenantId: string, userId: string) => key.tenantId === tenantId && key.userId === userId;
+  const own = (key: Row, tenantId: string, userId: string) =>
+    key.tenantId === tenantId && key.userId === userId;
 
   backend.on('GET', '/api-keys', ({ query }) => {
     if (query.scope === 'all') {
@@ -129,7 +137,8 @@ export function registerApiKeyRoutes(backend: MockBackend): void {
       throw new HttpError(400, 'bad_request', 'Nothing to change');
     }
     const name = body.name === undefined ? key.name : assertLabel(body.name);
-    const scopes = body.scopes === undefined ? key.scopes : assertScopes(backend, role, tenant.id, body.scopes);
+    const scopes =
+      body.scopes === undefined ? key.scopes : assertScopes(backend, role, tenant.id, body.scopes);
     if (name !== key.name) assertLabelFree(backend, tenant.id, user.id, name, key.id);
     key.name = name;
     key.scopes = scopes;

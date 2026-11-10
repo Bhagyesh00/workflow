@@ -69,7 +69,8 @@ export class FormAuthService implements FormAuthHelper {
     const payload = this.deps.context().formTokens.verify(token);
     // the page's own check binds the kind: a form token never opens a chat or a webhook, and so on
     const kind = payload?.kind;
-    if (kind !== FORM_TOKEN_KIND && kind !== CHAT_TOKEN_KINDS.user && kind !== WEBHOOK_TOKEN_KIND) return null;
+    if (kind !== FORM_TOKEN_KIND && kind !== CHAT_TOKEN_KINDS.user && kind !== WEBHOOK_TOKEN_KIND)
+      return null;
     const { userId, tenantId } = payload as { userId: unknown; tenantId: unknown };
     if (typeof userId !== 'string' || typeof tenantId !== 'string') return null;
     const { repos } = this.deps;

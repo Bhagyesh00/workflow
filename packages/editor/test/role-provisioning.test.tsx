@@ -38,7 +38,12 @@ describe('CSV of current access', () => {
     expect(csvCell('Doe, Jane')).toBe('"Doe, Jane"');
     expect(csvCell('say "hi"')).toBe('"say ""hi"""');
     expect(csvCell(null)).toBe('');
-    expect(toCsv([['a', '=b'], ['c', 'd,e']])).toBe("a,'=b\r\nc,\"d,e\"\r\n");
+    expect(
+      toCsv([
+        ['a', '=b'],
+        ['c', 'd,e'],
+      ]),
+    ).toBe('a,\'=b\r\nc,"d,e"\r\n');
   });
 
   it('lists every member with the workspace role', async () => {
@@ -67,7 +72,9 @@ describe('Role provisioning panel', () => {
     await user.selectOptions(screen.getByLabelText('When no role matches'), 'block');
     await user.click(screen.getByRole('button', { name: 'Save' }));
 
-    const dialog = await screen.findByRole('alertdialog', undefined, T).catch(() => screen.findByRole('dialog', undefined, T));
+    const dialog = await screen
+      .findByRole('alertdialog', undefined, T)
+      .catch(() => screen.findByRole('dialog', undefined, T));
     expect(within(dialog).getByText(/Download who holds which role first/)).toBeTruthy();
     expect(within(dialog).getByRole('button', { name: /Download current access/ })).toBeTruthy();
     await user.click(within(dialog).getByRole('button', { name: 'Turn on' }));
@@ -131,7 +138,13 @@ describe('Role provisioning panel', () => {
     }, T);
 
     // move the second rule up: it becomes the first
-    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Workspace rules' })).getAllByRole('listitem')).toHaveLength(2), T);
+    await waitFor(
+      () =>
+        expect(
+          within(screen.getByRole('list', { name: 'Workspace rules' })).getAllByRole('listitem'),
+        ).toHaveLength(2),
+      T,
+    );
     const rows = within(screen.getByRole('list', { name: 'Workspace rules' })).getAllByRole('listitem');
     await user.click(within(rows[1]!).getByRole('button', { name: 'Move up' }));
     await waitFor(async () => {

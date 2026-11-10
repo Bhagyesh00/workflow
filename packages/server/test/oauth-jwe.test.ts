@@ -35,7 +35,9 @@ beforeAll(async () => {
       }
       if (req.url === '/me') {
         seenBearer = String(req.headers.authorization ?? '');
-        res.writeHead(seenBearer === 'Bearer plain-access' ? 200 : 401, { 'content-type': 'application/json' });
+        res.writeHead(seenBearer === 'Bearer plain-access' ? 200 : 401, {
+          'content-type': 'application/json',
+        });
         res.end('{}');
         return;
       }
@@ -220,7 +222,11 @@ describe('decryptResponse', () => {
       server.ctx.oauthJwe.decryptResponse(b.tenant.id, { access_token: forA }, { jweEnabled: true }),
     ).rejects.toThrow(/Couldn't decrypt/);
     // and A's own key opens it
-    const out = await server.ctx.oauthJwe.decryptResponse(a.tenant.id, { access_token: forA }, { jweEnabled: true });
+    const out = await server.ctx.oauthJwe.decryptResponse(
+      a.tenant.id,
+      { access_token: forA },
+      { jweEnabled: true },
+    );
     expect(out.access_token).toBe('plain-access');
     // a workspace with no key at all cannot open it either
     await server.ctx.repos.jweKeys.delete(

@@ -65,7 +65,8 @@ function sorted(rules: RoleMappingRule[]): RoleMappingRule[] {
 /** the save-time dry run, as the server's: only a syntax error is a problem */
 function expressionProblem(expression: unknown): string | undefined {
   if (typeof expression !== 'string' || expression.trim().length === 0) return 'The expression is empty.';
-  if (expression.length > MAX_EXPRESSION) return `The expression is longer than ${MAX_EXPRESSION} characters.`;
+  if (expression.length > MAX_EXPRESSION)
+    return `The expression is longer than ${MAX_EXPRESSION} characters.`;
   try {
     evaluateSimple(expression, { $claims: {} }, { timeoutMs: 250 });
     return undefined;
@@ -75,11 +76,18 @@ function expressionProblem(expression: unknown): string | undefined {
   }
 }
 
-function roleValid(backend: MockBackend, tenantId: string, type: 'instance' | 'project', role: unknown): boolean {
+function roleValid(
+  backend: MockBackend,
+  tenantId: string,
+  type: 'instance' | 'project',
+  role: unknown,
+): boolean {
   if (typeof role !== 'string' || !role || role === 'owner') return false;
   const custom = demoRoles(backend, tenantId).find((r) => r.slug === role);
   if (type === 'instance') return role === 'admin' || role === 'member' || custom?.roleType === 'global';
-  return ['project:admin', 'project:editor', 'project:viewer'].includes(role) || custom?.roleType === 'project';
+  return (
+    ['project:admin', 'project:editor', 'project:viewer'].includes(role) || custom?.roleType === 'project'
+  );
 }
 
 function teamProjects(backend: MockBackend, tenantId: string, projectIds: unknown): string[] {
@@ -105,7 +113,9 @@ function checkRule(
     throw new HttpError(
       400,
       'bad_request',
-      long ? `An expression holds at most ${MAX_EXPRESSION} characters.` : `The expression doesn't work: ${problem}`,
+      long
+        ? `An expression holds at most ${MAX_EXPRESSION} characters.`
+        : `The expression doesn't work: ${problem}`,
     );
   }
   if (!roleValid(backend, tenantId, type, body.role)) {
@@ -137,11 +147,16 @@ export function registerProvisioningRoutes(backend: MockBackend): void {
       if (typeof body[key] !== 'boolean') throw new HttpError(400, BAD, 'Request validation failed');
       next[key] = body[key];
     }
-    for (const key of ['scopesName', 'scopesInstanceRoleClaimName', 'scopesProjectsRolesClaimName'] as const) {
+    for (const key of [
+      'scopesName',
+      'scopesInstanceRoleClaimName',
+      'scopesProjectsRolesClaimName',
+    ] as const) {
       if (body[key] === undefined) continue;
       const value = typeof body[key] === 'string' ? (body[key] as string).trim() : '';
       if (!value) throw new HttpError(400, BAD, 'Request validation failed');
-      if (key === 'scopesName' && /\s/.test(value)) throw new HttpError(400, BAD, 'A scope name has no spaces');
+      if (key === 'scopesName' && /\s/.test(value))
+        throw new HttpError(400, BAD, 'A scope name has no spaces');
       next[key] = value;
     }
     if (body.defaultInstanceRole !== undefined) {
@@ -159,7 +174,11 @@ export function registerProvisioningRoutes(backend: MockBackend): void {
     }
     const def = next.defaultInstanceRole;
     if (def && def !== 'block' && !roleValid(backend, tenant.id, 'instance', def)) {
-      throw new HttpError(400, 'bad_request', 'The default role must be a workspace role other than owner, or block.');
+      throw new HttpError(
+        400,
+        'bad_request',
+        'The default role must be a workspace role other than owner, or block.',
+      );
     }
     if (before.scopesProvisionProjectRoles && !next.scopesProvisionProjectRoles) {
       state(backend).rules.set(

@@ -139,7 +139,10 @@ async function browserSignIn(
   if (!result.allowed || !result.user) {
     return {
       allowed: false,
-      response: result.response ?? { statusCode: 403, body: { message: "You don't have permission to open this webhook." } },
+      response: result.response ?? {
+        statusCode: 403,
+        body: { message: "You don't have permission to open this webhook." },
+      },
     };
   }
   return { allowed: true, user: result.user };
@@ -159,7 +162,9 @@ export async function checkWebhookSignIn(
   const browser =
     params.oauthClient === 'auto' &&
     !hasBearer &&
-    (isBrowserNavigation(ctx) || headerOf(ctx, 'x-auth-token') !== undefined || hasCookie(ctx, cookieNameOf(ctx)));
+    (isBrowserNavigation(ctx) ||
+      headerOf(ctx, 'x-auth-token') !== undefined ||
+      hasCookie(ctx, cookieNameOf(ctx)));
   if (browser) return browserSignIn(ctx, params.requireExecuteAccess);
   // a host without the sign-in helper refuses the caller (401), never an error page
   if (!ctx.getMcpAuth?.()) {

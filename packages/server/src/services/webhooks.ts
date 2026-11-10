@@ -47,6 +47,7 @@ import {
   type ChatFrame,
   type ChatFrameMetadata,
   type ChatTokenKind,
+  credentialConnectionsRequiredBody,
   type DataObject,
   type ExecutionMode,
   type ExecutionState,
@@ -57,7 +58,6 @@ import {
   isHitlVariant,
   isPlainObject,
   type McpAuthHelper,
-  credentialConnectionsRequiredBody,
   type NodeType,
   type WebhookRequest,
   type WebhookResponse,
@@ -1031,7 +1031,12 @@ export class WebhookService {
         // the run reaches; the check fails closed (a throw is 503, no run). It runs before the claim: a refusal
         // leaves a test form or chat listening, as any refused request does
         if (result.triggerUserId) {
-          const blocked = await this.credentialGate(services, result.triggerUserId, tenant.id, input.workflowId);
+          const blocked = await this.credentialGate(
+            services,
+            result.triggerUserId,
+            tenant.id,
+            input.workflowId,
+          );
           if (blocked) return this.decorate(blocked, source, incoming.request.headers);
         }
         const lost = await input.claim?.();

@@ -18,7 +18,10 @@ let server: TestServer;
 const idps: FakeOidcIdp[] = [];
 
 beforeAll(async () => {
-  server = await createTestServer({ LOGIN_RATE_LIMIT_MAX: '1000' }, { startMain: false, allowInsecureIdp: true });
+  server = await createTestServer(
+    { LOGIN_RATE_LIMIT_MAX: '1000' },
+    { startMain: false, allowInsecureIdp: true },
+  );
 });
 afterAll(async () => {
   await server.close();
@@ -52,7 +55,10 @@ describe('SAML config', () => {
     const key = await keyOf(owner.client);
     const got = await api(key, 'GET', '/settings/sso/saml');
     expect(got.statusCode).toBe(200);
-    const put = await api(key, 'PUT', '/settings/sso/saml', { loginLabel: 'Corp SAML', loginBinding: 'post' });
+    const put = await api(key, 'PUT', '/settings/sso/saml', {
+      loginLabel: 'Corp SAML',
+      loginBinding: 'post',
+    });
     expect(put.statusCode).toBe(200);
     expect(put.json().data).toMatchObject({ loginLabel: 'Corp SAML', loginBinding: 'post' });
     const again = (await api(key, 'GET', '/settings/sso/saml')).json().data;
@@ -100,7 +106,11 @@ describe('OIDC config', () => {
     const key = await keyOf(owner.client);
     const { idp, res } = await save(key, { loginLabel: 'Corp OIDC' });
     expect(res.statusCode).toBe(200);
-    expect(res.json().data).toMatchObject({ clientId: idp.clientId, clientSecret: '', loginLabel: 'Corp OIDC' });
+    expect(res.json().data).toMatchObject({
+      clientId: idp.clientId,
+      clientSecret: '',
+      loginLabel: 'Corp OIDC',
+    });
     expect(res.body).not.toContain(idp.clientSecret);
     const got = await api(key, 'GET', '/settings/sso/oidc');
     expect(got.body).not.toContain(idp.clientSecret);

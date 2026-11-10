@@ -43,7 +43,11 @@ function setup() {
   return { demo, tenantId, team, userId: demo.auth().user.id };
 }
 
-function seedOAuth(demo: MockBackend, projectId: string, input: { id: string; name: string; isResolvable?: boolean }) {
+function seedOAuth(
+  demo: MockBackend,
+  projectId: string,
+  input: { id: string; name: string; isResolvable?: boolean },
+) {
   const at = new Date().toISOString();
   demo.credentials.push({
     id: input.id,
@@ -72,7 +76,9 @@ describe('a new OAuth credential', () => {
     await waitFor(() => expect((toggle as HTMLButtonElement).disabled).toBe(false));
     await user.click(toggle);
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(demo.requests.some((r) => r.method === 'POST' && r.path === '/credentials')).toBe(true));
+    await waitFor(() =>
+      expect(demo.requests.some((r) => r.method === 'POST' && r.path === '/credentials')).toBe(true),
+    );
     const create = demo.requests.find((r) => r.method === 'POST' && r.path === '/credentials');
     expect(create?.body).toMatchObject({ type: 'oAuth2Api', isResolvable: true, projectId: team.id });
     const saved = demo.credentials.find((c) => c.type === 'oAuth2Api');
@@ -120,9 +126,9 @@ describe('a saved private credential', () => {
     // the demo has no provider: the per user route answers after its own checks
     await user.click(screen.getByRole('button', { name: 'Reconnect my account' }));
     await waitFor(() =>
-      expect(demo.requests.some((r) => r.method === 'POST' && r.path === '/credentials/cred-private/authorize')).toBe(
-        true,
-      ),
+      expect(
+        demo.requests.some((r) => r.method === 'POST' && r.path === '/credentials/cred-private/authorize'),
+      ).toBe(true),
     );
     expect(demo.requests.some((r) => r.path === '/oauth2/authorize')).toBe(false);
 
@@ -143,7 +149,9 @@ describe('a saved private credential', () => {
     await user.click(toggle);
     const dialog = await screen.findByRole('dialog', { name: 'Use one shared account?' }, LONG);
     await user.click(within(dialog).getByRole('button', { name: 'Remove connections' }));
-    await waitFor(() => expect(demo.credentials.find((c) => c.id === 'cred-private')?.isResolvable).toBeUndefined());
+    await waitFor(() =>
+      expect(demo.credentials.find((c) => c.id === 'cred-private')?.isResolvable).toBeUndefined(),
+    );
     const patch = demo.requests.find((r) => r.method === 'PATCH' && r.path === '/credentials/cred-private');
     expect(patch?.body).toEqual({ isResolvable: false });
     expect(demo.privateConnections.has('cred-private')).toBe(false);
@@ -195,10 +203,14 @@ describe('private credentials on the other screens', () => {
       parameters: {},
       credentials: { oAuth2Api: { id: 'cred-private', name: 'Team mail' } },
     };
-    withProviders(<NodeCredentials node={node} description={description} readOnly={false} onChange={() => {}} />);
+    withProviders(
+      <NodeCredentials node={node} description={description} readOnly={false} onChange={() => {}} />,
+    );
     const row = await screen.findByTestId('private-credential-row', {}, LONG);
     expect(within(row).getByText('Not connected')).toBeTruthy();
-    expect(within(row).getByText('Connect your own account in the credential before you run this node.')).toBeTruthy();
+    expect(
+      within(row).getByText('Connect your own account in the credential before you run this node.'),
+    ).toBeTruthy();
   });
 
   it('a workflow card and a run show the private credentials icon', async () => {
@@ -244,7 +256,11 @@ describe('private credentials on the other screens', () => {
     expect(await screen.findByText(PRIVATE_MOVE_TEXT, {}, LONG)).toBeTruthy();
     const select = screen.getByLabelText('Destination project');
     await waitFor(() => expect(within(select).queryByRole('option', { name: 'Beta team' })).toBeTruthy());
-    expect(within(select).queryAllByRole('option').some((o) => /\(personal\)/.test(o.textContent ?? ''))).toBe(false);
+    expect(
+      within(select)
+        .queryAllByRole('option')
+        .some((o) => /\(personal\)/.test(o.textContent ?? '')),
+    ).toBe(false);
     expect(backend()).toBe(demo);
   });
 

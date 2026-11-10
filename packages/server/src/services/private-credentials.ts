@@ -50,7 +50,11 @@ const KEEP_SCOPE = 'credential:connect';
 export class PrivateCredentialService {
   constructor(readonly deps: ServiceDeps) {}
 
-  async entry(tenantId: string, credentialId: string, userId: string): Promise<CredentialUserEntryRow | undefined> {
+  async entry(
+    tenantId: string,
+    credentialId: string,
+    userId: string,
+  ): Promise<CredentialUserEntryRow | undefined> {
     return this.deps.repos.credentialEntries.get(tenantId, credentialId, userId);
   }
 
@@ -177,7 +181,11 @@ export class PrivateCredentialService {
   }
 
   /** a project delete never migrates a private credential to a personal project (n8n's project service) */
-  async assertProjectTransfer(tenantId: string, sourceProjectId: string, targetProjectId: string): Promise<void> {
+  async assertProjectTransfer(
+    tenantId: string,
+    sourceProjectId: string,
+    targetProjectId: string,
+  ): Promise<void> {
     const { repos } = this.deps;
     const target = await repos.projects.get(tenantId, targetProjectId);
     if (target?.type !== 'personal') return;

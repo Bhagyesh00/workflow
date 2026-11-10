@@ -48,7 +48,9 @@ export function privateWithoutUserError(name: string): Error {
 
 /** P6-15: the user the run acts for has not connected their own account to the private credential */
 export function privateNotConnectedError(name: string): Error {
-  return new Error(`Credential "${name}" is not connected for this user. Connect your own account in the credential.`);
+  return new Error(
+    `Credential "${name}" is not connected for this user. Connect your own account in the credential.`,
+  );
 }
 
 /** the shared fields of a credential (token material left out), to see whether a save changed one */

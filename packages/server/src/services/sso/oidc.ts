@@ -9,7 +9,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { REDACTED } from '@workflow/core';
 import { type DataObject, redactSecrets } from '@workflow/workflow';
-import { createRemoteJWKSet, customFetch as joseFetch, type JWTVerifyGetKey, jwtVerify } from 'jose';
+import { createRemoteJWKSet, type JWTVerifyGetKey, customFetch as joseFetch, jwtVerify } from 'jose';
 import * as client from 'openid-client';
 import { z } from 'zod';
 import type { ServiceDeps } from '../../context';
@@ -18,7 +18,7 @@ import type { AuthContext } from '../../http/auth';
 import { ApiError } from '../../http/errors';
 import { createRepositories } from '../../repositories';
 import type { AuthResult, SessionMeta } from '../auth';
-import { type SsoProfile, SSO_SIGN_IN_ERRORS } from './login';
+import { SSO_SIGN_IN_ERRORS, type SsoProfile } from './login';
 import { safeSsoRedirect } from './redirect';
 import { hasSavedConfig, isSsoMethod } from './settings';
 
@@ -62,8 +62,19 @@ export const OIDC_ERROR_CODES = {
 
 const PROMPTS = ['none', 'login', 'consent', 'select_account', 'create'] as const;
 /** asymmetric algorithms only: never `none`, never a shared-secret algorithm */
-const SIGNING_ALGORITHMS = ['RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512', 'ES256', 'ES384', 'ES512', 'EdDSA'];
-const SCOPE_TOKEN =/^[\x21\x23-\x5b\x5d-\x7e]+$/;
+const SIGNING_ALGORITHMS = [
+  'RS256',
+  'RS384',
+  'RS512',
+  'PS256',
+  'PS384',
+  'PS512',
+  'ES256',
+  'ES384',
+  'ES512',
+  'EdDSA',
+];
+const SCOPE_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
 
 const configInput = z.object({
   clientId: z.string().trim().min(1).max(256).optional(),
@@ -76,7 +87,14 @@ const configInput = z.object({
   additionalScopes: z
     .string()
     .max(512)
-    .refine((v) => v.split(/\s+/).filter(Boolean).every((s) => SCOPE_TOKEN.test(s)), 'Invalid scope')
+    .refine(
+      (v) =>
+        v
+          .split(/\s+/)
+          .filter(Boolean)
+          .every((s) => SCOPE_TOKEN.test(s)),
+      'Invalid scope',
+    )
     .optional(),
   emailVerifiedRequired: z.boolean().optional(),
   rpInitiatedLogoutEnabled: z.boolean().optional(),
@@ -176,15 +194,12 @@ export class OidcService {
   }
 
   private dropDiscovered(tenantId: string): void {
-    for (const key of this.discovered.keys()) if (key.startsWith(`${tenantId}\n`)) this.discovered.delete(key);
+    for (const key of this.discovered.keys())
+      if (key.startsWith(`${tenantId}\n`)) this.discovered.delete(key);
   }
 
   /** discovery through the guarded fetch; the result is the client's configuration */
-  private async discover(
-    endpoint: string,
-    clientId: string,
-    secret: string,
-  ): Promise<client.Configuration> {
+  private async discover(endpoint: string, clientId: string, secret: string): Promise<client.Configuration> {
     let url: URL;
     try {
       url = new URL(endpoint);
@@ -314,7 +329,7 @@ export class OidcService {
     const tenant = await this.tenantBySlug(slug);
     const row = await this.deps.repos.sso.get(tenant.id);
     // GHSA-pf83-w3f9-8m37: a workspace whose active method is not OIDC starts no sign-in
-    if (!row || row.method !== 'oidc') {
+    if (row?.method !== 'oidc') {
       throw failure('sso_method_inactive', SSO_SIGN_IN_ERRORS.sso_method_inactive, 403);
     }
     try {
@@ -641,7 +656,7 @@ export class OidcService {
     if (!options.idTokenCookie) return { redirect: null };
     try {
       const row = await this.deps.repos.sso.get(auth.tenant.id);
-      if (!row || row.method !== 'oidc' || this.stored(row).rpInitiatedLogoutEnabled !== true) {
+      if (row?.method !== 'oidc' || this.stored(row).rpInitiatedLogoutEnabled !== true) {
         return { redirect: null };
       }
       const idToken = this.ctx.cipher.decrypt<string>(options.idTokenCookie, {

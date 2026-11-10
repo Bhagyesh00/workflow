@@ -89,12 +89,7 @@ const configPatch = z
     scopesProvisionInstanceRole: z.boolean(),
     scopesProvisionProjectRoles: z.boolean(),
     scopesUseExpressionMapping: z.boolean(),
-    scopesName: z
-      .string()
-      .trim()
-      .min(1)
-      .max(128)
-      .regex(/^\S+$/, 'A scope name has no spaces'),
+    scopesName: z.string().trim().min(1).max(128).regex(/^\S+$/, 'A scope name has no spaces'),
     scopesInstanceRoleClaimName: claimName,
     scopesProjectsRolesClaimName: claimName,
     defaultInstanceRole: z.string().trim().min(1).max(128).nullable(),
@@ -122,7 +117,10 @@ const dto = (rule: RoleMappingRuleRecord): RoleMappingRuleDTO => ({
 /** a claim as a list of strings: an array, or one string split at commas and white space */
 function stringList(value: unknown): string[] {
   const items = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[\s,]+/) : [];
-  return items.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
+  return items
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 export class ProvisioningService {
@@ -149,8 +147,7 @@ export class ProvisioningService {
     const def = stored.defaultInstanceRole;
     return {
       scopesProvisionInstanceRole: pick('scopesProvisionInstanceRole'),
-      scopesProvisionProjectRoles:
-        pick('scopesProvisionInstanceRole') && pick('scopesProvisionProjectRoles'),
+      scopesProvisionProjectRoles: pick('scopesProvisionInstanceRole') && pick('scopesProvisionProjectRoles'),
       scopesUseExpressionMapping: pick('scopesUseExpressionMapping'),
       scopesName: named('scopesName'),
       scopesInstanceRoleClaimName: named('scopesInstanceRoleClaimName'),
@@ -193,7 +190,8 @@ export class ProvisioningService {
       return undefined;
     }
     const claim = claims[config.scopesInstanceRoleClaimName];
-    const slug = typeof claim === 'string' ? claim.trim() : Array.isArray(claim) ? String(claim[0] ?? '').trim() : '';
+    const slug =
+      typeof claim === 'string' ? claim.trim() : Array.isArray(claim) ? String(claim[0] ?? '').trim() : '';
     if (slug && (await this.instanceRoleValid(tenantId, slug))) return slug;
     // an unknown role, an owner claim or no claim: the default condition decides (the value stays out of the log)
     this.deps.logger.warn({ tenantId }, 'The identity provider gave no usable workspace role');
@@ -214,7 +212,10 @@ export class ProvisioningService {
         for (const projectId of rule.projectIds) if (!wanted.has(projectId)) wanted.set(projectId, rule.role);
       }
     } else {
-      for (const entry of stringList(claims[config.scopesProjectsRolesClaimName]).slice(0, MAX_PROJECT_CLAIMS)) {
+      for (const entry of stringList(claims[config.scopesProjectsRolesClaimName]).slice(
+        0,
+        MAX_PROJECT_CLAIMS,
+      )) {
         // `projectId:role`; a project id holds no colon, a role slug may (`project:editor`)
         const cut = entry.indexOf(':');
         if (cut <= 0) continue;
@@ -236,14 +237,12 @@ export class ProvisioningService {
    * What the claims give this person. Runs before any account or link is written. The owner is never changed
    * or blocked. The default condition decides when no claim or rule gives a workspace role.
    */
-  async resolve(
-    tenant: TenantRow,
-    claims: DataObject,
-    user?: UserRow | null,
-  ): Promise<ProvisioningDecision> {
+  async resolve(tenant: TenantRow, claims: DataObject, user?: UserRow | null): Promise<ProvisioningDecision> {
     const config = await this.readConfig(tenant.id);
     if (!config.scopesProvisionInstanceRole && !config.scopesProvisionProjectRoles) return { blocked: false };
-    const membership = user ? await this.repos.memberships.getIncludingDisabled(tenant.id, user.id) : undefined;
+    const membership = user
+      ? await this.repos.memberships.getIncludingDisabled(tenant.id, user.id)
+      : undefined;
     if (membership?.role === 'owner') return { blocked: false };
 
     const decision: ProvisioningDecision = { blocked: false };
@@ -276,13 +275,16 @@ export class ProvisioningService {
 
     if (decision.instanceRole !== undefined && decision.instanceRole !== membership.role) {
       if (!(await this.instanceRoleValid(tenantId, decision.instanceRole))) return;
-      await changeMemberRole(ctx, tenantId, userId, decision.instanceRole as Role, { source: 'provisioning' });
+      await changeMemberRole(ctx, tenantId, userId, decision.instanceRole as Role, {
+        source: 'provisioning',
+      });
       membership = (await this.repos.memberships.getIncludingDisabled(tenantId, userId)) ?? membership;
     }
 
     const wanted = decision.projectRoles;
     // owners and admins already reach every team project
-    if (!wanted || (IMPLICIT_TEAM_PROJECT_MEMBER_ROLES as readonly string[]).includes(membership.role)) return;
+    if (!wanted || (IMPLICIT_TEAM_PROJECT_MEMBER_ROLES as readonly string[]).includes(membership.role))
+      return;
     const changed = new Set<string>();
     await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
@@ -319,7 +321,8 @@ export class ProvisioningService {
       }
     });
     // a lowered or removed project role takes the person's private credential entries with it
-    for (const projectId of changed) await ctx.privateCredentials.afterAccessChange(tenantId, { userId, projectId });
+    for (const projectId of changed)
+      await ctx.privateCredentials.afterAccessChange(tenantId, { userId, projectId });
   }
 
   /** refused while workspace roles come from the provider */

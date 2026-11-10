@@ -125,7 +125,9 @@ describe('private credentials: cleanup on an access change', () => {
     const other = await projectIn(server, tenantId, `Other ${suffix()}`);
     const guest = await realMember(owner);
     await addToProject(server, tenantId, other.id, guest.user.id, 'project:editor');
-    const shared = await owner.client.put(`/rest/credentials/${credential.id}/share`, { shareWithIds: [other.id] });
+    const shared = await owner.client.put(`/rest/credentials/${credential.id}/share`, {
+      shareWithIds: [other.id],
+    });
     expect(shared.statusCode).toBe(200);
     await connected(tenantId, credential.id, guest.user.id);
     const unshared = await owner.client.put(`/rest/credentials/${credential.id}/share`, { shareWithIds: [] });
@@ -259,6 +261,8 @@ describe('private credentials: move rules', () => {
       data: oauth2Data,
       projectId: credential.projectId,
     });
-    await expect(server.ctx.privateCredentials.assertMovable(auth, fixed.id, target.id)).resolves.toBeUndefined();
+    await expect(
+      server.ctx.privateCredentials.assertMovable(auth, fixed.id, target.id),
+    ).resolves.toBeUndefined();
   });
 });

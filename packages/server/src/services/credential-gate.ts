@@ -28,7 +28,8 @@ const CONNECT_PATH = '/credential-connect';
 /** the enabled nodes the trigger reaches: downstream over main, then every sub-node of those */
 export function reachableNodes(workflow: WorkflowDefinition, startNode?: string): WorkflowNode[] {
   const byName = new Map<string, WorkflowNode>();
-  for (const node of workflow.nodes ?? []) if (node && typeof node.name === 'string') byName.set(node.name, node);
+  for (const node of workflow.nodes ?? [])
+    if (node && typeof node.name === 'string') byName.set(node.name, node);
   const connections = workflow.connections ?? {};
 
   // sources feeding a node over a non-main connection
@@ -133,7 +134,10 @@ export class CredentialGateService {
         credentialType: type,
         status: connected.has(credentialId) ? ('configured' as const) : ('missing' as const),
       }))
-      .sort((a, b) => a.credentialName.localeCompare(b.credentialName) || a.credentialId.localeCompare(b.credentialId));
+      .sort(
+        (a, b) =>
+          a.credentialName.localeCompare(b.credentialName) || a.credentialId.localeCompare(b.credentialId),
+      );
     return { readyToExecute: credentials.every((c) => c.status === 'configured'), credentials };
   }
 

@@ -9,12 +9,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { ApiError } from '../src/http/errors';
 import {
   addToProject,
+  signup as baseSignup,
   createTestServer,
   memberAs,
   projectIn,
   realMember,
   resetDatabase,
-  signup as baseSignup,
   type TestClient,
   type TestServer,
   workflowIn,

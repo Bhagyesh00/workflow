@@ -10,11 +10,11 @@ import { apiKeys, sessions } from '../src/db/schema';
 import { API_KEY_SCOPES } from '../src/http/api-key-scopes';
 import { startSmtpServer } from './fakes/smtp';
 import {
+  signup as baseSignup,
   createTestServer,
   memberAs,
   realMember,
   resetDatabase,
-  signup as baseSignup,
   type TestClient,
   type TestServer,
 } from './helpers';

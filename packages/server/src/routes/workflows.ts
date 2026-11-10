@@ -116,7 +116,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: ServerContext)
       auth.tenant.id,
       page.data.map((row) => row.id),
     );
-    return { ...page, data: page.data.map((row) => ({ ...row, usesPrivateCredentials: usesPrivate.has(row.id) })) };
+    return {
+      ...page,
+      data: page.data.map((row) => ({ ...row, usesPrivateCredentials: usesPrivate.has(row.id) })),
+    };
   });
 
   app.post('/workflows', async (request) => {

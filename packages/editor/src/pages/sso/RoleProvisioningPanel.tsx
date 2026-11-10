@@ -71,7 +71,12 @@ function RuleRow({
       <div className="flex shrink-0 items-center gap-0.5">
         {canUpdate && (
           <>
-            <IconButton label="Move up" size="sm" disabled={busy || index === 0} onClick={() => onMove(index - 1)}>
+            <IconButton
+              label="Move up"
+              size="sm"
+              disabled={busy || index === 0}
+              onClick={() => onMove(index - 1)}
+            >
               <ArrowUp size={13} />
             </IconButton>
             <IconButton
@@ -117,9 +122,10 @@ export function RoleProvisioningPanel() {
 
   const [draft, setDraft] = useState<Config | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [editing, setEditing] = useState<{ type: 'instance' | 'project'; rule: RoleMappingRule | null } | null>(
-    null,
-  );
+  const [editing, setEditing] = useState<{
+    type: 'instance' | 'project';
+    rule: RoleMappingRule | null;
+  } | null>(null);
   const [ruleError, setRuleError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -154,7 +160,8 @@ export function RoleProvisioningPanel() {
     onError: (e) => setRuleError(errorMessage(e)),
   });
   const move = useMutation({
-    mutationFn: ({ id, position }: { id: string; position: number }) => provisioningApi.moveRule(id, position),
+    mutationFn: ({ id, position }: { id: string; position: number }) =>
+      provisioningApi.moveRule(id, position),
     onSuccess: refresh,
     onError: (e) => setError(errorMessage(e)),
   });
@@ -186,7 +193,8 @@ export function RoleProvisioningPanel() {
   const instanceRoles: CustomRole[] = roles.data.global.filter((r) => r.slug !== 'owner');
   const projectRoles: CustomRole[] = roles.data.project.filter((r) => r.slug !== 'project:personalOwner');
   const teamProjects = projects.data.filter((p) => p.type === 'team');
-  const nameOfRole = (list: CustomRole[], slug: string) => list.find((r) => r.slug === slug)?.displayName ?? slug;
+  const nameOfRole = (list: CustomRole[], slug: string) =>
+    list.find((r) => r.slug === slug)?.displayName ?? slug;
   const nameOfProject = (id: string) => teamProjects.find((p) => p.id === id)?.name ?? 'a project';
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
@@ -239,7 +247,8 @@ export function RoleProvisioningPanel() {
   const deleteRule = async (rule: RoleMappingRule) => {
     const ok = await confirmDialog({
       title: 'Delete this rule?',
-      description: 'People who matched it get the next matching rule, or the default condition, on their next sign-in.',
+      description:
+        'People who matched it get the next matching rule, or the default condition, on their next sign-in.',
       confirmLabel: 'Delete',
       tone: 'danger',
     });
@@ -275,7 +284,8 @@ export function RoleProvisioningPanel() {
       >
         {list.length === 0 ? (
           <p className="px-5 py-4 text-sm text-ink-2">
-            No rules yet. {type === 'instance' ? 'Everyone gets the default condition.' : 'No project roles are set.'}
+            No rules yet.{' '}
+            {type === 'instance' ? 'Everyone gets the default condition.' : 'No project roles are set.'}
           </p>
         ) : (
           <ul aria-label={type === 'instance' ? 'Workspace rules' : 'Project rules'}>
@@ -338,7 +348,9 @@ export function RoleProvisioningPanel() {
                   <Select
                     id={id}
                     value={mapping}
-                    onChange={(event) => patch({ scopesUseExpressionMapping: event.target.value === 'rules' })}
+                    onChange={(event) =>
+                      patch({ scopesUseExpressionMapping: event.target.value === 'rules' })
+                    }
                   >
                     <option value="claims">Claims</option>
                     <option value="rules">Rules</option>

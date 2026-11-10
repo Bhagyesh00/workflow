@@ -5,7 +5,15 @@
  */
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createTestServer, projectIn, realMember, resetDatabase, signup as baseSignup, type TestClient, type TestServer } from './helpers';
+import {
+  signup as baseSignup,
+  createTestServer,
+  projectIn,
+  realMember,
+  resetDatabase,
+  type TestClient,
+  type TestServer,
+} from './helpers';
 
 const MISSING = 'User is missing a scope required to perform this action';
 
@@ -23,7 +31,10 @@ beforeEach(async () => {
 
 let ip = 1;
 const signup = () =>
-  baseSignup(server.app, { remoteAddress: `127.8.${Math.floor(ip / 250)}.${(ip++ % 250) + 1}`, projects: 'real' });
+  baseSignup(server.app, {
+    remoteAddress: `127.8.${Math.floor(ip / 250)}.${(ip++ % 250) + 1}`,
+    projects: 'real',
+  });
 
 const api = (key: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, payload?: unknown) =>
   server.app.inject({
@@ -56,7 +67,12 @@ describe('create, list, move, update, delete', () => {
   it('runs the whole life of a rule with the n8n shape and our slugs', async () => {
     const { owner, key } = await setup();
     const project = await projectIn(server, owner.tenant.id, 'Team A');
-    const first = await api(key, 'POST', '/role-mapping-rules', body({ expression: "{{ $claims.a === 'x' }}" }));
+    const first = await api(
+      key,
+      'POST',
+      '/role-mapping-rules',
+      body({ expression: "{{ $claims.a === 'x' }}" }),
+    );
     expect(first.statusCode).toBe(201);
     const a = first.json().data;
     expect(a).toMatchObject({ type: 'instance', role: 'admin', order: 0, projectIds: [] });
@@ -107,12 +123,16 @@ describe('create, list, move, update, delete', () => {
 
   it('refuses a bad expression, a role a rule may not give, a missing project and a bad body', async () => {
     const { key } = await setup();
-    expect((await api(key, 'POST', '/role-mapping-rules', body({ expression: '{{ ( }}' }))).statusCode).toBe(400);
-    expect((await api(key, 'POST', '/role-mapping-rules', body({ expression: 'x'.repeat(2001) }))).statusCode).toBe(
+    expect((await api(key, 'POST', '/role-mapping-rules', body({ expression: '{{ ( }}' }))).statusCode).toBe(
       400,
     );
+    expect(
+      (await api(key, 'POST', '/role-mapping-rules', body({ expression: 'x'.repeat(2001) }))).statusCode,
+    ).toBe(400);
     expect((await api(key, 'POST', '/role-mapping-rules', body({ role: 'owner' }))).statusCode).toBe(400);
-    expect((await api(key, 'POST', '/role-mapping-rules', body({ role: 'global:nope' }))).statusCode).toBe(400);
+    expect((await api(key, 'POST', '/role-mapping-rules', body({ role: 'global:nope' }))).statusCode).toBe(
+      400,
+    );
     expect(
       (
         await api(
@@ -124,17 +144,20 @@ describe('create, list, move, update, delete', () => {
       ).statusCode,
     ).toBe(404);
     expect((await api(key, 'POST', '/role-mapping-rules', { type: 'other' })).statusCode).toBe(400);
-    expect((await api(key, 'POST', `/role-mapping-rules/${randomUUID()}/move`, { order: -1 })).statusCode).toBe(400);
-    expect((await api(key, 'PATCH', `/role-mapping-rules/${randomUUID()}`, { role: 'member' })).statusCode).toBe(404);
+    expect(
+      (await api(key, 'POST', `/role-mapping-rules/${randomUUID()}/move`, { order: -1 })).statusCode,
+    ).toBe(400);
+    expect(
+      (await api(key, 'PATCH', `/role-mapping-rules/${randomUUID()}`, { role: 'member' })).statusCode,
+    ).toBe(404);
   });
 });
 
 describe('scopes and tenants', () => {
   it('each route needs its own key scope', async () => {
     const { owner } = await setup();
-    const made = (
-      await api(await keyOf(owner.client), 'POST', '/role-mapping-rules', body())
-    ).json().data as { id: string };
+    const made = (await api(await keyOf(owner.client), 'POST', '/role-mapping-rules', body())).json()
+      .data as { id: string };
     const only = async (scope: string) => keyOf(owner.client, [scope]);
     const listKey = await only('roleMappingRule:list');
     const createKey = await only('roleMappingRule:create');
@@ -145,10 +168,18 @@ describe('scopes and tenants', () => {
     expect((await api(createKey, 'GET', '/role-mapping-rules')).statusCode).toBe(403);
     expect((await api(listKey, 'POST', '/role-mapping-rules', body())).statusCode).toBe(403);
     expect((await api(createKey, 'POST', '/role-mapping-rules', body())).statusCode).toBe(201);
-    expect((await api(listKey, 'PATCH', `/role-mapping-rules/${made.id}`, { role: 'member' })).statusCode).toBe(403);
-    expect((await api(updateKey, 'PATCH', `/role-mapping-rules/${made.id}`, { role: 'member' })).statusCode).toBe(200);
-    expect((await api(deleteKey, 'POST', `/role-mapping-rules/${made.id}/move`, { order: 0 })).statusCode).toBe(403);
-    expect((await api(updateKey, 'POST', `/role-mapping-rules/${made.id}/move`, { order: 0 })).statusCode).toBe(200);
+    expect(
+      (await api(listKey, 'PATCH', `/role-mapping-rules/${made.id}`, { role: 'member' })).statusCode,
+    ).toBe(403);
+    expect(
+      (await api(updateKey, 'PATCH', `/role-mapping-rules/${made.id}`, { role: 'member' })).statusCode,
+    ).toBe(200);
+    expect(
+      (await api(deleteKey, 'POST', `/role-mapping-rules/${made.id}/move`, { order: 0 })).statusCode,
+    ).toBe(403);
+    expect(
+      (await api(updateKey, 'POST', `/role-mapping-rules/${made.id}/move`, { order: 0 })).statusCode,
+    ).toBe(200);
     expect((await api(updateKey, 'DELETE', `/role-mapping-rules/${made.id}`)).statusCode).toBe(403);
     expect((await api(deleteKey, 'DELETE', `/role-mapping-rules/${made.id}`)).statusCode).toBe(200);
   });
@@ -173,8 +204,12 @@ describe('scopes and tenants', () => {
     const b = await setup();
     const made = (await api(a.key, 'POST', '/role-mapping-rules', body())).json().data as { id: string };
     expect((await api(b.key, 'GET', '/role-mapping-rules')).json().data).toEqual([]);
-    expect((await api(b.key, 'PATCH', `/role-mapping-rules/${made.id}`, { role: 'member' })).statusCode).toBe(404);
-    expect((await api(b.key, 'POST', `/role-mapping-rules/${made.id}/move`, { order: 0 })).statusCode).toBe(404);
+    expect((await api(b.key, 'PATCH', `/role-mapping-rules/${made.id}`, { role: 'member' })).statusCode).toBe(
+      404,
+    );
+    expect((await api(b.key, 'POST', `/role-mapping-rules/${made.id}/move`, { order: 0 })).statusCode).toBe(
+      404,
+    );
     expect((await api(b.key, 'DELETE', `/role-mapping-rules/${made.id}`)).statusCode).toBe(404);
     expect((await api(a.key, 'GET', '/role-mapping-rules')).json().data.length).toBe(1);
   });

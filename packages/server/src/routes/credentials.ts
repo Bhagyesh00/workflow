@@ -96,7 +96,10 @@ async function privateFields(
   const resolvable = await ctx.repos.credentialEntries.resolvableIds(auth.tenant.id, ids);
   const status = await ctx.privateCredentials.connectedStatus(auth.tenant.id, auth.user.id, [...resolvable]);
   return new Map(
-    ids.map((id) => [id, resolvable.has(id) ? { isResolvable: true, ...status.get(id) } : { isResolvable: false }]),
+    ids.map((id) => [
+      id,
+      resolvable.has(id) ? { isResolvable: true, ...status.get(id) } : { isResolvable: false },
+    ]),
   );
 }
 

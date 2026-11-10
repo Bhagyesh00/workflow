@@ -129,7 +129,9 @@ describe('token and tenant binding', () => {
     expect((await scim('GET', `/Users/${inA.id}`, b.token)).statusCode).toBe(404);
     expect((await scim('PATCH', `/Users/${inA.id}`, b.token, { Operations: [] })).statusCode).toBe(404);
     expect((await scim('DELETE', `/Users/${inA.id}`, b.token)).statusCode).toBe(404);
-    const byName = (await scim('GET', `/Users?filter=${encodeURIComponent(`userName eq "${inA.userName}"`)}`, b.token)).json();
+    const byName = (
+      await scim('GET', `/Users?filter=${encodeURIComponent(`userName eq "${inA.userName}"`)}`, b.token)
+    ).json();
     expect(byName.totalResults).toBe(0);
     expect(await repos().memberships.get(a.tenant.id, inA.id)).toBeDefined();
   });
@@ -205,7 +207,9 @@ describe('create', () => {
     const body = await created(ws, entraUser(userName, { roles: [{ value: 'owner', primary: true }] }));
     expect(body.userName).toBe(userName);
     expect(await repos().memberships.get(ws.tenant.id, body.id)).toEqual({ role: 'member' });
-    expect((await repos().sso.getIdentity(ws.tenant.id, 'oidc', body.externalId as string))?.userId).toBe(body.id);
+    expect((await repos().sso.getIdentity(ws.tenant.id, 'oidc', body.externalId as string))?.userId).toBe(
+      body.id,
+    );
   });
 
   it('active false creates a disabled member', async () => {
@@ -224,13 +228,20 @@ describe('create', () => {
     expect(duplicate.json()).toMatchObject({ status: '409', scimType: 'uniqueness' });
     expect(duplicate.json().detail).toBe('User with this userName already exists');
     // the same address in another case is the same account
-    expect((await scim('POST', '/Users', ws.token, oktaUser(first.userName.toUpperCase()))).statusCode).toBe(409);
+    expect((await scim('POST', '/Users', ws.token, oktaUser(first.userName.toUpperCase()))).statusCode).toBe(
+      409,
+    );
     // an account of another workspace is never attached
     const elsewhere = await scim('POST', '/Users', ws.token, oktaUser(other.user.email));
     expect(elsewhere.statusCode).toBe(409);
     expect(await repos().memberships.get(ws.tenant.id, other.user.id)).toBeUndefined();
     // the same SCIM id twice
-    const sameId = await scim('POST', '/Users', ws.token, oktaUser(email(), { externalId: first.externalId }));
+    const sameId = await scim(
+      'POST',
+      '/Users',
+      ws.token,
+      oktaUser(email(), { externalId: first.externalId }),
+    );
     expect(sameId.statusCode).toBe(409);
     expect((await scim('GET', '/Users', ws.token)).json().totalResults).toBe(2);
   });
@@ -274,11 +285,23 @@ describe('list, get and filters', () => {
     expect(all).toMatchObject({ totalResults: 4, startIndex: 1, itemsPerPage: 4 });
     expect(all.schemas).toEqual(['urn:ietf:params:scim:api:messages:2.0:ListResponse']);
 
-    const byName = await scim('GET', `/Users?filter=${encodeURIComponent(`userName eq "${users[1].userName.toUpperCase()}"`)}`, ws.token);
+    const byName = await scim(
+      'GET',
+      `/Users?filter=${encodeURIComponent(`userName eq "${users[1].userName.toUpperCase()}"`)}`,
+      ws.token,
+    );
     expect(byName.json().Resources.map((r: { id: string }) => r.id)).toEqual([users[1].id]);
-    const byId = await scim('GET', `/Users?filter=${encodeURIComponent(`externalId eq "${users[2].externalId}"`)}`, ws.token);
+    const byId = await scim(
+      'GET',
+      `/Users?filter=${encodeURIComponent(`externalId eq "${users[2].externalId}"`)}`,
+      ws.token,
+    );
     expect(byId.json().Resources.map((r: { id: string }) => r.id)).toEqual([users[2].id]);
-    expect((await scim('GET', `/Users?filter=${encodeURIComponent('userName eq "nobody@example.com"')}`, ws.token)).json().totalResults).toBe(0);
+    expect(
+      (
+        await scim('GET', `/Users?filter=${encodeURIComponent('userName eq "nobody@example.com"')}`, ws.token)
+      ).json().totalResults,
+    ).toBe(0);
 
     // the owner is first, then the users in the order they were made
     const page = (await scim('GET', '/Users?startIndex=3&count=1', ws.token)).json();
@@ -354,7 +377,10 @@ describe('PATCH and PUT of a user the workspace manages', () => {
     const next = email('entra-new');
     const both = await scim('PATCH', `/Users/${user.id}`, ws.token, {
       Operations: [
-        { op: 'Replace', value: { userName: next, 'name.familyName': 'Murray', roles: [{ value: 'admin' }] } },
+        {
+          op: 'Replace',
+          value: { userName: next, 'name.familyName': 'Murray', roles: [{ value: 'admin' }] },
+        },
         { op: 'Add', path: 'externalId', value: 'entra-2' },
       ],
     });
@@ -365,7 +391,12 @@ describe('PATCH and PUT of a user the workspace manages', () => {
     const ws = await workspace();
     const user = await created(ws, oktaUser(email()));
     const other = await created(ws, oktaUser(email()));
-    const clash = await scim('PUT', `/Users/${user.id}`, ws.token, oktaUser(other.userName, { externalId: user.externalId }));
+    const clash = await scim(
+      'PUT',
+      `/Users/${user.id}`,
+      ws.token,
+      oktaUser(other.userName, { externalId: user.externalId }),
+    );
     expect(clash.statusCode).toBe(409);
     const next = email('put');
     const res = await scim('PUT', `/Users/${user.id}`, ws.token, {
@@ -378,9 +409,17 @@ describe('PATCH and PUT of a user the workspace manages', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ userName: next, displayName: 'Ada King', active: false });
     // a PUT that carries the same values writes nothing more
-    const before = (await repos().audit.list(ws.tenant.id, 100)).filter((r) => r.action === 'scim.user_updated').length;
-    await scim('PUT', `/Users/${user.id}`, ws.token, { userName: next, active: false, externalId: user.externalId });
-    const after = (await repos().audit.list(ws.tenant.id, 100)).filter((r) => r.action === 'scim.user_updated').length;
+    const before = (await repos().audit.list(ws.tenant.id, 100)).filter(
+      (r) => r.action === 'scim.user_updated',
+    ).length;
+    await scim('PUT', `/Users/${user.id}`, ws.token, {
+      userName: next,
+      active: false,
+      externalId: user.externalId,
+    });
+    const after = (await repos().audit.list(ws.tenant.id, 100)).filter(
+      (r) => r.action === 'scim.user_updated',
+    ).length;
     expect(after).toBe(before);
   });
 
@@ -388,7 +427,9 @@ describe('PATCH and PUT of a user the workspace manages', () => {
     const ws = await workspace();
     const user = await created(ws, entraUser(email()));
     expect((await scim('PATCH', `/Users/${user.id}`, ws.token, { schemas: [] })).statusCode).toBe(400);
-    expect((await scim('PATCH', `/Users/${user.id}`, ws.token, { Operations: [{ op: 'move' }] })).statusCode).toBe(400);
+    expect(
+      (await scim('PATCH', `/Users/${user.id}`, ws.token, { Operations: [{ op: 'move' }] })).statusCode,
+    ).toBe(400);
   });
 });
 
@@ -412,11 +453,21 @@ describe('a user the workspace does not manage', () => {
       ],
     });
     expect(okta.statusCode).toBe(200);
-    expect(okta.json()).toMatchObject({ userName: original.email, active: false, externalId: 'okta-existing' });
-    const entra = await scim('PATCH', `/Users/${member.user.id}`, ws.token, {
-      Operations: [{ op: 'Replace', value: { userName: email('y'), displayName: 'Changed', active: 'True' } }],
+    expect(okta.json()).toMatchObject({
+      userName: original.email,
+      active: false,
+      externalId: 'okta-existing',
     });
-    expect(entra.json()).toMatchObject({ userName: original.email, displayName: original.name, active: true });
+    const entra = await scim('PATCH', `/Users/${member.user.id}`, ws.token, {
+      Operations: [
+        { op: 'Replace', value: { userName: email('y'), displayName: 'Changed', active: 'True' } },
+      ],
+    });
+    expect(entra.json()).toMatchObject({
+      userName: original.email,
+      displayName: original.name,
+      active: true,
+    });
     const put = await scim('PUT', `/Users/${member.user.id}`, ws.token, {
       userName: email('z'),
       emails: [{ value: email('z2'), primary: true }],
@@ -502,13 +553,23 @@ describe('the owner guard', () => {
     expect(deactivate.statusCode).toBe(403);
     expect(deactivate.json().status).toBe('403');
     expect(
-      (await scim('PATCH', `/Users/${ownerId}`, ws.token, { Operations: [{ op: 'replace', path: 'userName', value: email() }] })).statusCode,
+      (
+        await scim('PATCH', `/Users/${ownerId}`, ws.token, {
+          Operations: [{ op: 'replace', path: 'userName', value: email() }],
+        })
+      ).statusCode,
     ).toBe(403);
-    expect((await scim('PUT', `/Users/${ownerId}`, ws.token, { userName: email(), active: true })).statusCode).toBe(403);
+    expect(
+      (await scim('PUT', `/Users/${ownerId}`, ws.token, { userName: email(), active: true })).statusCode,
+    ).toBe(403);
     expect((await scim('DELETE', `/Users/${ownerId}`, ws.token)).statusCode).toBe(403);
     expect(await repos().memberships.get(ws.tenant.id, ownerId)).toEqual({ role: 'owner' });
     expect(
-      (await scim('PATCH', `/Users/${ownerId}`, ws.token, { Operations: [{ op: 'replace', path: 'active', value: true }] })).statusCode,
+      (
+        await scim('PATCH', `/Users/${ownerId}`, ws.token, {
+          Operations: [{ op: 'replace', path: 'active', value: true }],
+        })
+      ).statusCode,
     ).toBe(200);
   });
 
@@ -541,7 +602,9 @@ describe('the owner guard', () => {
     const ws = await workspace();
     const admin = await created(ws, oktaUser(email()));
     await repos().memberships.updateRole(ws.tenant.id, admin.id, 'admin');
-    const res = await scim('PATCH', `/Users/${admin.id}`, ws.token, { Operations: [{ op: 'replace', path: 'active', value: false }] });
+    const res = await scim('PATCH', `/Users/${admin.id}`, ws.token, {
+      Operations: [{ op: 'replace', path: 'active', value: false }],
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json().active).toBe(false);
     expect(await repos().memberships.get(ws.tenant.id, admin.id)).toBeUndefined();
@@ -557,11 +620,19 @@ describe('rate limit', () => {
       await limited.ctx.repos.scim.patchSettings(owner.tenant.id, { enabled: true });
       const { token } = await mintScimToken(limited.ctx.scim.deps, owner.tenant.id, owner.user.id);
       const call = (ip: string) =>
-        limited.app.inject({ method: 'GET', url: '/scim/v2/Users', remoteAddress: ip, headers: { authorization: `Bearer ${token}` } });
+        limited.app.inject({
+          method: 'GET',
+          url: '/scim/v2/Users',
+          remoteAddress: ip,
+          headers: { authorization: `Bearer ${token}` },
+        });
       for (let i = 0; i < 3; i++) expect((await call('10.9.9.9')).statusCode).toBe(200);
       const over = await call('10.9.9.9');
       expect(over.statusCode).toBe(429);
-      expect(over.json()).toMatchObject({ status: '429', schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'] });
+      expect(over.json()).toMatchObject({
+        status: '429',
+        schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'],
+      });
       // another address has its own count
       expect((await call('10.9.9.10')).statusCode).toBe(200);
     } finally {

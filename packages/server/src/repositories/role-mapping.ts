@@ -6,11 +6,7 @@
  */
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
-import {
-  type RoleMappingRuleRow,
-  roleMappingRuleProjects,
-  roleMappingRules,
-} from '../db/schema';
+import { type RoleMappingRuleRow, roleMappingRuleProjects, roleMappingRules } from '../db/schema';
 import { isUuid } from './util';
 
 export type RoleMappingRuleType = RoleMappingRuleRow['type'];
@@ -56,9 +52,7 @@ export class RoleMappingRepository {
     const rows = await this.db
       .select()
       .from(roleMappingRules)
-      .where(
-        and(eq(roleMappingRules.tenantId, tenantId), type ? eq(roleMappingRules.type, type) : undefined),
-      )
+      .where(and(eq(roleMappingRules.tenantId, tenantId), type ? eq(roleMappingRules.type, type) : undefined))
       // 'instance' sorts before 'project'
       .orderBy(asc(roleMappingRules.type), asc(roleMappingRules.order));
     return this.withProjects(tenantId, rows);
@@ -75,7 +69,9 @@ export class RoleMappingRepository {
 
   /** one lock per (workspace, type) for the rest of the transaction */
   private async lock(tx: DbOrTx, tenantId: string, type: RoleMappingRuleType): Promise<void> {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`role-mapping:${tenantId}:${type}`}, 0))`);
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`role-mapping:${tenantId}:${type}`}, 0))`,
+    );
   }
 
   /** ids of one type in their order */
@@ -89,7 +85,12 @@ export class RoleMappingRepository {
   }
 
   /** writes the sequence `ids` as orders 0..n-1: first all to negative values, then to the final ones */
-  private async renumber(tx: DbOrTx, tenantId: string, type: RoleMappingRuleType, ids: string[]): Promise<void> {
+  private async renumber(
+    tx: DbOrTx,
+    tenantId: string,
+    type: RoleMappingRuleType,
+    ids: string[],
+  ): Promise<void> {
     await tx
       .update(roleMappingRules)
       .set({ order: sql`-(${roleMappingRules.order}) - 1` })

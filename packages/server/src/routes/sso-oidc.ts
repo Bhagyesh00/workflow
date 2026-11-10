@@ -36,12 +36,7 @@ function flowCookiePath(slug: string): string {
   return `/sso/oidc/${encodeURIComponent(slug)}`;
 }
 
-function setFlowCookies(
-  reply: FastifyReply,
-  ctx: ServerContext,
-  slug: string,
-  cookies: OidcCookie[],
-): void {
+function setFlowCookies(reply: FastifyReply, ctx: ServerContext, slug: string, cookies: OidcCookie[]): void {
   for (const cookie of cookies) {
     reply.setCookie(cookie.name, cookie.value, {
       httpOnly: true,
@@ -101,12 +96,10 @@ export function registerOidcPublicRoutes(app: FastifyInstance, ctx: ServerContex
     const query = parse(callbackQuery, request.query);
     reply.header('cache-control', 'no-store');
     try {
-      const outcome = await ctx.oidc.callback(
-        slug,
-        query,
-        request.cookies,
-        { ip: request.ip, userAgent: request.headers['user-agent'] },
-      );
+      const outcome = await ctx.oidc.callback(slug, query, request.cookies, {
+        ip: request.ip,
+        userAgent: request.headers['user-agent'],
+      });
       clearFlowCookies(reply, ctx, slug);
       if (outcome.kind === 'test') {
         // the test flow never starts a session; the page holds fixed words and an escaped email

@@ -22,7 +22,14 @@ import type { ServiceDeps } from '../context';
 /** the only key management algorithm (as n8n) */
 const KEY_ALGORITHM = 'RSA-OAEP-256';
 /** content encryption algorithms accepted for a token */
-const CONTENT_ALGORITHMS = ['A128GCM', 'A192GCM', 'A256GCM', 'A128CBC-HS256', 'A192CBC-HS384', 'A256CBC-HS512'];
+const CONTENT_ALGORITHMS = [
+  'A128GCM',
+  'A192GCM',
+  'A256GCM',
+  'A128CBC-HS256',
+  'A192CBC-HS384',
+  'A256CBC-HS512',
+];
 /** the token response fields that may carry a JWE */
 const TOKEN_FIELDS = ['access_token', 'refresh_token', 'id_token'] as const;
 const MAX_JWE_LENGTH = 64 * 1024;

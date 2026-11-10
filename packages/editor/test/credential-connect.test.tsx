@@ -23,7 +23,9 @@ let issueCode: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   go = vi.spyOn(formReturn, 'go').mockImplementation(() => {});
-  connect = vi.spyOn(privateCredentialsApi, 'connect').mockResolvedValue({ url: 'https://provider.example/auth' });
+  connect = vi
+    .spyOn(privateCredentialsApi, 'connect')
+    .mockResolvedValue({ url: 'https://provider.example/auth' });
   disconnect = vi.spyOn(privateCredentialsApi, 'disconnect').mockResolvedValue({ ok: true });
   vi.spyOn(credentialsApi, 'get').mockResolvedValue({ name: 'Calendar' } as never);
   open = vi.spyOn(window, 'open').mockReturnValue(window);
@@ -39,7 +41,9 @@ const pageOf = (returnTo: string, action = 'connect', id = ID) =>
 /** the OAuth callback page's message to its opener */
 const providerSays = (data: unknown) =>
   act(() => {
-    window.dispatchEvent(new MessageEvent('message', { data, origin: window.location.origin, source: window }));
+    window.dispatchEvent(
+      new MessageEvent('message', { data, origin: window.location.origin, source: window }),
+    );
   });
 
 describe('the connect page', () => {
@@ -69,7 +73,7 @@ describe('the connect page', () => {
     expect(go).toHaveBeenCalledWith(FORM);
   });
 
-  it('shows the provider\'s refusal and lets the user try again', async () => {
+  it("shows the provider's refusal and lets the user try again", async () => {
     signedIn();
     renderApp(pageOf(FORM));
     await userEvent.click(await screen.findByRole('button', { name: 'Connect' }));
@@ -86,7 +90,11 @@ describe('the connect page', () => {
     await screen.findByText('Finish signing in in the window that opened.');
     act(() => {
       window.dispatchEvent(
-        new MessageEvent('message', { data: { status: 'success' }, origin: 'https://evil.example', source: window }),
+        new MessageEvent('message', {
+          data: { status: 'success' },
+          origin: 'https://evil.example',
+          source: window,
+        }),
       );
     });
     expect(screen.queryByRole('heading', { name: 'Account connected' })).toBeNull();
@@ -109,7 +117,7 @@ describe('the connect page', () => {
     expect(open).not.toHaveBeenCalled();
   });
 
-  it('shows the server\'s reason when it will not start the connection', async () => {
+  it("shows the server's reason when it will not start the connection", async () => {
     signedIn();
     connect.mockRejectedValue(new ApiError(400, 'bad_request', 'This credential is not private'));
     renderApp(pageOf(FORM));
@@ -193,7 +201,11 @@ describe('the connect page', () => {
     await screen.findByText('Finish signing in in the window that opened.');
     // the only call is the credential id; the provider window gets the server's address as given
     expect(connect).toHaveBeenCalledWith(ID);
-    expect(backend().requests.map((r) => r.path).join(' ')).not.toMatch(/token|session/i);
+    expect(
+      backend()
+        .requests.map((r) => r.path)
+        .join(' '),
+    ).not.toMatch(/token|session/i);
   });
 });
 

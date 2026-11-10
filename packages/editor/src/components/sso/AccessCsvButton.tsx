@@ -36,7 +36,13 @@ export async function loadAccessRows(): Promise<string[][]> {
   const roleOf = new Map(members.map((m) => [m.email, String(m.role)]));
   for (const project of details) {
     for (const relation of project.relations) {
-      rows.push([relation.email, relation.name, roleOf.get(relation.email) ?? '', project.name, relation.role]);
+      rows.push([
+        relation.email,
+        relation.name,
+        roleOf.get(relation.email) ?? '',
+        project.name,
+        relation.role,
+      ]);
     }
   }
   return rows;
@@ -63,7 +69,13 @@ export function AccessCsvButton({ onError }: { onError?: (message: string) => vo
     }
   };
   return (
-    <Button variant="secondary" size="sm" icon={<Download size={13} />} loading={busy} onClick={() => void download()}>
+    <Button
+      variant="secondary"
+      size="sm"
+      icon={<Download size={13} />}
+      loading={busy}
+      onClick={() => void download()}
+    >
       Download current access (CSV)
     </Button>
   );

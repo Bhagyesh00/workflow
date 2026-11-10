@@ -5,7 +5,7 @@
  * provisioning) drive it the same way: `authorize(authUrl, who)` plays the browser's visit to the provider
  * and returns the query the provider sends back to the callback.
  */
-import { createPrivateKey, createSign, generateKeyPairSync, randomBytes, type KeyObject } from 'node:crypto';
+import { createPrivateKey, createSign, generateKeyPairSync, type KeyObject, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -115,7 +115,10 @@ export async function startFakeOidcIdp(options: FakeOidcOptions = {}): Promise<F
   let metadataPatch: Record<string, unknown> = { ...(options.metadata ?? {}) };
 
   /** codes handed out by `authorize`, each used once */
-  const codes = new Map<string, FakeOidcVisit & { nonce: string; redirectUri: string; accessToken: string }>();
+  const codes = new Map<
+    string,
+    FakeOidcVisit & { nonce: string; redirectUri: string; accessToken: string }
+  >();
   const accessTokens = new Map<string, FakeOidcVisit>();
   const requests: FakeOidcRequest[] = [];
   const tokenRequests: Array<Record<string, string>> = [];
@@ -165,7 +168,8 @@ export async function startFakeOidcIdp(options: FakeOidcOptions = {}): Promise<F
         const basic = request.headers.authorization?.startsWith('Basic ')
           ? Buffer.from(request.headers.authorization.slice(6), 'base64').toString()
           : null;
-        const secretOk = form.client_secret === idp.clientSecret || basic === `${clientId}:${idp.clientSecret}`;
+        const secretOk =
+          form.client_secret === idp.clientSecret || basic === `${clientId}:${idp.clientSecret}`;
         const issued = form.code ? codes.get(form.code) : undefined;
         if (!secretOk || form.grant_type !== 'authorization_code' || !issued) {
           json(response, 400, { error: 'invalid_grant', error_description: 'IDP-SECRET-TEXT' });
@@ -250,7 +254,12 @@ export async function startFakeOidcIdp(options: FakeOidcOptions = {}): Promise<F
     authorize(authorizationUrl: string, visit: FakeOidcVisit): Record<string, string> {
       const params = new URL(authorizationUrl).searchParams;
       const state = visit.state ?? params.get('state') ?? '';
-      if (visit.error) return { error: visit.error.error, ...(visit.error.description ? { error_description: visit.error.description } : {}), state };
+      if (visit.error)
+        return {
+          error: visit.error.error,
+          ...(visit.error.description ? { error_description: visit.error.description } : {}),
+          state,
+        };
       const code = `code-${randomBytes(8).toString('hex')}`;
       codes.set(code, {
         ...visit,

@@ -5,9 +5,9 @@
  * One state per workspace in `backend.ext.scim`.
  */
 import type { ScimConfig, ScimTransferTarget } from '../api/types';
-import { demoSsoOptions } from './mock-sso';
 import type { MockBackend } from './mock-backend';
 import { copy, HttpError } from './mock-http';
+import { demoSsoOptions } from './mock-sso';
 
 interface ScimState {
   enabled: boolean;
@@ -34,7 +34,13 @@ function stateOf(backend: MockBackend, tenantId: string): ScimState {
   const map = states(backend);
   let state = map.get(tenantId);
   if (!state) {
-    state = { enabled: false, tokenHint: null, onDelete: 'disable', dataAction: 'transfer', transferProjectId: null };
+    state = {
+      enabled: false,
+      tokenHint: null,
+      onDelete: 'disable',
+      dataAction: 'transfer',
+      transferProjectId: null,
+    };
     map.set(tenantId, state);
   }
   return state;
@@ -61,7 +67,9 @@ function randomChars(length: number): string {
 /** team projects and the personal projects of active members, as the server lists them */
 function targetsOf(backend: MockBackend, tenantId: string): ScimTransferTarget[] {
   const active = new Set(
-    backend.memberships.filter((m) => m.tenantId === tenantId && m.status !== 'disabled').map((m) => m.userId),
+    backend.memberships
+      .filter((m) => m.tenantId === tenantId && m.status !== 'disabled')
+      .map((m) => m.userId),
   );
   return backend.projects
     .filter((p) => p.tenantId === tenantId)
@@ -96,14 +104,23 @@ export function registerScimRoutes(backend: MockBackend): void {
     const { tenant } = backend.requireScope('scim:manage');
     const onDelete = body.onDelete;
     const dataAction = body.dataAction;
-    if ((onDelete !== 'disable' && onDelete !== 'delete') || (dataAction !== 'transfer' && dataAction !== 'delete'))
+    if (
+      (onDelete !== 'disable' && onDelete !== 'delete') ||
+      (dataAction !== 'transfer' && dataAction !== 'delete')
+    )
       throw new HttpError(400, 'validation_error', 'Request validation failed');
     let transferProjectId: string | null = null;
     if (dataAction === 'transfer' && typeof body.transferProjectId === 'string' && body.transferProjectId) {
-      const project = backend.projects.find((p) => p.tenantId === tenant.id && p.id === body.transferProjectId);
+      const project = backend.projects.find(
+        (p) => p.tenantId === tenant.id && p.id === body.transferProjectId,
+      );
       if (!project) throw new HttpError(404, 'not_found', 'Project not found');
       if (!targetsOf(backend, tenant.id).some((t) => t.id === project.id))
-        throw new HttpError(400, 'bad_request', 'Pick a team project or the personal project of an active member.');
+        throw new HttpError(
+          400,
+          'bad_request',
+          'Pick a team project or the personal project of an active member.',
+        );
       transferProjectId = project.id;
     }
     const state = stateOf(backend, tenant.id);
@@ -131,4 +148,3 @@ export function registerScimRoutes(backend: MockBackend): void {
     return copy(targetsOf(backend, tenant.id));
   });
 }
-

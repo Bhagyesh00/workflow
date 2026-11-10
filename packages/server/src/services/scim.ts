@@ -12,9 +12,9 @@ import type { TenantRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import { createRepositories } from '../repositories';
 import type { ScimMember } from '../repositories/scim';
+import { randomToken } from './auth';
 import { disableMember, enableMember } from './member-disable';
 import { transferPersonalWork } from './member-removal';
-import { randomToken } from './auth';
 
 /** a SCIM answer: the status and the `application/scim+json` body */
 export interface ScimReply {
@@ -100,13 +100,15 @@ function invalid(message: string): ScimError {
 
 function emailOf(value: string | undefined): string | undefined {
   const email = value?.trim().toLowerCase();
-  return email && email.includes('@') && !/\s/.test(email) ? email : undefined;
+  return email?.includes('@') && !/\s/.test(email) ? email : undefined;
 }
 
 /** the primary work address of an `emails` value, else the first one with a value */
 function emailFromList(value: unknown): string | undefined {
   if (!Array.isArray(value)) return undefined;
-  const items = value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object');
+  const items = value.filter(
+    (item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object',
+  );
   const primary = items.find((item) => bool(item.primary) === true && text(item.value));
   const work = items.find((item) => String(item.type ?? '').toLowerCase() === 'work' && text(item.value));
   const any = items.find((item) => text(item.value));
@@ -148,7 +150,8 @@ function readPath(changes: Changes, rawPath: string, value: unknown): void {
     changes.displayName = text(value);
   } else if (lowered === 'name') {
     if (value && typeof value === 'object') {
-      for (const [k, v] of Object.entries(value as Record<string, unknown>)) readPath(changes, `name.${k}`, v);
+      for (const [k, v] of Object.entries(value as Record<string, unknown>))
+        readPath(changes, `name.${k}`, v);
     }
   } else if (lowered === 'name.givenname') {
     changes.givenName = text(value) ?? '';
@@ -225,7 +228,11 @@ export class ScimService {
     if (query.filter !== undefined && query.filter.trim() !== '') {
       const match = /^\s*(userName|externalId)\s+eq\s+"((?:[^"\\]|\\.)*)"\s*$/i.exec(query.filter);
       if (!match) {
-        throw new ScimError(400, 'Only the filters userName eq "value" and externalId eq "value" work', 'invalidFilter');
+        throw new ScimError(
+          400,
+          'Only the filters userName eq "value" and externalId eq "value" work',
+          'invalidFilter',
+        );
       }
       const value = match[2].replace(/\\(.)/g, '$1');
       if (match[1].toLowerCase() === 'username') userName = value;
@@ -287,7 +294,11 @@ export class ScimService {
         if (externalId) {
           await txRepos.memberships.setExternalId(tenant.id, user.id, externalId);
           if (method === 'saml' || method === 'oidc') {
-            await txRepos.sso.linkIdentity(tenant.id, { providerType: method, providerId: externalId, userId: user.id });
+            await txRepos.sso.linkIdentity(tenant.id, {
+              providerType: method,
+              providerId: externalId,
+              userId: user.id,
+            });
           }
         }
         await txRepos.audit.add(tenant.id, {
@@ -325,11 +336,16 @@ export class ScimService {
     if (!schemas.length) throw new ScimError(400, 'A PATCH needs schemas', 'invalidSyntax');
     const changes: Changes = {};
     for (const raw of operations) {
-      if (!raw || typeof raw !== 'object') throw new ScimError(400, 'An operation must be an object', 'invalidSyntax');
+      if (!raw || typeof raw !== 'object')
+        throw new ScimError(400, 'An operation must be an object', 'invalidSyntax');
       const operation = raw as { op?: unknown; path?: unknown; value?: unknown };
       const op = String(operation.op ?? '').toLowerCase();
       if (op !== 'add' && op !== 'replace' && op !== 'remove') {
-        throw new ScimError(400, `The operation "${text(String(operation.op ?? '')) ?? ''}" is not supported`, 'invalidSyntax');
+        throw new ScimError(
+          400,
+          `The operation "${text(String(operation.op ?? '')) ?? ''}" is not supported`,
+          'invalidSyntax',
+        );
       }
       const path = typeof operation.path === 'string' ? operation.path : undefined;
       if (op === 'remove') {

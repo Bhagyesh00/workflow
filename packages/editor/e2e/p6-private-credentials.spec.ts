@@ -46,9 +46,14 @@ test.describe('Private credentials (P6-15)', () => {
     await page.goto(`/projects/${projectId}/credentials`);
     await page.getByRole('button', { name: 'Add credential' }).first().click();
     await page.getByLabel('Search credential types').fill('OAuth2 API');
-    await page.getByRole('button', { name: /^OAuth2 API/ }).first().click();
+    await page
+      .getByRole('button', { name: /^OAuth2 API/ })
+      .first()
+      .click();
     await page.getByLabel('Name', { exact: true }).fill(credentialName);
-    await page.getByRole('textbox', { name: /^Authorization URL/ }).fill('https://auth.example.com/authorize');
+    await page
+      .getByRole('textbox', { name: /^Authorization URL/ })
+      .fill('https://auth.example.com/authorize');
     await page.getByRole('textbox', { name: /^Access Token URL/ }).fill('https://auth.example.com/token');
     await page.getByRole('textbox', { name: /^Client ID/ }).fill('shared-client');
     const toggle = page.getByRole('switch', { name: 'Private credential', exact: true });
@@ -69,7 +74,9 @@ test.describe('Private credentials (P6-15)', () => {
     await expect(row.getByText('Not connected', { exact: true })).toBeVisible();
     await row.getByRole('button', { name: `Actions for ${credentialName}` }).click();
     await page.getByRole('menuitem', { name: 'Move to project' }).click();
-    await expect(page.getByText(/This credential is private\. It can't move to a personal project/)).toBeVisible();
+    await expect(
+      page.getByText(/This credential is private\. It can't move to a personal project/),
+    ).toBeVisible();
     const destination = page.getByLabel('Destination project');
     await expect(destination.getByRole('option', { name: /\(personal\)/ })).toHaveCount(0);
     await page.keyboard.press('Escape');

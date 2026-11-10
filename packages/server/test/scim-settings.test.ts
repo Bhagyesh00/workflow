@@ -32,7 +32,8 @@ beforeEach(async () => {
 const repos = () => server.ctx.repos;
 
 let ipCounter = 0;
-const ws = () => signup(server.app, { remoteAddress: `10.132.${Math.floor(ipCounter / 250)}.${(ipCounter++ % 250) + 1}` });
+const ws = () =>
+  signup(server.app, { remoteAddress: `10.132.${Math.floor(ipCounter / 250)}.${(ipCounter++ % 250) + 1}` });
 
 describe('access', () => {
   it('needs a session (401) and scim:manage: a member gets 403, an admin passes', async () => {
@@ -89,8 +90,12 @@ describe('config', () => {
     );
     expect((await owner.client.data(owner.client.get('/rest/scim/config'))).enabled).toBe(false);
     await ssoOn(server, owner.tenant.id, 'oidc');
-    expect((await owner.client.data(owner.client.patch('/rest/scim/config', { enabled: true }))).enabled).toBe(true);
-    expect((await owner.client.data(owner.client.patch('/rest/scim/config', { enabled: false }))).enabled).toBe(false);
+    expect(
+      (await owner.client.data(owner.client.patch('/rest/scim/config', { enabled: true }))).enabled,
+    ).toBe(true);
+    expect(
+      (await owner.client.data(owner.client.patch('/rest/scim/config', { enabled: false }))).enabled,
+    ).toBe(false);
     expect((await owner.client.patch('/rest/scim/config', { enabled: 'yes' })).statusCode).toBe(400);
     // a rest of the settings stays when the SCIM object is written
     const tenant = await repos().tenants.get(owner.tenant.id);
@@ -100,7 +105,9 @@ describe('config', () => {
   it('does not change the rest of the workspace settings', async () => {
     const owner = await ws();
     await ssoOn(server, owner.tenant.id, 'saml');
-    await repos().tenants.updateSettings(owner.tenant.id, { firstProductionFailure: { at: '2026-01-01T00:00:00.000Z' } });
+    await repos().tenants.updateSettings(owner.tenant.id, {
+      firstProductionFailure: { at: '2026-01-01T00:00:00.000Z' },
+    });
     await owner.client.patch('/rest/scim/config', { enabled: true });
     await owner.client.put('/rest/scim/deprovisioning', { onDelete: 'delete', dataAction: 'delete' });
     const tenant = await repos().tenants.get(owner.tenant.id);
@@ -120,7 +127,11 @@ describe('token', () => {
     expect(token).toMatch(/^wfs_scim_[A-Za-z0-9_-]{43}$/);
     expect(baseUrl).toBe(`${server.ctx.config.baseUrl}/scim/v2`);
     const row = await repos().scim.get(owner.tenant.id);
-    expect(row).toMatchObject({ tokenHash: sha256(token), tokenHint: token.slice(-4), createdBy: owner.user.id });
+    expect(row).toMatchObject({
+      tokenHash: sha256(token),
+      tokenHint: token.slice(-4),
+      createdBy: owner.user.id,
+    });
     const config = await owner.client.data(owner.client.get('/rest/scim/config'));
     expect(config).toMatchObject({ hasToken: true, tokenHint: token.slice(-4) });
     // the token never comes back, in the config or the audit log
@@ -138,7 +149,11 @@ describe('token', () => {
     const second = (await owner.client.post('/rest/scim/token')).json().data.token as string;
     expect(second).not.toBe(first);
     const call = (token: string) =>
-      server.app.inject({ url: '/scim/v2/Users', remoteAddress: '10.202.0.1', headers: { authorization: `Bearer ${token}` } });
+      server.app.inject({
+        url: '/scim/v2/Users',
+        remoteAddress: '10.202.0.1',
+        headers: { authorization: `Bearer ${token}` },
+      });
     expect((await call(first)).statusCode).toBe(401);
     expect((await call(second)).statusCode).toBe(200);
   });
@@ -154,11 +169,20 @@ describe('token', () => {
     const tokenB = (await b.client.post('/rest/scim/token')).json().data.token as string;
     expect((await a.client.delete('/rest/scim/token')).json().data).toEqual({ ok: true });
     const call = (token: string) =>
-      server.app.inject({ url: '/scim/v2/Users', remoteAddress: '10.202.0.2', headers: { authorization: `Bearer ${token}` } });
+      server.app.inject({
+        url: '/scim/v2/Users',
+        remoteAddress: '10.202.0.2',
+        headers: { authorization: `Bearer ${token}` },
+      });
     expect((await call(tokenA)).statusCode).toBe(401);
     expect((await call(tokenB)).statusCode).toBe(200);
-    expect(await a.client.data(a.client.get('/rest/scim/config'))).toMatchObject({ hasToken: false, tokenHint: null });
-    expect((await repos().audit.list(a.tenant.id, 50)).some((r) => r.action === 'scim.token_revoked')).toBe(true);
+    expect(await a.client.data(a.client.get('/rest/scim/config'))).toMatchObject({
+      hasToken: false,
+      tokenHint: null,
+    });
+    expect((await repos().audit.list(a.tenant.id, 50)).some((r) => r.action === 'scim.token_revoked')).toBe(
+      true,
+    );
     // revoking again is a no-op
     expect((await a.client.delete('/rest/scim/token')).statusCode).toBe(200);
   });
@@ -207,7 +231,11 @@ describe('deprovisioning and transfer targets', () => {
 
     // delete the work: no target is kept
     const deleted = await owner.client.data(
-      owner.client.put('/rest/scim/deprovisioning', { onDelete: 'delete', dataAction: 'delete', transferProjectId: team.id }),
+      owner.client.put('/rest/scim/deprovisioning', {
+        onDelete: 'delete',
+        dataAction: 'delete',
+        transferProjectId: team.id,
+      }),
     );
     expect(deleted).toMatchObject({ dataAction: 'delete', transferProjectId: null });
 

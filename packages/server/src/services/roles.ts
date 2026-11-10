@@ -394,7 +394,9 @@ export class RoleService {
       const named = blockers
         .map((blocker) => (blocker.id === 'default' ? 'the default condition' : `rule ${blocker.id}`))
         .join(', ');
-      throw ApiError.conflict(`Cannot delete a role that role mapping rules give: ${named}`, { rules: blockers });
+      throw ApiError.conflict(`Cannot delete a role that role mapping rules give: ${named}`, {
+        rules: blockers,
+      });
     }
 
     // as n8n: a holder of the role cannot move its holders, itself among them, to another role

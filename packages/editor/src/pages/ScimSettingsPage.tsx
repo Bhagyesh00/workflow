@@ -51,7 +51,12 @@ export function ScimSettingsPage() {
     enabled: allowed,
   });
   // the sign-in method decides whether SCIM can be turned on; when it can't be read, the server decides
-  const sso = useQuery({ queryKey: queryKeys.ssoMethod, queryFn: ssoApi.method, enabled: allowed, retry: false });
+  const sso = useQuery({
+    queryKey: queryKeys.ssoMethod,
+    queryFn: ssoApi.method,
+    enabled: allowed,
+    retry: false,
+  });
   const [created, setCreated] = useState<string | null>(null);
   const [onDelete, setOnDelete] = useState<ScimConfig['onDelete']>('disable');
   const [dataAction, setDataAction] = useState<ScimConfig['dataAction']>('transfer');
@@ -107,7 +112,9 @@ export function ScimSettingsPage() {
   if (config.isLoading) return <PageLoader />;
   if (config.error || !config.data) {
     return (
-      <Callout tone="err">{config.error ? errorMessage(config.error) : 'Could not load the SCIM settings.'}</Callout>
+      <Callout tone="err">
+        {config.error ? errorMessage(config.error) : 'Could not load the SCIM settings.'}
+      </Callout>
     );
   }
   const data = config.data;
@@ -119,7 +126,8 @@ export function ScimSettingsPage() {
     if (data.hasToken) {
       const ok = await confirmDialog({
         title: 'Create a new token?',
-        description: 'The current token stops working right away. Put the new one into your identity provider.',
+        description:
+          'The current token stops working right away. Put the new one into your identity provider.',
         confirmLabel: 'Create new token',
         tone: 'danger',
       });
@@ -177,7 +185,10 @@ export function ScimSettingsPage() {
         </div>
 
         <div className="flex flex-col gap-3 border-b border-line px-5 py-4">
-          <FormField label="SCIM base URL" hint="Put this in your identity provider as the SCIM connector base URL.">
+          <FormField
+            label="SCIM base URL"
+            hint="Put this in your identity provider as the SCIM connector base URL."
+          >
             {(id) => (
               <div className="flex items-center gap-2">
                 <input
@@ -292,7 +303,11 @@ export function ScimSettingsPage() {
                   hint="With no project picked, or when the project is gone, the owner's personal project takes it."
                 >
                   {(id) => (
-                    <Select id={id} value={transferProjectId} onChange={(e) => setTransferProjectId(e.target.value)}>
+                    <Select
+                      id={id}
+                      value={transferProjectId}
+                      onChange={(e) => setTransferProjectId(e.target.value)}
+                    >
                       <option value={OWNER_HOME}>The owner's personal project</option>
                       {(targets.data ?? []).map((target) => (
                         <option key={target.id} value={target.id}>

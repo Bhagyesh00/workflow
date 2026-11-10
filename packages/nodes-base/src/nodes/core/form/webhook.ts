@@ -13,6 +13,7 @@ import {
   type WebhookResponseData,
 } from '@workflow/workflow';
 import { DateTime } from 'luxon';
+import { loadConnectPanel } from '../../../utils/connect-panel';
 import { checkBasicAuth, ipAllowed, isIgnoredBot, WWW_AUTHENTICATE } from './access';
 import {
   FORM_DEFAULT_BUTTON_LABEL,
@@ -28,7 +29,6 @@ import {
   renderMessagePage,
 } from './render';
 import { safeRedirectUrl, sanitizeHtml } from './sanitize';
-import { loadConnectPanel } from '../../../utils/connect-panel';
 import { checkFormUserAuth, type FormUserAuthParams } from './user-auth';
 
 export const FORM_TRIGGER_TYPE = 'core.formTrigger';

@@ -70,7 +70,8 @@ beforeEach(() => {
       return token === GOOD_TOKEN && resource === URL_PATH ? { user: USER, role: 'editor' } : null;
     },
     canExecute: (userId, workflowId) => canExecute(userId, workflowId),
-    challenge: (resource) => `Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource${resource}"`,
+    challenge: (resource) =>
+      `Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource${resource}"`,
   };
 });
 
@@ -148,9 +149,14 @@ describe('the option', () => {
 
   it('asks for the execute permission by default and offers the two clients', () => {
     expect(property('requireExecuteAccess')).toMatchObject({ default: true });
-    expect(property('requireExecuteAccess')?.displayOptions).toEqual({ show: { authentication: ['n8nOAuth2'] } });
+    expect(property('requireExecuteAccess')?.displayOptions).toEqual({
+      show: { authentication: ['n8nOAuth2'] },
+    });
     expect(property('oauthClient')).toMatchObject({ default: 'bearer' });
-    expect(property('oauthClient')?.options?.map((o) => (o as { value?: unknown }).value)).toEqual(['bearer', 'auto']);
+    expect(property('oauthClient')?.options?.map((o) => (o as { value?: unknown }).value)).toEqual([
+      'bearer',
+      'auto',
+    ]);
     expect(property('includeUserInOutput')).toMatchObject({ default: true });
   });
 });
@@ -176,12 +182,15 @@ describe('client "bearer"', () => {
   });
 
   it('gives only the path to the host, never the Host header, scheme or query', async () => {
-    const result = await call({ url: `${URL_PATH}?x=1`, headers: { ...bearer(GOOD_TOKEN), host: 'evil.example' } });
+    const result = await call({
+      url: `${URL_PATH}?x=1`,
+      headers: { ...bearer(GOOD_TOKEN), host: 'evil.example' },
+    });
     expect(result.webhookResponse).toBeUndefined();
     expect(asked).toEqual([URL_PATH]);
   });
 
-  it('starts the run as the token\'s user, whether or not the user is in the output', async () => {
+  it("starts the run as the token's user, whether or not the user is in the output", async () => {
     const result = await call({ headers: bearer(GOOD_TOKEN) });
     expect(result.triggerUserId).toBe(USER.id);
     expect(result.workflowData?.[0][0].json.user).toEqual(USER);
@@ -232,14 +241,19 @@ describe('client "bearer"', () => {
 describe('client "auto"', () => {
   const auto = { oauthClient: 'auto' };
 
-  it('still takes a Bearer token for the webhook\'s own address', async () => {
+  it("still takes a Bearer token for the webhook's own address", async () => {
     const result = await call({ parameters: auto, headers: bearer(GOOD_TOKEN) });
     expect(result.triggerUserId).toBe(USER.id);
     expect((await call({ parameters: auto, headers: bearer('nope') })).webhookResponse?.statusCode).toBe(401);
   });
 
   it('sends a browser without a token to the sign-in page, back to this address', async () => {
-    const result = await call({ parameters: auto, headers: browser, query: { ref: 'mail' }, url: `${URL_PATH}?ref=mail` });
+    const result = await call({
+      parameters: auto,
+      headers: browser,
+      query: { ref: 'mail' },
+      url: `${URL_PATH}?ref=mail`,
+    });
     expect(result.workflowData).toBeUndefined();
     expect(result.webhookResponse?.statusCode).toBe(302);
     expect(result.webhookResponse?.headers?.location).toBe(
@@ -263,7 +277,9 @@ describe('client "auto"', () => {
     expect(cookie).toContain('SameSite=Lax');
     expect(cookie).not.toContain('good-code');
     // the token is of the webhook kind and bound to this tenant and workflow
-    const minted = [...formTokens.tokens.values()].map((t) => t.payload).find((p) => p.userId === USER.id && p.workflowId);
+    const minted = [...formTokens.tokens.values()]
+      .map((t) => t.payload)
+      .find((p) => p.userId === USER.id && p.workflowId);
     expect(minted).toMatchObject({ kind: WEBHOOK_TOKEN_KIND, tenantId: 't1', workflowId: 'wf-1' });
   });
 
@@ -351,6 +367,6 @@ describe('client "auto"', () => {
       headers: { ...browser, cookie: `ncb-form-auth-wf-wf-1=${token}` },
     });
     expect(result.webhookResponse?.statusCode).toBe(403);
-    expect(String(result.webhookResponse?.body)).toContain("don&#39;t have permission");
+    expect(String(result.webhookResponse?.body)).toContain('don&#39;t have permission');
   });
 });

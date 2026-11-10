@@ -96,9 +96,15 @@ const CONNECT_BAR_STYLES = `${CONNECT_PANEL_STYLES}
  * navigation, no session or token in it). The dialog opens by itself while an account is missing. Values are
  * escaped; the one script is fixed text.
  */
-export function renderChatConnectBar(panel: ConnectPanel): { styles: string; markup: string; script: string } {
+export function renderChatConnectBar(panel: ConnectPanel): {
+  styles: string;
+  markup: string;
+  script: string;
+} {
   const ready = panel.ready && !panel.failed;
-  const label = panel.failed ? CONNECT_PANEL_TEXTS.failed : `${CONNECT_PANEL_TEXTS.title} (${connectedCount(panel)})`;
+  const label = panel.failed
+    ? CONNECT_PANEL_TEXTS.failed
+    : `${CONNECT_PANEL_TEXTS.title} (${connectedCount(panel)})`;
   const markup = [
     `<div id="connect-bar"><button type="button" id="connect-open" data-ready="${ready}">${escapeConnectText(label)}</button></div>`,
     `<dialog id="connect-dialog" aria-label="${escapeConnectText(CONNECT_PANEL_TEXTS.title)}"${ready ? '' : ' data-open'}>`,

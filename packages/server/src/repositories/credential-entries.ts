@@ -27,7 +27,11 @@ const uuids = (ids: readonly string[]) => [...new Set(ids.filter(isUuid))];
 export class CredentialEntryRepository {
   constructor(private readonly db: DbOrTx) {}
 
-  async get(tenantId: string, credentialId: string, userId: string): Promise<CredentialUserEntryRow | undefined> {
+  async get(
+    tenantId: string,
+    credentialId: string,
+    userId: string,
+  ): Promise<CredentialUserEntryRow | undefined> {
     if (!isUuid(credentialId) || !isUuid(userId)) return undefined;
     const [row] = await this.db
       .select()
@@ -77,14 +81,20 @@ export class CredentialEntryRepository {
     const rows = await this.db
       .delete(credentialUserEntries)
       .where(
-        and(eq(credentialUserEntries.tenantId, tenantId), eq(credentialUserEntries.credentialId, credentialId)),
+        and(
+          eq(credentialUserEntries.tenantId, tenantId),
+          eq(credentialUserEntries.credentialId, credentialId),
+        ),
       )
       .returning({ userId: credentialUserEntries.userId });
     return rows.length;
   }
 
   /** the entries of the given members on the given credentials (access was lost); both lists AND */
-  async deleteWhere(tenantId: string, scope: { userIds?: string[]; credentialIds?: string[] }): Promise<number> {
+  async deleteWhere(
+    tenantId: string,
+    scope: { userIds?: string[]; credentialIds?: string[] },
+  ): Promise<number> {
     const conditions: SQL[] = [eq(credentialUserEntries.tenantId, tenantId)];
     if (scope.userIds) {
       const ids = uuids(scope.userIds);
@@ -128,13 +138,18 @@ export class CredentialEntryRepository {
     const rows = await this.db
       .select({ credentialId: credentialUserEntries.credentialId, count: sql<number>`count(*)::int` })
       .from(credentialUserEntries)
-      .where(and(eq(credentialUserEntries.tenantId, tenantId), inArray(credentialUserEntries.credentialId, ids)))
+      .where(
+        and(eq(credentialUserEntries.tenantId, tenantId), inArray(credentialUserEntries.credentialId, ids)),
+      )
       .groupBy(credentialUserEntries.credentialId);
     return new Map(rows.map((row) => [row.credentialId, Number(row.count)]));
   }
 
   /** the connections of one member, one credential, both, or (no filter) the whole workspace */
-  async list(tenantId: string, scope: { userId?: string; credentialId?: string } = {}): Promise<CredentialEntryKey[]> {
+  async list(
+    tenantId: string,
+    scope: { userId?: string; credentialId?: string } = {},
+  ): Promise<CredentialEntryKey[]> {
     const conditions: SQL[] = [eq(credentialUserEntries.tenantId, tenantId)];
     if (scope.userId !== undefined) {
       if (!isUuid(scope.userId)) return [];
@@ -166,7 +181,13 @@ export class CredentialEntryRepository {
     const rows = await this.db
       .select({ id: credentials.id })
       .from(credentials)
-      .where(and(eq(credentials.tenantId, tenantId), inArray(credentials.id, ids), eq(credentials.isResolvable, true)));
+      .where(
+        and(
+          eq(credentials.tenantId, tenantId),
+          inArray(credentials.id, ids),
+          eq(credentials.isResolvable, true),
+        ),
+      );
     return new Set(rows.map((row) => row.id));
   }
 
@@ -178,12 +199,19 @@ export class CredentialEntryRepository {
       .select({ id: credentials.id, name: credentials.name })
       .from(credentials)
       .where(
-        and(eq(credentials.tenantId, tenantId), inArray(credentials.name, wanted), eq(credentials.isResolvable, true)),
+        and(
+          eq(credentials.tenantId, tenantId),
+          inArray(credentials.name, wanted),
+          eq(credentials.isResolvable, true),
+        ),
       );
   }
 
   /** the private credentials a project owns or is shared (a project delete must not move them to a personal one) */
-  async resolvableInProject(tenantId: string, projectId: string): Promise<Array<{ id: string; name: string }>> {
+  async resolvableInProject(
+    tenantId: string,
+    projectId: string,
+  ): Promise<Array<{ id: string; name: string }>> {
     if (!isUuid(projectId)) return [];
     return this.db
       .select({ id: credentials.id, name: credentials.name })

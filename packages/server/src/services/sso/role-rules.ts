@@ -18,7 +18,11 @@ function run(expression: string, claims: DataObject): unknown {
 
 /** whether `expression` matches the claims (an error is false) */
 export function ruleMatches(expression: string, claims: DataObject): boolean {
-  if (typeof expression !== 'string' || expression.length === 0 || expression.length > RULE_EXPRESSION_MAX_LENGTH) {
+  if (
+    typeof expression !== 'string' ||
+    expression.length === 0 ||
+    expression.length > RULE_EXPRESSION_MAX_LENGTH
+  ) {
     return false;
   }
   try {

@@ -287,7 +287,11 @@ export const ChatTriggerNode: NodeType = {
       }
       // P6-87: a signed-in visitor sees which private accounts a message needs and which they have connected
       if (reply && access.user && typeof reply.body === 'string') {
-        const panel = await loadConnectPanel(ctx, access.user.id, ctx.getRequestObject().url?.split('?')[0] ?? '');
+        const panel = await loadConnectPanel(
+          ctx,
+          access.user.id,
+          ctx.getRequestObject().url?.split('?')[0] ?? '',
+        );
         if (panel) reply.body = injectChatConnectBar(reply.body, panel);
       }
       return page;
@@ -318,7 +322,10 @@ export const ChatTriggerNode: NodeType = {
     if (action === 'loadPreviousSession') {
       const mode = String(options.loadPreviousSession ?? 'notSupported');
       if (mode === 'manually') {
-        return { workflowData: [[{ json: { sessionId, action: 'loadPreviousSession', ...user } }]], ...identity };
+        return {
+          workflowData: [[{ json: { sessionId, action: 'loadPreviousSession', ...user } }]],
+          ...identity,
+        };
       }
       if (mode !== 'memory') return respond(200, { data: [] }, corsOrigin);
       // the memory reads this same body as its item: give it what a run's item holds, never the caller's

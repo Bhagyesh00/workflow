@@ -56,7 +56,11 @@ beforeEach(() => {
   void HOUR;
 });
 
-function contextOf(method: 'GET' | 'POST', parameters: DataObject = {}, services: { credentialGate?: CredentialGateHelper } = { credentialGate: gate }) {
+function contextOf(
+  method: 'GET' | 'POST',
+  parameters: DataObject = {},
+  services: { credentialGate?: CredentialGateHelper } = { credentialGate: gate },
+) {
   const workflow = new Workflow(
     {
       id: 'wf-1',
@@ -104,7 +108,11 @@ function contextOf(method: 'GET' | 'POST', parameters: DataObject = {}, services
   );
 }
 
-const call = (method: 'GET' | 'POST', parameters?: DataObject, services?: { credentialGate?: CredentialGateHelper }): Promise<WebhookResponseData> =>
+const call = (
+  method: 'GET' | 'POST',
+  parameters?: DataObject,
+  services?: { credentialGate?: CredentialGateHelper },
+): Promise<WebhookResponseData> =>
   nodeTypes.get('core.formTrigger')!.webhook!(contextOf(method, parameters, services));
 
 const pageOf = (data: WebhookResponseData) => String(data.webhookResponse?.body);
@@ -215,7 +223,14 @@ describe('loadConnectPanel', () => {
       connected: 0,
       total: 1,
       items: [
-        { credentialId: 'c1', name: 'A', type: 't', connected: false, connectUrl: 'javascript:alert(1)', disconnectUrl: '' },
+        {
+          credentialId: 'c1',
+          name: 'A',
+          type: 't',
+          connected: false,
+          connectUrl: 'javascript:alert(1)',
+          disconnectUrl: '',
+        },
       ],
     });
     expect(html).not.toContain('javascript:');

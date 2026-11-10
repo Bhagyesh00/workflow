@@ -40,9 +40,9 @@ describe('the SCIM page', () => {
       'https://workflow.example.com/scim/v2',
     );
     expect(screen.getByTestId('scim-token-state').textContent).toContain('No token yet');
-    expect(screen.getByRole('switch', { name: 'Enable SCIM provisioning' }).getAttribute('aria-checked')).toBe(
-      'false',
-    );
+    expect(
+      screen.getByRole('switch', { name: 'Enable SCIM provisioning' }).getAttribute('aria-checked'),
+    ).toBe('false');
     expect(screen.getByRole('button', { name: 'Create token' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Revoke token' })).toBeNull();
   });
@@ -68,21 +68,29 @@ describe('the SCIM page', () => {
     renderApp('/settings/scim');
     const hint = await screen.findByTestId('scim-sso-hint', {}, T);
     expect(hint.textContent).toContain('Turn on SAML or OIDC single sign-on first');
-    expect((screen.getByRole('switch', { name: 'Enable SCIM provisioning' }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
+    expect(
+      (screen.getByRole('switch', { name: 'Enable SCIM provisioning' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it('leaves the decision to the server when the sign-in method cannot be read', async () => {
     setup();
-    server.use(http.get(/\/rest\/sso\/method$/, () => HttpResponse.json({ error: { code: 'forbidden', message: 'no' } }, { status: 403 })));
+    server.use(
+      http.get(/\/rest\/sso\/method$/, () =>
+        HttpResponse.json({ error: { code: 'forbidden', message: 'no' } }, { status: 403 }),
+      ),
+    );
     renderApp('/settings/scim');
     const toggle = await screen.findByRole('switch', { name: 'Enable SCIM provisioning' }, T);
     expect((toggle as HTMLButtonElement).disabled).toBe(false);
     const user = userEvent.setup();
     await user.click(toggle);
     expect(
-      await screen.findByText('Turn on SAML or OIDC single sign-on before you enable SCIM provisioning.', {}, T),
+      await screen.findByText(
+        'Turn on SAML or OIDC single sign-on before you enable SCIM provisioning.',
+        {},
+        T,
+      ),
     ).toBeTruthy();
     expect(toggle.getAttribute('aria-checked')).toBe('false');
   });
@@ -107,7 +115,10 @@ describe('the SCIM page', () => {
           .map((m) => m.state.data),
       );
     await waitFor(() => expect(cached()).not.toContain(token), T);
-    await waitFor(() => expect(screen.getByTestId('scim-token-state').textContent).toContain(token.slice(-4)), T);
+    await waitFor(
+      () => expect(screen.getByTestId('scim-token-state').textContent).toContain(token.slice(-4)),
+      T,
+    );
     // the page and the server's config never show the token again
     expect(document.body.textContent).not.toContain(token);
     expect(JSON.stringify((await call('GET', '/scim/config')).body)).not.toContain(token);
@@ -132,7 +143,10 @@ describe('the SCIM page', () => {
         name: 'Revoke token',
       }),
     );
-    await waitFor(() => expect(screen.getByTestId('scim-token-state').textContent).toContain('No token yet'), T);
+    await waitFor(
+      () => expect(screen.getByTestId('scim-token-state').textContent).toContain('No token yet'),
+      T,
+    );
     expect((await call('GET', '/scim/config')).body.data).toMatchObject({ hasToken: false, tokenHint: null });
   });
 
@@ -149,29 +163,36 @@ describe('the SCIM page', () => {
     expect(screen.getByText('Their work')).toBeTruthy();
     await waitFor(() => expect(save.disabled).toBe(false));
     const picker = screen.getByLabelText('Move work to') as HTMLSelectElement;
-    await waitFor(() => expect(within(picker).getByRole('option', { name: 'Receiving team' })).toBeTruthy(), T);
+    await waitFor(
+      () => expect(within(picker).getByRole('option', { name: 'Receiving team' })).toBeTruthy(),
+      T,
+    );
     expect(within(picker).getByRole('option', { name: "The owner's personal project" })).toBeTruthy();
     await user.selectOptions(picker, team.id);
     await user.click(save);
-    await waitFor(async () =>
-      expect((await call('GET', '/scim/config')).body.data).toMatchObject({
-        onDelete: 'delete',
-        dataAction: 'transfer',
-        transferProjectId: team.id,
-      }),
-    T);
+    await waitFor(
+      async () =>
+        expect((await call('GET', '/scim/config')).body.data).toMatchObject({
+          onDelete: 'delete',
+          dataAction: 'transfer',
+          transferProjectId: team.id,
+        }),
+      T,
+    );
     await waitFor(() => expect(save.disabled).toBe(true), T);
 
     // deleting the work needs no target
     await user.click(screen.getByLabelText('Delete it'));
     expect(screen.queryByLabelText('Move work to')).toBeNull();
     await user.click(save);
-    await waitFor(async () =>
-      expect((await call('GET', '/scim/config')).body.data).toMatchObject({
-        dataAction: 'delete',
-        transferProjectId: null,
-      }),
-    T);
+    await waitFor(
+      async () =>
+        expect((await call('GET', '/scim/config')).body.data).toMatchObject({
+          dataAction: 'delete',
+          transferProjectId: null,
+        }),
+      T,
+    );
   });
 
   it('shows a member without scim:manage a note, and asks nothing', async () => {
@@ -195,10 +216,17 @@ describe('the demo SCIM routes', () => {
     expect((await call('PATCH', '/scim/config', { enabled: true })).body.data.enabled).toBe(true);
     expect((await call('PATCH', '/scim/config', { enabled: 'yes' })).status).toBe(400);
     expect(
-      (await call('PUT', '/scim/deprovisioning', { onDelete: 'disable', dataAction: 'transfer', transferProjectId: 'nope' }))
-        .status,
+      (
+        await call('PUT', '/scim/deprovisioning', {
+          onDelete: 'disable',
+          dataAction: 'transfer',
+          transferProjectId: 'nope',
+        })
+      ).status,
     ).toBe(404);
-    expect((await call('PUT', '/scim/deprovisioning', { onDelete: 'x', dataAction: 'transfer' })).status).toBe(400);
+    expect(
+      (await call('PUT', '/scim/deprovisioning', { onDelete: 'x', dataAction: 'transfer' })).status,
+    ).toBe(400);
 
     demo.users.push({ id: 'u-sam', email: 'sam@example.com', name: 'Sam Shaw', password: 'x' });
     demo.memberships.push({ tenantId, userId: 'u-sam', role: 'member' });
@@ -212,8 +240,16 @@ describe('the demo SCIM routes', () => {
     const { demo, tenantId, team } = setup();
     demo.users.push({ id: 'u-sam', email: 'sam@example.com', name: 'Sam Shaw', password: 'x' });
     demo.memberships.push({ tenantId, userId: 'u-sam', role: 'member', status: 'disabled' });
-    const samHome = demo.createProject({ tenantId, name: 'Sam Shaw', type: 'personal', ownerUserId: 'u-sam' });
-    const targets = (await call('GET', '/scim/transfer-targets')).body.data as Array<{ id: string; type: string }>;
+    const samHome = demo.createProject({
+      tenantId,
+      name: 'Sam Shaw',
+      type: 'personal',
+      ownerUserId: 'u-sam',
+    });
+    const targets = (await call('GET', '/scim/transfer-targets')).body.data as Array<{
+      id: string;
+      type: string;
+    }>;
     expect(targets.map((t) => t.id)).toContain(team.id);
     expect(targets.map((t) => t.id)).not.toContain(samHome.id);
   });

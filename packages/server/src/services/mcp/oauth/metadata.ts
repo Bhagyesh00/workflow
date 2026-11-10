@@ -119,7 +119,9 @@ export async function triggerNodesAt(
     }
     let found = await repos.webhooks.findStatic(tenantId, method, path);
     if (!found) {
-      const candidates = sortDynamic(await repos.webhooks.listDynamic(tenantId, method, path.split('/').length));
+      const candidates = sortDynamic(
+        await repos.webhooks.listDynamic(tenantId, method, path.split('/').length),
+      );
       found = candidates.find((candidate) => matchDynamic(candidate.path, path) !== null);
     }
     if (!found) continue;

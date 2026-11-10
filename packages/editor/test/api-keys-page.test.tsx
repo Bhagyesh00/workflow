@@ -43,7 +43,7 @@ describe('API keys page (P6-21)', () => {
     await user.click(screen.getByRole('button', { name: 'Create key' }));
     await screen.findByTestId('new-api-key', {}, T);
     const post = backend().requests.find((r) => r.method === 'POST' && r.path === '/api-keys');
-    const sent = (post?.body as { expiresAt: number }).expiresAt;
+    const sent = (post?.body as { expiresAt: number } | undefined)?.expiresAt;
     expect(sent).toBeGreaterThanOrEqual(before + 30 * DAY - 5);
     expect(sent).toBeLessThanOrEqual(before + 30 * DAY + 60);
     expect(await screen.findByText(/· expires /, {}, T)).toBeTruthy();
@@ -105,10 +105,9 @@ describe('API keys page (P6-21)', () => {
     seedKey(demo.session!.userId, 'Live');
     seedKey(demo.session!.userId, 'Old', { expiresAt: Math.floor(Date.now() / 1000) - DAY });
     renderApp('/settings/api-keys');
-    expect((await screen.findByRole('button', { name: 'Rotate Old' }, T)) as HTMLButtonElement).toHaveProperty(
-      'disabled',
-      true,
-    );
+    expect(
+      (await screen.findByRole('button', { name: 'Rotate Old' }, T)) as HTMLButtonElement,
+    ).toHaveProperty('disabled', true);
     await user.click(screen.getByRole('button', { name: 'Rotate Live' }));
     await user.click(await screen.findByRole('button', { name: 'Rotate key' }));
     expect((await screen.findByTestId('new-api-key', {}, T)).textContent).toMatch(/^wfk_/);
