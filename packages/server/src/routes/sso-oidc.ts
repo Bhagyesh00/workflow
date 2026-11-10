@@ -127,6 +127,15 @@ export function registerOidcPublicRoutes(app: FastifyInstance, ctx: ServerContex
           path: '/rest',
           maxAge: Math.floor(ctx.config.sessionTtlMs / 1000),
         });
+      } else {
+        // no id token for this sign-in (over 3800 bytes, setting off, no end session URL): an older cookie
+        // must not become a stale id_token_hint at the next logout
+        reply.clearCookie(OIDC_ID_TOKEN_COOKIE, {
+          httpOnly: true,
+          sameSite: 'lax',
+          secure: ctx.config.cookieSecure,
+          path: '/rest',
+        });
       }
       return reply.redirect(outcome.redirect, 302);
     } catch (error) {

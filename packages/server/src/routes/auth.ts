@@ -7,6 +7,7 @@ import type { Role } from '../db/schema';
 import { clearSessionCookie, requireAuth, setSessionCookie } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
 import { type AuthResult, tenantDTO, userDTO } from '../services/auth';
+import { OIDC_ID_TOKEN_COOKIE } from '../services/sso/oidc';
 
 const signupSchema = z.object({
   email: z.email().max(254),
@@ -31,6 +32,12 @@ const loginSchema = z.object({
 const acceptSchema = z.object({
   name: z.string().trim().min(1).max(128),
   password: z.string().min(1).max(256),
+  /** P6-18: an existing account with MFA on sends its code */
+  mfaCode: z
+    .string()
+    .regex(/^\d{6}$/, 'The MFA code must be 6 digits')
+    .optional(),
+  mfaRecoveryCode: z.string().trim().min(1).max(64).optional(),
 });
 
 const meta = (request: FastifyRequest) => ({ ip: request.ip, userAgent: request.headers['user-agent'] });
@@ -92,6 +99,13 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: ServerContext): vo
     if (current?.sessionId)
       await auth.logout(current.sessionId, current.tenant.id, current.user.id, request.ip);
     clearSessionCookie(reply, config);
+    // an OIDC id token kept for the identity provider's logout goes too
+    reply.clearCookie(OIDC_ID_TOKEN_COOKIE, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: config.cookieSecure,
+      path: '/rest',
+    });
     return { data: { ok: true } };
   });
 

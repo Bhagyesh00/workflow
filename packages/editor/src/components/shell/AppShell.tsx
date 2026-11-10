@@ -23,12 +23,13 @@ import {
   onUnauthorized,
   setCurrentTenant,
 } from '../../api/client';
-import { authApi } from '../../api/endpoints';
+import { authApi, ssoApi } from '../../api/endpoints';
 import { assistantFeatureOf, queryKeys, useMe, useSettings } from '../../api/queries';
 import type { Me } from '../../api/types';
 import { CommandBar } from '../../features/command-bar/CommandBar';
 import { InboxNavBadge } from '../../features/reviews/InboxNavBadge';
 import { assistantLinkVisible } from '../../lib/assistant-access';
+import { ssoNavigation } from '../../pages/auth/SsoSignIn';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { DataTableStorageBanner } from '../data-tables/StorageBanner';
 import { ProjectNav } from '../projects/ProjectNav';
@@ -137,14 +138,29 @@ function UserMenu({ me, collapsed }: { me: Me; collapsed: boolean }) {
   const theme = useUiStore((s) => s.theme);
   const setTheme = useUiStore((s) => s.setTheme);
   const logout = async () => {
-    try {
-      await authApi.logout();
-    } catch {
-      // the session may already be gone
+    // P6-10: an OIDC session signs out through the server's OIDC route, which also answers the identity
+    // provider's end session URL when the workspace signs people out of the provider too
+    let providerUrl: string | null = null;
+    let ended = false;
+    if (me.authMethod === 'oidc') {
+      try {
+        providerUrl = (await ssoApi.oidcLogout()).url;
+        ended = true;
+      } catch {
+        // fall back to the plain sign out below
+      }
+    }
+    if (!ended) {
+      try {
+        await authApi.logout();
+      } catch {
+        // the session may already be gone
+      }
     }
     setCurrentTenant(null);
     queryClient.clear();
-    navigate('/signin');
+    if (providerUrl) ssoNavigation.go(providerUrl);
+    else navigate('/signin');
   };
   return (
     <Menu

@@ -706,14 +706,14 @@ describe('logout', () => {
   it('is a local logout when the provider has no end session URL or the setting is off', async () => {
     const off = await workspace({ rpInitiatedLogoutEnabled: false });
     const a = await signedIn(off);
-    expect(a.res.cookies.wf_oidc_idt).toBeUndefined();
+    expect(a.res.cookies.wf_oidc_idt ?? '').toBe('');
     const outA = await a.client.post('/rest/sso/oidc/logout');
     expect(outA.statusCode).toBe(200);
     expect(outA.json().data.url).toBeNull();
 
     const noEnd = await workspace({ rpInitiatedLogoutEnabled: true }, { noEndSession: true });
     const b = await signedIn(noEnd);
-    expect(b.res.cookies.wf_oidc_idt).toBeUndefined();
+    expect(b.res.cookies.wf_oidc_idt ?? '').toBe('');
     const outB = await b.client.post('/rest/sso/oidc/logout');
     expect(outB.json().data.url).toBeNull();
     const me = new TestClient(server.app, ORIGIN, nextAddress());
@@ -724,8 +724,32 @@ describe('logout', () => {
   it('is a local logout when the id token is over 3800 bytes', async () => {
     const w = await workspace({ rpInitiatedLogoutEnabled: true });
     const big = await signedIn(w, person({ extra: { groups: 'g'.repeat(5000) } }));
-    expect(big.res.cookies.wf_oidc_idt).toBeUndefined();
+    expect(big.res.cookies.wf_oidc_idt ?? '').toBe('');
     const out = await big.client.post('/rest/sso/oidc/logout');
+    expect(out.statusCode).toBe(200);
+    expect(out.json().data.url).toBeNull();
+  });
+
+  it('clears an older id token cookie when the new sign-in sets none, so logout is local', async () => {
+    const w = await workspace({ rpInitiatedLogoutEnabled: true });
+    const who = person();
+    const first = await signIn(w, { person: who });
+    const old = first.cookies.wf_oidc_idt;
+    expect(old).toBeTruthy();
+    // the same person signs in again with an id token over 3800 bytes: no new cookie, and the old one is cleared
+    const login = await startLogin(w);
+    const query = w.idp.authorize(login.location, {
+      person: { ...who, extra: { groups: 'g'.repeat(5000) } },
+    });
+    const again = await browserGet(callbackUrl(w, query), { ...login.cookies, wf_oidc_idt: old });
+    expect(again.statusCode).toBe(302);
+    const cleared = cookiesOf(again);
+    expect('wf_oidc_idt' in cleared).toBe(true);
+    expect(cleared.wf_oidc_idt).toBe('');
+    // without the old cookie the logout is local
+    const client = new TestClient(server.app, ORIGIN, nextAddress());
+    client.cookie = cookieHeader({ wf_session: sessionOf(cleared) });
+    const out = await client.post('/rest/sso/oidc/logout');
     expect(out.statusCode).toBe(200);
     expect(out.json().data.url).toBeNull();
   });

@@ -43,8 +43,12 @@ describe('auth', () => {
     const { rows } = await server.ctx.database.pool.query('select id from sessions');
     expect(rows.map((r) => r.id)).toEqual([sha256(token)]);
 
-    expect((await client.post('/rest/auth/logout')).statusCode).toBe(200);
+    const logout = await client.post('/rest/auth/logout');
+    expect(logout.statusCode).toBe(200);
     expect(client.cookie).toBeUndefined();
+    // an OIDC id token cookie left from an SSO sign-in is cleared too
+    const cleared = [logout.headers['set-cookie']].flat().map(String);
+    expect(cleared.some((c) => /^wf_oidc_idt=;/.test(c) && /Path=\/rest/.test(c))).toBe(true);
     expect((await client.get('/rest/auth/me')).statusCode).toBe(401);
     const { rows: after } = await server.ctx.database.pool.query('select id from sessions');
     expect(after).toHaveLength(0);
