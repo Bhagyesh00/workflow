@@ -3,7 +3,7 @@
  * `/settings/sso/oidc` (`oidc:manage`), through `ctx.saml.saveConfig` and `ctx.oidc.saveConfig`. A GET answer
  * can be sent back as the PUT body; secrets are blanked, and a blank keeps the stored one.
  * PUBLIC_SSO_ROUTES is final and shaped as PUBLIC_ROLE_ROUTES (public-api.ts spreads it); the handlers
- * throw until L12 (stub (L12)).
+ * call the same services as /rest/sso.
  */
 import { z } from 'zod';
 import type { ServerContext } from '../context';
@@ -14,15 +14,15 @@ type Handler = (ctx: ServerContext, input: PublicApiInput) => Promise<unknown>;
 /** the protocol's config fields (L7 and L8 own the exact shape) */
 const configBody = z.record(z.string(), z.unknown());
 
-const notImplemented: Handler = async () => {
-  throw new Error('not implemented (L12)');
-};
-
 export const publicSsoHandlers: Record<'getSaml' | 'saveSaml' | 'getOidc' | 'saveOidc', Handler> = {
-  getSaml: notImplemented,
-  saveSaml: notImplemented,
-  getOidc: notImplemented,
-  saveOidc: notImplemented,
+  getSaml: async (ctx, { auth }) => ({ data: await ctx.saml.getConfig(auth.tenant.id) }),
+  saveSaml: async (ctx, { auth, body }) => ({
+    data: await ctx.saml.saveConfig(auth.tenant.id, body, auth.user.id),
+  }),
+  getOidc: async (ctx, { auth }) => ({ data: await ctx.oidc.getConfig(auth.tenant.id) }),
+  saveOidc: async (ctx, { auth, body }) => ({
+    data: await ctx.oidc.saveConfig(auth.tenant.id, body, auth.user.id),
+  }),
 };
 
 const row = (name: keyof typeof publicSsoHandlers, fields: Omit<ApiRoute, 'handler' | 'tag'>): ApiRoute => ({
