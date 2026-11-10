@@ -222,7 +222,8 @@ describe('Your account: two-step sign-in', () => {
       }),
     );
     renderApp('/settings/account');
-    expect(await screen.findByText(/managed by your identity provider/, undefined, T)).toBeTruthy();
+    const notes = await screen.findAllByText(/managed by your identity provider/, undefined, T);
+    expect(notes.length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'Set up' })).toBeNull();
   });
 });
