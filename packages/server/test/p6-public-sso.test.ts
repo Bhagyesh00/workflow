@@ -5,7 +5,14 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeOidcIdp, startFakeOidcIdp } from './fakes/oidc-idp';
-import { createTestServer, resetDatabase, signup, type TestClient, type TestServer } from './helpers';
+import {
+  createTestServer,
+  realMember,
+  resetDatabase,
+  signup,
+  type TestClient,
+  type TestServer,
+} from './helpers';
 
 let server: TestServer;
 const idps: FakeOidcIdp[] = [];
@@ -114,5 +121,25 @@ describe('OIDC config', () => {
     expect((await api(narrow, 'PUT', '/settings/sso/oidc', {})).statusCode).toBe(403);
     const seen = (await api(await keyOf(b.client), 'GET', '/settings/sso/oidc')).json().data;
     expect(seen.clientId).not.toBe(idp.clientId);
+  });
+});
+
+describe('a true member', () => {
+  it('is refused on both configs with a key that has no scopes, and the stored config stays', async () => {
+    const owner = await signup(server.app);
+    const member = await realMember(owner);
+    const ownerKey = await keyOf(owner.client);
+    await api(ownerKey, 'PUT', '/settings/sso/saml', { loginLabel: 'Owner SAML' });
+    const before = await server.ctx.repos.sso.get(owner.tenant.id);
+    const memberKey = await keyOf(member.client);
+    for (const kind of ['saml', 'oidc']) {
+      for (const method of ['GET', 'PUT'] as const) {
+        const payload = method === 'PUT' ? { loginLabel: 'Taken' } : undefined;
+        const res = await api(memberKey, method, `/settings/sso/${kind}`, payload);
+        expect(res.statusCode).toBe(403);
+      }
+    }
+    expect(await server.ctx.repos.sso.get(owner.tenant.id)).toEqual(before);
+    expect((await api(ownerKey, 'GET', '/settings/sso/saml')).json().data.loginLabel).toBe('Owner SAML');
   });
 });
