@@ -199,8 +199,10 @@ export const authApi = {
   logout: () => api.post<{ ok: true }>('/auth/logout'),
   me: () => api.get<Me>('/auth/me'),
   switchTenant: (tenantId: string) => api.post<AuthResult>('/auth/switch-tenant', { tenantId }),
-  acceptInvitation: (token: string, body: { name: string; password: string }) =>
-    api.post<AuthResult>(`/invitations/${enc(token)}/accept`, body),
+  acceptInvitation: (
+    token: string,
+    body: { name: string; password: string; mfaCode?: string; mfaRecoveryCode?: string },
+  ) => api.post<AuthResult>(`/invitations/${enc(token)}/accept`, body),
   /** P6-01 (public): the sign-in method of a workspace (by slug); `email` with no workspace */
   ssoOptions: (workspace?: string) => api.get<SsoOptions>('/auth/sso-options', { workspace }),
 };

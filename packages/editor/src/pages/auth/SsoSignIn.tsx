@@ -20,8 +20,10 @@ export interface SsoSignInProps {
 }
 
 /**
- * The texts of `?ssoError=<code>` (the codes of the server's `SSO_SIGN_IN_ERRORS`, services/sso/login.ts).
- * The page never shows the query text itself, so a crafted link cannot put words on it.
+ * The texts of `?ssoError=<code>`: the codes of the server's `SSO_SIGN_IN_ERRORS` (services/sso/login.ts),
+ * the OIDC codes of `OIDC_ERROR_CODES` (services/sso/oidc.ts), the SAML codes of `SAML_SIGN_IN_ERRORS`
+ * (services/sso/saml.ts) and the start route's refusals. The page never shows the query text itself, so a
+ * crafted link cannot put words on it.
  */
 export const SSO_ERROR_TEXTS: Readonly<Record<string, string>> = {
   sso_method_inactive: "Single sign-on isn't turned on for this workspace.",
@@ -31,6 +33,17 @@ export const SSO_ERROR_TEXTS: Readonly<Record<string, string>> = {
   sso_invite_required: 'This email already has an account. Ask an admin of the workspace for an invite.',
   sso_user_unknown: 'This email has no access to the workspace. Ask an admin of the workspace for an invite.',
   sso_access_blocked: "Your identity provider doesn't give you access to this workspace.",
+  sso_state_invalid: 'The sign-in took too long or was started in another browser. Try again.',
+  sso_login_failed:
+    "Couldn't sign in with your identity provider. Try again, or ask an admin of the workspace.",
+  saml_response_invalid:
+    "Your identity provider's SAML response couldn't be verified. Try again, or ask an admin of the workspace.",
+  saml_response_replayed: 'This SAML response was already used. Sign in again.',
+  saml_attributes_missing:
+    "Your identity provider didn't send all the user attributes the workspace needs, such as the email. Ask an admin of the workspace.",
+  saml_config_invalid: "The workspace's SAML settings can't be read. Ask an admin of the workspace.",
+  saml_metadata_invalid: "The workspace's SAML settings can't be read. Ask an admin of the workspace.",
+  not_found: 'There is no workspace with this name. Check the workspace name.',
 };
 export const SSO_ERROR_FALLBACK =
   "Couldn't sign in with single sign-on. Try again, or ask an admin of the workspace.";

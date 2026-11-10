@@ -7,7 +7,12 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SSO_ERROR_FALLBACK, SSO_ERROR_TEXTS, ssoNavigation } from '../src/pages/auth/SsoSignIn';
+import {
+  SSO_ERROR_FALLBACK,
+  SSO_ERROR_TEXTS,
+  ssoErrorText,
+  ssoNavigation,
+} from '../src/pages/auth/SsoSignIn';
 import { backend } from './backend';
 import { renderApp } from './utils';
 
@@ -49,7 +54,8 @@ describe('sign-in page: workspace and SSO', () => {
     await screen.findByLabelText('Email');
     expect(optionsAsked()).toHaveLength(0);
     await user.type(screen.getByLabelText('Workspace'), 'engines');
-    const button = await screen.findByRole('link', { name: 'Continue with SSO' });
+    // the field settles 400 ms after the last key, then asks the options: a loaded run needs more time
+    const button = await screen.findByRole('link', { name: 'Continue with SSO' }, { timeout: 5000 });
     expect(button.getAttribute('href')).toBe('/sso/oidc/engines/login?redirect=%2Fworkflows');
     expect(optionsAsked().map((r) => r.query?.workspace)).toEqual(['engines']);
     // typed by hand: the button, not a jump away
@@ -88,6 +94,24 @@ describe('sign-in page: workspace and SSO', () => {
     expect(await screen.findByText(SSO_ERROR_TEXTS.sso_invite_required)).toBeTruthy();
     expect(await screen.findByRole('link', { name: 'Continue with SSO' })).toBeTruthy();
     expect(go).not.toHaveBeenCalled();
+  });
+
+  it('has its own text for the OIDC and SAML refusal codes', async () => {
+    for (const code of [
+      'sso_state_invalid',
+      'sso_login_failed',
+      'saml_response_invalid',
+      'saml_response_replayed',
+      'saml_attributes_missing',
+      'saml_config_invalid',
+      'saml_metadata_invalid',
+      'not_found',
+    ]) {
+      expect(ssoErrorText(code)).toBe(SSO_ERROR_TEXTS[code]);
+      expect(SSO_ERROR_TEXTS[code]).not.toBe(SSO_ERROR_FALLBACK);
+    }
+    renderApp('/signin?workspace=acme&ssoError=saml_attributes_missing');
+    expect(await screen.findByText(SSO_ERROR_TEXTS.saml_attributes_missing)).toBeTruthy();
   });
 
   it('never shows the text of an unknown ?ssoError=', async () => {

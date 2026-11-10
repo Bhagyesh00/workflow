@@ -269,17 +269,47 @@ export function SignupPage() {
   );
 }
 
+/** the accept body; P6-18: an existing account with MFA on sends its code too */
+type AcceptBody = { name: string; password: string } & Partial<{ mfaCode: string; mfaRecoveryCode: string }>;
+
 export function AcceptInvitationPage() {
   const { token = '' } = useParams();
   const onSuccess = useAuthSuccess();
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [touched, setTouched] = useState(false);
+  // P6-18: the password matched an existing account with MFA on: ask for the second step
+  const [mfaStep, setMfaStep] = useState(false);
   const accept = useMutation({
-    mutationFn: (body: { name: string; password: string }) => authApi.acceptInvitation(token, body),
+    mutationFn: (body: AcceptBody) => authApi.acceptInvitation(token, body),
     onSuccess,
+    onError: (error) => {
+      if (isApiError(error, 401) && error.code === 'mfa_required') setMfaStep(true);
+    },
   });
   const problem = passwordProblem(password);
+  if (mfaStep) {
+    const stepError =
+      accept.error && !(isApiError(accept.error, 401) && accept.error.code === 'mfa_required')
+        ? isApiError(accept.error, 429)
+          ? 'Too many attempts. Wait a minute, then try again.'
+          : errorMessage(accept.error)
+        : null;
+    return (
+      <AuthLayout title="Two-factor authentication" subtitle="Enter the code from your authenticator app.">
+        <MfaStep
+          pending={accept.isPending}
+          error={stepError}
+          onSubmit={(input: MfaLoginInput) => accept.mutate({ name: name.trim(), password, ...input })}
+          onCancel={() => {
+            accept.reset();
+            setPassword('');
+            setMfaStep(false);
+          }}
+        />
+      </AuthLayout>
+    );
+  }
   return (
     <AuthLayout title="Join your team" subtitle="Set up your account to accept the invitation.">
       <form
