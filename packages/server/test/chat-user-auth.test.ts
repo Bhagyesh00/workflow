@@ -105,8 +105,6 @@ describe('POST /rest/form-auth/code for a chat', () => {
   });
 
   it.each([
-    ['not ending in /chat', '/webhook/acme/chat-id/chat/extra'],
-    ['a look-alike ending', '/webhook/acme/chat-id/notchat'],
     ['no workspace and id', '/webhook/chat'],
     ['a waiting resume URL', '/webhook-waiting/e1/chat'],
     ['the REST API', '/rest/me'],
@@ -117,6 +115,20 @@ describe('POST /rest/form-auth/code for a chat', () => {
   ])('refuses %s', async (_name, returnTo) => {
     const { client } = await owner();
     expect((await client.post('/rest/form-auth/code', { returnTo })).statusCode).toBe(400);
+  });
+
+  // P6-87: a webhook path is a return target too; the service gives a code only for a chat or a Webhook with
+  // workspace sign-in, so these pass the shape check and get no code
+  it.each([
+    ['not ending in /chat', 'chat-id/chat/extra'],
+    ['a look-alike ending', 'chat-id/notchat'],
+  ])('gives no code for a webhook path %s that is no chat and no signed-in webhook', async (_name, rest) => {
+    const { client, tenant } = await owner();
+    for (const slug of [tenant.slug, 'acme']) {
+      const res = await client.post('/rest/form-auth/code', { returnTo: `/webhook/${slug}/${rest}` });
+      expect(res.statusCode).toBe(403);
+      expect(JSON.stringify(res.json())).not.toMatch(/"code":"[\w-]{43}"/);
+    }
   });
 
   it("refuses a chat of a workspace the user isn't in", async () => {

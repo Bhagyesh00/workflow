@@ -87,8 +87,8 @@ describe('a bad chat link', () => {
   it.each([
     ['another site', pageOf(`https://evil.example${CHAT}`)],
     ['a protocol-relative URL', pageOf(`//evil.example${CHAT}`)],
-    ['a path not ending in /chat', pageOf('/webhook/acme/hook-1/chat/more')],
-    ['a look-alike ending', pageOf('/webhook/acme/hook-1/notchat')],
+    ['a protocol-relative webhook URL', pageOf('//evil.example/webhook/acme/hook-1')],
+    ['a webhook path with no workspace', pageOf('/webhook//evil.example/x')],
     ['a resume URL', pageOf('/webhook-waiting/e1/chat')],
     ['a way out of the path', pageOf('/webhook/acme/../../rest/chat')],
     ['an encoded way out', pageOf('/webhook/acme/%2e%2e/chat')],
@@ -99,6 +99,23 @@ describe('a bad chat link', () => {
     expect(await screen.findByText("This sign-in link isn't valid.")).toBeTruthy();
     expect(go).not.toHaveBeenCalled();
     expect(issueCode).not.toHaveBeenCalled();
+  });
+});
+
+// P6-87: a webhook path is a return target too; the server decides whether it is a chat or a signed-in webhook
+describe('a webhook path that is no chat', () => {
+  it.each([
+    ['a path not ending in /chat', '/webhook/acme/hook-1/chat/more'],
+    ['a look-alike ending', '/webhook/acme/hook-1/notchat'],
+  ])('%s asks the server for a code and shows its refusal', async (_label, path) => {
+    signedIn();
+    issueCode.mockRejectedValue(
+      new ApiError(403, 'forbidden', "You aren't a member of the workspace this form belongs to"),
+    );
+    renderApp(pageOf(path));
+    expect(await screen.findByRole('heading', { name: "Couldn't open this webhook" })).toBeTruthy();
+    expect(issueCode).toHaveBeenCalledWith(path);
+    expect(go).not.toHaveBeenCalled();
   });
 });
 
