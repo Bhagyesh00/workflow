@@ -4,24 +4,110 @@
  * `jwe:<kid>`); `decryptResponse` uses jose `compactDecrypt` with `RSA-OAEP-256` and an allow list of
  * content algorithms, and refuses a plain response while the flag is on. `publicJwks` serves the public
  * part at `/.well-known/jwks/:slug.json`. The hook runs on the OAuth2 callback (services/oauth2.ts
- * `useJwe`) and on every refresh and client credentials call of a run (`oauthTokenDecrypt`).
- * Stub from C0: `decryptResponse` PASSES (the token as it came) unless `data.jweEnabled === true`, which
- * throws until L15; `publicJwks` throws until L15.
+ * `useJwe`), on every refresh and client credentials call of a run (`oauthTokenDecrypt`) and on the
+ * credential test call (services/credential-test.ts).
  */
+import { randomUUID } from 'node:crypto';
 import type { DataObject } from '@workflow/workflow';
+import {
+  type CompactJWEHeaderParameters,
+  compactDecrypt,
+  exportJWK,
+  exportPKCS8,
+  generateKeyPair,
+  importPKCS8,
+} from 'jose';
 import type { ServiceDeps } from '../context';
+
+/** the only key management algorithm (as n8n) */
+const KEY_ALGORITHM = 'RSA-OAEP-256';
+/** content encryption algorithms accepted for a token */
+const CONTENT_ALGORITHMS = ['A128GCM', 'A192GCM', 'A256GCM', 'A128CBC-HS256', 'A192CBC-HS384', 'A256CBC-HS512'];
+/** the token response fields that may carry a JWE */
+const TOKEN_FIELDS = ['access_token', 'refresh_token', 'id_token'] as const;
+const MAX_JWE_LENGTH = 64 * 1024;
+
+const COMPACT_JWE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
+
+/** a compact JWE has five dot-separated base64url parts and a header that names `enc` */
+function looksLikeJwe(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > MAX_JWE_LENGTH || !COMPACT_JWE.test(value)) return false;
+  try {
+    const header = JSON.parse(Buffer.from(value.split('.')[0], 'base64url').toString('utf8')) as {
+      enc?: unknown;
+    };
+    return typeof header.enc === 'string';
+  } catch {
+    return false;
+  }
+}
 
 export class OAuthJweService {
   constructor(readonly deps: ServiceDeps) {}
 
-  async decryptResponse(_tenantId: string, token: DataObject, data: DataObject): Promise<DataObject> {
-    // stub (L15): PASSES for every credential without the flag
+  /**
+   * The token response with its JWE fields decrypted. Without `jweEnabled` the token is returned as it came.
+   * With it, at least one of the token fields must be a JWE that opens with this workspace's key; a plain
+   * response, a wrong algorithm (including `alg: none`) or a foreign key throws.
+   */
+  async decryptResponse(tenantId: string, token: DataObject, data: DataObject): Promise<DataObject> {
     if (data.jweEnabled !== true) return token;
-    throw new Error('not implemented (L15)');
+    const out: DataObject = { ...token };
+    let decrypted = 0;
+    const rows = await this.deps.repos.jweKeys.list(tenantId);
+    const keys = new Map<string, Awaited<ReturnType<typeof importPKCS8>>>();
+    const resolveKey = async (header: CompactJWEHeaderParameters) => {
+      const row = (header.kid ? rows.filter((r) => r.kid === header.kid) : rows)[0];
+      if (!row) throw new Error('no key');
+      let key = keys.get(row.kid);
+      if (!key) {
+        const pem = this.deps.context().cipher.decrypt<string>(row.privateEnc, {
+          tenantId,
+          credentialId: `jwe:${row.kid}`,
+        });
+        key = await importPKCS8(pem, KEY_ALGORITHM);
+        keys.set(row.kid, key);
+      }
+      return key;
+    };
+    for (const field of TOKEN_FIELDS) {
+      const value = token[field];
+      if (!looksLikeJwe(value)) continue;
+      try {
+        const { plaintext } = await compactDecrypt(value, resolveKey, {
+          keyManagementAlgorithms: [KEY_ALGORITHM],
+          contentEncryptionAlgorithms: CONTENT_ALGORITHMS,
+        });
+        out[field] = new TextDecoder().decode(plaintext);
+        decrypted += 1;
+      } catch {
+        throw new Error(`Couldn't decrypt the ${field} of the token response`);
+      }
+    }
+    if (decrypted === 0) {
+      throw new Error('The token response holds no encrypted token, but encrypted tokens are turned on');
+    }
+    return out;
   }
 
-  /** the workspace's public keys as a JWK set; undefined for an unknown slug */
-  async publicJwks(_slug: string): Promise<{ keys: DataObject[] } | undefined> {
-    throw new Error('not implemented (L15)');
+  /** the workspace's public keys as a JWK set; undefined for an unknown slug. Makes the first key on first use. */
+  async publicJwks(slug: string): Promise<{ keys: DataObject[] } | undefined> {
+    const tenant = await this.deps.repos.tenants.getBySlug(slug);
+    if (!tenant) return undefined;
+    let rows = await this.deps.repos.jweKeys.list(tenant.id);
+    if (rows.length === 0) rows = [await this.createKey(tenant.id)];
+    return { keys: rows.map((r) => ({ ...r.publicJwk }) as DataObject) };
+  }
+
+  private async createKey(tenantId: string) {
+    const { publicKey, privateKey } = await generateKeyPair(KEY_ALGORITHM, {
+      modulusLength: 2048,
+      extractable: true,
+    });
+    const kid = randomUUID();
+    const publicJwk = { ...(await exportJWK(publicKey)), kid, use: 'enc', alg: KEY_ALGORITHM };
+    const pem = await exportPKCS8(privateKey);
+    const privateEnc = this.deps.context().cipher.encrypt(pem, { tenantId, credentialId: `jwe:${kid}` });
+    return this.deps.repos.jweKeys.create(tenantId, { kid, privateEnc, publicJwk });
   }
 }

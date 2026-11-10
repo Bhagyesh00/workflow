@@ -77,6 +77,16 @@ export const oAuth2Api: CredentialType = {
         { name: 'Send Client Credentials in Body', value: 'body' },
       ],
     },
+    {
+      displayName: 'Encrypted Tokens (JWE)',
+      name: 'jweEnabled',
+      type: 'boolean',
+      default: false,
+      // the generic type only: a service type that extends it does not offer the field
+      doNotInherit: true,
+      description:
+        "The provider sends its tokens encrypted as JWE for this workspace's public key. Give the provider the key URL shown below. A plain token response is refused.",
+    },
     { displayName: 'OAuth Token Data', name: 'oauthTokenData', type: 'hidden', default: {} },
   ],
 };

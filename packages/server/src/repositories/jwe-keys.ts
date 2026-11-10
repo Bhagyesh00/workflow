@@ -1,30 +1,47 @@
 /**
  * P6-16 (L15): a workspace's JWE key pairs for OAuth2 token responses (`oauth_jwe_keys`): the private key
- * encrypted, the public JWK served at /.well-known/jwks/:slug.json. Stub from C0; L15 fills it.
+ * encrypted, the public JWK served at /.well-known/jwks/:slug.json. Every query filters tenant_id.
  */
+import { and, desc, eq } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
-import type { OAuthJweKeyRow } from '../db/schema';
+import { type OAuthJweKeyRow, oauthJweKeys } from '../db/schema';
 
 export class JweKeyRepository {
   constructor(protected readonly db: DbOrTx) {}
 
   /** newest first */
-  async list(_tenantId: string): Promise<OAuthJweKeyRow[]> {
-    throw new Error('not implemented (L15)');
+  async list(tenantId: string): Promise<OAuthJweKeyRow[]> {
+    return this.db
+      .select()
+      .from(oauthJweKeys)
+      .where(eq(oauthJweKeys.tenantId, tenantId))
+      .orderBy(desc(oauthJweKeys.createdAt), desc(oauthJweKeys.kid));
   }
 
-  async get(_tenantId: string, _kid: string): Promise<OAuthJweKeyRow | undefined> {
-    throw new Error('not implemented (L15)');
+  async get(tenantId: string, kid: string): Promise<OAuthJweKeyRow | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(oauthJweKeys)
+      .where(and(eq(oauthJweKeys.tenantId, tenantId), eq(oauthJweKeys.kid, kid)));
+    return row;
   }
 
   async create(
-    _tenantId: string,
-    _input: { kid: string; privateEnc: string; publicJwk: Record<string, unknown> },
+    tenantId: string,
+    input: { kid: string; privateEnc: string; publicJwk: Record<string, unknown> },
   ): Promise<OAuthJweKeyRow> {
-    throw new Error('not implemented (L15)');
+    const [row] = await this.db
+      .insert(oauthJweKeys)
+      .values({ tenantId, kid: input.kid, privateEnc: input.privateEnc, publicJwk: input.publicJwk })
+      .returning();
+    return row;
   }
 
-  async delete(_tenantId: string, _kid: string): Promise<boolean> {
-    throw new Error('not implemented (L15)');
+  async delete(tenantId: string, kid: string): Promise<boolean> {
+    const rows = await this.db
+      .delete(oauthJweKeys)
+      .where(and(eq(oauthJweKeys.tenantId, tenantId), eq(oauthJweKeys.kid, kid)))
+      .returning({ kid: oauthJweKeys.kid });
+    return rows.length > 0;
   }
 }

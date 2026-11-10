@@ -9,6 +9,7 @@ import {
   HttpError,
   type NodeTypes,
   type OAuth2Data,
+  type OAuthTokenDecrypt,
   oauth2Request,
 } from '@workflow/core';
 import {
@@ -36,6 +37,8 @@ export interface CredentialTestOptions {
   nodeTypes: NodeTypes;
   tenantId: string;
   logger: Logger;
+  /** P6-16: opens a JWE token response of an OAuth2 credential with `jweEnabled` (the tenant's `decryptResponse`) */
+  oauthTokenDecrypt?: OAuthTokenDecrypt;
 }
 
 function resolveTemplates<T>(value: T, credentials: DataObject): T {
@@ -176,7 +179,14 @@ export async function testCredential(
     if (allowedDomains) base.allowedDomains = allowedDomains;
     let response: HttpFullResponse;
     if (isOAuth2) {
-      response = (await oauth2Request(http, full as OAuth2Data, base, async () => {})) as HttpFullResponse;
+      response = (await oauth2Request(
+        http,
+        full as OAuth2Data,
+        base,
+        async () => {},
+        undefined,
+        opts?.oauthTokenDecrypt,
+      )) as HttpFullResponse;
     } else {
       response = (await http.request(
         await applyAuthentication(resolvedType, full, base, createCredentialHelpers(http, allowedDomains)),
