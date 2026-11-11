@@ -195,6 +195,7 @@ async function contextText(
       workflowId: start.workflowId,
       definition,
       sendValues: run.sendValues,
+      userId: run.user.id,
     });
   }
   if (!definition.nodes.length) return 'The workflow is empty.';
@@ -470,6 +471,11 @@ function nodePreviews(
   outcome: RunOutcome,
   sendValues: boolean,
 ): VerifyNodePreview[] {
+  // P6-53: the Assistant only starts manual-mode runs (run-helper), so only the manual channel applies. A
+  // run whose manual channel is redacted (its own snapshot or a sub-workflow's report) shows the
+  // model counts and statuses only: no item values and no error text, as `previewOutput` shows no values
+  const redacted =
+    outcome.redaction?.own.manual === true || outcome.redaction?.fromSubWorkflows.manual === true;
   return definition.nodes.map((node) => {
     const runs = outcome.runData?.[node.name];
     const last = Array.isArray(runs) ? runs[runs.length - 1] : undefined;
@@ -478,7 +484,7 @@ function nodePreviews(
       const list = Array.isArray(items) ? items : [];
       return {
         itemCount: list.length,
-        ...(sendValues ? { items: list.slice(0, RUN_PREVIEW.items).map(previewItem) } : {}),
+        ...(sendValues && !redacted ? { items: list.slice(0, RUN_PREVIEW.items).map(previewItem) } : {}),
       };
     });
     return {
@@ -487,9 +493,16 @@ function nodePreviews(
       ran: true,
       status: last.executionStatus ?? null,
       outputs,
-      ...(last.error?.message ? { error: cut(redactSecrets(String(last.error.message)), 500) } : {}),
+      ...(last.error?.message && !redacted
+        ? { error: cut(redactSecrets(String(last.error.message)), 500) }
+        : {}),
     };
   });
+}
+
+/** P6-53: the manual channel is on in the run's own snapshot or in what its sub-workflows reported */
+function isManualRedacted(outcome: RunOutcome): boolean {
+  return outcome.redaction?.own.manual === true || outcome.redaction?.fromSubWorkflows.manual === true;
 }
 
 /** names of nodes that ran and returned no item on any output, so the nodes after them did not run */
@@ -611,7 +624,11 @@ export const verifyWorkflowTool: AssistantToolDefinition<VerifyInput> = {
       simulationNote: VERIFY_TEXTS.simulationNote,
       ...(empty ? { emptyOutputNote: empty } : {}),
       nodePreviews: previews,
-      ...(run.sendValues ? {} : { itemValues: 'Item values are hidden by a workspace setting' }),
+      ...(isManualRedacted(outcome)
+        ? { itemValues: 'Item values are redacted for this execution' }
+        : run.sendValues
+          ? {}
+          : { itemValues: 'Item values are hidden by a workspace setting' }),
     };
   },
 };

@@ -12,6 +12,7 @@ import { FlowCanvas } from '../components/canvas/FlowCanvas';
 import { ExecutionAnnotationPanel } from '../components/executions/ExecutionAnnotationPanel';
 import { RanOnVersion } from '../components/executions/RanOnVersion';
 import { NodeDetailsView } from '../components/ndv/NodeDetailsView';
+import { RedactedDataState } from '../components/redaction/RedactedDataState';
 import { Button } from '../components/ui/Button';
 import { Menu } from '../components/ui/Menu';
 import { Callout, EmptyState, PageLoader, StatusBadge } from '../components/ui/misc';
@@ -112,7 +113,8 @@ export function ExecutionDetailPage() {
   const canRun = can('workflow:execute', data);
   const canDelete = can('execution:delete', data);
   const retryable = ['error', 'crashed', 'canceled'].includes(data.status);
-  const error = data.state?.resultData?.error;
+  // P6-53: a redacted run keeps no error text in its state; what is left of it comes as `redactedError`
+  const error = data.state?.resultData?.error ?? data.redactedError ?? undefined;
   const canResume = Boolean(data.state?.executionData?.failedExecuteData);
 
   return (
@@ -205,6 +207,15 @@ export function ExecutionDetailPage() {
           {error.hint && <p>{error.hint}</p>}
           {error.code && <p className="mt-1 font-mono text-xs">{error.code}</p>}
         </Callout>
+      )}
+      {data.redactionInfo?.isRedacted && (
+        <div className="m-3 mb-0 rounded-xl border border-line bg-surface">
+          <RedactedDataState
+            info={data.redactionInfo}
+            executionId={data.id}
+            onRevealed={(revealed) => queryClient.setQueryData(queryKeys.execution(id), revealed)}
+          />
+        </div>
       )}
       <ExecutionAnnotationPanel execution={data} />
       <div className="relative min-h-0 flex-1">

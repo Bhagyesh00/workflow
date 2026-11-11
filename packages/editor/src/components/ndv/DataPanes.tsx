@@ -30,6 +30,7 @@ import type { NodePorts } from '../../lib/ports';
 import { getAncestors, getMainParents, type WorkflowGraph } from '../../lib/workflow-ops';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { CodeEditor } from '../code/CodeEditor';
+import { RedactedDataState, useRunRedaction } from '../redaction/RedactedDataState';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { Select } from '../ui/Field';
@@ -442,6 +443,9 @@ export function OutputPane({
   const [editing, setEditing] = useState(false);
   const [compare, setCompare] = useState(false);
   useEffect(() => setRunIndex(Math.max(0, runs.length - 1)), [runs.length]);
+  // P6-53: a node that ran and shows no items may be a redacted run; the run is read to find out
+  const outputItems = pinned ?? getNodeOutput(runData, node.name, output, runIndex) ?? [];
+  const redaction = useRunRedaction(runs.length > 0 && outputItems.length === 0 && !pinned && !running);
 
   if (ports.isSubNode) {
     return (
@@ -587,7 +591,13 @@ export function OutputPane({
         </ul>
       )}
       <div className="min-h-0 flex-1 border-t border-line">
-        {task?.error && !pinned ? (
+        {redaction.info && redaction.executionId && !pinned ? (
+          <RedactedDataState
+            info={redaction.info}
+            executionId={redaction.executionId}
+            onRevealed={redaction.reveal}
+          />
+        ) : task?.error && !pinned ? (
           <ErrorPanel error={task.error} />
         ) : compare && previous ? (
           <Comparison before={previous} after={items} />

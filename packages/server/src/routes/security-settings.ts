@@ -12,6 +12,8 @@ import { parse } from '../http/errors';
 const policyBody = z.object({
   personalSpacePublishing: z.boolean().optional(),
   personalSpaceSharing: z.boolean().optional(),
+  /** P6-53: the workspace's redaction floor */
+  redaction: z.object({ floor: z.enum(['off', 'production', 'all']) }).optional(),
 });
 
 export function registerSecuritySettingsRoutes(app: FastifyInstance, ctx: ServerContext): void {

@@ -7,12 +7,21 @@
  * owner of the public policy route; later items add their fields to the same two handlers.
  */
 import { z } from 'zod';
+import type { SecurityPolicyDTO } from '../services/security-settings';
 import type { ApiRoute } from './public-api';
 
 const policyBody = z.object({
   personalSpacePublishing: z.boolean().optional(),
   personalSpaceSharing: z.boolean().optional(),
+  /** P6-53: the workspace's redaction floor (the public name of the REST `redaction`) */
+  redactionEnforcement: z.object({ floor: z.enum(['off', 'production', 'all']) }).optional(),
 });
+
+/** the public shape: the REST answer with `redaction` named `redactionEnforcement` */
+function publicPolicy(dto: SecurityPolicyDTO) {
+  const { redaction, ...rest } = dto;
+  return { ...rest, redactionEnforcement: redaction };
+}
 
 export const PUBLIC_SECURITY_POLICY_ROUTES: ApiRoute[] = [
   {
@@ -23,7 +32,9 @@ export const PUBLIC_SECURITY_POLICY_ROUTES: ApiRoute[] = [
     access: { scope: 'securitySettings:manage' },
     scope: 'securitySettings:manage',
     response: 'SecurityPolicy',
-    handler: async (ctx, { auth }) => ({ data: await ctx.securitySettings.get(auth.tenant.id) }),
+    handler: async (ctx, { auth }) => ({
+      data: publicPolicy(await ctx.securitySettings.get(auth.tenant.id)),
+    }),
   },
   {
     method: 'PUT',
@@ -34,8 +45,10 @@ export const PUBLIC_SECURITY_POLICY_ROUTES: ApiRoute[] = [
     scope: 'securitySettings:manage',
     body: policyBody,
     response: 'SecurityPolicy',
-    handler: async (ctx, { auth, body }) => ({
-      data: await ctx.securitySettings.update(auth.tenant.id, body, auth.user.id),
-    }),
+    handler: async (ctx, { auth, body }) => {
+      const { redactionEnforcement, ...flags } = body;
+      const patch = { ...flags, ...(redactionEnforcement ? { redaction: redactionEnforcement } : {}) };
+      return { data: publicPolicy(await ctx.securitySettings.update(auth.tenant.id, patch, auth.user.id)) };
+    },
   },
 ];

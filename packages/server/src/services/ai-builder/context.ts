@@ -20,6 +20,7 @@ import {
 import type { ServerContext } from '../../context';
 import type { TenantRow } from '../../db/schema';
 import { ApiError } from '../../http/errors';
+import { redactExecution } from '../redaction/read';
 import { estimateTokens } from './compaction';
 
 export interface BuildWorkflowContextInput {
@@ -31,6 +32,8 @@ export interface BuildWorkflowContextInput {
   definition: WorkflowDefinition;
   /** the tenant's "send data values" setting */
   sendValues: boolean;
+  /** P6-53: who the model works for; the last run is read as this user (absent: as no one, credentials count as unusable) */
+  userId?: string;
 }
 
 export interface SanitizeOptions {
@@ -159,11 +162,21 @@ export async function executionContext(input: {
   tenant: TenantRow;
   workflowId: string;
   sendValues: boolean;
+  userId?: string;
 }): Promise<string> {
   const { ctx, tenant, workflowId, sendValues } = input;
   const [last] = await ctx.repos.executions.list(tenant.id, { workflowId, limit: 1 });
   if (!last || last.workflowId !== workflowId) return 'This workflow has not run yet.';
-  const data = await ctx.repos.executions.getData(tenant.id, last.id);
+  // P6-53: the run is read through `redactExecution` (never with `reveal`): a redacted run gives the model
+  // the node names and statuses only, whatever the "send data values" setting says
+  const read = await redactExecution(
+    ctx.serviceDeps,
+    { tenantId: tenant.id, userId: input.userId ?? NO_VIEWER },
+    last,
+    await ctx.repos.executions.getData(tenant.id, last.id),
+  );
+  if (read.redactionInfo?.isRedacted) return redactedRunContext(read.data, last.status);
+  const data = read.data;
   const runData = (data?.state as { resultData?: { runData?: Record<string, RunTask[]> } } | null)?.resultData
     ?.runData;
   if (!runData || !Object.keys(runData).length) return 'The last run of this workflow has no node output.';
@@ -191,6 +204,22 @@ export async function executionContext(input: {
   return `Output of each node in the last run (status ${last.status}):\n${wrapUntrusted('execution', json)}`;
 }
 
+/** a viewer id no member has: a run read for no identified user passes only when it names no credential */
+const NO_VIEWER = '00000000-0000-0000-0000-000000000000';
+
+/** a redacted run: the nodes that ran with their status and run count, no schema and no value */
+function redactedRunContext(data: { state: unknown } | undefined, status: string): string {
+  const runData = (data?.state as { resultData?: { runData?: Record<string, RunTask[]> } } | null)?.resultData
+    ?.runData;
+  const nodes = Object.entries(runData ?? {}).map(([name, runs]) => ({
+    node: name,
+    runs: Array.isArray(runs) ? runs.length : 0,
+    status: (Array.isArray(runs) ? runs[runs.length - 1]?.executionStatus : undefined) ?? null,
+  }));
+  return `The last run of this workflow (status ${status}) is redacted: its data is not shared, only which nodes ran.
+${wrapUntrusted('execution', JSON.stringify(nodes))}`;
+}
+
 export async function buildWorkflowContext(input: BuildWorkflowContextInput): Promise<string> {
   const { ctx, tenant, workflowId, definition, sendValues } = input;
   const row = await ctx.repos.workflows.get(tenant.id, workflowId);
@@ -199,7 +228,7 @@ export async function buildWorkflowContext(input: BuildWorkflowContextInput): Pr
     definition.nodes?.length
       ? `The current workflow (nodes, parameters and connections${sendValues ? '' : '; values are hidden by a workspace setting'}):\n${wrapUntrusted('workflow', fittedWorkflow(definition, sendValues))}`
       : 'The workflow is empty.',
-    await executionContext({ ctx, tenant, workflowId: row.id, sendValues }),
+    await executionContext({ ctx, tenant, workflowId: row.id, sendValues, userId: input.userId }),
   ];
   return parts.join('\n\n');
 }
