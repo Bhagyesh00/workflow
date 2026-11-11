@@ -1,10 +1,17 @@
 /**
  * /rest/source-control status, push, pull and remote content (P6-07, L4), as n8n's source control controller.
- * Status (direction push), push and remote content are in the list filter form: any signed-in user, and the
- * service narrows to the projects of `pushableProjects` (a name outside the caller's own status is refused; n8n's
- * `getWorkflowsInAdminProjectsFromContext`). Status with direction pull and the pull need `sourceControl:pull`.
- * The schemas are exported for the public rows (routes/public-source-control.ts, L5).
- * stub (L4): the routes are registered with their final gates; the service methods throw.
+ * Status (direction push), push and remote content are in the list filter form the plan names for them (plan-S4
+ * C0c item 3 and critic row 4: "the list filter form through `pushableProjects`"): any signed-in user, and the
+ * service narrows to the projects of `pushableProjects` (services/source-control/scope.ts, the `sourceControl:push`
+ * filter: `'all'` for the global scope, else the team projects whose role holds it, as
+ * `ctx.access.listFilter(auth, 'sourceControl:push')` gives; a name outside the caller's own status is refused;
+ * n8n's `getWorkflowsInAdminProjectsFromContext`). The filter is read once, in the service, under the lease, so
+ * the route does not read it again. Status with direction pull and the pull need `sourceControl:pull`. Every error
+ * text these routes answer passes `redactSecrets` in `SourceControlSyncService`.
+ * The schemas are exported for the public rows (routes/public-source-control.ts, L5). Answers in this order: a bad
+ * body or query 400, source control not connected 412 (n8n's middleware), then the service's own refusals (a name
+ * outside the caller's status 400, a remote workflow outside the caller's pushable projects 403, a conflict 409,
+ * another operation holding the lease 409).
  */
 import type { SourceControlledFileType } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
