@@ -1,9 +1,8 @@
 /**
  * Track Time Saved (P6-56, n8n "Time Saved"): adds minutes to the run's time saved when the workflow's
  * `timeSavedMode` is `dynamic`, once for the node or per input item, and passes its input through.
- * stub (L12): the description is final; L12 fills `execute`.
  */
-import type { NodeType } from '@workflow/workflow';
+import { NodeOperationError, type NodeType } from '@workflow/workflow';
 
 export const TimeSavedNode: NodeType = {
   description: {
@@ -46,7 +45,28 @@ export const TimeSavedNode: NodeType = {
     ],
   },
 
-  async execute() {
-    throw new Error('not implemented (L12)');
+  async execute(ctx) {
+    const items = ctx.getInputData();
+    const mode = String(ctx.getNodeParameter('mode', 0, 'once'));
+    const read = (itemIndex: number): number => {
+      const raw = ctx.getNodeParameter('minutesSaved', itemIndex, 0);
+      const minutes = typeof raw === 'number' ? raw : Number(raw);
+      if (!Number.isFinite(minutes)) {
+        throw new NodeOperationError(ctx.getNode(), `Time saved must be a number, got: ${String(raw)}`, {
+          itemIndex,
+        });
+      }
+      if (minutes < 0) {
+        throw new NodeOperationError(ctx.getNode(), `Time saved cannot be negative, got: ${minutes}`, {
+          itemIndex,
+        });
+      }
+      return Math.trunc(minutes);
+    };
+    let total = 0;
+    if (mode === 'perItem') for (let i = 0; i < items.length; i++) total += read(i);
+    else total = read(0);
+    ctx.setMetadata({ timeSaved: { minutes: total } });
+    return [items];
   },
 };
