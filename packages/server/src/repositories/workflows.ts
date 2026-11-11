@@ -59,7 +59,7 @@ export interface WorkflowListFilter extends AccessListOptions {
   folderId?: string;
   /**
    * P6-49 (S3): only workflows with a node of one of these types (`executionBlockedBy=restrictedNode`);
-   * an empty list matches none. Type only from C0: L4 writes the query (ignored until then).
+   * an empty list matches none. Any number of types: it is not the capped `nodeTypes` of the search.
    */
   usesNodeTypes?: string[];
   /** 'false' (default) hides archived workflows, 'true' shows only them, 'all' both */
@@ -100,6 +100,17 @@ export class WorkflowRepository {
       }
       conditions.push(
         alternatives.length === 1 ? alternatives[0] : sql`(${sql.join(alternatives, sql` or `)})`,
+      );
+    }
+    if (filter.usesNodeTypes !== undefined) {
+      // P6-49: any node of the workflow is of a listed type; a query of its own, so the 20 type cap of the
+      // search does not apply, and an empty list matches none
+      if (filter.usesNodeTypes.length === 0) return [];
+      conditions.push(
+        sql`exists (select 1 from jsonb_array_elements(${workflows.nodes}) n where n->>'type' in (${sql.join(
+          filter.usesNodeTypes.map((t) => sql`${t}`),
+          sql`, `,
+        )}))`,
       );
     }
     if (filter.active !== undefined) conditions.push(eq(workflows.active, filter.active));
