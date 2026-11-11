@@ -108,6 +108,14 @@ describe('discover', () => {
     expect(push?.inputSchema).toMatchObject({ type: 'object' });
     expect(JSON.stringify(push?.inputSchema)).toContain('fileNames');
     expect(push?.outputSchema).toBeTruthy();
+    // the answer carries no `components`, so an output schema holds no link to one (the rows of PushResult are inlined)
+    const pushOut = JSON.stringify(push?.outputSchema);
+    expect(pushOut).not.toContain('$ref');
+    expect(pushOut).toContain('conflict');
+    expect(pushOut).toContain('files');
+    for (const e of entriesOf(withSchemas.json())) {
+      expect(JSON.stringify(e.outputSchema), keyOfEntry(e)).not.toContain('#/components/');
+    }
     expect((await discover(key, '?include=nope')).statusCode).toBe(400);
   });
 

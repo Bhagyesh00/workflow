@@ -11,7 +11,8 @@
  * The schemas are exported for the public rows (routes/public-source-control.ts, L5). Answers in this order: a bad
  * body or query 400, source control not connected 412 (n8n's middleware), then the service's own refusals (a name
  * outside the caller's status 400, a remote workflow outside the caller's pushable projects 403, a conflict 409,
- * another operation holding the lease 409).
+ * another operation holding the lease 409). A caller with no pushable project gets an empty push status (200) and a
+ * refused push (400) before any lease, fetch or 412; a body of `{}` is 400, never 403.
  */
 import type { SourceControlledFileType } from '@workflow/workflow';
 import type { FastifyInstance, FastifyRequest } from 'fastify';

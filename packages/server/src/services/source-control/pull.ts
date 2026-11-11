@@ -3,7 +3,8 @@
  * parse (one zod schema per kind), the status for the caller's projects; a conflict or a local change without
  * `force` gives 409 with the list. Then, after the Git session is closed, the writes in n8n's order (projects,
  * folders, credentials, workflows, then deletes, tags, variables) through the services inside `withPullWrites`,
- * the `contentImport` policy per workflow, then `autoPublish`.
+ * the `contentImport` policy per workflow, then `autoPublish` once `withPullWrites` has returned (no trigger or
+ * timer an activation starts keeps the bypass). The lease is extended before every file's write and every publish.
  *
  * Ids: the services mint every local id, so an incoming resource is created first and its git id recorded against
  * the new local id (`SyncIdMap.record`); a new workflow is made empty first and filled once every id is known, so
@@ -48,7 +49,8 @@ import type {
   VariableStub,
   WorkflowFile,
 } from './import-schemas';
-import { resolveOwner } from './owners';
+import type { SourceControlLease } from './lock';
+import { findOwner, resolveOwner } from './owners';
 import { fileVersionId, localSnapshot } from './status';
 import { readBranch, rowKey, statusRows, withLease, withSession } from './sync';
 
@@ -90,13 +92,23 @@ function mergeStub(stored: DataObject, remote: DataObject): DataObject {
   return merged;
 }
 
-/** the text of a refused file, as the pull result shows it (no secret, no stack) */
+/** the lease codes: a lost or busy lease stops the whole pull, never one file */
+const LEASE_CODES: ReadonlySet<string> = new Set(['source_control_busy', 'source_control_lease_lost']);
+
+/**
+ * the text of a refused file, as the pull result shows it (no secret, no stack): a policy violation, a save rule
+ * (400), a name clash (409) or the team project limit (403 `plan_limit`); a lease error is never a file's refusal
+ */
 function refusalOf(error: unknown): string[] | undefined {
   if (error instanceof PolicyViolationError) {
     return error.violations.map((v) => violationMessage([v]));
   }
-  if (error instanceof ApiError && error.statusCode === 400) return [redactSecrets(error.message)];
-  return undefined;
+  if (!(error instanceof ApiError) || LEASE_CODES.has(error.code)) return undefined;
+  const refused =
+    error.statusCode === 400 ||
+    error.statusCode === 409 ||
+    (error.statusCode === 403 && error.code === 'plan_limit');
+  return refused ? [redactSecrets(error.message)] : undefined;
 }
 
 class PullRun {
@@ -117,6 +129,8 @@ class PullRun {
     readonly remote: Map<string, ParsedFile>,
     readonly scope: Scope,
     readonly rows: SourceControlledFile[],
+    /** extended before every file's write and every publish: a lost lease stops the pull with 409 */
+    readonly lease: SourceControlLease,
   ) {
     this.tenantId = auth.tenant.id;
     this.actor = { userId: auth.user.id };
@@ -141,6 +155,8 @@ class PullRun {
 
   /** runs one file's writes; a refusal by a policy or a save rule skips that file and lists it */
   private async perFile(row: { id: string; name: string }, fn: () => Promise<void>): Promise<boolean> {
+    // the lease first, outside the refusal handling: a lost lease (409) stops the run before the next write
+    await this.lease.extend();
     try {
       await fn();
       return true;
@@ -152,13 +168,20 @@ class PullRun {
     }
   }
 
-  /** the local project a file's owner names (personal by email, team through the map); none: the puller's own */
-  private async ownerProject(owner: FileOwner | null): Promise<string> {
-    if (owner) return resolveOwner(this.deps, this.tenantId, owner, { userId: this.auth.user.id }, this.map);
-    return this.ctx.access.targetProject(this.auth, null);
+  /**
+   * the local project a file's owner names (personal by email, team through the map); none: the puller's own. A
+   * missing team project is made (through the project service) only for a caller with every project; a caller
+   * limited to some projects only looks up, so a file of an unknown team is outside its projects.
+   */
+  private async ownerProject(owner: FileOwner | null): Promise<string | undefined> {
+    if (!owner) return this.ctx.access.targetProject(this.auth, null);
+    const puller = { userId: this.auth.user.id, auth: this.auth };
+    if (this.scope !== 'all') return findOwner(this.deps, this.tenantId, owner, puller, this.map);
+    return resolveOwner(this.deps, this.tenantId, owner, puller, this.map);
   }
 
-  async run(autoPublish: NonNullable<PullWorkFolderBody['autoPublish']>): Promise<void> {
+  /** every write, inside `withPullWrites`; the publish runs after it (`publish`) */
+  async run(): Promise<void> {
     await this.projects();
     await this.folders();
     await this.credentials();
@@ -171,7 +194,6 @@ class PullRun {
       if (file?.type === 'variables') await this.syncVariables(file.data, null);
     }
     this.listSingleFiles();
-    await this.publish(autoPublish);
   }
 
   // ---- projects (team projects, with their variable stubs) ----
@@ -182,32 +204,33 @@ class PullRun {
       const data: ProjectFile = file.data;
       const mapped = this.map.localIdFor('project', file.id);
       const existing = mapped ? await this.deps.repos.projects.get(this.tenantId, mapped) : undefined;
-      let localId: string;
-      if (existing) {
-        if (!this.inScope(existing.id)) continue;
-        localId = existing.id;
-        if (
-          existing.name !== data.name ||
-          (existing.description ?? null) !== data.description ||
-          JSON.stringify(existing.icon ?? null) !== JSON.stringify(data.icon)
-        ) {
-          await this.ctx.projects.update(this.auth, localId, {
+      if (existing ? !this.inScope(existing.id) : this.scope !== 'all') continue;
+      let localId = existing?.id ?? '';
+      const ok = await this.perFile(row, async () => {
+        if (existing) {
+          if (
+            existing.name !== data.name ||
+            (existing.description ?? null) !== data.description ||
+            JSON.stringify(existing.icon ?? null) !== JSON.stringify(data.icon)
+          ) {
+            await this.ctx.projects.update(this.auth, localId, {
+              name: data.name,
+              icon: data.icon,
+              description: data.description,
+            });
+          }
+        } else {
+          const created = await this.ctx.projects.create(this.auth, {
             name: data.name,
             icon: data.icon,
             description: data.description,
           });
+          localId = created.id;
+          this.map.record('project', file.id, localId, {});
         }
-      } else {
-        if (this.scope !== 'all') continue;
-        const created = await this.ctx.projects.create(this.auth, {
-          name: data.name,
-          icon: data.icon,
-          description: data.description,
-        });
-        localId = created.id;
-        this.map.record('project', file.id, localId, {});
-      }
-      await this.syncVariables(data.variableStubs ?? [], localId);
+        await this.syncVariables(data.variableStubs ?? [], localId);
+      });
+      if (!ok) continue;
       this.imported.push({ type: 'project', gitId: file.id, localId, file });
       this.files.push(row);
     }
@@ -217,7 +240,8 @@ class PullRun {
   private async folderProject(folder: FoldersFile['folders'][number]): Promise<string | undefined> {
     const team = this.map.localIdFor('project', folder.homeProjectId);
     if (team && (await this.deps.repos.projects.get(this.tenantId, team))) return team;
-    // a personal project's folder: the owner of a workflow file inside it, else the puller
+    // a personal project's folder: the owner of a workflow file inside it, else the puller (for a caller limited to
+    // some projects `ownerProject` only looks the owner up and makes no project)
     for (const file of this.remote.values()) {
       if (file.type === 'workflow' && file.data.parentFolderId === folder.id) {
         return this.ownerProject(file.data.owner);
@@ -241,35 +265,7 @@ class PullRun {
       );
       if (index === -1) index = 0;
       const [folder] = pending.splice(index, 1);
-      const projectId = await this.folderProject(folder);
-      if (!projectId || !this.inScope(projectId)) continue;
-      const parentLocal = folder.parentFolderId
-        ? this.map.localIdFor('folder', folder.parentFolderId)
-        : undefined;
-      const parent = parentLocal ? await this.deps.repos.folders.get(this.tenantId, parentLocal) : undefined;
-      const parentFolderId = parent && parent.projectId === projectId ? parent.id : null;
-      const mapped = this.map.localIdFor('folder', folder.id);
-      const existing = mapped ? await this.deps.repos.folders.get(this.tenantId, mapped) : undefined;
-      if (existing) {
-        if (existing.name !== folder.name || existing.parentFolderId !== parentFolderId) {
-          await this.ctx.folders.update(
-            this.tenantId,
-            existing.id,
-            {
-              ...(existing.name !== folder.name ? { name: folder.name } : {}),
-              ...(existing.parentFolderId !== parentFolderId ? { parentFolderId } : {}),
-            },
-            this.actor,
-          );
-        }
-        continue;
-      }
-      const created = await this.ctx.folders.create(
-        this.tenantId,
-        { name: folder.name, parentFolderId, projectId },
-        this.actor,
-      );
-      this.map.record('folder', folder.id, created.id, {});
+      await this.perFile(folder, () => this.writeFolder(folder));
     }
     if (this.scope !== 'all') return;
     for (const entry of this.map.entries('folder')) {
@@ -286,6 +282,45 @@ class PullRun {
     }
   }
 
+  /**
+   * one folder of folders.json: created or changed in its project when that project is the caller's; a mapped
+   * folder of another project (or one the file would move to another project) is left as it is
+   */
+  private async writeFolder(folder: FoldersFile['folders'][number]): Promise<void> {
+    const projectId = await this.folderProject(folder);
+    if (!projectId || !this.inScope(projectId)) return;
+    // the mapped folder, else a folder of this workspace with the git id itself (the first pusher's own)
+    const mapped = this.map.localIdFor('folder', folder.id);
+    const existing = await this.deps.repos.folders.get(this.tenantId, mapped ?? folder.id);
+    if (existing && (existing.projectId !== projectId || !this.inScope(existing.projectId))) return;
+    if (existing && !mapped) this.map.record('folder', folder.id, existing.id, {});
+    const parentLocal = folder.parentFolderId
+      ? (this.map.localIdFor('folder', folder.parentFolderId) ?? folder.parentFolderId)
+      : undefined;
+    const parent = parentLocal ? await this.deps.repos.folders.get(this.tenantId, parentLocal) : undefined;
+    const parentFolderId = parent && parent.projectId === projectId ? parent.id : null;
+    if (existing) {
+      if (existing.name !== folder.name || existing.parentFolderId !== parentFolderId) {
+        await this.ctx.folders.update(
+          this.tenantId,
+          existing.id,
+          {
+            ...(existing.name !== folder.name ? { name: folder.name } : {}),
+            ...(existing.parentFolderId !== parentFolderId ? { parentFolderId } : {}),
+          },
+          this.actor,
+        );
+      }
+      return;
+    }
+    const created = await this.ctx.folders.create(
+      this.tenantId,
+      { name: folder.name, parentFolderId, projectId },
+      this.actor,
+    );
+    this.map.record('folder', folder.id, created.id, {});
+  }
+
   // ---- credentials (stubs) ----
   private async credentials(): Promise<void> {
     const shareGlobally = (await this.ctx.access.scopesForAuth(this.auth)).has('credential:shareGlobally');
@@ -298,6 +333,10 @@ class PullRun {
       let localId = existing?.id ?? '';
       const ok = await this.perFile(row, async () => {
         if (existing) {
+          // the mapped row's project decides, never the owner the file names (decisions G)
+          if (!this.inScope(existing.projectId)) {
+            throw new ApiError(400, 'source_control_scope', OUTSIDE_PROJECTS);
+          }
           const merged = mergeStub(this.ctx.credentials.decrypt(existing), data.data);
           await this.ctx.credentials.update(this.tenantId, existing.id, {
             name: data.name,
@@ -308,7 +347,9 @@ class PullRun {
           return;
         }
         const projectId = await this.ownerProject(data.owner);
-        if (!this.inScope(projectId)) throw new ApiError(400, 'source_control_scope', OUTSIDE_PROJECTS);
+        if (!projectId || !this.inScope(projectId)) {
+          throw new ApiError(400, 'source_control_scope', OUTSIDE_PROJECTS);
+        }
         // a stub: secrets empty; the service encrypts it fresh under this workspace's binding
         const created = await this.ctx.credentials.create(
           this.tenantId,
@@ -341,6 +382,9 @@ class PullRun {
       let localId = existing?.id ?? '';
       const ok = await this.perFile(row, async () => {
         if (existing) {
+          if (!this.inScope(existing.projectId)) {
+            throw new ApiError(400, 'source_control_scope', OUTSIDE_PROJECTS);
+          }
           if (existing.name !== data.name) {
             await this.ctx.dataTables.patch(this.tenantId, existing.id, { name: data.name }, this.actor);
           }
@@ -348,7 +392,9 @@ class PullRun {
           return;
         }
         const projectId = await this.ownerProject({ type: 'team', teamId: data.projectId, teamName: '' });
-        if (!this.inScope(projectId)) throw new ApiError(400, 'source_control_scope', OUTSIDE_PROJECTS);
+        if (!projectId || !this.inScope(projectId)) {
+          throw new ApiError(400, 'source_control_scope', OUTSIDE_PROJECTS);
+        }
         const made = await this.ctx.dataTables.create(
           this.tenantId,
           { name: data.name, columns, projectId },
@@ -411,7 +457,9 @@ class PullRun {
       let made = false;
       const ok = await this.perFile(row, async () => {
         const projectId = existing?.projectId ?? (await this.ownerProject(file.owner));
-        if (!this.inScope(projectId)) throw new ApiError(400, 'source_control_scope', OUTSIDE_PROJECTS);
+        if (!projectId || !this.inScope(projectId)) {
+          throw new ApiError(400, 'source_control_scope', OUTSIDE_PROJECTS);
+        }
         await evaluateWorkflow(this.deps, 'contentImport', {
           tenantId: this.tenantId,
           projectId,
@@ -441,37 +489,15 @@ class PullRun {
     const def = this.map.rewriteDefinition(item.file, 'toLocal');
     const before = await service.get(this.tenantId, localId);
     const ok = await this.perFile(row, async () => {
-      if (before.isArchived && !def.isArchived) {
-        await this.ctx.workflowArchive.unarchive(this.tenantId, localId, this.actor);
-      }
-      const update = {
-        versionId: before.versionId,
-        name: def.name,
-        nodes: def.nodes,
-        connections: def.connections,
-        settings: def.settings ?? {},
-        stickyNotes: def.stickyNotes ?? [],
-        nodeGroups: def.nodeGroups ?? [],
-      } as Parameters<WorkflowService['update']>[2];
-      const saved = await service.update(this.tenantId, localId, update, this.actor, 'Pulled from Git');
-      if (def.description) {
-        await service.updateVersion(
-          this.tenantId,
-          localId,
-          saved.versionId,
-          { description: def.description.slice(0, 2000) },
-          this.actor,
-        );
-      }
-      const folder = def.parentFolderId
-        ? await this.deps.repos.folders.get(this.tenantId, def.parentFolderId)
-        : undefined;
-      const folderId = folder && folder.projectId === before.projectId ? folder.id : null;
-      if (before.folderId !== folderId) {
-        await this.ctx.workflowArchive.move(this.tenantId, [localId], folderId, this.actor);
-      }
-      if (def.isArchived && !before.isArchived) {
+      if (!before.isArchived) return this.saveWorkflow(service, localId, before, def);
+      // an archived workflow takes no save: unarchived for it, archived again when the file says so or the save
+      // is refused
+      await this.ctx.workflowArchive.unarchive(this.tenantId, localId, this.actor);
+      try {
+        await this.saveWorkflow(service, localId, before, def);
+      } catch (error) {
         await this.ctx.workflowArchive.archive(this.tenantId, localId, this.actor, { publicApi: true });
+        throw error;
       }
     });
     if (!ok) {
@@ -490,6 +516,44 @@ class PullRun {
     const parsed = this.remote.get(row.file) as ParsedFile;
     this.imported.push({ type: 'workflow', gitId, localId, file: parsed });
     this.files.push(row);
+  }
+
+  /** the file's definition saved on an unarchived workflow, its folder set, then archived when the file says so */
+  private async saveWorkflow(
+    service: WorkflowService,
+    localId: string,
+    before: Awaited<ReturnType<WorkflowService['get']>>,
+    def: WorkflowFile,
+  ): Promise<void> {
+    const update = {
+      versionId: before.versionId,
+      name: def.name,
+      nodes: def.nodes,
+      connections: def.connections,
+      settings: def.settings ?? {},
+      stickyNotes: def.stickyNotes ?? [],
+      nodeGroups: def.nodeGroups ?? [],
+    } as Parameters<WorkflowService['update']>[2];
+    const saved = await service.update(this.tenantId, localId, update, this.actor, 'Pulled from Git');
+    if (def.description) {
+      await service.updateVersion(
+        this.tenantId,
+        localId,
+        saved.versionId,
+        { description: def.description.slice(0, 2000) },
+        this.actor,
+      );
+    }
+    const folder = def.parentFolderId
+      ? await this.deps.repos.folders.get(this.tenantId, def.parentFolderId)
+      : undefined;
+    const folderId = folder && folder.projectId === before.projectId ? folder.id : null;
+    if (before.folderId !== folderId) {
+      await this.ctx.workflowArchive.move(this.tenantId, [localId], folderId, this.actor);
+    }
+    if (def.isArchived) {
+      await this.ctx.workflowArchive.archive(this.tenantId, localId, this.actor, { publicApi: true });
+    }
   }
 
   // ---- deletes (real, as n8n; listed) ----
@@ -621,12 +685,14 @@ class PullRun {
     }
   }
 
-  // ---- publish (autoPublish only) ----
-  private async publish(mode: NonNullable<PullWorkFolderBody['autoPublish']>): Promise<void> {
+  // ---- publish (autoPublish only), after the writes and outside `withPullWrites`: no trigger or timer it starts
+  // keeps the bypass (publish is allowed on a protected workspace and needs none) ----
+  async publish(mode: NonNullable<PullWorkFolderBody['autoPublish']>): Promise<void> {
     if (mode === 'none') return;
     for (const workflow of this.pulledWorkflows) {
       if (workflow.archived) continue;
       if (mode === 'published' && !workflow.wasPublished) continue;
+      await this.lease.extend();
       try {
         await this.ctx.workflows.setActive(this.tenantId, workflow.id, true, this.actor);
       } catch (error) {
@@ -685,9 +751,11 @@ export async function pullWorkFolder(
       }
     }
     await lease.extend();
-    const run = new PullRun(deps, auth, map, remote.parsed, scope, rows);
+    const run = new PullRun(deps, auth, map, remote.parsed, scope, rows, lease);
     try {
-      await withPullWrites(() => run.run(body.autoPublish ?? 'none'));
+      await withPullWrites(() => run.run());
+      // the activations start triggers and timers: never inside the bypass, so none of them inherits it
+      await run.publish(body.autoPublish ?? 'none');
     } finally {
       // what was written stays mapped, even when a later step failed
       await run.recordVersions();

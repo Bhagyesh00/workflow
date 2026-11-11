@@ -25,7 +25,7 @@ import type { AuthContext } from '../../http/auth';
 import { ApiError } from '../../http/errors';
 import type { workflowDataSchema } from '../../http/schemas';
 import { MISSING_SCOPE_MESSAGE } from '../access';
-import { type GitDeps, type GitSession, withRepo } from './git-repo';
+import { type GitDeps, type GitRemote, type GitSession, withRepo } from './git-repo';
 import { SyncIdMap } from './id-map';
 import { type ParsedFile, parseFile } from './import-schemas';
 import { acquireLease, type SourceControlLease } from './lock';
@@ -71,17 +71,46 @@ export async function withLease<T>(
   }
 }
 
-/** one Git session on the workspace's remote: the key or token is decrypted for this call only */
+/** an error's text with each of `secrets` (and every known secret pattern) replaced, message and stack */
+function scrubError(error: unknown, secrets: string[]): void {
+  if (!(error instanceof Error)) return;
+  const scrub = (text: string) => {
+    let out = text;
+    for (const secret of secrets) out = out.split(secret).join('[redacted]');
+    return redactSecrets(out);
+  };
+  if (typeof error.message === 'string') error.message = scrub(error.message);
+  if (typeof error.stack === 'string') error.stack = scrub(error.stack);
+}
+
+/** the decrypted secrets of one remote (a token or a key; short values are not searched for) */
+function secretsOf(remote: GitRemote): string[] {
+  const value = remote.auth.kind === 'ssh' ? remote.auth.privateKey : remote.auth.token;
+  const out = value && value.length >= 6 ? [value] : [];
+  // a key also leaves no line of its body behind
+  if (remote.auth.kind === 'ssh') {
+    for (const line of value.split(/\r?\n/)) if (line.trim().length >= 16) out.push(line.trim());
+  }
+  return out;
+}
+
+/**
+ * one Git session on the workspace's remote: the key or token is decrypted for this call only, and no error thrown
+ * inside it carries the key or the token (message and stack, the parts an answer or a log line can show)
+ */
 export function withSession<T>(
   deps: ServiceDeps,
   tenantId: string,
   fn: (session: GitSession, settings: SourceControlSettingsRow) => Promise<T>,
 ): Promise<T> {
-  return deps
-    .context()
-    .sourceControl.withRemote(tenantId, (remote, settings) =>
-      withRepo(gitDepsOf(deps), remote, (session) => fn(session, settings)),
-    );
+  return deps.context().sourceControl.withRemote(tenantId, async (remote, settings) => {
+    try {
+      return await withRepo(gitDepsOf(deps), remote, (session) => fn(session, settings));
+    } catch (error) {
+      scrubError(error, secretsOf(remote));
+      throw error;
+    }
+  });
 }
 
 /** fetches the branch (shallow) and reads and parses its files; `afterFetch` runs between the two steps */
@@ -128,8 +157,8 @@ async function redacted<T>(op: () => Promise<T>): Promise<T> {
   try {
     return await op();
   } catch (error) {
-    if (error instanceof Error && typeof error.message === 'string')
-      error.message = redactSecrets(error.message);
+    // the stack too: the error handler logs it for an error that is not an ApiError
+    scrubError(error, []);
     throw error;
   }
 }
@@ -154,9 +183,11 @@ export class SourceControlSyncService {
   ): Promise<SourceControlledFile[]> {
     const tenantId = auth.tenant.id;
     const deps = this.deps;
+    // the caller's projects first: a caller with none gets an empty status with no lease, fetch or 412
+    const scope =
+      query.direction === 'push' ? await pushableProjects(deps, auth) : await pullableProjects(deps, auth);
+    if (scope !== 'all' && scope.size === 0) return [];
     return withLease(deps, tenantId, async (lease) => {
-      const scope =
-        query.direction === 'push' ? await pushableProjects(deps, auth) : await pullableProjects(deps, auth);
       const remote = await withSession(deps, tenantId, (session, settings) =>
         readBranch(session, settings.branchName, () => lease.extend()),
       );

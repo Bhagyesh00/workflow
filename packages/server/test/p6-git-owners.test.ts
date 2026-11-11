@@ -1,7 +1,8 @@
 /**
  * P6-74 (L3): `resolveOwner`, the project a pulled file lands in. A personal owner maps by email to that member's
  * personal project in this workspace; an email of no member (or of a member of another workspace) falls back to the
- * puller's personal project; a team owner maps through the id map, the project made when missing.
+ * puller's personal project; a team owner maps through the id map, the project made through the project service when
+ * missing (the service mints the id).
  */
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
@@ -127,7 +128,7 @@ describe('resolveOwner', () => {
     ).toBe(projectId);
   });
 
-  it('uses the project an allocated team id already points to, making the row with that id', async () => {
+  it('makes a missing project of an allocated team id through the project service and maps the team to it', async () => {
     const { owner, tenantId, map } = await workspace();
     const teamId = randomUUID();
     const allocated = map.allocate('project', teamId);
@@ -138,11 +139,13 @@ describe('resolveOwner', () => {
       { userId: owner.user.id },
       map,
     );
-    expect(projectId).toBe(allocated);
-    expect(await server.ctx.repos.projects.get(tenantId, allocated)).toMatchObject({
+    expect(projectId).not.toBe(allocated);
+    expect(map.localIdFor('project', teamId)).toBe(projectId);
+    expect(await server.ctx.repos.projects.get(tenantId, projectId)).toMatchObject({
       type: 'team',
       name: 'Ops',
     });
+    expect(await server.ctx.repos.projects.get(tenantId, allocated)).toBeUndefined();
   });
 
   it('takes a team project of this workspace that carries the git id (the first pusher)', async () => {

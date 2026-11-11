@@ -2,13 +2,15 @@
  * P6-75 (S4 L5): the public source control rows, GET /source-control/status, POST /source-control/push and POST
  * /source-control/pull, through `ctx.sourceControlSync` as REST does. Key scopes (`sourceControl:read`, `:push`,
  * `:pull`) are checked per row; a project admin's key (no key scopes) pushes only their project's files; not
- * connected is 400 (n8n's public controller; REST says 412); a conflict is 409 with the files. Remotes are the
+ * connected is 400 (n8n's public controller; REST says 412); a name outside the caller's status is 403 'You are not
+ * allowed to push these changes' (REST says 400); a conflict is 409 with the files. Remotes are the
  * fakes of test/fakes/git-server.ts on 127.0.0.1; no network.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { HttpClient } from '@workflow/core';
 import type { HttpRequestOptions, SourceControlledFile } from '@workflow/workflow';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../src/http/errors';
 import { type BareRepo, createBareRepo, requireGit, startGitHttpServer } from './fakes/git-server';
 import {
   addToProject,
@@ -212,6 +214,39 @@ describe('push', () => {
     expect(viaRest.statusCode).toBe(412);
   });
 
+  it('redacts a token and a key in an error text before it reaches the client', async () => {
+    const a = await world();
+    const key = await keyOf(a);
+    const github = `ghp_${randomBytes(16).toString('hex')}`;
+    const bearer = `Bearer ${randomBytes(18).toString('hex')}`;
+    const pem = `-----BEGIN OPENSSH PRIVATE KEY-----
+${randomBytes(24).toString('base64')}
+-----END OPENSSH PRIVATE KEY-----`;
+    const leak = `remote said ${github} ${bearer} ${pem}`;
+    const sync = server.ctx.sourceControlSync;
+    // the not connected error is mapped to 400, any other error keeps its status; both pass redactSecrets
+    const spies = [
+      vi.spyOn(sync, 'push').mockRejectedValue(new ApiError(412, 'source_control_not_connected', leak)),
+      vi.spyOn(sync, 'status').mockRejectedValue(ApiError.badRequest(leak)),
+      vi.spyOn(sync, 'pull').mockRejectedValue(new ApiError(409, 'conflict', leak)),
+    ];
+    try {
+      for (const [res, status] of [
+        [await pushVia(key, ['x']), 400],
+        [await api(key, 'GET', '/source-control/status'), 400],
+        [await api(key, 'POST', '/source-control/pull', {}), 409],
+      ] as const) {
+        expect(res.statusCode, res.body).toBe(status);
+        expect(res.body).not.toContain(github);
+        expect(res.body).not.toContain(bearer.slice(7));
+        expect(res.body).not.toContain('PRIVATE KEY');
+        expect(res.json().error.message).toContain('remote said');
+      }
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
   it('answers a conflict with 409 and the files; force pushes', async () => {
     const { connect } = await remote();
     const a = await world();
@@ -269,6 +304,42 @@ describe('push', () => {
     const files = [...(await repo.files((await repo.head()) ?? '')).keys()];
     expect(files.some((f) => f.includes(inX.id))).toBe(true);
     expect(files.some((f) => f.includes(inY.id))).toBe(false);
+  });
+  it('answers 403 You are not allowed to push these changes to a name outside the caller’s status; REST stays 400', async () => {
+    const { repo, connect } = await remote();
+    const a = await world();
+    await connect(a);
+    const text = 'You are not allowed to push these changes';
+    const head = await repo.head();
+    const unknown = await pushVia(await keyOf(a, ['sourceControl:push']), [randomUUID()]);
+    expect(unknown.statusCode, unknown.body).toBe(403);
+    expect(unknown.json().error.message).toBe(text);
+    // a true member, project admin of a's default project, names a workflow of another team project
+    const other = await projectIn(server, a.tenant.id, `Other ${randomUUID().slice(0, 6)}`);
+    const inOther = await workflowIn(server, a.tenant.id, other.id, { name: 'In other', nodes: manual() });
+    const admin = await realMember(a);
+    await addToProject(
+      server,
+      a.tenant.id,
+      a.client.defaultProjectId as string,
+      admin.user.id,
+      'project:admin',
+    );
+    const foreign = await pushVia(await keyOf(admin), [inOther.id]);
+    expect(foreign.statusCode, foreign.body).toBe(403);
+    expect(foreign.json().error.message).toBe(text);
+    // a true member with no pushable project names a's workflow
+    const wf = await createWorkflow(a.client, { name: 'One', nodes: manual() });
+    const member = await realMember(a);
+    const none = await pushVia(await keyOf(member), [wf.id]);
+    expect(none.statusCode, none.body).toBe(403);
+    expect(none.json().error.message).toBe(text);
+    expect(await repo.head()).toBe(head);
+    const viaRest = await a.client.post('/rest/source-control/push-workfolder', {
+      fileNames: [{ id: randomUUID(), type: 'workflow' }],
+    });
+    expect(viaRest.statusCode).toBe(400);
+    expect(viaRest.json().error.message).toBe('A picked file is not part of the changes.');
   });
 });
 

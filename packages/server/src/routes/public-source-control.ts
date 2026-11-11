@@ -3,26 +3,45 @@
  * `/source-control/push` (`sourceControl:push`; any key whose user has pushable projects, the service narrows to
  * them, so the access is in the list filter form) and POST `/source-control/pull` (`sourceControl:pull`), through
  * `ctx.sourceControlSync` as REST; 409 lists the files, 400 when not connected (n8n's public controller; REST
- * answers 412). The pull direction of the status also needs the user's `sourceControl:pull`, as the REST status
- * does. Error text passes `redactSecrets` inside `SourceControlSyncService`.
+ * answers 412), and a pushed name outside the caller's own status is 403 'You are not allowed to push these changes'
+ * (REST answers 400). The pull direction of the status also needs the user's `sourceControl:pull`, as the REST status
+ * does. Error text passes `redactSecrets` inside `SourceControlSyncService` and again here, for every error a row
+ * lets through (a remote can put a token or a key in a Git error).
  * PUBLIC_SOURCE_CONTROL_ROUTES is shaped as PUBLIC_DATA_TABLE_ROUTES (public-api.ts spreads it).
  */
+import { redactSecrets } from '@workflow/workflow';
 import { z } from 'zod';
 import { requireScope } from '../http/auth';
 import { ApiError } from '../http/errors';
+import { PushFileNotInChangesError } from '../services/source-control/push';
 import type { ApiRoute } from './public-api';
 import { pullWorkFolderSchema, pushWorkFolderSchema } from './source-control-sync';
 
 const statusQuery = z.object({ direction: z.enum(['push', 'pull']).default('push') });
 
-/** the service says 412 `source_control_not_connected`; n8n's public controller answers 400 */
+/**
+ * the service says 412 `source_control_not_connected`; n8n's public controller answers 400. Every error text that
+ * leaves a row passes `redactSecrets` (class, status, code and details stay).
+ */
 async function whenConnected<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {
+    if (error instanceof Error) error.message = redactSecrets(error.message);
     if (error instanceof ApiError && error.code === 'source_control_not_connected') {
       throw ApiError.badRequest(error.message);
     }
+    throw error;
+  }
+}
+
+/** n8n's public controller: a name outside the caller's own push status is 403, one text for unknown and foreign names (REST keeps 400) */
+async function allowedToPush<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof PushFileNotInChangesError)
+      throw ApiError.forbidden('You are not allowed to push these changes');
     throw error;
   }
 }
@@ -55,7 +74,7 @@ export const PUBLIC_SOURCE_CONTROL_ROUTES: ApiRoute[] = [
     body: pushWorkFolderSchema,
     response: 'PushResult',
     handler: async (ctx, { auth, body }) => ({
-      data: await whenConnected(() => ctx.sourceControlSync.push(auth, body)),
+      data: await whenConnected(() => allowedToPush(() => ctx.sourceControlSync.push(auth, body))),
     }),
   },
   {

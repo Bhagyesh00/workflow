@@ -76,6 +76,28 @@ function inputSchemaOf(route: ApiRoute): Record<string, unknown> {
   return { type: 'object', properties: parts };
 }
 
+const REF_PREFIX = '#/components/schemas/';
+
+/**
+ * A copy of `node` with each `{ $ref: '#/components/schemas/X' }` replaced by a copy of schemas[X], so an answer
+ * that carries no `components` has no dangling link. `seen` holds the components being inlined: a cycle stops
+ * there and keeps its `$ref`.
+ */
+function inlineRefs(node: unknown, schemas: Record<string, unknown>, seen: string[] = []): unknown {
+  if (Array.isArray(node)) return node.map((item) => inlineRefs(item, schemas, seen));
+  if (node === null || typeof node !== 'object') return node;
+  const record = node as Record<string, unknown>;
+  const ref = record.$ref;
+  if (typeof ref === 'string' && ref.startsWith(REF_PREFIX)) {
+    const name = ref.slice(REF_PREFIX.length);
+    if (seen.includes(name) || !(name in schemas)) return record;
+    return inlineRefs(schemas[name], schemas, [...seen, name]);
+  }
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [key, inlineRefs(value, schemas, seen)]),
+  );
+}
+
 export const PUBLIC_DISCOVER_ROUTES: ApiRoute[] = [
   {
     method: 'GET',
@@ -103,7 +125,7 @@ export const PUBLIC_DISCOVER_ROUTES: ApiRoute[] = [
         if (query.operation && query.operation !== operation) continue;
         const group = (resources[resource] ??= {});
         const key = operation in group ? `${operation}${capital(route.method.toLowerCase())}` : operation;
-        const output = schemas?.[route.response];
+        const output = schemas ? inlineRefs(schemas[route.response], schemas) : undefined;
         group[key] = {
           method: route.method,
           path: route.path,

@@ -8,11 +8,20 @@
  * `autoPublish` modes with a real publish and a publishing error, a remote delete, the seeded secret in no blob,
  * answer or log line, and two pulls at once. Over HTTP (the guarded client sending https://127.0.0.1 as http to the
  * plain fake, so a token is allowed) and over SSH. Every remote is a fake on 127.0.0.1 in a temp folder.
+ * The publish of a pull runs after its writes, outside the pull's lock bypass: a trigger it starts meets the
+ * protected lock like any production run. A Git error naming the stored token or a line of the stored key reaches
+ * no answer and no log line.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { HttpClient, REDACTED } from '@workflow/core';
-import type { HttpRequestOptions, SourceControlledFile } from '@workflow/workflow';
+import {
+  type HttpRequestOptions,
+  type NodePackage,
+  pathFor,
+  type SourceControlledFile,
+} from '@workflow/workflow';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { inPullWrite } from '../src/services/protected';
 import {
   type BareRepo,
   createBareRepo,
@@ -25,10 +34,12 @@ import {
   createTestServer,
   createWorkflow,
   node,
+  protectWorkspace,
   resetDatabase,
   setNode,
   signup,
   type TestServer,
+  waitFor,
   waitForExecution,
 } from './helpers';
 
@@ -49,6 +60,52 @@ let ip = 1;
 const cleanups: Array<() => Promise<void>> = [];
 const logs: string[] = [];
 
+/**
+ * sync-1: a trigger whose timer does what a production run's data table node does (a table create through the
+ * node proxy) and records the answer: 'passed' or the status code
+ */
+const probes: Array<number | 'passed'> = [];
+/** whether each activation of the probe ran inside the pull's lock bypass */
+const activations: boolean[] = [];
+let probeTarget: { tenantId: string; projectId: string } | undefined;
+const probePackage: NodePackage = {
+  name: 'git-sync-probe',
+  nodes: [
+    {
+      description: {
+        name: 'test.pullProbe',
+        displayName: 'Pull probe',
+        description: '',
+        group: ['trigger'],
+        version: 1,
+        defaults: { name: 'Probe' },
+        inputs: [],
+        outputs: ['main'],
+        properties: [],
+      },
+      async trigger() {
+        activations.push(inPullWrite());
+        const timer = setInterval(() => {
+          const target = probeTarget;
+          if (!target) return;
+          server.ctx.dataTables
+            .forProject(target.tenantId, target.projectId, { workflowId: 'probe' })
+            .createTable({
+              name: `probe_${randomUUID().slice(0, 8)}`,
+              columns: [{ name: 'a', type: 'string' }],
+            })
+            .then(
+              () => probes.push('passed'),
+              (error: { statusCode?: number }) => probes.push(error.statusCode ?? 500),
+            );
+        }, 30);
+        return { closeFunction: async () => clearInterval(timer) };
+      },
+    },
+  ],
+  credentials: [],
+};
+
 beforeAll(async () => {
   await requireGit();
   server = await createTestServer(
@@ -57,6 +114,7 @@ beforeAll(async () => {
       http: new TlsTerminatingClient({
         ssrf: { enabled: true, allow: ['127.0.0.1', 'localhost'], deny: [] },
       }),
+      nodePackages: [probePackage],
     },
   );
 });
@@ -547,5 +605,111 @@ describe('a pull on a second workspace gives the same workflows (SSH)', () => {
     expect(bChild.id).not.toBe(child.id);
     expect(bParent.nodes.find((n: any) => n.name === 'Call').parameters.workflowId).toBe(bChild.id);
     expect(await status(b, 'pull')).toEqual([]);
+  });
+});
+
+describe('the publish of a pull runs after the pull’s lock bypass', () => {
+  it('a workflow pulled and published with a trigger, then the workspace protected: its later run’s table create is refused', async () => {
+    const { url } = await httpRemote();
+    const a = await world();
+    await connect(a, url);
+    await createWorkflow(a.client, { name: 'Probe', nodes: [node('Probe', 'test.pullProbe')] });
+    await pushAll(a);
+    const b = await world();
+    await connect(b, url);
+    activations.length = 0;
+    const res = await pull(b, { autoPublish: 'all' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.publishingErrors).toEqual([]);
+    // the trigger started after the pull's writes, outside the bypass
+    expect(activations).toEqual([false]);
+    const probe = await byName(b.tenant.id, 'Probe');
+    expect(probe.active).toBe(true);
+    await protectWorkspace(server, b.tenant.id, true);
+    probes.length = 0;
+    probeTarget = { tenantId: b.tenant.id, projectId: probe.project_id };
+    try {
+      await waitFor(async () => probes.length >= 3, { message: 'three trigger ticks' });
+      expect(new Set(probes)).toEqual(new Set([403]));
+    } finally {
+      probeTarget = undefined;
+      await server.ctx.workflows.setActive(b.tenant.id, probe.id, false, { userId: b.user.id });
+    }
+  });
+});
+
+describe('the stored token and key in no answer or log line', () => {
+  /** status, push, pull and remote content of `w`; each a 4xx whose text was redacted */
+  async function answersOf(w: World, id: string) {
+    return [
+      await w.client.get('/rest/source-control/get-status'),
+      await w.client.post('/rest/source-control/push-workfolder', {
+        fileNames: [{ id: randomUUID(), type: 'workflow' }],
+      }),
+      await pull(w),
+      await w.client.get(`/rest/source-control/remote-content/workflow/${id}`),
+    ];
+  }
+
+  /** a work folder file whose refusal names `key` (a key the remote chose) */
+  const badFile = (id: string, key: string) => ({
+    path: pathFor('workflow', id),
+    data: JSON.stringify({ id, name: 'Bad', nodes: [], connections: { [key]: 5 }, versionId: 'v1' }),
+  });
+
+  it('HTTPS: a Git error naming the token', async () => {
+    const { repo, url } = await httpRemote();
+    const id = randomUUID();
+    const pattern = `ghp_${randomBytes(18).toString('hex')}`;
+    await repo.commit([badFile(id, `${TOKEN}+${pattern}`)], { message: 'bad file' });
+    const a = await world();
+    await connect(a, url);
+    for (const res of await answersOf(a, id)) {
+      expect(res.statusCode, res.body).toBeGreaterThanOrEqual(400);
+      expect(res.statusCode, res.body).toBeLessThan(500);
+      expect(res.body).not.toContain(TOKEN);
+      expect(res.body).not.toContain(pattern);
+      expect(res.json().error.message).toContain('[redacted]');
+    }
+    const lines = logs.join('\n');
+    expect(lines).not.toContain(TOKEN);
+    expect(lines).not.toContain(pattern);
+  });
+
+  it('SSH: a Git error naming a line of the stored key', async () => {
+    const repo = await createBareRepo();
+    const ssh = await startGitSshServer(repo);
+    cleanups.push(
+      () => repo.cleanup(),
+      () => ssh.close(),
+    );
+    const keyLine = ssh.clientKey.privateKey
+      .split(/\r?\n/)
+      .filter((line) => !line.startsWith('-----'))
+      .sort((x, y) => y.length - x.length)[0];
+    expect(keyLine.length).toBeGreaterThan(16);
+    const id = randomUUID();
+    await repo.commit([badFile(id, keyLine)], { message: 'bad file' });
+    const a = await world();
+    await server.ctx.repos.sourceControl.upsert(a.tenant.id, {
+      keyType: 'ed25519',
+      publicKey: ssh.clientKey.publicKey,
+      privateKeyEnc: server.ctx.cipher.encrypt(ssh.clientKey.privateKey, {
+        tenantId: a.tenant.id,
+        credentialId: `sourceControl:${a.tenant.id}`,
+      }),
+    });
+    const connected = await a.client.post('/rest/source-control/preferences', {
+      repositoryUrl: ssh.url,
+      initRepo: true,
+    });
+    expect(connected.statusCode, connected.body).toBe(200);
+    for (const res of await answersOf(a, id)) {
+      expect(res.statusCode, res.body).toBeGreaterThanOrEqual(400);
+      expect(res.statusCode, res.body).toBeLessThan(500);
+      expect(res.body).not.toContain(keyLine);
+      expect(res.json().error.message).toContain('[redacted]');
+    }
+    expect(logs.join('\n')).not.toContain(keyLine);
   });
 });

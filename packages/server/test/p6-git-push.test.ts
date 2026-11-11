@@ -5,15 +5,23 @@
  * refused); one commit on the fetched head with only the picked files changed and the message trimmed (default
  * "Updated Workfolder"); a conflict without `force` is 409 with the list, `force` pushes. Remote content: workflows
  * only, by git id; the global admin 200, a project viewer 403, an id with no local mapping 403 for a non-admin, an
- * id the repository does not hold 404. Not connected 412, a bad body 400, a held lease 409. Before L5 the project
- * admin's pushable set is empty (fail closed), so only the global admin and a project viewer are tested here.
+ * id the repository does not hold 404. Not connected 412, a bad body 400, a held lease 409. A caller with no
+ * pushable project gets an empty status and a refused push before any lease, fetch or 412. A project admin's push
+ * carries the folders (with their parents) and the tags of the picked workflows into folders.json and tags.json,
+ * every other entry kept. Error text passes `redactSecrets` and never holds the stored token.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { HttpClient } from '@workflow/core';
 import { type HttpRequestOptions, pathFor, type SourceControlledFile } from '@workflow/workflow';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { acquireLease } from '../src/services/source-control/lock';
-import { type BareRepo, createBareRepo, requireGit, startGitHttpServer } from './fakes/git-server';
+import {
+  type BareRepo,
+  createBareRepo,
+  type GitHttpServer,
+  requireGit,
+  startGitHttpServer,
+} from './fakes/git-server';
 import {
   addToProject,
   createTestServer,
@@ -63,18 +71,18 @@ afterEach(async () => {
 const world = () => signup(server.app, { remoteAddress: `127.9.5.${(ip++ % 250) + 1}` });
 type World = Awaited<ReturnType<typeof world>>;
 
-async function httpRemote(): Promise<{ repo: BareRepo; url: string }> {
+async function httpRemote(): Promise<{ repo: BareRepo; url: string; http: GitHttpServer }> {
   const repo = await createBareRepo();
   const http = await startGitHttpServer(repo, { auth: { username: 'deploy', token: TOKEN } });
   cleanups.push(
     () => repo.cleanup(),
     () => http.close(),
   );
-  return { repo, url: `https://127.0.0.1:${http.port}${repo.urlPath}` };
+  return { repo, url: `https://127.0.0.1:${http.port}${repo.urlPath}`, http };
 }
 
-async function connected(): Promise<{ repo: BareRepo; url: string; a: World }> {
-  const { repo, url } = await httpRemote();
+async function connected(): Promise<{ repo: BareRepo; url: string; a: World; http: GitHttpServer }> {
+  const { repo, url, http } = await httpRemote();
   const a = await world();
   const res = await a.client.post('/rest/source-control/preferences', {
     repositoryUrl: url,
@@ -84,7 +92,7 @@ async function connected(): Promise<{ repo: BareRepo; url: string; a: World }> {
     initRepo: true,
   });
   expect(res.statusCode, res.body).toBe(200);
-  return { repo, url, a };
+  return { repo, url, a, http };
 }
 
 const status = async (w: { client: World['client'] }, direction: 'push' | 'pull' = 'push') =>
@@ -161,6 +169,8 @@ describe('push', () => {
     const head = await repo.head();
     const refused = await push(member, { fileNames: [{ id: wf.id, type: 'workflow' }] });
     expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.message).toBe('A picked file is not part of the changes.');
+    expect(unknown.json().error.message).toBe('A picked file is not part of the changes.');
     expect(await repo.head()).toBe(head);
     // a client path is never read: only id and type
     const path = await push(a, {
@@ -240,6 +250,127 @@ describe('push', () => {
   });
 });
 
+describe('a caller with no pushable project', () => {
+  it('gets an empty status and a 400 push with no lease, fetch or 412; a body of {} is 400', async () => {
+    const { a, http } = await connected();
+    await createWorkflow(a.client, { name: 'Admin work', nodes: manual() });
+    const member = await realMember(a);
+    await addToProject(server, a.tenant.id, a.client.defaultProjectId!, member.user.id, 'project:viewer');
+    const seen = http.requests.length;
+    // the lease is held: the member's calls never reach it
+    const lease = await acquireLease(server.ctx.serviceDeps, a.tenant.id);
+    try {
+      const empty = await member.client.get('/rest/source-control/get-status?direction=push');
+      expect(empty.statusCode, empty.body).toBe(200);
+      expect(empty.json().data).toEqual([]);
+      const refused = await push(member, { fileNames: [{ id: randomUUID(), type: 'workflow' }] });
+      expect(refused.statusCode, refused.body).toBe(400);
+      expect(refused.json().error.message).toBe('A picked file is not part of the changes.');
+      const bad = await push(member, {});
+      expect(bad.statusCode).toBe(400);
+      expect(bad.json().error.code).toBe('validation_error');
+      // the owner meets the held lease
+      expect((await a.client.get('/rest/source-control/get-status')).statusCode).toBe(409);
+    } finally {
+      await lease.release();
+    }
+    expect(http.requests.length).toBe(seen);
+    // a workspace with no Git connection: no 412 tells the member about it
+    const lone = await world();
+    const loneMember = await realMember(lone);
+    const status = await loneMember.client.get('/rest/source-control/get-status');
+    expect(status.statusCode, status.body).toBe(200);
+    expect(status.json().data).toEqual([]);
+    expect((await push(loneMember, { fileNames: [{ id: randomUUID(), type: 'workflow' }] })).statusCode).toBe(
+      400,
+    );
+  });
+});
+
+describe('a push limited to some projects', () => {
+  it('carries the folder chain and the tags of the picked workflows; the remote keeps every other entry', async () => {
+    const { repo, url, a } = await connected();
+    const x = a.client.defaultProjectId!;
+    // the remote first holds another workflow with its tag
+    const keep = await a.client.data<{ id: string }>(a.client.post('/rest/tags', { name: 'keep' }));
+    const other = await a.client.data<{ id: string }>(
+      a.client.post('/rest/workflows', {
+        name: 'Other',
+        tagIds: [keep.id],
+        nodes: manual(),
+        connections: {},
+      }),
+    );
+    const everything = await status(a);
+    expect(
+      (await push(a, { fileNames: everything.map((r) => ({ id: r.id, type: r.type })) })).statusCode,
+    ).toBe(200);
+    // then a folder chain, a tag and a workflow in it; a project admin of X pushes the workflow only
+    const outer = await a.client.data<{ id: string }>(a.client.post('/rest/folders', { name: 'Billing' }));
+    const inner = await a.client.data<{ id: string }>(
+      a.client.post('/rest/folders', { name: 'Invoices', parentFolderId: outer.id }),
+    );
+    const prod = await a.client.data<{ id: string }>(a.client.post('/rest/tags', { name: 'prod' }));
+    const wf = await a.client.data<{ id: string }>(
+      a.client.post('/rest/workflows', {
+        name: 'Billing run',
+        folderId: inner.id,
+        tagIds: [prod.id],
+        nodes: manual(),
+        connections: {},
+      }),
+    );
+    const admin = await realMember(a);
+    await addToProject(server, a.tenant.id, x, admin.user.id, 'project:admin');
+    const res = await push(admin, { fileNames: [{ id: wf.id, type: 'workflow' }] });
+    expect(res.statusCode, res.body).toBe(200);
+    const files = await repo.files((await repo.head()) ?? '');
+    const folders = JSON.parse(files.get('folders.json') ?? '{}').folders as Array<Record<string, unknown>>;
+    expect(folders).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: outer.id, name: 'Billing', parentFolderId: null, homeProjectId: x }),
+        expect.objectContaining({
+          id: inner.id,
+          name: 'Invoices',
+          parentFolderId: outer.id,
+          homeProjectId: x,
+        }),
+      ]),
+    );
+    const tags = JSON.parse(files.get('tags.json') ?? '{}');
+    expect(tags.tags.map((t: { name: string }) => t.name).sort()).toEqual(['keep', 'prod']);
+    expect(tags.mappings).toEqual(
+      expect.arrayContaining([
+        { workflowId: other.id, tagId: keep.id },
+        { workflowId: wf.id, tagId: prod.id },
+      ]),
+    );
+
+    // a second workspace pulls it: the workflow lands in its folder with its tag
+    const b = await world();
+    const connect = await b.client.post('/rest/source-control/preferences', {
+      repositoryUrl: url,
+      connectionType: 'https',
+      httpsUsername: 'deploy',
+      httpsPassword: TOKEN,
+      initRepo: true,
+    });
+    expect(connect.statusCode, connect.body).toBe(200);
+    const pulled = await b.client.post('/rest/source-control/pull-workfolder', {});
+    expect(pulled.statusCode, pulled.body).toBe(200);
+    const { pool } = server.ctx.database;
+    const row = (
+      await pool.query(
+        'select w.id, f.name as folder from workflows w left join folders f on f.id = w.folder_id where w.tenant_id = $1 and w.name = $2',
+        [b.tenant.id, 'Billing run'],
+      )
+    ).rows[0];
+    expect(row.folder).toBe('Invoices');
+    const bTags = await server.ctx.repos.workflows.tagsFor(b.tenant.id, [row.id]);
+    expect((bTags.get(row.id) ?? []).map((t) => t.name)).toEqual(['prod']);
+  });
+});
+
 describe('remote content', () => {
   it('gives the global admin the remote workflow in local ids; a viewer 403; an unknown id 403 or 404', async () => {
     const { a } = await connected();
@@ -305,21 +436,33 @@ describe('remote content', () => {
 });
 
 describe('error text', () => {
-  it('passes redactSecrets on status, push, pull and remote content (a remote path can hold a token)', async () => {
+  it('passes redactSecrets on status, push, pull and remote content (a remote file can name a token)', async () => {
     const { repo, a } = await connected();
-    // a file the work folder does not use: L1 names its path in the refusal
+    // a work folder file of the wrong shape: the refusal names the key the remote chose (a token here, and the
+    // stored Git token itself)
     const secret = `ghp_${randomBytes(18).toString('hex')}`;
-    await repo.commit([{ path: `notes/${secret}.txt`, data: 'x' }], { message: 'stray file' });
+    const id = randomUUID();
+    const bad = {
+      id,
+      name: 'Bad',
+      nodes: [],
+      connections: { [`${secret}+${TOKEN}`]: 5 },
+      versionId: 'v1',
+    };
+    await repo.commit([{ path: pathFor('workflow', id), data: JSON.stringify(bad) }], {
+      message: 'bad file',
+    });
     const answers = [
       await a.client.get('/rest/source-control/get-status'),
       await push(a, { fileNames: [{ id: randomUUID(), type: 'workflow' }] }),
       await a.client.post('/rest/source-control/pull-workfolder', {}),
-      await a.client.get(`/rest/source-control/remote-content/workflow/${randomUUID()}`),
+      await a.client.get(`/rest/source-control/remote-content/workflow/${id}`),
     ];
     for (const res of answers) {
       expect(res.statusCode, res.body).toBeGreaterThanOrEqual(400);
       expect(res.statusCode, res.body).toBeLessThan(500);
       expect(res.body).not.toContain(secret);
+      expect(res.body).not.toContain(TOKEN);
       expect(res.json().error.message).toContain('[redacted]');
     }
   });
