@@ -53,6 +53,19 @@ export interface Registries {
  * P6-47 (L3): `lists` is `config.nodes` (NODES_EXCLUDE, NODES_INCLUDE); C0 added the parameter and ignores it
  * until L3 applies it (an empty `include` means every type).
  */
-export function buildRegistries(packages: NodePackage[], _lists?: Config['nodes']): Registries {
-  return registriesFromPackages(packages);
+export function buildRegistries(packages: NodePackage[], lists?: Config['nodes']): Registries {
+  const exclude = new Set(lists?.exclude ?? []);
+  const include = new Set(lists?.include ?? []);
+  if (exclude.size === 0 && include.size === 0) return registriesFromPackages(packages);
+  const narrowed = packages.map((pkg) => ({
+    ...pkg,
+    nodes: pkg.nodes.filter(
+      (n) =>
+        (include.size === 0 || include.has(n.description.name)) && !exclude.has(n.description.name),
+    ),
+  }));
+  const registries = registriesFromPackages(narrowed);
+  // a tool variant can be excluded alone, the base stays (as n8n)
+  for (const name of exclude) registries.nodeTypes.unregister(name);
+  return registries;
 }

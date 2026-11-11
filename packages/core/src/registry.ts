@@ -22,6 +22,11 @@ export class NodeTypes implements NodeTypeRegistry {
     this.types.set(name, node);
   }
 
+  /** P6-47: drop a type by name (NODES_EXCLUDE on a tool variant); true when it existed */
+  unregister(name: string): boolean {
+    return this.types.delete(name);
+  }
+
   get(type: string): NodeType | undefined {
     return this.types.get(type);
   }
