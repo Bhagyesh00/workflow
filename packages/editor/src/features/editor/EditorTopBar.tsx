@@ -33,12 +33,13 @@ import { Menu } from '../../components/ui/Menu';
 import { Badge, Kbd } from '../../components/ui/misc';
 import { TagsEditor } from '../../components/workflow/TagsEditor';
 import type { DoctorIssue } from '../../lib/doctor';
+import { useProtectedWorkspace } from '../../lib/protected';
 import { useBuilderStore } from '../../stores/builder-store';
 import { openDependencyDetails } from '../../stores/dependency-dialog-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { AutosaveStatus } from './AutosaveStatus';
-import { useCanEditWorkflow } from './open-resources';
+import { useCanEditWorkflow, useOpenWorkflowCan } from './open-resources';
 import { PublishDialog } from './PublishDialog';
 import { PUBLISH_STATE_LABEL, publishStateOf, requestPublish } from './publish-actions';
 import { SHORTCUTS } from './useEditorShortcuts';
@@ -82,6 +83,14 @@ export function EditorTopBar({
   const tagsRequested = useUiStore((s) => s.tagsEditRequested);
   // archive / restore / delete follow the role, not the archived read-only state
   const canWrite = useCanEditWorkflow();
+  // P6-80: a protected workspace locks the canvas (`readOnly`) but not Publish and Unpublish: those stay on the
+  // role, the archive state, the write lock and the workflow's own scopes
+  const protectedWorkspace = useProtectedWorkspace();
+  const roleReadOnly = useWorkflowStore((s) => s.roleReadOnly);
+  const lockReadOnly = useWorkflowStore((s) => s.lockReadOnly);
+  const canOpen = useOpenWorkflowCan();
+  const canvasLocked = roleReadOnly || meta.isArchived || lockReadOnly;
+  const publishLocked = canvasLocked || !canOpen('workflow:publish') || activating;
   const aiBuilder = useAiBuilderFeature();
   const [name, setDraftName] = useState(meta.name);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -280,7 +289,7 @@ export function EditorTopBar({
                   label: 'Unpublish',
                   icon: <CloudOff size={14} />,
                   onSelect: onUnpublish,
-                  disabled: readOnly || activating,
+                  disabled: publishLocked,
                 },
               ]
             : []),
@@ -291,7 +300,7 @@ export function EditorTopBar({
                   label: 'Restore',
                   icon: <ArchiveRestore size={14} />,
                   onSelect: onUnarchive,
-                  disabled: !canWrite,
+                  disabled: !canWrite || protectedWorkspace,
                 },
                 {
                   key: 'delete',
@@ -299,7 +308,7 @@ export function EditorTopBar({
                   icon: <Trash2 size={14} />,
                   onSelect: onDelete,
                   danger: true,
-                  disabled: !canWrite,
+                  disabled: !canWrite || protectedWorkspace,
                 },
               ]
             : [
@@ -327,7 +336,7 @@ export function EditorTopBar({
         icon={<Rocket size={14} />}
         onClick={() => void requestPublish()}
         loading={activating}
-        disabled={readOnly || activating || publishState === 'published'}
+        disabled={publishLocked || publishState === 'published'}
         title={publishState === 'published' ? 'This version is already published' : undefined}
       >
         Publish

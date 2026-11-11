@@ -62,6 +62,7 @@ import {
 import { issuesByNode, lintWorkflow } from '../lib/doctor';
 import { canWith } from '../lib/permissions';
 import { isTriggerDescription } from '../lib/ports';
+import { useProtectedWorkspace } from '../lib/protected';
 import { getMainParents, getNode } from '../lib/workflow-ops';
 import { useBuilderStore } from '../stores/builder-store';
 import { useChatStore } from '../stores/chat-store';
@@ -602,6 +603,14 @@ export function WorkflowEditorPage() {
     useRunStore.getState().reset();
     useChatStore.getState().newSession();
   }, [isNew]);
+
+  // P6-80: a protected workspace locks the canvas (the fourth part of the store's `readOnly`); after the reset
+  // above, so a new workflow keeps it too. The role check in the load effect stays unmasked.
+  const protectedWorkspace = useProtectedWorkspace();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: isNew only re-runs this after the reset effect above
+  useEffect(() => {
+    useWorkflowStore.getState().setProtectedReadOnly(protectedWorkspace);
+  }, [protectedWorkspace, isNew]);
 
   // P5-62: another workflow never gets this one's builder stream or draft; the redirect from `new` to the
   // row it just created keeps them (`meta.id === id`, as `alreadyOpen`), which the first send relies on

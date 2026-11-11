@@ -10,7 +10,8 @@ import { matchPath, useLocation } from 'react-router';
 import { projectsApi } from '../../api/endpoints';
 import { queryKeys, useMe, useProject, useProjects } from '../../api/queries';
 import type { ProjectListFilter } from '../../api/types';
-import { canWith } from '../../lib/permissions';
+import { canWith, maskedWhenProtected } from '../../lib/permissions';
+import { useProtectedWorkspace } from '../../lib/protected';
 import { useProjectStore } from '../../stores/project-store';
 import { Select } from '../ui/Field';
 
@@ -64,6 +65,7 @@ export function useProjectListScope(resource: 'workflows' | 'credentials' | 'exe
   const { pathname } = useLocation();
   const stored = useProjectStore((s) => s.currentProjectId);
   const me = useMe().data;
+  const protectedWorkspace = useProtectedWorkspace();
   const [picked, setPicked] = useState<string | null>(null);
   const fromRoute = matchPath('/projects/:id/*', pathname)?.params.id;
   const kind: ListScopeKind = fromRoute ? 'project' : pathname.startsWith('/shared') ? 'shared' : 'home';
@@ -90,8 +92,9 @@ export function useProjectListScope(resource: 'workflows' | 'credentials' | 'exe
     [filterProject, kind],
   );
   const canCreate = useCallback(
-    (scope: Scope) => kind !== 'shared' && canWith(me, scope, target),
-    [kind, me, target],
+    (scope: Scope) =>
+      kind !== 'shared' && !(protectedWorkspace && maskedWhenProtected(scope)) && canWith(me, scope, target),
+    [kind, me, target, protectedWorkspace],
   );
   return {
     kind,

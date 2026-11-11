@@ -4,8 +4,9 @@ import { Plus, Variable as VariableIcon } from 'lucide-react';
 import { useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { variablesApi } from '../../api/endpoints';
-import { queryKeys, useProject } from '../../api/queries';
-import { usePermissions } from '../../lib/permissions';
+import { queryKeys, useMe, useProject } from '../../api/queries';
+import { canWith, usePermissions } from '../../lib/permissions';
+import { useProtectedWorkspace } from '../../lib/protected';
 import { VARIABLE_KEY, VariableRow } from '../../pages/SettingsPages';
 import { toast } from '../../stores/ui-store';
 import { Button } from '../ui/Button';
@@ -23,7 +24,12 @@ export function ProjectVariablesTab({ projectId }: ProjectVariablesTabProps) {
   const scoped = project.data ?? null;
   const canList = can('projectVariable:list', scoped);
   const canCreate = can('projectVariable:create', scoped);
-  const canEdit = can('projectVariable:update', scoped) && can('projectVariable:delete', scoped);
+  // P6-80: `can` masks create and delete on a protected workspace; the row stays editable on the raw delete scope
+  // (the value still saves, the key does not change)
+  const me = useMe().data;
+  const canEdit = can('projectVariable:update', scoped) && canWith(me, 'projectVariable:delete', scoped);
+  const canDelete = canEdit && can('projectVariable:delete', scoped);
+  const protectedWorkspace = useProtectedWorkspace();
   const variables = useQuery({
     queryKey: queryKeys.projectVariables(projectId),
     queryFn: () => variablesApi.forProject(projectId),
@@ -118,6 +124,8 @@ export function ProjectVariablesTab({ projectId }: ProjectVariablesTabProps) {
               variable={v}
               onSaved={refresh}
               readOnly={!canEdit}
+              keyLocked={protectedWorkspace}
+              canDelete={canDelete}
             />
           ))}
         </ul>

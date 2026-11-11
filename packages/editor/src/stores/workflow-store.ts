@@ -62,6 +62,8 @@ export interface WorkflowState extends WorkflowGraph {
   roleReadOnly: boolean;
   /** the write-lock part of `readOnly` */
   lockReadOnly: boolean;
+  /** P6-80: the protected workspace part of `readOnly` (set by the editor page from the settings) */
+  protectedReadOnly: boolean;
   /** bumped on load so views can reset (fit view, close panels) */
   loadCount: number;
   /** node type descriptions for the group rules (set by the editor page once the catalog loads) */
@@ -84,6 +86,8 @@ export interface WorkflowState extends WorkflowGraph {
   setArchived(isArchived: boolean, readOnly?: boolean): void;
   /** P6-81: another user or tab holds the write lock (true) or it is free again (false); `readOnly` follows */
   setLockReadOnly(locked: boolean): void;
+  /** P6-80: the workspace is protected (true) or writable again (false); `readOnly` follows */
+  setProtectedReadOnly(on: boolean): void;
 
   /** push the current graph to history (call before a gesture like a drag) */
   checkpoint(): void;
@@ -224,6 +228,7 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
     readOnly: false,
     roleReadOnly: false,
     lockReadOnly: false,
+    protectedReadOnly: false,
     loadCount: 0,
     nodeTypeLookup: undefined,
 
@@ -253,7 +258,7 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
         future: [],
         dirty: false,
         roleReadOnly: options.readOnly ?? false,
-        readOnly: (options.readOnly ?? false) || isArchived || get().lockReadOnly,
+        readOnly: (options.readOnly ?? false) || isArchived || get().lockReadOnly || get().protectedReadOnly,
         loadCount: get().loadCount + 1,
       });
     },
@@ -269,6 +274,7 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
         readOnly: false,
         roleReadOnly: false,
         lockReadOnly: false,
+        protectedReadOnly: false,
         loadCount: get().loadCount + 1,
       });
     },
@@ -327,12 +333,21 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
         return {
           meta: { ...s.meta, isArchived },
           roleReadOnly,
-          readOnly: isArchived || roleReadOnly || s.lockReadOnly,
+          readOnly: isArchived || roleReadOnly || s.lockReadOnly || s.protectedReadOnly,
         };
       });
     },
     setLockReadOnly(locked) {
-      set((s) => ({ lockReadOnly: locked, readOnly: s.roleReadOnly || s.meta.isArchived || locked }));
+      set((s) => ({
+        lockReadOnly: locked,
+        readOnly: s.roleReadOnly || s.meta.isArchived || locked || s.protectedReadOnly,
+      }));
+    },
+    setProtectedReadOnly(on) {
+      set((s) => ({
+        protectedReadOnly: on,
+        readOnly: s.roleReadOnly || s.meta.isArchived || s.lockReadOnly || on,
+      }));
     },
 
     checkpoint() {

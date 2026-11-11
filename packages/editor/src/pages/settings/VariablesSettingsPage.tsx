@@ -8,13 +8,14 @@ import { Plus, Trash2, Variable as VariableIcon } from 'lucide-react';
 import { useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { variablesApi } from '../../api/endpoints';
-import { queryKeys } from '../../api/queries';
+import { queryKeys, useMe } from '../../api/queries';
 import type { Variable } from '../../api/types';
 import { Button, IconButton } from '../../components/ui/Button';
 import { confirmDialog } from '../../components/ui/Dialog';
 import { FormField, TextInput } from '../../components/ui/Field';
 import { Callout, EmptyState, PageLoader } from '../../components/ui/misc';
-import { usePermissions } from '../../lib/permissions';
+import { canWith, usePermissions } from '../../lib/permissions';
+import { useProtectedWorkspace } from '../../lib/protected';
 import { toast } from '../../stores/ui-store';
 import { Panel } from './Panel';
 
@@ -24,11 +25,19 @@ export function VariableRow({
   variable,
   onSaved,
   readOnly = false,
+  keyLocked = false,
+  canDelete,
 }: {
   variable: Variable;
   onSaved: () => void;
+  /** no right to change the row: key, value and Save are locked */
   readOnly?: boolean;
+  /** P6-80: the key stays as it is (a protected workspace) while the value still saves */
+  keyLocked?: boolean;
+  /** the Delete button shows; defaults to the row being editable */
+  canDelete?: boolean;
 }) {
+  const mayDelete = canDelete ?? !readOnly;
   const [key, setKey] = useState(variable.key);
   const [value, setValue] = useState(variable.value);
   const dirty = key !== variable.key || value !== variable.value;
@@ -61,7 +70,7 @@ export function VariableRow({
         aria-label="Key"
         className="font-mono"
         value={key}
-        readOnly={readOnly}
+        readOnly={readOnly || keyLocked}
         onChange={(e) => setKey(e.target.value)}
         aria-invalid={!VARIABLE_KEY.test(key) || undefined}
       />
@@ -83,7 +92,7 @@ export function VariableRow({
             Save
           </Button>
         )}
-        {!readOnly && (
+        {mayDelete && (
           <IconButton label={`Delete ${variable.key}`} size="sm" onClick={() => void remove()}>
             <Trash2 size={14} />
           </IconButton>
@@ -97,7 +106,11 @@ export function VariablesSettingsPage() {
   const queryClient = useQueryClient();
   const { can } = usePermissions();
   const canCreate = can('variable:create');
-  const canEdit = can('variable:update') && can('variable:delete');
+  // P6-80: `can` masks create and delete on a protected workspace; the row stays editable on the raw delete scope
+  // (the value still saves, the key does not change)
+  const me = useMe().data;
+  const canEdit = can('variable:update') && canWith(me, 'variable:delete');
+  const protectedWorkspace = useProtectedWorkspace();
   const variables = useQuery({ queryKey: queryKeys.variables, queryFn: variablesApi.list });
   const [key, setKey] = useState('');
   const [value, setValue] = useState('');
@@ -176,6 +189,8 @@ export function VariablesSettingsPage() {
               variable={v}
               onSaved={refresh}
               readOnly={!canEdit}
+              keyLocked={protectedWorkspace}
+              canDelete={canEdit && can('variable:delete')}
             />
           ))}
         </ul>
