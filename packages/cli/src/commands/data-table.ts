@@ -35,7 +35,12 @@ async function changeBody(ctx: Ctx): Promise<unknown> {
       dryRun: flagOn(ctx.args, 'dry-run'),
     };
   }
-  return ctx.body();
+  const body = await ctx.body();
+  if (!flagOn(ctx.args, 'dry-run')) return body;
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    throw new UsageError('--dry-run needs a JSON object with filter and data');
+  }
+  return { ...body, dryRun: true };
 }
 
 export const dataTableCommands: CommandGroup = {

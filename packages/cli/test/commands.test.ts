@@ -430,6 +430,34 @@ describe('--file and --stdin on create and update', () => {
     expect(last()).toMatchObject({ method: 'POST', path: `/api/v1/data-tables/${ID}/rows/upsert`, body });
   });
 
+  it('--dry-run is sent when the body comes from a file or stdin', async () => {
+    const body = { filter: { type: 'and', filters: [] }, data: { a: 1 } };
+    await cli(['data-table', 'update-rows', ID, '--file', 'b.json', '--dry-run'], {
+      files: { 'b.json': JSON.stringify(body) },
+    });
+    expect(last()).toMatchObject({ method: 'PATCH', body: { ...body, dryRun: true } });
+    await cli(['data-table', 'upsert-rows', ID, '--stdin', '--dry-run'], { stdin: JSON.stringify(body) });
+    expect(last()).toMatchObject({
+      method: 'POST',
+      path: `/api/v1/data-tables/${ID}/rows/upsert`,
+      body: { ...body, dryRun: true },
+    });
+    const before = seen.length;
+    const bad = await cli(['data-table', 'update-rows', ID, '--stdin', '--dry-run'], { stdin: '[1]' });
+    expect(bad.code).toBe(2);
+    expect(seen).toHaveLength(before);
+  });
+
+  it('a key with a control character and trailing space is refused before any request and never printed', async () => {
+    const before = seen.length;
+    const result = await cli(['workflow', 'list'], { env: { WORKFLOW_API_KEY: 'realkey\nrest ' } });
+    expect(result.code).toBe(2);
+    expect(result.stderr()).toMatch(/characters a key never has/);
+    expect(result.stderr()).not.toContain('realkey');
+    expect(result.stdout()).not.toContain('realkey');
+    expect(seen).toHaveLength(before);
+  });
+
   it('no input, a missing file, both, and bad JSON are usage errors that send nothing', async () => {
     const none = await cli(['workflow', 'create']);
     expect(none.code).toBe(2);
@@ -692,6 +720,9 @@ describe('exit codes for server errors', () => {
     [409, 7],
     [400, 2],
     [422, 2],
+    [405, 1],
+    [413, 1],
+    [429, 1],
     [500, 8],
     [503, 8],
   ])('HTTP %i exits %i and prints the server message', async (status, code) => {

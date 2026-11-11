@@ -49,7 +49,8 @@ function exitCodeFor(status: number): number {
   if (status === 404) return EXIT.notFound;
   if (status === 409) return EXIT.conflict;
   if (status >= 500) return EXIT.server;
-  return EXIT.usage;
+  if (status === 400 || status === 422) return EXIT.usage;
+  return EXIT.general;
 }
 
 /** the text of a server error body: `{ error: { message } }`, or `{ message }`, else the status line */
@@ -76,6 +77,10 @@ export class ApiClient {
     const url = new URL(`${this.base}/api/v1${path}`);
     for (const [name, value] of Object.entries(options.query ?? {})) {
       if (value !== undefined) url.searchParams.set(name, String(value));
+    }
+    // Node's fetch trims a bad header value and quotes it in its error, which no scrub of the raw key would match
+    if (!/^[!-~]+$/.test(this.apiKey)) {
+      throw new CliError('The API key holds characters a key never has', EXIT.usage);
     }
     const headers: Record<string, string> = { 'X-API-KEY': this.apiKey, Accept: 'application/json' };
     let body: string | undefined;
