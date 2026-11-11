@@ -5,13 +5,19 @@
  *
  * `startCollaboration` is the session of one open workflow: presence `open`, a write-access `request` for
  * someone who may edit, a heartbeat every 25 seconds (it keeps the lock, which ends 2 minutes after the last
- * one), a new request when the lock is released, and presence `close` on leave. `receiveCollaborationEvent`
- * routes the four push events (components/shell/PushBridge.tsx).
+ * one), a new request when the lock is released, and presence `close` on leave (after any call still in flight,
+ * and on `pagehide` for a reload or a closed tab). `receiveCollaborationEvent` routes the four push events
+ * (components/shell/PushBridge.tsx).
+ *
+ * The lock is also part of the workflow store's `readOnly` (`setLockReadOnly`), so Save, Publish, the shortcuts,
+ * paste, the command bar and every store edit refuse while another user or tab holds it.
  */
 import { create } from 'zustand';
+import { buildUrl, fetchTransport, getCurrentTenant, getTransport } from '../api/client';
 import { collaborationApi } from '../api/endpoints';
 import type { CollaborationState, Collaborator, PushEvent, WriteLock } from '../api/types';
 import { clientId } from '../lib/client-id';
+import { useWorkflowStore } from './workflow-store';
 
 export interface CollaborationStoreState {
   /** the workflow the editor has open (null outside the editor) */
@@ -39,12 +45,22 @@ const EMPTY = {
 
 export const useCollaborationStore = create<CollaborationStoreState>()((set) => ({
   ...EMPTY,
-  open: (workflowId) => set({ ...EMPTY, workflowId }),
+  open: (workflowId) => {
+    useWorkflowStore.getState().setLockReadOnly(false);
+    set({ ...EMPTY, workflowId });
+  },
   setCollaborators: (collaborators) => set({ collaborators }),
-  setWriteLock: (writeLock) =>
-    set({ writeLock, lockedByOther: !!writeLock && writeLock.clientId !== clientId() }),
+  setWriteLock: (writeLock) => {
+    const lockedByOther = !!writeLock && writeLock.clientId !== clientId();
+    // the workflow store first: a subscriber of this store (autosave) judges `readOnly` at once
+    useWorkflowStore.getState().setLockReadOnly(lockedByOther);
+    set({ writeLock, lockedByOther });
+  },
   markUpdated: (updatedBy) => set({ updatedBy }),
-  reset: () => set({ ...EMPTY }),
+  reset: () => {
+    useWorkflowStore.getState().setLockReadOnly(false);
+    set({ ...EMPTY });
+  },
 }));
 
 /** how often the open tab says it is still there (the lock ends 2 minutes after the last one) */
@@ -59,6 +75,33 @@ interface Session {
 }
 
 let session: Session | null = null;
+
+/**
+ * The tab goes away (reload, closed tab): presence `close` frees its lock now, not after the 2 minutes. A page
+ * that is unloading may not finish an ordinary call, so the browser transport sends it with `keepalive` (and
+ * the `push-ref` header, which `sendBeacon` cannot set); another transport (the demo) answers in-process.
+ */
+function closeOnPageHide(workflowId: string): void {
+  const path = `/workflows/${encodeURIComponent(workflowId)}/presence`;
+  if (getTransport() !== fetchTransport) {
+    void collaborationApi.presence(workflowId, 'close').catch(() => {});
+    return;
+  }
+  const headers: Record<string, string> = {
+    accept: 'application/json',
+    'content-type': 'application/json',
+    'push-ref': clientId(),
+  };
+  const tenantId = getCurrentTenant();
+  if (tenantId) headers['x-tenant-id'] = tenantId;
+  void fetch(buildUrl(path), {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers,
+    body: JSON.stringify({ action: 'close' }),
+    keepalive: true,
+  }).catch(() => {});
+}
 
 const holdsLock = (): boolean => {
   const lock = useCollaborationStore.getState().writeLock;
@@ -102,26 +145,43 @@ export function startCollaboration(options: Session): CollaborationSession {
   useCollaborationStore.getState().open(mine.workflowId);
   const { workflowId } = mine;
 
-  void (async () => {
-    try {
-      apply(workflowId, await collaborationApi.presence(workflowId, 'open'));
-    } catch {
-      return; // no presence, no lock: the editor stays as it is
-    }
-    await requestWriteIfFree(workflowId);
-  })();
+  // the calls of this session still in flight: `close` goes after them, or a request served after it would
+  // leave the lock with a tab that has gone (they never reject)
+  const inflight = new Set<Promise<void>>();
+  const track = (task: Promise<void>): void => {
+    inflight.add(task);
+    void task.finally(() => inflight.delete(task));
+  };
 
-  const timer = setInterval(() => {
-    void (async () => {
+  track(
+    (async () => {
       try {
-        if (holdsLock()) apply(workflowId, await collaborationApi.writeAccess(workflowId, 'heartbeat'));
-        else apply(workflowId, await collaborationApi.presence(workflowId, 'heartbeat'));
+        apply(workflowId, await collaborationApi.presence(workflowId, 'open'));
       } catch {
-        return;
+        return; // no presence, no lock: the editor stays as it is
       }
       await requestWriteIfFree(workflowId);
-    })();
+    })(),
+  );
+
+  const timer = setInterval(() => {
+    track(
+      (async () => {
+        try {
+          if (holdsLock()) apply(workflowId, await collaborationApi.writeAccess(workflowId, 'heartbeat'));
+          else apply(workflowId, await collaborationApi.presence(workflowId, 'heartbeat'));
+        } catch {
+          return;
+        }
+        await requestWriteIfFree(workflowId);
+      })(),
+    );
   }, HEARTBEAT_MS);
+
+  const onPageHide = (): void => {
+    if (session === mine) closeOnPageHide(workflowId);
+  };
+  if (typeof window !== 'undefined') window.addEventListener('pagehide', onPageHide);
 
   return {
     setCanWrite(canWrite) {
@@ -130,10 +190,13 @@ export function startCollaboration(options: Session): CollaborationSession {
     },
     stop() {
       clearInterval(timer);
+      if (typeof window !== 'undefined') window.removeEventListener('pagehide', onPageHide);
       if (session === mine) {
         session = null;
         useCollaborationStore.getState().reset();
-        void collaborationApi.presence(workflowId, 'close').catch(() => {});
+        const close = () => void collaborationApi.presence(workflowId, 'close').catch(() => {});
+        if (inflight.size) void Promise.allSettled([...inflight]).then(close);
+        else close();
       }
     },
   };

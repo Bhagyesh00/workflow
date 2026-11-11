@@ -53,7 +53,15 @@ export interface WorkflowState extends WorkflowGraph {
   dirty: boolean;
   /** incremented on every change; a save only clears `dirty` if nothing changed meanwhile */
   revision: number;
+  /**
+   * what the editor refuses to change: the role's read-only (`load`), an archived workflow, or another user's
+   * write lock (P6-81, `setLockReadOnly`). Every save, publish, shortcut and mutator reads this one flag.
+   */
   readOnly: boolean;
+  /** the role part of `readOnly` (the last `load` or `setArchived` answer) */
+  roleReadOnly: boolean;
+  /** the write-lock part of `readOnly` */
+  lockReadOnly: boolean;
   /** bumped on load so views can reset (fit view, close panels) */
   loadCount: number;
   /** node type descriptions for the group rules (set by the editor page once the catalog loads) */
@@ -74,6 +82,8 @@ export interface WorkflowState extends WorkflowGraph {
   setActive(active: boolean, versionId?: string): void;
   /** P3-07: after archive / unarchive. Archived is read-only; on unarchive pass the role's `readOnly` */
   setArchived(isArchived: boolean, readOnly?: boolean): void;
+  /** P6-81: another user or tab holds the write lock (true) or it is free again (false); `readOnly` follows */
+  setLockReadOnly(locked: boolean): void;
 
   /** push the current graph to history (call before a gesture like a drag) */
   checkpoint(): void;
@@ -212,6 +222,8 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
     dirty: false,
     revision: 0,
     readOnly: false,
+    roleReadOnly: false,
+    lockReadOnly: false,
     loadCount: 0,
     nodeTypeLookup: undefined,
 
@@ -240,7 +252,8 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
         past: [],
         future: [],
         dirty: false,
-        readOnly: (options.readOnly ?? false) || isArchived,
+        roleReadOnly: options.readOnly ?? false,
+        readOnly: (options.readOnly ?? false) || isArchived || get().lockReadOnly,
         loadCount: get().loadCount + 1,
       });
     },
@@ -254,6 +267,8 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
         future: [],
         dirty: false,
         readOnly: false,
+        roleReadOnly: false,
+        lockReadOnly: false,
         loadCount: get().loadCount + 1,
       });
     },
@@ -307,7 +322,17 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
       get().setPublished(active ? current : null, versionId);
     },
     setArchived(isArchived, readOnly) {
-      set((s) => ({ meta: { ...s.meta, isArchived }, readOnly: isArchived || (readOnly ?? s.readOnly) }));
+      set((s) => {
+        const roleReadOnly = readOnly ?? s.roleReadOnly;
+        return {
+          meta: { ...s.meta, isArchived },
+          roleReadOnly,
+          readOnly: isArchived || roleReadOnly || s.lockReadOnly,
+        };
+      });
+    },
+    setLockReadOnly(locked) {
+      set((s) => ({ lockReadOnly: locked, readOnly: s.roleReadOnly || s.meta.isArchived || locked }));
     },
 
     checkpoint() {

@@ -75,6 +75,22 @@ interface LockEntry {
   expires: number;
 }
 
+/**
+ * Redis side of "do this only while this tab still holds the lock": the compare and the write are one
+ * step, so a `force` that lands between a read and the write is not overwritten or deleted.
+ * KEYS[1] lock key; ARGV[1] user id, ARGV[2] client id; refresh: ARGV[3] new lock JSON, ARGV[4] ttl ms.
+ */
+const HELD_BY = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, lock = pcall(cjson.decode, raw)
+if not ok or type(lock) ~= 'table' or lock.userId ~= ARGV[1] or lock.clientId ~= ARGV[2] then return 0 end
+`;
+const REFRESH_IF_HELD = `${HELD_BY}redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[4])
+return 1`;
+const REMOVE_IF_HELD = `${HELD_BY}redis.call('DEL', KEYS[1])
+return 1`;
+
 const nameOf = (user: CollaborationUser): string =>
   [user.firstName, user.lastName]
     .filter((part): part is string => !!part?.trim())
@@ -128,7 +144,11 @@ export class CollaborationService {
     await this.touch(tenantId, workflowId, user, clientId);
     const lock = await this.lockOf(tenantId, workflowId);
     if (lock && lock.userId === user.id && lock.clientId === clientId) {
-      await this.putLock(tenantId, workflowId, { ...lock, expires: Date.now() + WRITE_LOCK_TTL_MS });
+      // not a plain write: a take over between the read and here keeps its lock
+      await this.refreshLockIf(tenantId, workflowId, user.id, clientId, {
+        ...lock,
+        expires: Date.now() + WRITE_LOCK_TTL_MS,
+      });
     }
     return this.state(tenantId, workflowId);
   }
@@ -148,11 +168,13 @@ export class CollaborationService {
       name: nameOf(user),
       expires: Date.now() + WRITE_LOCK_TTL_MS,
     };
-    const held = await this.lockOf(tenantId, workflowId);
-    if (held && held.userId === user.id && held.clientId === clientId) {
-      // this tab already holds it: a repeat request keeps it
-      await this.putLock(tenantId, workflowId, next);
-    } else {
+    let held = await this.lockOf(tenantId, workflowId);
+    const isHolder = (lock: LockEntry | undefined) => lock?.userId === user.id && lock.clientId === clientId;
+    // this tab already holds it: a repeat request keeps it (compared and written in one step)
+    const kept = isHolder(held) && (await this.refreshLockIf(tenantId, workflowId, user.id, clientId, next));
+    if (!kept) {
+      // it changed hands since the read: look again
+      if (isHolder(held)) held = await this.lockOf(tenantId, workflowId);
       let acquired = false;
       if (held) {
         if (options.force) {
@@ -379,6 +401,60 @@ export class CollaborationService {
     }
   }
 
+  /** renews the lock only while this tab still holds it; false when it does not */
+  private async refreshLockIf(
+    tenantId: string,
+    workflowId: string,
+    userId: string,
+    clientId: string,
+    next: LockEntry,
+  ): Promise<boolean> {
+    const { redis } = this.deps.context();
+    if (redis) {
+      const done = await redis.eval(
+        REFRESH_IF_HELD,
+        1,
+        this.key(tenantId, workflowId, 'lock'),
+        userId,
+        clientId,
+        JSON.stringify(next),
+        WRITE_LOCK_TTL_MS,
+      );
+      return done === 1;
+    }
+    // memory: no await between the compare and the write
+    const k = `${tenantId}:${workflowId}`;
+    const held = this.locks.get(k);
+    if (!held || held.userId !== userId || held.clientId !== clientId) return false;
+    this.locks.set(k, next);
+    return true;
+  }
+
+  /** removes the lock only while this tab still holds it; false when it does not */
+  private async removeLockIf(
+    tenantId: string,
+    workflowId: string,
+    userId: string,
+    clientId: string,
+  ): Promise<boolean> {
+    const { redis } = this.deps.context();
+    if (redis) {
+      const done = await redis.eval(
+        REMOVE_IF_HELD,
+        1,
+        this.key(tenantId, workflowId, 'lock'),
+        userId,
+        clientId,
+      );
+      return done === 1;
+    }
+    const k = `${tenantId}:${workflowId}`;
+    const held = this.locks.get(k);
+    if (!held || held.userId !== userId || held.clientId !== clientId) return false;
+    this.locks.delete(k);
+    return true;
+  }
+
   /** takes a free lock; false when another request won it first */
   private async claimLock(tenantId: string, workflowId: string, lock: LockEntry): Promise<boolean> {
     const { redis } = this.deps.context();
@@ -408,8 +484,10 @@ export class CollaborationService {
   ): Promise<void> {
     const lock = await this.lockOf(tenantId, workflowId);
     if (!lock || lock.userId !== userId || lock.clientId !== clientId) return;
-    await this.removeLock(tenantId, workflowId);
-    this.send(tenantId, workflowId, 'writeAccessReleased', { workflowId });
+    // a take over between the read and the delete keeps its lock, and nothing is announced
+    if (await this.removeLockIf(tenantId, workflowId, userId, clientId)) {
+      this.send(tenantId, workflowId, 'writeAccessReleased', { workflowId });
+    }
   }
 
   private send(tenantId: string, workflowId: string, type: string, data: unknown): void {

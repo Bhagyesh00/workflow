@@ -4,13 +4,16 @@
  * id and a public API write pass; a restore by another user is 423; a lock expires 2 minutes after the last
  * heartbeat and presence after 15 (a fake clock); a take over moves the lock; a close frees it; presence of
  * a workspace never reaches another. Pushes go out with `{ workflowId }`. One block runs on Redis (db 5) and
- * checks that every key holds the tenant id.
+ * checks that every key holds the tenant id. The second user of the lock cases is a true `member` of the team
+ * project (`project:editor`), one case runs as an admin; a take over that lands between a heartbeat's, a
+ * repeat request's or a release's read and write keeps its lock (memory and Redis).
  */
 import { randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PRESENCE_TTL_MS, WRITE_LOCK_TTL_MS } from '../src/services/collaboration';
 import {
+  addToProject,
   createTestServer,
   createWorkflow,
   flushRedis,
@@ -22,6 +25,7 @@ import {
   TEST_REDIS,
   type TestClient,
   type TestServer,
+  teamProjectOf,
 } from './helpers';
 
 const LOCKED = 'Cannot modify workflow while it is being edited by a user in the editor.';
@@ -57,15 +61,44 @@ const save = async (client: TestClient, id: string, tab: string | undefined, nam
   );
 };
 
-/** an owner with a team workflow and an admin of the same workspace */
+/**
+ * an owner with a team workflow, a true member of the team project (`project:editor`) and an admin of the same
+ * workspace
+ */
 async function setup() {
   const owner = await signup(server.app);
   const admin = await memberAs(owner, 'admin');
+  const member = await realMember(owner);
+  await addToProject(
+    server,
+    owner.tenant.id,
+    await teamProjectOf(server, owner.tenant.id),
+    member.user.id,
+    'project:editor',
+  );
   const workflow = await createWorkflow(owner.client, {
     name: 'Shared',
     nodes: [node('Start', 'core.manualTrigger', {})],
   });
-  return { owner, admin, workflow, id: workflow.id };
+  return { owner, admin, member, workflow, id: workflow.id };
+}
+
+/**
+ * runs `during` once, right after the first lock read of `service`: the moment between a read and the write that
+ * follows it (the read stays what it was)
+ */
+function duringFirstLockRead(service: object, during: () => Promise<unknown>): void {
+  const target = service as { lockOf(...args: unknown[]): Promise<unknown> };
+  const read = target.lockOf.bind(target);
+  let pending = true;
+  vi.spyOn(target, 'lockOf').mockImplementation(async (...args: unknown[]) => {
+    const lock = await read(...args);
+    if (pending) {
+      pending = false;
+      await during();
+    }
+    return lock;
+  });
 }
 
 const stateOf = async (res: Promise<{ json(): any; statusCode: number }>) => {
@@ -156,8 +189,8 @@ describe('presence', () => {
 });
 
 describe('write lock', () => {
-  it('the first writer holds it; a second user gets read-only and their save is 423', async () => {
-    const { owner, admin, id } = await setup();
+  it('the first writer holds it; a project editor gets read-only and their save is 423', async () => {
+    const { owner, member: admin, id } = await setup();
     const send = vi.spyOn(server.ctx.push, 'send');
     const mine = await stateOf(access(owner.client, id, 'tab-a', 'request'));
     expect(mine.writeLock).toMatchObject({ userId: owner.user.id, clientId: 'tab-a' });
@@ -175,6 +208,18 @@ describe('write lock', () => {
     expect((await save(owner.client, id, 'tab-a', 'By owner')).statusCode).toBe(200);
   });
 
+  it('an admin is read-only under the lock too, and a member with no project cannot ask', async () => {
+    const { owner, admin, id } = await setup();
+    await access(owner.client, id, 'tab-a', 'request');
+    const asked = await stateOf(access(admin.client, id, 'tab-b', 'request'));
+    expect(asked.writeLock?.userId).toBe(owner.user.id);
+    const refused = await save(admin.client, id, 'tab-b', 'By admin');
+    expect(refused.statusCode).toBe(423);
+    expect(refused.json().error.message).toBe(LOCKED);
+    const outsider = await realMember(owner);
+    expect((await access(outsider.client, id, 'tab-o', 'request')).statusCode).toBe(403);
+  });
+
   it("the same user's other tab gets 409, and a save with no client id passes", async () => {
     const { owner, id } = await setup();
     await access(owner.client, id, 'tab-a', 'request');
@@ -184,7 +229,7 @@ describe('write lock', () => {
   });
 
   it('every editor write route checks it: delete, archive, unarchive, publish, unpublish, restore', async () => {
-    const { owner, admin, id, workflow } = await setup();
+    const { owner, member: admin, id, workflow } = await setup();
     await access(owner.client, id, 'tab-a', 'request');
     const b = { 'push-ref': 'tab-b' };
     const calls: Array<[string, string]> = [
@@ -223,7 +268,7 @@ describe('write lock', () => {
   });
 
   it('expires 2 minutes after the last heartbeat; a heartbeat keeps it', async () => {
-    const { owner, admin, id } = await setup();
+    const { owner, member: admin, id } = await setup();
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-01-01T10:00:00Z'));
     await access(owner.client, id, 'tab-a', 'request');
@@ -240,7 +285,7 @@ describe('write lock', () => {
   });
 
   it('take over: request keeps the holder, force moves the lock and the old holder is read-only', async () => {
-    const { owner, admin, id } = await setup();
+    const { owner, member: admin, id } = await setup();
     await access(owner.client, id, 'tab-a', 'request');
     const kept = await stateOf(access(admin.client, id, 'tab-b', 'request'));
     expect(kept.writeLock?.userId).toBe(owner.user.id);
@@ -257,7 +302,7 @@ describe('write lock', () => {
   });
 
   it('release and a presence close free the lock, and announce it', async () => {
-    const { owner, admin, id } = await setup();
+    const { owner, member: admin, id } = await setup();
     const send = vi.spyOn(server.ctx.push, 'send');
     await access(owner.client, id, 'tab-a', 'request');
     // someone else's release changes nothing
@@ -280,6 +325,38 @@ describe('write lock', () => {
     const viewer = await memberAs(owner, 'viewer');
     expect((await presence(viewer.client, id, 'tab-v', 'open')).statusCode).toBe(200);
     expect((await access(viewer.client, id, 'tab-v', 'request')).statusCode).toBe(403);
+  });
+});
+
+describe('a take over between a read and a write', () => {
+  it('a heartbeat does not put its own lock back over the take over', async () => {
+    const { owner, member, id } = await setup();
+    await access(owner.client, id, 'tab-a', 'request');
+    duringFirstLockRead(server.ctx.collaboration, () => access(member.client, id, 'tab-b', 'force'));
+    await access(owner.client, id, 'tab-a', 'heartbeat');
+    vi.restoreAllMocks();
+    const state = await stateOf(presence(member.client, id, 'tab-b', 'heartbeat'));
+    expect(state.writeLock).toMatchObject({ userId: member.user.id, clientId: 'tab-b' });
+    expect((await save(member.client, id, 'tab-b', 'New holder')).statusCode).toBe(200);
+    expect((await save(owner.client, id, 'tab-a', 'Old holder')).statusCode).toBe(423);
+  });
+
+  it('a repeat request of the holder does not put its own lock back over the take over', async () => {
+    const { owner, member, id } = await setup();
+    await access(owner.client, id, 'tab-a', 'request');
+    duringFirstLockRead(server.ctx.collaboration, () => access(member.client, id, 'tab-b', 'force'));
+    const answer = await stateOf(access(owner.client, id, 'tab-a', 'request'));
+    expect(answer.writeLock).toMatchObject({ userId: member.user.id, clientId: 'tab-b' });
+  });
+
+  it("a release by the old holder does not delete the new holder's lock, and announces nothing", async () => {
+    const { owner, member, id } = await setup();
+    await access(owner.client, id, 'tab-a', 'request');
+    duringFirstLockRead(server.ctx.collaboration, () => access(member.client, id, 'tab-b', 'force'));
+    const send = vi.spyOn(server.ctx.push, 'send');
+    const answer = await stateOf(access(owner.client, id, 'tab-a', 'release'));
+    expect(answer.writeLock).toMatchObject({ userId: member.user.id, clientId: 'tab-b' });
+    expect(send.mock.calls.some((c) => c[1] === 'writeAccessReleased')).toBe(false);
   });
 });
 
@@ -356,5 +433,37 @@ describe('Redis state', () => {
     });
     await redisServer.ctx.collaboration.closed(tenantId, wf.id, a.writeLock!.userId, a.writeLock!.clientId);
     await expect(redisServer.ctx.collaboration.assertNoLock(tenantId, wf.id)).resolves.toBeUndefined();
+  });
+
+  it('a take over between a read and the write keeps its lock: heartbeat, repeat request and release', async () => {
+    const owner = await signup(redisServer.app);
+    const member = await realMember(owner);
+    await addToProject(
+      redisServer,
+      owner.tenant.id,
+      await teamProjectOf(redisServer, owner.tenant.id),
+      member.user.id,
+      'project:editor',
+    );
+    const wf = await createWorkflow(owner.client, { nodes: [node('Start', 'core.manualTrigger', {})] });
+    const service = redisServer.ctx.collaboration;
+    const tenantId = owner.tenant.id;
+    const mine = { id: owner.user.id, email: owner.user.email };
+    const theirs = { id: member.user.id, email: member.user.email };
+    const takeOver = () => service.requestWrite(tenantId, wf.id, theirs, 'tab-b', { force: true });
+
+    for (const act of [
+      () => service.heartbeat(tenantId, wf.id, mine, 'tab-a'),
+      () => service.requestWrite(tenantId, wf.id, mine, 'tab-a'),
+      () => service.release(tenantId, wf.id, owner.user.id, 'tab-a'),
+    ]) {
+      await service.requestWrite(tenantId, wf.id, mine, 'tab-a', { force: true });
+      duringFirstLockRead(service, takeOver);
+      const answer = await act();
+      vi.restoreAllMocks();
+      expect(answer.writeLock).toMatchObject({ userId: member.user.id, clientId: 'tab-b' });
+      expect((await service.state(tenantId, wf.id)).writeLock).toMatchObject({ clientId: 'tab-b' });
+      await service.release(tenantId, wf.id, member.user.id, 'tab-b');
+    }
   });
 });

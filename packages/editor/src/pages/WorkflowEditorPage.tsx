@@ -65,11 +65,7 @@ import { isTriggerDescription } from '../lib/ports';
 import { getMainParents, getNode } from '../lib/workflow-ops';
 import { useBuilderStore } from '../stores/builder-store';
 import { useChatStore } from '../stores/chat-store';
-import {
-  type CollaborationSession,
-  startCollaboration,
-  useCollaborationStore,
-} from '../stores/collaboration-store';
+import { type CollaborationSession, startCollaboration } from '../stores/collaboration-store';
 import { useRunStore } from '../stores/run-store';
 import { toast, useUiStore } from '../stores/ui-store';
 import { useWorkflowStore } from '../stores/workflow-store';
@@ -86,8 +82,8 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
   const nodeGroups = useWorkflowStore((s) => s.nodeGroups);
   const selection = useWorkflowStore((s) => s.selection);
   // P6-81: another user's or tab's write lock makes the editor read-only, as a viewer's role does
-  const lockedByOther = useCollaborationStore((s) => s.lockedByOther);
-  const readOnly = useWorkflowStore((s) => s.readOnly) || lockedByOther;
+  // P6-81: the store's flag holds the role, the archive and another user's write lock
+  const readOnly = useWorkflowStore((s) => s.readOnly);
   const meta = useWorkflowStore((s) => s.meta);
   const loadCount = useWorkflowStore((s) => s.loadCount);
   const runData = useRunStore((s) => s.runData);

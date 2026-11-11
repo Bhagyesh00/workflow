@@ -3,12 +3,16 @@
  * workflow (a lock held by another tab makes `lockedByOther`; other workflows' events and the user's own saves
  * are ignored); the editor opens presence, asks for the lock, shows the avatars, the read-only banner and the
  * take over confirm; autosave stops while another holds the lock and goes on when it is free; "workflow was
- * updated" reloads. The demo backend plays the server (one session: it gives the lock to the asking tab).
+ * updated" reloads. The lock is part of the workflow store's read-only flag, so Save, Publish, Ctrl+S, paste
+ * and every store edit refuse while another holds it. A reload or a closed tab (`pagehide`) closes presence at
+ * once; a leave waits for the calls still in flight. The demo backend plays the server (one session: it gives
+ * the lock to the asking tab).
  */
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { WorkflowNode } from '@workflow/workflow';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fetchTransport, getTransport, setTransport } from '../src/api/client';
 import { CollaboratorsPane } from '../src/components/collaboration/CollaboratorsPane';
 import { handlePushEvent } from '../src/components/shell/PushBridge';
 import { clientId } from '../src/lib/client-id';
@@ -72,6 +76,54 @@ describe('the collaboration store', () => {
     expect(useCollaborationStore.getState().lockedByOther).toBe(false);
     store.setWriteLock(null);
     expect(useCollaborationStore.getState().lockedByOther).toBe(false);
+  });
+
+  it('the lock is part of the workflow store read-only flag, over the role and the archive', () => {
+    const lock = useCollaborationStore.getState();
+    const flag = () => useWorkflowStore.getState().readOnly;
+    const loadWith = (readOnly: boolean) =>
+      useWorkflowStore.getState().load({ name: 'Flag', nodes: [trigger], connections: {} }, { readOnly });
+    loadWith(false);
+    expect(flag()).toBe(false);
+    lock.setWriteLock(lockOf(OTHER, 'tab-of-someone-else'));
+    expect(flag()).toBe(true);
+    // a load under the lock stays read-only; the own tab's lock does not
+    loadWith(false);
+    expect(flag()).toBe(true);
+    lock.setWriteLock(lockOf(OTHER, clientId()));
+    expect(flag()).toBe(false);
+    // the role stays read-only when the lock goes
+    loadWith(true);
+    lock.setWriteLock(lockOf(OTHER, 'tab-of-someone-else'));
+    lock.setWriteLock(null);
+    expect(flag()).toBe(true);
+    // so does the archive; unarchive with the role's answer frees it
+    loadWith(false);
+    useWorkflowStore.getState().setArchived(true);
+    lock.setWriteLock(lockOf(OTHER, 'tab-of-someone-else'));
+    lock.setWriteLock(null);
+    expect(flag()).toBe(true);
+    useWorkflowStore.getState().setArchived(false, false);
+    expect(flag()).toBe(false);
+    // a leave frees the store
+    lock.setWriteLock(lockOf(OTHER, 'tab-of-someone-else'));
+    lock.reset();
+    expect(flag()).toBe(false);
+  });
+
+  it('a store edit is refused while another holds the lock, and goes through when it is free', () => {
+    useWorkflowStore
+      .getState()
+      .load({ name: 'Edits', nodes: [trigger], connections: {} }, { readOnly: false });
+    useCollaborationStore.getState().setWriteLock(lockOf(OTHER, 'tab-of-someone-else'));
+    const revision = useWorkflowStore.getState().revision;
+    useWorkflowStore.getState().moveNodes({ Start: [90, 30] });
+    useWorkflowStore.getState().setName('Renamed under the lock');
+    expect(useWorkflowStore.getState()).toMatchObject({ revision, dirty: false });
+    expect(useWorkflowStore.getState().meta.name).toBe('Edits');
+    useCollaborationStore.getState().setWriteLock(null);
+    useWorkflowStore.getState().setName('Renamed free');
+    expect(useWorkflowStore.getState().meta.name).toBe('Renamed free');
   });
 
   it('opens presence and asks for the lock, and takes the answers', async () => {
@@ -156,6 +208,81 @@ describe('the collaboration store', () => {
   });
 });
 
+describe('leaving', () => {
+  const presenceBodies = () => paths('POST', /\/presence$/).map((r) => r.body);
+
+  it('a leave while the lock request is in flight sends close after it, so no lock is left behind', async () => {
+    const { wf, selfId } = seed();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = 0;
+    setTransport(async (request) => {
+      if (/\/write-access$/.test(request.path)) {
+        held++;
+        await gate;
+      }
+      return fetchTransport(request);
+    });
+    started = startCollaboration({ workflowId: wf.id, selfUserId: selfId, canWrite: true });
+    await waitFor(() => expect(held).toBe(1));
+    started.stop();
+    started = null;
+    // the request has not been served: close waits
+    await new Promise((r) => setTimeout(r, 200));
+    expect(presenceBodies()).not.toContainEqual({ action: 'close' });
+    release();
+    await waitFor(() => expect(presenceBodies()).toContainEqual({ action: 'close' }));
+    const order = backend().requests.map((r) => `${r.path.split('/').pop()}:${JSON.stringify(r.body)}`);
+    expect(order.indexOf('write-access:{"action":"request"}')).toBeLessThan(
+      order.indexOf('presence:{"action":"close"}'),
+    );
+    // the (demo) server ends with nothing open for the tab that left
+    const open = (backend().ext.collaboration as { open: Map<string, unknown> }).open;
+    expect(open.get(wf.id)).toBeUndefined();
+  });
+
+  it('a reload or a closed tab (pagehide) closes presence at once, with keepalive and the push-ref header', async () => {
+    const { wf, selfId } = seed();
+    started = startCollaboration({ workflowId: wf.id, selfUserId: selfId, canWrite: true });
+    await waitFor(() => expect(useCollaborationStore.getState().writeLock?.clientId).toBe(clientId()));
+    const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push([input, init]);
+      return realFetch(input, init);
+    });
+    try {
+      expect(getTransport()).toBe(fetchTransport);
+      window.dispatchEvent(new Event('pagehide'));
+      await waitFor(() => expect(calls).toHaveLength(1));
+      const [url, init] = calls[0];
+      expect(String(url)).toContain(`/workflows/${wf.id}/presence`);
+      expect(init).toMatchObject({
+        method: 'POST',
+        keepalive: true,
+        body: JSON.stringify({ action: 'close' }),
+      });
+      expect(((init?.headers ?? {}) as Record<string, string>)['push-ref']).toBe(clientId());
+      await waitFor(() => expect(presenceBodies()).toContainEqual({ action: 'close' }));
+      const open = (backend().ext.collaboration as { open: Map<string, unknown> }).open;
+      expect(open.get(wf.id)).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    // after a leave the page no longer reacts
+    started.stop();
+    started = null;
+    await waitFor(() =>
+      expect(presenceBodies().filter((b) => (b as { action: string }).action === 'close')).toHaveLength(2),
+    );
+    window.dispatchEvent(new Event('pagehide'));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(presenceBodies().filter((b) => (b as { action: string }).action === 'close')).toHaveLength(2);
+  });
+});
+
 describe('the avatars', () => {
   it('show who has the workflow open, with the holder of the lock marked', () => {
     const id = 'wf-avatars';
@@ -202,6 +329,10 @@ describe('the editor', () => {
     expect(await screen.findByLabelText(/People with this workflow open: Olive Owner/)).toBeTruthy();
     expect(screen.queryByTestId('write-lock-banner')).toBeNull();
 
+    // an edit made before the lock is lost waits; autosave stops with the lock
+    useWorkflowStore.getState().moveNodes({ Start: [90, 30] });
+    expect(useWorkflowStore.getState().dirty).toBe(true);
+
     // someone else takes the lock
     handlePushEvent({
       type: 'collaboratorsChanged',
@@ -221,8 +352,11 @@ describe('the editor', () => {
     expect(banner.textContent).toContain('Omar Other is editing this workflow.');
     expect(banner.textContent).toContain('read-only');
 
-    // autosave stops while the other holds the lock
-    useWorkflowStore.getState().moveNodes({ Start: [90, 30] });
+    // autosave stops while the other holds the lock, and a new edit is refused
+    const revision = useWorkflowStore.getState().revision;
+    useWorkflowStore.getState().moveNodes({ Start: [120, 60] });
+    expect(useWorkflowStore.getState().revision).toBe(revision);
+    expect(useWorkflowStore.getState().nodes[0].position).toEqual([90, 30]);
     await new Promise((r) => setTimeout(r, 2400));
     expect(patches()).toHaveLength(0);
 
@@ -240,7 +374,54 @@ describe('the editor', () => {
     expect(useCollaborationStore.getState().lockedByOther).toBe(false);
 
     // free again: the pending change is saved
-    await waitFor(() => expect(patches().length).toBeGreaterThanOrEqual(1), { timeout: 8000 });
+    await waitFor(() => expect(patches().length).toBeGreaterThanOrEqual(1), { timeout: 20_000 });
+  }, 60_000);
+
+  it('while another holds the lock Save and Publish are disabled, Ctrl+S sends no PATCH, and paste and Delete do nothing', async () => {
+    const user = userEvent.setup();
+    const { wf } = await openEditor();
+    await waitFor(() => expect(useCollaborationStore.getState().writeLock).not.toBeNull());
+    // an unsaved edit: Save is live and so is Publish
+    act(() => useWorkflowStore.getState().moveNodes({ Start: [90, 30] }));
+    expect(screen.getByRole('button', { name: 'Publish' })).toHaveProperty('disabled', false);
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false);
+    handlePushEvent({
+      type: 'writeAccessAcquired',
+      data: { workflowId: wf.id, userId: OTHER, clientId: 'their-tab' },
+    });
+    await screen.findByTestId('write-lock-banner');
+    expect(screen.getByRole('button', { name: 'Publish' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
+
+    const names = () => useWorkflowStore.getState().nodes.map((n) => n.name);
+    const before = backend().requests.length;
+    fireEvent.keyDown(window, { key: 's', ctrlKey: true });
+    fireEvent.paste(document, {
+      clipboardData: {
+        getData: () =>
+          JSON.stringify({
+            nodes: [{ name: 'Pasted', type: 'core.noOp', position: [10, 10], parameters: {} }],
+            connections: {},
+          }),
+      },
+    });
+    act(() => useWorkflowStore.getState().select({ nodes: ['Start'], stickies: [], edges: [] }));
+    fireEvent.keyDown(window, { key: 'Delete' });
+    await user.keyboard('{Escape}');
+    expect(names()).toEqual(['Start']);
+    expect(
+      backend()
+        .requests.slice(before)
+        .filter((r) => r.method !== 'GET' && !/(presence|write-access)$/.test(r.path)),
+    ).toEqual([]);
+
+    // free again: the same keys edit
+    handlePushEvent({ type: 'writeAccessReleased', data: { workflowId: wf.id } });
+    await waitFor(() => expect(screen.queryByTestId('write-lock-banner')).toBeNull());
+    expect(screen.getByRole('button', { name: 'Publish' })).toHaveProperty('disabled', false);
+    act(() => useWorkflowStore.getState().select({ nodes: ['Start'], stickies: [], edges: [] }));
+    fireEvent.keyDown(window, { key: 'Delete' });
+    expect(names()).toEqual([]);
   }, 60_000);
 
   it('a release by the other lets the editor go on', async () => {
