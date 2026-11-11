@@ -1,7 +1,7 @@
 /**
  * P6-85 (L17): stop and delete many runs, in the list filter form of GET /executions (S1), each row checked.
- * - `stopMany` (POST /executions/stopMany `{ filter }`, `ids` in the filter for a selection): only rows of
- *   projects from `accessibleProjectIds(auth, 'workflow:execute')`; answers `{ stopped }`.
+ * - `stopMany` (POST /executions/stopMany `{ filter }`, `ids` in the filter for a selection): only rows the
+ *   caller may execute (`listFilter(auth, 'workflow:execute')`: their projects and shared workflows); answers `{ stopped }`.
  * - `deleteMany` (POST /executions/delete `{ ids, filters, deleteBefore }`): `execution:delete` per row; none
  *   accessible gives "Execution not found"; answers `{ deleted }`.
  * Rows with no workflow id: owner and admin only (they reach them only through the global scope: `all`).
@@ -31,6 +31,8 @@ export interface ExecutionBulkFilter {
   customDataKey?: string;
   customDataValue?: string;
   customDataExact?: boolean;
+  /** the run's workflow is archived (`true`) or not (`false`) */
+  archived?: boolean;
 }
 
 /** runs read, and acted on, per round */
@@ -71,6 +73,7 @@ async function eachBatch(
       customDataKey: filter.customDataKey,
       customDataValue: filter.customDataValue,
       customDataExact: filter.customDataExact,
+      archived: filter.archived,
       limit,
       cursor,
     });
@@ -94,17 +97,9 @@ export async function stopMany(
 ): Promise<{ stopped: number }> {
   const ctx = deps.context();
   const tenantId = auth.tenant.id;
-  const held = await ctx.access.listFilter(auth, 'workflow:execute');
   // the projects where the caller may execute (every project with the global scope, and then the runs with no
-  // workflow row too); a workflow shared into a project is reached through that project, as in n8n
-  const access: AccessFilter = held.all
-    ? held
-    : {
-        all: false,
-        projectIds: await ctx.access.accessibleProjectIds(auth, 'workflow:execute'),
-        workflowIds: [],
-        credentialIds: [],
-      };
+  // workflow row too) plus the workflows shared to them with a role that may execute, as the stop route
+  const access = await ctx.access.listFilter(auth, 'workflow:execute');
   const active = filter.status?.length ? filter.status.filter((s) => ACTIVE.includes(s)) : [...ACTIVE];
   if (!active.length) return { stopped: 0 };
   let stopped = 0;

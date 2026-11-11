@@ -2,7 +2,8 @@
  * /rest bulk run actions (P6-85, L17), as n8n's executions controller: POST `/executions/stopMany`
  * (`{ filter }`, a selection as `ids` in the filter; only runs of projects where the caller holds
  * `workflow:execute`; answers `{ stopped }`) and POST `/executions/delete` (`{ ids, filters, deleteBefore }`;
- * `execution:delete` per row; none accessible gives "Execution not found"; answers `{ deleted }`). Both are in
+ * `execution:delete` per row; none accessible gives "Execution not found"; answers `{ deleted }`; needs a non-empty
+ * `ids` or a `deleteBefore`, `filters` only narrow it). Both are in
  * the list filter form of `GET /executions` (from S1): no scope on the route, every row is checked against the
  * caller's access in the service.
  */
@@ -44,6 +45,8 @@ const bulkFilter = z.object({
   customDataKey: z.string().min(1).max(50).optional(),
   customDataValue: z.string().max(255).optional(),
   customDataExact: z.boolean().optional(),
+  /** the run's workflow is archived (`true`) or not (`false`), as the list's `archived` */
+  archived: z.boolean().optional(),
 });
 
 const stopBody = z.object({ filter: bulkFilter.default({}) });
@@ -64,9 +67,10 @@ export function registerExecutionBulkRoutes(app: FastifyInstance, ctx: ServerCon
   app.post('/executions/delete', async (request) => {
     const auth = requireAuth(request);
     const body = parse(deleteBody, request.body ?? {});
-    if (!body.ids?.length && !body.filters && !body.deleteBefore) {
-      // a delete with nothing to select is refused (it would reach every run)
-      throw ApiError.badRequest('Give ids, filters or deleteBefore');
+    if (!body.ids?.length && !body.deleteBefore) {
+      // as n8n: a delete needs ids or a time bound; filters only narrow a deleteBefore delete, so `{ filters }`
+      // alone (which would reach every run in reach) is refused
+      throw ApiError.badRequest('Give ids or deleteBefore');
     }
     return { data: await deleteMany(ctx.serviceDeps, auth, body) };
   });

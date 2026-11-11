@@ -167,7 +167,11 @@ describe('Executions page bulk actions', () => {
     await user.click(within(confirm).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(backend().executions.length).toBe(1), LONG);
     expect(backend().executions[0].id).toBe(recent);
-    expect(seen[0]).toMatchObject({ filters: { startedBefore: '2026-02-01T00:00:00.000Z' } });
+    // bounded as n8n does: only runs up to the newest listed run's start, never one that started after the list
+    expect(seen[0]).toMatchObject({
+      filters: { startedBefore: '2026-02-01T00:00:00.000Z' },
+      deleteBefore: '2026-01-01T00:00:00.000Z',
+    });
     expect(seen[0].ids).toBeUndefined();
   });
 

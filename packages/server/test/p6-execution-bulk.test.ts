@@ -51,6 +51,9 @@ async function seed(
   return id;
 }
 
+/** a time after every seeded run: the bound a filter delete needs */
+const LATER = '2099-01-01T00:00:00Z';
+
 const statusOf = async (tenantId: string, id: string) =>
   (await server.ctx.repos.executions.get(tenantId, id))?.status;
 const exists = async (tenantId: string, id: string) =>
@@ -142,6 +145,33 @@ describe('stop many (P6-85)', () => {
     expect(await statusOf(t, tagged)).toBe('canceled');
   });
 
+  it('stops a run of a workflow shared into the project the caller edits, and not an unshared one', async () => {
+    const s = await setup();
+    const t = s.owner.tenant.id;
+    await server.ctx.repos.shares.set(t, 'workflow', s.inGamma.id, [s.alpha.id]);
+    const shared = await seed(t, s.inGamma.id);
+    const unshared = await seed(t, s.inBeta.id);
+    const res = await s.member.client.post('/rest/executions/stopMany', {
+      filter: { ids: [shared, unshared], projectId: s.alpha.id },
+    });
+    expect(res.json().data).toEqual({ stopped: 1 });
+    expect(await statusOf(t, shared)).toBe('canceled');
+    expect(await statusOf(t, unshared)).toBe('waiting');
+  });
+
+  it('a filter on archived narrows a stop', async () => {
+    const s = await setup();
+    const t = s.owner.tenant.id;
+    const archivedWf = await workflowIn(server, t, s.alpha.id);
+    await server.ctx.repos.workflows.setArchived(t, archivedWf.id, true);
+    const archivedRun = await seed(t, archivedWf.id);
+    const liveRun = await seed(t, s.inAlpha.id);
+    const res = await s.owner.client.post('/rest/executions/stopMany', { filter: { archived: true } });
+    expect(res.json().data).toEqual({ stopped: 1 });
+    expect(await statusOf(t, archivedRun)).toBe('canceled');
+    expect(await statusOf(t, liveRun)).toBe('waiting');
+  });
+
   it('a status filter that holds no active status stops nothing', async () => {
     const s = await setup();
     const t = s.owner.tenant.id;
@@ -219,14 +249,20 @@ describe('delete many (P6-85)', () => {
     const a2 = await seed(t, s.inAlpha.id, { status: 'error', mode: 'manual' });
     const b1 = await seed(t, s.inBeta.id, { status: 'success', mode: 'webhook' });
     const orphan = await seed(t, null, { status: 'success', mode: 'webhook' });
-    const res = await s.member.client.post('/rest/executions/delete', { filters: { mode: 'webhook' } });
+    const res = await s.member.client.post('/rest/executions/delete', {
+      filters: { mode: 'webhook' },
+      deleteBefore: LATER,
+    });
     expect(res.json().data).toEqual({ deleted: 1 });
     expect(await exists(t, a1)).toBe(false);
     expect(await exists(t, a2)).toBe(true);
     expect(await exists(t, b1)).toBe(true);
     expect(await exists(t, orphan)).toBe(true);
 
-    const all = await s.owner.client.post('/rest/executions/delete', { filters: { mode: 'webhook' } });
+    const all = await s.owner.client.post('/rest/executions/delete', {
+      filters: { mode: 'webhook' },
+      deleteBefore: LATER,
+    });
     expect(all.json().data).toEqual({ deleted: 2 });
     expect(await exists(t, b1)).toBe(false);
     expect(await exists(t, orphan)).toBe(false);
@@ -286,6 +322,40 @@ describe('delete many (P6-85)', () => {
     expect(await exists(t, run)).toBe(true);
   });
 
+  it('refuses filters with no ids and no deleteBefore, and deletes nothing', async () => {
+    const s = await setup();
+    const t = s.owner.tenant.id;
+    const run = await seed(t, s.inAlpha.id, { status: 'success', mode: 'webhook' });
+    const orphan = await seed(t, null, { status: 'success' });
+    for (const body of [
+      { filters: {} },
+      { filters: { mode: 'webhook' } },
+      { ids: [], filters: { workflowId: s.inAlpha.id } },
+    ]) {
+      const res = await s.owner.client.post('/rest/executions/delete', body);
+      expect(res.statusCode).toBe(400);
+      expect(JSON.stringify(res.json())).toMatch(/Give ids or deleteBefore/);
+    }
+    expect(await exists(t, run)).toBe(true);
+    expect(await exists(t, orphan)).toBe(true);
+  });
+
+  it('a filter on archived narrows a delete: runs of a workflow that is not archived stay', async () => {
+    const s = await setup();
+    const t = s.owner.tenant.id;
+    const archivedWf = await workflowIn(server, t, s.alpha.id);
+    await server.ctx.repos.workflows.setArchived(t, archivedWf.id, true);
+    const gone = await seed(t, archivedWf.id, { status: 'success' });
+    const stays = await seed(t, s.inAlpha.id, { status: 'success' });
+    const res = await s.owner.client.post('/rest/executions/delete', {
+      filters: { archived: true },
+      deleteBefore: LATER,
+    });
+    expect(res.json().data).toEqual({ deleted: 1 });
+    expect(await exists(t, gone)).toBe(false);
+    expect(await exists(t, stays)).toBe(true);
+  });
+
   it('another workspace is untouched, and its ids answer not found', async () => {
     const s = await setup();
     const other = await signup(server.app);
@@ -293,7 +363,10 @@ describe('delete many (P6-85)', () => {
     const foreign = await seed(other.tenant.id, otherWf.id, { status: 'success' });
     const byId = await s.owner.client.post('/rest/executions/delete', { ids: [foreign] });
     expect(byId.statusCode).toBe(404);
-    const byFilter = await s.owner.client.post('/rest/executions/delete', { filters: { mode: 'manual' } });
+    const byFilter = await s.owner.client.post('/rest/executions/delete', {
+      filters: { mode: 'manual' },
+      deleteBefore: LATER,
+    });
     expect(byFilter.json().data).toEqual({ deleted: 0 });
     expect(await exists(other.tenant.id, foreign)).toBe(true);
   });

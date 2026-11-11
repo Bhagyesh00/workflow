@@ -18,6 +18,8 @@ export interface BulkActionsBarProps {
   /** the list's filter */
   filter: ExecutionBulkFilter;
   allMatching: boolean;
+  /** the start of the newest listed run: "every run matching" deletes only runs up to it, never one newer than the list */
+  deleteBefore: string;
   /** clears the selection after an action */
   onClear(): void;
 }
@@ -28,6 +30,7 @@ export function BulkActionsBar({
   selectedIds,
   filter,
   allMatching,
+  deleteBefore,
   onClear,
 }: BulkActionsBarProps): ReactNode {
   const client = useQueryClient();
@@ -45,7 +48,8 @@ export function BulkActionsBar({
     onError: (error) => toast.error("Couldn't stop the runs", errorMessage(error)),
   });
   const remove = useMutation({
-    mutationFn: () => executionBulkApi.deleteMany(allMatching ? { filters: filter } : { ids: selectedIds }),
+    mutationFn: () =>
+      executionBulkApi.deleteMany(allMatching ? { filters: filter, deleteBefore } : { ids: selectedIds }),
     onSuccess: ({ deleted }) => {
       toast.success(`Deleted ${plural(deleted, 'run')}`);
       onClear();

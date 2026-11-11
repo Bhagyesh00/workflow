@@ -2,7 +2,7 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import type { ExecutionStatus } from '@workflow/workflow';
 import { History, RefreshCw } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { errorMessage } from '../api/client';
 import { type ExecutionBulkFilter, executionsApi, workflowsApi } from '../api/endpoints';
@@ -123,11 +123,19 @@ export function ExecutionsPage() {
   };
   // a new filter is a new list: the picks and "all matching" no longer describe it
   const filterKey = JSON.stringify(bulkFilter);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the key is the trigger
-  useEffect(() => {
+  const [pickedFor, setPickedFor] = useState(filterKey);
+  if (pickedFor !== filterKey) {
+    setPickedFor(filterKey);
     setSelected([]);
     setAllMatching(false);
-  }, [filterKey]);
+  }
+  // "every run matching" stops at the newest listed run (as n8n): a run that starts after the list loaded stays
+  // (a list of runs that have not started has no start to use: the time the list loaded)
+  const newestStart = executions.reduce(
+    (newest, e) => (e.startedAt && e.startedAt > newest ? e.startedAt : newest),
+    '',
+  );
+  const deleteBefore = newestStart || new Date(query.dataUpdatedAt).toISOString();
   const pageIds = executions.map((e) => e.id);
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
   const toggleRow = (id: string, on: boolean) => {
@@ -261,6 +269,7 @@ export function ExecutionsPage() {
         selectedIds={selected}
         filter={bulkFilter}
         allMatching={allMatching}
+        deleteBefore={deleteBefore}
         onClear={() => {
           setSelected([]);
           setAllMatching(false);

@@ -85,8 +85,8 @@ export function registerExecutionBulkRoutes(backend: MockBackend): void {
     const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).map(String) : undefined;
     const filters = body.filters as Record<string, unknown> | undefined;
     const deleteBefore = typeof body.deleteBefore === 'string' ? body.deleteBefore : undefined;
-    if (!ids?.length && !filters && !deleteBefore) {
-      throw new HttpError(400, 'bad_request', 'Give ids, filters or deleteBefore');
+    if (!ids?.length && !deleteBefore) {
+      throw new HttpError(400, 'bad_request', 'Give ids or deleteBefore');
     }
     const rows = matching({ ...filters, ...(ids ? { ids } : {}) }, 'execution:delete', deleteBefore);
     if (ids?.length && rows.length === 0) throw new HttpError(404, 'not_found', 'Execution not found');
