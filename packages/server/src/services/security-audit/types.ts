@@ -3,6 +3,10 @@
  * words). Platform env values are never part of a report.
  * Types from C0; L9 may add fields it needs.
  */
+import type { WorkflowNode } from '@workflow/workflow';
+import type { ServiceDeps } from '../../context';
+import type { WorkflowRow } from '../../db/schema';
+import { AUDIT_PAGE_SIZE } from '../../repositories/security-audit';
 
 export const AUDIT_CATEGORIES = ['credentials', 'database', 'nodes', 'filesystem', 'instance'] as const;
 export type AuditCategory = (typeof AUDIT_CATEGORIES)[number];
@@ -47,5 +51,46 @@ export interface SecurityAuditOptions {
 /** what each category reads (resolved options) */
 export interface AuditRunOptions {
   daysAbandonedWorkflow: number;
+  /** the value the caller sent, if any; the only day count a report text may print (never the config default) */
+  requestedDaysAbandonedWorkflow?: number;
   categories: AuditCategory[];
+}
+
+/** the report title of a category (`Credentials Risk Report`) */
+export function auditTitle(category: AuditCategory): string {
+  return `${category[0].toUpperCase()}${category.slice(1)} Risk Report`;
+}
+
+export type AuditWorkflow = Omit<WorkflowRow, 'nodes'> & { nodes: WorkflowNode[] };
+
+/** the page by page walk over a workspace's workflows that the categories share (200 rows a page, one page held) */
+export async function eachWorkflow(
+  deps: ServiceDeps,
+  tenantId: string,
+  visit: (workflow: AuditWorkflow) => void,
+): Promise<void> {
+  let after: string | null = null;
+  for (;;) {
+    const page = await deps.repos.securityAudit.workflowsPage(tenantId, after);
+    for (const row of page) {
+      const nodes = (Array.isArray(row.nodes) ? row.nodes : []).filter(
+        (node): node is WorkflowNode =>
+          !!node && typeof node === 'object' && typeof (node as WorkflowNode).type === 'string',
+      );
+      visit({ ...row, nodes });
+    }
+    if (page.length < AUDIT_PAGE_SIZE) return;
+    after = page[page.length - 1].id;
+  }
+}
+
+export function nodeLocation(workflow: AuditWorkflow, node: WorkflowNode): AuditLocation {
+  return {
+    kind: 'node',
+    workflowId: workflow.id,
+    workflowName: workflow.name,
+    nodeId: String(node.id ?? ''),
+    nodeName: String(node.name ?? ''),
+    nodeType: node.type,
+  };
 }
