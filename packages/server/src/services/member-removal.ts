@@ -5,13 +5,16 @@
  * personal project and its relations cascade with it). S2 and S3 call these (P6-02, P6-12, P6-21).
  * Only this workspace is touched: the user, their other memberships and their other personal projects stay.
  */
-import type { ServerContext } from '../context';
+
+import { and, eq } from 'drizzle-orm';
+import type { ServerContext, ServiceDeps } from '../context';
 import type { DbOrTx } from '../db/client';
-import type { ProjectRow } from '../db/schema';
+import { credentials, type ProjectRow, workflows } from '../db/schema';
 import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { createRepositories } from '../repositories';
 import { MISSING_SCOPE_MESSAGE } from './access';
+import { assertTransferAllowed } from './type-policies/enforce';
 
 /** the caller's choice for the removed member's personal work */
 export type MemberRemovalChoice = { transferToProjectId: string } | { deleteData: true };
@@ -47,7 +50,60 @@ async function requireTarget(
       { dataTables: clashes },
     );
   }
+  await assertProjectWorkAllowed(ctx.serviceDeps, tenantId, personal.id, target.id);
   return target;
+}
+
+/**
+ * P6-51: the work of project `fromProjectId` (a member's personal project, or a project that is deleted
+ * with a transfer): its workflows (all their node types and credential types) and credentials may
+ * enter the target project's type policies, else 403 `policy_violation` (or 503 when the check cannot
+ * decide). Runs before the first write of `removeMember` and `transferPersonalWork`, so a refusal moves
+ * nothing and removes no membership. Judged in the target project, as a move into it.
+ */
+export async function assertProjectWorkAllowed(
+  deps: ServiceDeps,
+  tenantId: string,
+  fromProjectId: string,
+  targetProjectId: string,
+): Promise<void> {
+  const { db } = deps.database;
+  const [rows, credentialRows] = await Promise.all([
+    db
+      .select({ nodes: workflows.nodes })
+      .from(workflows)
+      .where(and(eq(workflows.tenantId, tenantId), eq(workflows.projectId, fromProjectId))),
+    db
+      .select({ type: credentials.type })
+      .from(credentials)
+      .where(and(eq(credentials.tenantId, tenantId), eq(credentials.projectId, fromProjectId))),
+  ]);
+  const nodes: Array<{ name: string; type: string; credentials?: Record<string, never> }> = [];
+  for (const row of rows) {
+    for (const raw of row.nodes) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const node = raw as { name?: unknown; type?: unknown; credentials?: unknown };
+      if (typeof node.type !== 'string') continue;
+      const held =
+        typeof node.credentials === 'object' && node.credentials !== null && !Array.isArray(node.credentials)
+          ? (node.credentials as Record<string, never>)
+          : undefined;
+      nodes.push({
+        name: typeof node.name === 'string' ? node.name : '',
+        type: node.type,
+        credentials: held,
+      });
+    }
+  }
+  if (nodes.length > 0) {
+    await assertTransferAllowed(deps, tenantId, targetProjectId, {
+      kind: 'workflow',
+      workflow: { nodes },
+    });
+  }
+  for (const credentialType of new Set(credentialRows.map((row) => row.type))) {
+    await assertTransferAllowed(deps, tenantId, targetProjectId, { kind: 'credential', credentialType });
+  }
 }
 
 /**

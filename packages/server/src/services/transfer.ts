@@ -17,6 +17,14 @@ import { createRepositories } from '../repositories';
 import { MISSING_SCOPE_MESSAGE } from './access';
 import { assertCredentialsUsable } from './credential-usable';
 import { loadPublishedDefinition, publishedDefinition } from './published-workflow';
+import { assertTransferAllowed, filterAvailable } from './type-policies/enforce';
+import { violationMessage } from './type-policies/errors';
+import {
+  ENFORCEMENT_DEADLINE_MS,
+  type PolicyKind,
+  type PolicyWorkflow,
+  type TypePolicyViolation,
+} from './type-policies/types';
 
 /** one reason a move leaves something restricted (the editor's `PolicyViolation`) */
 export interface PolicyViolation {
@@ -65,6 +73,25 @@ export const SAME_FOLDER_DESTINATION =
   "You can't transfer a folder into the project that's already owning it.";
 
 type Resource = 'workflow' | 'credential' | 'folder';
+
+/** a transfer preview row: S1's `PolicyViolation` plus the rule and opt-in the editor reads */
+type RestrictedRow = PolicyViolation & { matchedRuleId?: string; optInAvailable?: boolean };
+
+/** the nodes a policy check reads out of a stored `nodes` column (anything else is skipped) */
+function policyNodes(nodes: readonly unknown[]): PolicyWorkflow['nodes'] {
+  const out: Array<PolicyWorkflow['nodes'][number]> = [];
+  for (const raw of nodes) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const node = raw as { name?: unknown; type?: unknown; credentials?: unknown };
+    if (typeof node.type !== 'string') continue;
+    const credentials =
+      typeof node.credentials === 'object' && node.credentials !== null && !Array.isArray(node.credentials)
+        ? (node.credentials as Record<string, never>)
+        : undefined;
+    out.push({ name: typeof node.name === 'string' ? node.name : '', type: node.type, credentials });
+  }
+  return out;
+}
 type Tx = Parameters<typeof createRepositories>[0];
 
 export class TransferService {
@@ -80,7 +107,13 @@ export class TransferService {
     await this.requireProject(auth, destinationProjectId);
     await this.requireCreate(auth, 'workflow', destinationProjectId);
     const unpublishReasons = row.active ? await this.previewBlockers(auth, row, destinationProjectId) : [];
-    return { restricted: [], checkFailed: false, unpublishReasons };
+    const policy = await this.previewTypes(
+      auth,
+      destinationProjectId,
+      { nodes: policyNodes(row.nodes) },
+      row.id,
+    );
+    return { restricted: policy.restricted, checkFailed: policy.checkFailed, unpublishReasons };
   }
 
   async previewCredential(
@@ -93,6 +126,8 @@ export class TransferService {
     await this.requireProject(auth, destinationProjectId);
     await this.requireCreate(auth, 'credential', destinationProjectId);
     const restricted: PolicyViolation[] = [];
+    const policy = await this.previewTypes(auth, destinationProjectId, { credentialType: row.type }, row.id);
+    restricted.push(...policy.restricted);
     try {
       await this.deps
         .context()
@@ -108,7 +143,7 @@ export class TransferService {
         projectId: destinationProjectId,
       });
     }
-    return { restricted, checkFailed: false };
+    return { restricted, checkFailed: policy.checkFailed };
   }
 
   async previewFolder(
@@ -120,14 +155,21 @@ export class TransferService {
     if (!folder) throw ApiError.notFound('Folder');
     await this.requireProject(auth, destinationProjectId);
     await this.requireCreate(auth, 'folder', destinationProjectId);
-    const active = (await this.workflowsInTree(auth.tenant.id, folderId)).filter((w) => w.active);
+    const inTree = await this.workflowsInTree(auth.tenant.id, folderId);
+    const policy = await this.previewTypes(
+      auth,
+      destinationProjectId,
+      { nodes: inTree.flatMap((w) => policyNodes(w.nodes)) },
+      folderId,
+    );
+    const active = inTree.filter((w) => w.active);
     const stay: Array<{ id: string; name: string }> = [];
     for (const workflow of active) {
       if ((await this.previewBlockers(auth, workflow, destinationProjectId)).length) {
         stay.push({ id: workflow.id, name: workflow.name });
       }
     }
-    return { restricted: [], checkFailed: false, workflowsToUnpublish: stay };
+    return { restricted: policy.restricted, checkFailed: policy.checkFailed, workflowsToUnpublish: stay };
   }
 
   async transferWorkflow(auth: AuthContext, workflowId: string, input: WorkflowTransferInput): Promise<void> {
@@ -140,6 +182,11 @@ export class TransferService {
     if (row.projectId === destination) throw ApiError.badRequest(SAME_WORKFLOW_DESTINATION);
     await this.requireFolder(tenantId, destination, input.destinationParentFolderId);
     const shareIds = await this.checkShareCredentials(auth, input.shareCredentials);
+    // P6-51: the destination project's type policies, before the first write
+    await assertTransferAllowed(this.deps, tenantId, destination, {
+      kind: 'workflow',
+      workflow: { nodes: policyNodes(row.nodes) },
+    });
 
     // the version that runs now is the one that runs again (never the draft)
     const publishedVersionId = row.active ? row.publishedVersionId : null;
@@ -186,6 +233,11 @@ export class TransferService {
     await this.requireCreate(auth, 'credential', destination);
     if (row.projectId === destination) throw ApiError.badRequest(SAME_CREDENTIAL_DESTINATION);
     await this.deps.context().secrets.assertProjectAccess(tenantId, destination, row.secretKeys ?? []);
+    // P6-51: the destination project's type policies, before the first write
+    await assertTransferAllowed(this.deps, tenantId, destination, {
+      kind: 'credential',
+      credentialType: row.type,
+    });
 
     await this.deps.database.db.transaction(async (tx) => {
       await tx
@@ -219,6 +271,11 @@ export class TransferService {
 
     const treeIds = await repos.folders.subtreeIds(tenantId, folderId);
     const inTree = await this.workflowsInTree(tenantId, folderId);
+    // P6-51: every workflow of the tree is judged as one, in the destination project, before the first write
+    await assertTransferAllowed(this.deps, tenantId, destination, {
+      kind: 'workflow',
+      workflow: { nodes: inTree.flatMap((w) => policyNodes(w.nodes)) },
+    });
     const wasActive = inTree.flatMap((w) =>
       w.active && w.publishedVersionId ? [{ id: w.id, versionId: w.publishedVersionId }] : [],
     );
@@ -255,6 +312,81 @@ export class TransferService {
   }
 
   // -------------------------------------------------------------------------------------------
+
+  /**
+   * P6-51: the node and credential types of a move that the destination project does not allow, for a
+   * preview: the same decision as `assertTransferAllowed`, with no audit row and no refusal. A check that
+   * fails or misses its deadline sets `checkFailed` (the lists can be incomplete).
+   */
+  private async previewTypes(
+    auth: AuthContext,
+    projectId: string,
+    what: { nodes?: PolicyWorkflow['nodes']; credentialType?: string },
+    subject: string,
+  ): Promise<{ restricted: PolicyViolation[]; checkFailed: boolean }> {
+    const tenantId = auth.tenant.id;
+    const seen = new Set<string>();
+    const nodeTypes: string[] = [];
+    const credentialTypes: string[] = [];
+    for (const node of what.nodes ?? []) {
+      if (!seen.has(`node:${node.type}`)) {
+        seen.add(`node:${node.type}`);
+        nodeTypes.push(node.type);
+      }
+      for (const type of Object.keys(node.credentials ?? {})) {
+        if (seen.has(`credential:${type}`)) continue;
+        seen.add(`credential:${type}`);
+        credentialTypes.push(type);
+      }
+    }
+    if (what.credentialType !== undefined) credentialTypes.push(what.credentialType);
+    const judge = async (kind: PolicyKind, types: string[]): Promise<RestrictedRow[]> => {
+      if (types.length === 0) return [];
+      const rows = await filterAvailable(this.deps, tenantId, projectId, kind, types);
+      return rows
+        .filter((row) => !row.available)
+        .map((row) => {
+          const violation: TypePolicyViolation = {
+            kind: kind === 'credential' ? 'credential-type-unavailable' : 'node-type-unavailable',
+            type: row.type,
+            scope: row.scope ?? 'workspace',
+            matchedRuleId: null,
+            optInAvailable: row.optInAvailable ?? false,
+          };
+          return {
+            kind: violation.kind,
+            checkId: kind === 'credential' ? 'credentialTypePolicy' : 'nodeTypePolicy',
+            // a project denial never names the project
+            message: violationMessage([violation]),
+            subject,
+            subjectType: what.credentialType !== undefined ? 'credential' : 'workflow',
+            scope: violation.scope,
+            optInAvailable: violation.optInAvailable,
+          };
+        });
+    };
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const work = Promise.all([judge('node', nodeTypes), judge('credential', credentialTypes)]);
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('deadline missed')),
+          ENFORCEMENT_DEADLINE_MS.workflowTransfer,
+        );
+        timer.unref?.();
+      });
+      const [nodes, credentials] = await Promise.race([work, deadline]);
+      return { restricted: [...nodes, ...credentials], checkFailed: false };
+    } catch (error) {
+      this.deps.logger.warn(
+        { tenantId, deadlineMissed: error instanceof Error && error.message === 'deadline missed' },
+        'The type policy preview failed',
+      );
+      return { restricted: [], checkFailed: true };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   private async requireProject(auth: AuthContext, projectId: string): Promise<void> {
     if (!(await this.deps.repos.projects.get(auth.tenant.id, projectId))) throw ApiError.notFound('Project');

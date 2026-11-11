@@ -18,6 +18,7 @@ import { effectiveLimits, type TenantSettings } from '../plans';
 import { createRepositories, type Repositories } from '../repositories';
 import { PERSONAL_OWNER_ROLE } from '../repositories/projects';
 import { MISSING_SCOPE_MESSAGE } from './access';
+import { assertProjectWorkAllowed } from './member-removal';
 import { RELOAD_CHANNEL } from './secrets/manager';
 import { projectShared } from './share-mails';
 
@@ -481,6 +482,8 @@ export class ProjectService {
           { dataTables: clashes },
         );
       }
+      // P6-51: the target project's type policies judge the work that moves, before the first write
+      await assertProjectWorkAllowed(this.deps, tenantId, projectId, target.id);
       let vault: string[] = [];
       await this.deps.database.db.transaction(async (tx) => {
         await lockProject(tx, tenantId, projectId);
