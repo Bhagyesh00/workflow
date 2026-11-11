@@ -92,7 +92,11 @@ test('the owner saves a workflow, then denies its node type through the public A
   const version = ((await scope.json()).data as { version: number }).version;
   const attached = await page.request.put('/api/v1/node-type-policies/instance', {
     headers,
-    data: { defaultAction: 'allow', attachments: [{ policyId, priority: 0, isFloor: false }], expectedVersion: version },
+    data: {
+      defaultAction: 'allow',
+      attachments: [{ policyId, priority: 0, isFloor: false }],
+      expectedVersion: version,
+    },
   });
   expect(attached.ok()).toBe(true);
 });

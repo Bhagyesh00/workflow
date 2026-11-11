@@ -120,7 +120,10 @@ export async function checkRateLimit(deps: ServiceDeps, request: RateLimitReques
   if (endpointLimit > 0) {
     const window = limits[`endpoint${op}Window`];
     results.push(
-      resultOf(await count(deps, `${base}:endpoint:${op}:${request.method}:${request.route}`, window), endpointLimit),
+      resultOf(
+        await count(deps, `${base}:endpoint:${op}:${request.method}:${request.route}`, window),
+        endpointLimit,
+      ),
     );
   }
   if (results.length === 0) return { allowed: true, limit: 0, remaining: 0, resetSeconds: 0 };
@@ -174,7 +177,10 @@ export class RateLimitSettingsService {
   /** the workspace's limits, defaults filled */
   async get(tenantId: string): Promise<PublicApiRateLimit> {
     const tenant = await this.deps.repos.tenants.get(tenantId);
-    return effectiveOf(this.deps, (tenant?.settings as TenantSettings | null | undefined)?.publicApiRateLimit);
+    return effectiveOf(
+      this.deps,
+      (tenant?.settings as TenantSettings | null | undefined)?.publicApiRateLimit,
+    );
   }
 
   async update(

@@ -60,8 +60,7 @@ export function buildRegistries(packages: NodePackage[], lists?: Config['nodes']
   const narrowed = packages.map((pkg) => ({
     ...pkg,
     nodes: pkg.nodes.filter(
-      (n) =>
-        (include.size === 0 || include.has(n.description.name)) && !exclude.has(n.description.name),
+      (n) => (include.size === 0 || include.has(n.description.name)) && !exclude.has(n.description.name),
     ),
   }));
   const registries = registriesFromPackages(narrowed);

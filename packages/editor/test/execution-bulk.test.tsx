@@ -180,7 +180,7 @@ describe('Executions page bulk actions', () => {
     addRun('Run one', { status: 'waiting' });
     b.setDemoRole('viewer');
     const user = userEvent.setup();
-    renderApp('/projects/' + b.oldestTeamProject(b.session!.tenantId).id + '/executions');
+    renderApp(`/projects/${b.oldestTeamProject(b.session!.tenantId).id}/executions`);
     await screen.findByRole('link', { name: 'Run one' }, LONG);
     await user.click(screen.getByRole('checkbox', { name: 'Select Run one' }));
     const bar = screen.getByRole('toolbar', { name: 'Bulk actions' });

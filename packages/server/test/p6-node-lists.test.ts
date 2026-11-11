@@ -20,9 +20,15 @@ const mk = (name: string, tool = false): NodeType => ({
     return [ctx.getInputData()];
   },
 });
-const pkg: NodePackage = { name: 'p6-lists', nodes: [mk('p6.a', true), mk('p6.b'), mk('p6.c')], credentials: [] };
+const pkg: NodePackage = {
+  name: 'p6-lists',
+  nodes: [mk('p6.a', true), mk('p6.b'), mk('p6.c')],
+  credentials: [],
+};
 const names = (l?: { exclude: string[]; include: string[] }) =>
-  buildRegistries([pkg], l).nodeTypes.list().map((n) => n.description.name);
+  buildRegistries([pkg], l)
+    .nodeTypes.list()
+    .map((n) => n.description.name);
 
 describe('node lists', () => {
   it('default empty lists keep everything, with the tool variant', () => {
@@ -47,6 +53,8 @@ describe('node lists', () => {
     expect(n.filter((x) => x.startsWith('p6.')).sort()).toEqual(['p6.a', 'p6.aTool', 'p6.b']);
   });
   it('exclude wins over include', () => {
-    expect(names({ exclude: ['p6.b'], include: ['p6.b', 'p6.c'] }).filter((x) => x.startsWith('p6.'))).toEqual(['p6.c']);
+    expect(
+      names({ exclude: ['p6.b'], include: ['p6.b', 'p6.c'] }).filter((x) => x.startsWith('p6.')),
+    ).toEqual(['p6.c']);
   });
 });

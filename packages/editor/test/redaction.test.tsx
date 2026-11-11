@@ -7,8 +7,7 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { WorkflowSettings } from '@workflow/workflow';
-import { useState } from 'react';
-import { act } from 'react';
+import { act, useState } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { queryKeys } from '../src/api/queries';
 import { RedactionSettingsFields } from '../src/components/redaction/RedactionSettingsFields';

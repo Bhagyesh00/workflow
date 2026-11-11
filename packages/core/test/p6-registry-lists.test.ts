@@ -3,7 +3,17 @@ import { NodeTypes } from '../src/registry';
 
 const nt = (name: string) =>
   ({
-    description: { name, displayName: name, description: '', group: [], version: 1, defaults: { name }, inputs: ['main'], outputs: ['main'], properties: [] },
+    description: {
+      name,
+      displayName: name,
+      description: '',
+      group: [],
+      version: 1,
+      defaults: { name },
+      inputs: ['main'],
+      outputs: ['main'],
+      properties: [],
+    },
     async execute() {
       return [[]];
     },

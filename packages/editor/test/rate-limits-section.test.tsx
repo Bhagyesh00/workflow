@@ -20,7 +20,9 @@ describe('rate limits section', () => {
     expect((screen.getByLabelText('Global read limit') as HTMLInputElement).value).toBe('1200');
     expect((screen.getByLabelText('Endpoint write window (seconds)') as HTMLInputElement).value).toBe('60');
     expect(screen.getByText(/each API key can make 600 calls per minute/)).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Save rate limits' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Save rate limits' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
   });
 
   it('saves the switch and a changed limit, and keeps what was not touched', async () => {
@@ -39,10 +41,10 @@ describe('rate limits section', () => {
     });
     const saved = await rateLimitsApi.get();
     expect(saved.globalWriteLimit).toBe(600);
-    await waitFor(() =>
-      expect(screen.queryByText(/each API key can make 600 calls per minute/)).toBeNull(),
+    await waitFor(() => expect(screen.queryByText(/each API key can make 600 calls per minute/)).toBeNull());
+    expect((screen.getByRole('button', { name: 'Save rate limits' }) as HTMLButtonElement).disabled).toBe(
+      true,
     );
-    expect((screen.getByRole('button', { name: 'Save rate limits' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('blocks the save on a bad number', async () => {
@@ -53,7 +55,9 @@ describe('rate limits section', () => {
     await user.clear(window);
     await user.type(window, '0');
     expect(screen.getByText('Enter 1 or more')).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Save rate limits' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Save rate limits' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     await user.clear(window);
     await user.type(window, 'abc');
     expect(screen.getByText('Enter a whole number')).toBeTruthy();

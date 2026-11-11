@@ -14,13 +14,13 @@
  * The clearing helpers at the end are shared with read.ts.
  */
 import {
+  type ConnectionType,
   type ExecutionErrorShape,
   type ExecutionState,
   floorToChannels,
   isWeakerThanFloor,
   mergeChannels,
   policyToChannels,
-  type ConnectionType,
   type RedactionChannels,
   type RedactionFloor,
   type RedactionPolicy,
