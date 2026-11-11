@@ -2,7 +2,8 @@
  * /rest/source-control (P6-73, L2), as n8n's source control preferences controller: GET preferences (any signed-in
  * user; the answer narrows by scope), POST and PATCH preferences, POST disconnect, GET get-branches and POST
  * generate-key-pair (`sourceControl:manage`). The key and the token never appear in an answer.
- * stub (L2): the routes are registered with their final gates; the service methods throw.
+ * Every route but GET preferences needs `sourceControl:manage`; a branch name starts with a letter or a digit and
+ * the colour is `#rrggbb` (a 400 before the service runs).
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -16,9 +17,18 @@ const keyType = z.enum(['ed25519', 'rsa']);
 export const sourceControlPreferencesSchema = z.object({
   repositoryUrl: z.string().trim().min(1).max(2048).optional(),
   connectionType: z.enum(['ssh', 'https']).optional(),
-  branchName: z.string().trim().min(1).max(255).optional(),
+  branchName: z
+    .string()
+    .trim()
+    .min(1)
+    .max(255)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/, 'The branch name must start with a letter or a digit')
+    .optional(),
   branchReadOnly: z.boolean().optional(),
-  branchColor: z.string().max(16).optional(),
+  branchColor: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/, 'The branch colour must look like #5296D6')
+    .optional(),
   initRepo: z.boolean().optional(),
   keyGeneratorType: keyType.optional(),
   httpsUsername: z.string().max(255).optional(),
