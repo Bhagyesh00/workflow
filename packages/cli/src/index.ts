@@ -3,6 +3,8 @@
  * bin/workflow.mjs calls `run(process.argv.slice(2), nodeIo())` and sets the exit code it returns.
  */
 
+import { execute } from './main';
+
 export interface CliIo {
   stdout(text: string): void;
   stderr(text: string): void;
@@ -18,8 +20,5 @@ export interface CliIo {
 
 /** Runs one command line and returns the process exit code. */
 export async function run(argv: string[], io: CliIo): Promise<number> {
-  // stub (L10)
-  void argv;
-  io.stderr('not implemented (L10)\n');
-  return 1;
+  return execute(argv, io);
 }
