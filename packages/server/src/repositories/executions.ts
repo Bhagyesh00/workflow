@@ -1,7 +1,7 @@
 /** Executions and their (separately stored) run data. */
 
 import type { RedactionChannels } from '@workflow/workflow';
-import { and, count, desc, eq, inArray, lt, lte, ne, notInArray, type SQL, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, lt, lte, ne, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import { type ExecutionDataRow, type ExecutionRow, executionData, executions, workflows } from '../db/schema';
 import type { Cursor } from '../http/pagination';
@@ -171,6 +171,14 @@ export class ExecutionRepository {
       customDataValue?: string;
       /** the whole value; otherwise a part of it (case-sensitive) */
       customDataExact?: boolean;
+      /** P6-85: only these runs (a bulk selection) */
+      ids?: string[];
+      /** P6-85: runs started at or after / at or before this time (a run that never started has no start) */
+      startedAfter?: Date;
+      startedBefore?: Date;
+      mode?: string;
+      /** P6-85: the run's workflow is archived (`true`) or not (`false`; a run with no workflow row counts as not archived) */
+      archived?: boolean;
       limit: number;
       cursor?: Cursor;
     },
@@ -189,6 +197,19 @@ export class ExecutionRepository {
       conditions.push(eq(executions.workflowId, filter.workflowId));
     }
     if (filter.status?.length) conditions.push(inArray(executions.status, filter.status));
+    if (filter.ids) {
+      const ids = filter.ids.filter(isUuid);
+      if (!ids.length) return [];
+      conditions.push(inArray(executions.id, ids));
+    }
+    if (filter.mode) conditions.push(eq(executions.mode, filter.mode));
+    if (filter.startedAfter) conditions.push(gte(executions.startedAt, filter.startedAfter));
+    if (filter.startedBefore) conditions.push(lte(executions.startedAt, filter.startedBefore));
+    if (filter.archived !== undefined) {
+      conditions.push(
+        sql`coalesce((select ${workflows.isArchived} from ${workflows} where ${workflows.id} = ${executions.workflowId} and ${workflows.tenantId} = ${tenantId}::uuid), false) = ${filter.archived}`,
+      );
+    }
     if (filter.workflowVersionId) {
       if (!isUuid(filter.workflowVersionId)) return [];
       conditions.push(eq(executions.workflowVersionId, filter.workflowVersionId));

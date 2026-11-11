@@ -138,16 +138,36 @@ export function registerAnnotationRoutes(backend: MockBackend): void {
   });
 }
 
-/** GET /executions filters `annotationTags` (comma ids, all must match) and `vote` */
+/** the time of a run's start, or null (an ISO time that is not a time reads as none) */
+const startedAtMs = (e: StoredExecution): number | null => {
+  const t = e.startedAt ? Date.parse(e.startedAt) : Number.NaN;
+  return Number.isNaN(t) ? null : t;
+};
+
+/**
+ * GET /executions filters `annotationTags` (comma ids, all must match) and `vote`, and (P6-85) `mode`,
+ * `startedAfter` and `startedBefore` (both ends included; a run that has not started has no start time)
+ */
 export function filterExecutionList(
   _backend: MockBackend,
   executions: StoredExecution[],
   query: Record<string, string>,
 ): StoredExecution[] {
   const wanted = (query.annotationTags ?? '').split(',').filter(Boolean);
-  return executions.filter(
-    (e) =>
-      wanted.every((id) => e.annotation?.tags.some((t) => t.id === id)) &&
-      (!query.vote || e.annotation?.vote === query.vote),
-  );
+  const after = query.startedAfter ? Date.parse(query.startedAfter) : null;
+  const before = query.startedBefore ? Date.parse(query.startedBefore) : null;
+  return executions.filter((e) => {
+    if (!wanted.every((id) => e.annotation?.tags.some((t) => t.id === id))) return false;
+    if (query.vote && e.annotation?.vote !== query.vote) return false;
+    if (query.mode && e.mode !== query.mode) return false;
+    if (after !== null && !Number.isNaN(after)) {
+      const at = startedAtMs(e);
+      if (at === null || at < after) return false;
+    }
+    if (before !== null && !Number.isNaN(before)) {
+      const at = startedAtMs(e);
+      if (at === null || at > before) return false;
+    }
+    return true;
+  });
 }

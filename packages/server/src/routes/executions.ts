@@ -36,6 +36,27 @@ export const viewerOf = (auth: Pick<AuthContext, 'tenant' | 'user'>): ExecutionV
 
 const STATUSES = ['new', 'running', 'success', 'error', 'canceled', 'waiting', 'crashed'] as const;
 
+/** P6-85: the run modes the list filters by */
+export const EXECUTION_MODES = [
+  'manual',
+  'trigger',
+  'webhook',
+  'internal',
+  'retry',
+  'integrated',
+  'cli',
+  'evaluation',
+  'chat',
+  'error',
+] as const;
+
+/** P6-85: an ISO date or time in a query */
+export const isoInstant = z
+  .string()
+  .max(40)
+  .refine((v) => !Number.isNaN(Date.parse(v)), 'Use an ISO date or time')
+  .transform((v) => new Date(v));
+
 export const executionListQuery = z.object({
   workflowId: z.string().max(64).optional(),
   /**
@@ -73,6 +94,16 @@ export const executionListQuery = z.object({
     .enum(['true', 'false'])
     .optional()
     .transform((v) => v === 'true'),
+  /** P6-85: runs started at or after / at or before this time */
+  startedAfter: isoInstant.optional(),
+  startedBefore: isoInstant.optional(),
+  /** P6-85 (REST only, as n8n): the run mode */
+  mode: z.enum(EXECUTION_MODES).optional(),
+  /** P6-85 (REST only): the run's workflow is archived (`true`) or not (`false`) */
+  archived: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
   ...paginationQuery,
 });
 
@@ -119,6 +150,10 @@ export async function listExecutions(
     customDataKey: query.customDataKey,
     customDataValue: query.customDataValue,
     customDataExact: query.customDataExact,
+    startedAfter: query.startedAfter,
+    startedBefore: query.startedBefore,
+    mode: query.mode,
+    archived: query.archived,
     limit: query.limit,
     cursor: decodeCursor(query.cursor),
   });

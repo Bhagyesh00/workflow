@@ -2,14 +2,16 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import type { ExecutionStatus } from '@workflow/workflow';
 import { History, RefreshCw } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { errorMessage } from '../api/client';
-import { executionsApi, workflowsApi } from '../api/endpoints';
+import { type ExecutionBulkFilter, executionsApi, workflowsApi } from '../api/endpoints';
 import type { AnnotationVote } from '../api/types';
 import { PrivateCredentialsMark } from '../components/credentials/PrivateCredentialSection';
 import { AnnotationBadges } from '../components/executions/AnnotationBadges';
 import { AnnotationFilters, type AnnotationFilterValue } from '../components/executions/AnnotationFilters';
+import { BulkActionsBar } from '../components/executions/BulkActionsBar';
+import { ExecutionFilterBar } from '../components/executions/ExecutionFilterBar';
 import { VersionFilter } from '../components/executions/VersionFilter';
 import { VersionLabel } from '../components/executions/VersionLabel';
 import { useProjectListScope } from '../components/projects/ProjectFilter';
@@ -56,7 +58,13 @@ export function ExecutionsPage() {
   const customDataKey = params.get('customDataKey') ?? '';
   const customDataValue = params.get('customDataValue') ?? '';
   const customDataExact = params.get('customDataExact') === 'true';
+  // P6-85 start time range (ISO times)
+  const startedAfter = params.get('startedAfter') ?? '';
+  const startedBefore = params.get('startedBefore') ?? '';
   const [autoRefresh, setAutoRefresh] = useState(true);
+  // P6-85 bulk actions: the picked runs, or every run matching the filters
+  const [selected, setSelected] = useState<string[]>([]);
+  const [allMatching, setAllMatching] = useState(false);
   const workflows = useQuery({
     queryKey: ['workflows', 'filter-options', projectId],
     queryFn: () => workflowsApi.list({ limit: 200, projectId: projectId ?? undefined }),
@@ -74,6 +82,8 @@ export function ExecutionsPage() {
         customDataKey,
         customDataValue,
         customDataExact,
+        startedAfter,
+        startedBefore,
       },
     ],
     initialPageParam: undefined as string | undefined,
@@ -88,6 +98,8 @@ export function ExecutionsPage() {
         customDataKey: customDataKey || undefined,
         customDataValue: customDataKey && customDataValue ? customDataValue : undefined,
         customDataExact: customDataKey && customDataValue && customDataExact ? true : undefined,
+        startedAfter: startedAfter || undefined,
+        startedBefore: startedBefore || undefined,
         limit: 50,
         cursor: pageParam,
       }),
@@ -95,6 +107,37 @@ export function ExecutionsPage() {
     refetchInterval: autoRefresh ? 5000 : false,
   });
   const executions = query.data?.pages.flatMap((p) => p.data) ?? [];
+  // what a bulk action covers when it takes the whole filter: the list's own filter, no paging
+  const bulkFilter: ExecutionBulkFilter = {
+    projectId: projectId ?? undefined,
+    workflowId: workflowId || undefined,
+    status: status || undefined,
+    annotationTags: annotationTags.length ? annotationTags : undefined,
+    vote,
+    workflowVersionId: workflowVersionId || undefined,
+    customDataKey: customDataKey || undefined,
+    customDataValue: customDataKey && customDataValue ? customDataValue : undefined,
+    customDataExact: customDataKey && customDataValue && customDataExact ? true : undefined,
+    startedAfter: startedAfter || undefined,
+    startedBefore: startedBefore || undefined,
+  };
+  // a new filter is a new list: the picks and "all matching" no longer describe it
+  const filterKey = JSON.stringify(bulkFilter);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the key is the trigger
+  useEffect(() => {
+    setSelected([]);
+    setAllMatching(false);
+  }, [filterKey]);
+  const pageIds = executions.map((e) => e.id);
+  const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
+  const toggleRow = (id: string, on: boolean) => {
+    setAllMatching(false);
+    setSelected((now) => (on ? [...new Set([...now, id])] : now.filter((x) => x !== id)));
+  };
+  const togglePage = (on: boolean) => {
+    setAllMatching(false);
+    setSelected(on ? pageIds : []);
+  };
   const setFilter = (key: string, value: string) => {
     const next = new URLSearchParams(params);
     if (value) next.set(key, value);
@@ -202,7 +245,39 @@ export function ExecutionsPage() {
             <span aria-hidden="true">Exact</span>
           </span>
         </fieldset>
+        <ExecutionFilterBar
+          value={{ startedAfter: startedAfter || undefined, startedBefore: startedBefore || undefined }}
+          onChange={(next) => {
+            const nextParams = new URLSearchParams(params);
+            for (const key of ['startedAfter', 'startedBefore'] as const) {
+              if (next[key]) nextParams.set(key, next[key]);
+              else nextParams.delete(key);
+            }
+            setParams(nextParams, { replace: true });
+          }}
+        />
       </div>
+      <BulkActionsBar
+        selectedIds={selected}
+        filter={bulkFilter}
+        allMatching={allMatching}
+        onClear={() => {
+          setSelected([]);
+          setAllMatching(false);
+        }}
+      />
+      {allOnPage && query.hasNextPage && !allMatching && (
+        <p className="-mt-3 text-sm text-ink-2">
+          The {pageIds.length} runs on this page are selected.{' '}
+          <button
+            type="button"
+            className="font-semibold text-brand hover:underline"
+            onClick={() => setAllMatching(true)}
+          >
+            Select every run matching the filters
+          </button>
+        </p>
+      )}
       <section
         className="overflow-hidden rounded-2xl border border-line bg-surface shadow-card"
         aria-label="Execution list"
@@ -223,7 +298,16 @@ export function ExecutionsPage() {
           <table className="w-full text-sm">
             <thead className="bg-surface-2 text-left text-xs text-ink-3">
               <tr>
-                <th className="px-5 py-2.5 font-semibold">Workflow</th>
+                <th className="w-10 py-2.5 pl-5 font-semibold">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all runs on this page"
+                    className="size-4 accent-[var(--wf-brand)]"
+                    checked={allMatching || allOnPage}
+                    onChange={(e) => togglePage(e.target.checked)}
+                  />
+                </th>
+                <th className="px-3 py-2.5 font-semibold">Workflow</th>
                 <th className="px-3 py-2.5 font-semibold">Status</th>
                 <th className="px-3 py-2.5 font-semibold">Started</th>
                 <th className="px-3 py-2.5 font-semibold">Duration</th>
@@ -233,7 +317,16 @@ export function ExecutionsPage() {
             <tbody>
               {executions.map((e) => (
                 <tr key={e.id} className="border-t border-line hover:bg-surface-2">
-                  <td className="max-w-80 px-5 py-3">
+                  <td className="w-10 py-3 pl-5">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${e.workflowName}`}
+                      className="size-4 accent-[var(--wf-brand)]"
+                      checked={allMatching || selected.includes(e.id)}
+                      onChange={(ev) => toggleRow(e.id, ev.target.checked)}
+                    />
+                  </td>
+                  <td className="max-w-80 px-3 py-3">
                     <Link
                       to={`/executions/${encodeURIComponent(e.id)}`}
                       className="block truncate font-semibold text-ink hover:text-brand"
