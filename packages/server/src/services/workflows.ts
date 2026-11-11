@@ -48,6 +48,7 @@ import type {
 } from '../http/schemas';
 import type { TenantSettings } from '../plans';
 import { createRepositories, type Repositories, type TagRef } from '../repositories';
+import { isUniqueViolation, isUuid } from '../repositories/util';
 import { type AccessFilter, MISSING_SCOPE_MESSAGE } from './access';
 import type { ActiveWorkflowManager, ValidationIssue } from './active-workflows';
 import { assertCredentialsUsable } from './credential-usable';
@@ -447,6 +448,7 @@ export class WorkflowService {
     tenantId: string,
     input: CreateInput & { projectId: string },
     actor: Actor,
+    options: { id?: string } = {},
   ): Promise<WorkflowDTO> {
     await assertTenantWritable(this.deps.context().serviceDeps, tenantId, 'workflowCreate');
     assertGraph(input as unknown as WorkflowDefinition, this.deps.nodeTypes);
@@ -489,7 +491,8 @@ export class WorkflowService {
       undefined,
       input.settings as EngineWorkflowSettings | undefined,
     );
-    const id = randomUUID();
+    // P6-78: `options.id` (the import command) is kept only when no workflow row of any workspace holds it
+    let id = options.id && (await this.workflowIdFree(options.id)) ? options.id : randomUUID();
     const versionId = randomUUID();
     let settings: NonNullable<CreateInput['settings']> = { ...(input.settings ?? {}) };
     // P5-04: a new workflow is available in MCP when the tenant auto exposes new workflows (unless the input says)
@@ -520,32 +523,42 @@ export class WorkflowService {
       stickyNotes: input.stickyNotes ?? [],
       nodeGroups: input.nodeGroups ?? [],
     };
-    const row = await this.deps.database.db.transaction(async (tx) => {
-      const repos = createRepositories(tx);
-      const tagIds = input.tagIds ? await this.checkTags(repos, tenantId, input.tagIds) : [];
-      const row = await repos.workflows.create(tenantId, {
-        ...content,
-        id,
-        versionId,
-        projectId,
-        createdBy: actor.userId,
-        folderId: input.folderId ?? null,
+    const save = () =>
+      this.deps.database.db.transaction(async (tx) => {
+        const repos = createRepositories(tx);
+        const tagIds = input.tagIds ? await this.checkTags(repos, tenantId, input.tagIds) : [];
+        const row = await repos.workflows.create(tenantId, {
+          ...content,
+          id,
+          versionId,
+          projectId,
+          createdBy: actor.userId,
+          folderId: input.folderId ?? null,
+        });
+        await repos.versions.create(tenantId, {
+          id: versionId,
+          workflowId: id,
+          name: content.name,
+          nodes: content.nodes,
+          connections: content.connections,
+          settings: content.settings,
+          stickyNotes: content.stickyNotes,
+          nodeGroups: content.nodeGroups,
+          authorId: actor.userId ?? null,
+          message: 'Created',
+        });
+        if (tagIds.length) await repos.workflows.setTags(tenantId, id, tagIds);
+        return row;
       });
-      await repos.versions.create(tenantId, {
-        id: versionId,
-        workflowId: id,
-        name: content.name,
-        nodes: content.nodes,
-        connections: content.connections,
-        settings: content.settings,
-        stickyNotes: content.stickyNotes,
-        nodeGroups: content.nodeGroups,
-        authorId: actor.userId ?? null,
-        message: 'Created',
-      });
-      if (tagIds.length) await repos.workflows.setTags(tenantId, id, tagIds);
-      return row;
-    });
+    let row: WorkflowRow;
+    try {
+      row = await save();
+    } catch (error) {
+      // the id was free a moment ago and another insert took it: a random one
+      if (id !== options.id || !isUniqueViolation(error)) throw error;
+      id = randomUUID();
+      row = await save();
+    }
     await this.repos.audit.add(tenantId, {
       userId: actor.userId,
       action: 'workflow.created',
@@ -554,6 +567,17 @@ export class WorkflowService {
       ip: actor.ip,
     });
     return this.dto(tenantId, row);
+  }
+
+  /** true when no workflow row of any workspace has this id (the application's role is not under RLS) */
+  private async workflowIdFree(id: string): Promise<boolean> {
+    if (!isUuid(id)) return false;
+    const [taken] = await this.deps.database.db
+      .select({ id: workflows.id })
+      .from(workflows)
+      .where(eq(workflows.id, id))
+      .limit(1);
+    return !taken;
   }
 
   /**

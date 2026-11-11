@@ -1,7 +1,8 @@
 /** The real `CliIo` on Node: process streams, the user's home folder, global fetch and node:fs/promises. */
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { CliIo } from './index';
 
 async function readStdin(): Promise<string> {
@@ -35,14 +36,26 @@ export function nodeIo(): CliIo {
     },
     /**
      * Makes the folder, then writes the file with `mode` (0o600 for the config file). A file written with a
-     * mode gets a private folder (0o700) when the folder is new, and an existing file is set to the mode too
-     * (writeFile's mode applies only to a new file). On Windows the mode is not enforced.
+     * mode gets a private folder (0o700) when the folder is new and is written to a new temp file in the same
+     * folder with that mode (flag `wx`), then renamed over the target: the text never sits in a file with an
+     * older, wider mode. On Windows the mode is not enforced.
      */
     async writeFile(path, data, options) {
       const mode = options.mode;
       await mkdir(dirname(path), mode === undefined ? { recursive: true } : { recursive: true, mode: 0o700 });
-      await writeFile(path, data, mode === undefined ? { encoding: 'utf8' } : { encoding: 'utf8', mode });
-      if (mode !== undefined) await chmod(path, mode);
+      if (mode === undefined) {
+        await writeFile(path, data, { encoding: 'utf8' });
+        return;
+      }
+      const temp = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+      try {
+        await writeFile(temp, data, { encoding: 'utf8', mode, flag: 'wx' });
+        await chmod(temp, mode);
+        await rename(temp, path);
+      } catch (error) {
+        await rm(temp, { force: true }).catch(() => undefined);
+        throw error;
+      }
     },
     /** Removes the file; a missing file is not an error. */
     async removeFile(path) {

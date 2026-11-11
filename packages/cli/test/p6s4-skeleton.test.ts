@@ -12,6 +12,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     chmod: vi.fn(actual.chmod),
     mkdir: vi.fn(actual.mkdir),
+    rename: vi.fn(actual.rename),
     writeFile: vi.fn(actual.writeFile),
   };
 });
@@ -31,6 +32,7 @@ beforeEach(() => {
   vi.mocked(fsp.writeFile).mockClear();
   vi.mocked(fsp.mkdir).mockClear();
   vi.mocked(fsp.chmod).mockClear();
+  vi.mocked(fsp.rename).mockClear();
 });
 
 describe('cli skeleton', () => {
@@ -121,15 +123,33 @@ describe('nodeIo', () => {
     expect(fsp.chmod).not.toHaveBeenCalled();
   });
 
-  it('writeFile passes the mode (the call, not stat: win32 reports 0o666)', async () => {
+  it('writeFile with a mode writes a new temp file with it (the call, not stat: win32 reports 0o666) and renames it over the target', async () => {
     const io = nodeIo();
-    const path = join(tmp, '.workflow', 'config.json');
+    const folder = join(tmp, '.workflow');
+    const path = join(folder, 'config.json');
     await io.writeFile(path, '{"url":"x"}', { mode: 0o600 });
-    expect(fsp.writeFile).toHaveBeenCalledWith(path, '{"url":"x"}', expect.objectContaining({ mode: 0o600 }));
-    expect(fsp.mkdir).toHaveBeenCalledWith(join(tmp, '.workflow'), { recursive: true, mode: 0o700 });
-    expect(fsp.chmod).toHaveBeenCalledWith(path, 0o600);
+    expect(fsp.mkdir).toHaveBeenCalledWith(folder, { recursive: true, mode: 0o700 });
+    const [temp, text, options] = vi.mocked(fsp.writeFile).mock.calls[0] as [string, string, object];
+    expect(temp).not.toBe(path);
+    expect(temp.startsWith(join(folder, '.config.json.'))).toBe(true);
+    expect(text).toBe('{"url":"x"}');
+    expect(options).toEqual({ encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    expect(fsp.chmod).toHaveBeenCalledWith(temp, 0o600);
+    expect(fsp.rename).toHaveBeenCalledWith(temp, path);
     await io.writeFile(path, '{"url":"y"}', { mode: 0o600 });
     expect(await io.readFile(path)).toBe('{"url":"y"}');
+    expect(readdirSync(folder)).toEqual(['config.json']);
+  });
+
+  it('writeFile with a mode removes the temp file and keeps the target when the write fails', async () => {
+    const io = nodeIo();
+    const folder = join(tmp, 'failing');
+    const path = join(folder, 'config.json');
+    await io.writeFile(path, 'old', { mode: 0o600 });
+    vi.mocked(fsp.rename).mockRejectedValueOnce(new Error('disk full'));
+    await expect(io.writeFile(path, 'new', { mode: 0o600 })).rejects.toThrow('disk full');
+    expect(await io.readFile(path)).toBe('old');
+    expect(readdirSync(folder)).toEqual(['config.json']);
   });
 
   it('removeFile removes the file and a missing file is no error', async () => {

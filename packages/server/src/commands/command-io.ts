@@ -2,9 +2,12 @@
  * P6-78 (C0, final): what a CLI command (src/commands/*.ts, dispatched by cli.ts) reads and writes, so tests capture
  * the output and assert the mode a file is written with on the call itself (never `stat`, which Windows ignores).
  * `processIo()` is the real one: stdout and stderr of this process, files as UTF-8. A write with a `mode` (the
- * `--decrypted` export writes 0o600) applies it to a new file and tightens an existing one with `chmod`.
+ * `--decrypted` export writes 0o600) never puts data into an older file under its old mode: it creates a new file
+ * in the same folder with that mode (flag `wx`), writes it and renames it over the target.
  */
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 export interface CommandIo {
   stdout(text: string): void;
@@ -21,12 +24,24 @@ export function processIo(): CommandIo {
     stderr: (text) => {
       process.stderr.write(text);
     },
-    readFile: (path) => readFile(path, 'utf8'),
-    writeFile: async (path, data, options) => {
+    readFile: (file) => readFile(file, 'utf8'),
+    writeFile: async (target, data, options) => {
       const { mode } = options;
-      await writeFile(path, data, mode === undefined ? { encoding: 'utf8' } : { encoding: 'utf8', mode });
-      // writeFile's mode applies only to a new file: an existing one keeps its old mode unless changed here
-      if (mode !== undefined) await chmod(path, mode);
+      if (mode === undefined) {
+        await writeFile(target, data, { encoding: 'utf8' });
+        return;
+      }
+      // the mode of writeFile applies only to a new file, so the data goes into a new one and replaces the target
+      const temp = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.tmp`);
+      try {
+        await writeFile(temp, data, { encoding: 'utf8', mode, flag: 'wx' });
+        // the process umask may have narrowed the mode, never widened it; the call says what is meant
+        await chmod(temp, mode);
+        await rename(temp, target);
+      } catch (error) {
+        await rm(temp, { force: true }).catch(() => undefined);
+        throw error;
+      }
     },
   };
 }

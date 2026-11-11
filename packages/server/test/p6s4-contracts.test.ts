@@ -8,7 +8,7 @@
  * with the mode on the call; `rewriteUuids` (FULL); `pushableProjects` passes fail closed.
  */
 import { randomUUID } from 'node:crypto';
-import { chmod, readFile as fsReadFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, readFile as fsReadFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { nodesBasePackage } from '@workflow/nodes-base';
@@ -424,9 +424,31 @@ describe('P6 S4 processIo', () => {
 
     const secret = path.join(dir, 'secret.json');
     await io.writeFile(secret, 'x', { mode: 0o600 });
-    expect(writeFile).toHaveBeenCalledWith(secret, 'x', expect.objectContaining({ mode: 0o600 }));
-    expect(chmod).toHaveBeenCalledWith(secret, 0o600);
+    // the data goes into a new file with the mode (flag wx) in the same folder, then over the target
+    const call = vi.mocked(writeFile).mock.calls.find(([file]) => String(file) !== plain);
+    expect(path.dirname(String(call?.[0]))).toBe(dir);
+    expect(String(call?.[0])).not.toBe(secret);
+    expect(call?.[1]).toBe('x');
+    expect(call?.[2]).toEqual({ encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    expect(chmod).toHaveBeenCalledWith(String(call?.[0]), 0o600);
+    expect(await io.readFile(secret)).toBe('x');
     await expect(io.readFile(path.join(dir, 'missing.json'))).rejects.toThrow();
+  });
+
+  it('a write with a mode over an existing file never writes into that file and leaves no temp file', async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'wf-p6s4-io-'));
+    const io = processIo();
+    const target = path.join(dir, 'creds.json');
+    await writeFile(target, 'old and readable', { mode: 0o644 });
+    vi.mocked(writeFile).mockClear();
+    await io.writeFile(target, 'secret', { mode: 0o600 });
+    // no write call names the target: the old file is replaced, never filled under its old mode
+    expect(vi.mocked(writeFile).mock.calls.map(([file]) => String(file))).not.toContain(target);
+    expect(vi.mocked(writeFile).mock.calls[0]?.[2]).toEqual(
+      expect.objectContaining({ mode: 0o600, flag: 'wx' }),
+    );
+    expect(await io.readFile(target)).toBe('secret');
+    expect(await readdir(dir)).toEqual(['creds.json']);
   });
 
   it('stdout and stderr write the text as is', () => {
