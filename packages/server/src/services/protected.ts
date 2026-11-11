@@ -21,9 +21,11 @@ export type ProtectedAction =
   | 'workflowArchive'
   | 'workflowRestore'
   | 'credentialCreate'
+  | 'credentialMove'
   | 'variableCreate'
   | 'variableDelete'
   | 'variableRename'
+  | 'variableMove'
   | 'folderCreate'
   | 'folderUpdate'
   | 'folderDelete'
@@ -43,9 +45,11 @@ export const PROTECTED_TEXT: Record<ProtectedAction, string> = {
   workflowArchive: `Cannot archive workflows on a protected workspace. ${READ_ONLY}`,
   workflowRestore: `Cannot restore workflows on a protected workspace. ${READ_ONLY}`,
   credentialCreate: `Cannot create credentials on a protected workspace. ${READ_ONLY}`,
+  credentialMove: `Cannot move credentials to another project on a protected workspace. ${READ_ONLY}`,
   variableCreate: `Cannot create variables on a protected workspace. ${READ_ONLY}`,
   variableDelete: `Cannot delete variables on a protected workspace. ${READ_ONLY}`,
   variableRename: `Cannot rename variables on a protected workspace. ${READ_ONLY}`,
+  variableMove: `Cannot move variables on a protected workspace. ${READ_ONLY}`,
   folderCreate: `Cannot create folders on a protected workspace. ${READ_ONLY}`,
   folderUpdate: `Cannot change folders on a protected workspace. ${READ_ONLY}`,
   folderDelete: `Cannot delete folders on a protected workspace. ${READ_ONLY}`,
@@ -68,16 +72,28 @@ export function isProtected(settings: TenantSettings | null | undefined): boolea
   return settings?.sourceControl?.readOnly === true;
 }
 
-const pullWrites = new AsyncLocalStorage<true>();
+/** one bypass: `active` is switched off when its `withPullWrites` returns */
+type PullWriteScope = { active: boolean };
 
-/** runs `fn` as a pull's write: the locks let it through (and every promise started inside it) */
-export function withPullWrites<T>(fn: () => Promise<T>): Promise<T> {
-  return pullWrites.run(true, fn);
+const pullWrites = new AsyncLocalStorage<PullWriteScope>();
+
+/**
+ * runs `fn` as an internal write (a pull, or a member removal's work): the locks let it through while `fn` runs.
+ * Work started inside that outlives it (a timer, a Cron, a trigger, a run in the background) inherits the store,
+ * so the store carries a flag that is switched off when `fn` settles: such work sees no bypass afterwards.
+ */
+export async function withPullWrites<T>(fn: () => Promise<T>): Promise<T> {
+  const scope: PullWriteScope = { active: true };
+  try {
+    return await pullWrites.run(scope, fn);
+  } finally {
+    scope.active = false;
+  }
 }
 
-/** true inside `withPullWrites` (and in work started there), false everywhere else */
+/** true while a `withPullWrites` call runs (in its own work), false everywhere else and after it returns */
 export function inPullWrite(): boolean {
-  return pullWrites.getStore() === true;
+  return pullWrites.getStore()?.active === true;
 }
 
 /**

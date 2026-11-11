@@ -24,6 +24,7 @@ import { ApiError } from '../http/errors';
 import { createRepositories } from '../repositories';
 import { MISSING_SCOPE_MESSAGE } from './access';
 import { assertCredentialsUsable } from './credential-usable';
+import { assertTenantWritable } from './protected';
 import { loadPublishedDefinition, publishedDefinition } from './published-workflow';
 import { assertTransferAllowed, filterAvailable } from './type-policies/enforce';
 import { violationMessage } from './type-policies/errors';
@@ -212,6 +213,8 @@ export class TransferService {
 
   async transferWorkflow(auth: AuthContext, workflowId: string, input: WorkflowTransferInput): Promise<void> {
     const tenantId = auth.tenant.id;
+    // a move changes the owner the next push writes: Git is the only writer on a protected workspace
+    await assertTenantWritable(this.deps, tenantId, 'workflowUpdate');
     const row = await this.deps.repos.workflows.get(tenantId, workflowId);
     if (!row) throw ApiError.notFound('Workflow');
     const destination = input.destinationProjectId;
@@ -265,7 +268,8 @@ export class TransferService {
     input: CredentialTransferInput,
   ): Promise<void> {
     const tenantId = auth.tenant.id;
-    // P6-15: first, a private credential's move rules (personal target, `credential:createEndUser`)
+    await assertTenantWritable(this.deps, tenantId, 'credentialMove');
+    // P6-15: then a private credential's move rules (personal target, `credential:createEndUser`)
     await this.deps
       .context()
       .privateCredentials.assertMovable(auth, credentialId, input.destinationProjectId);
@@ -302,6 +306,7 @@ export class TransferService {
 
   async transferFolder(auth: AuthContext, folderId: string, input: FolderTransferInput): Promise<void> {
     const tenantId = auth.tenant.id;
+    await assertTenantWritable(this.deps, tenantId, 'folderUpdate');
     const { repos } = this.deps;
     const folder = await repos.folders.get(tenantId, folderId);
     if (!folder) throw ApiError.notFound('Folder');

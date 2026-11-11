@@ -14,6 +14,7 @@ import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { createRepositories } from '../repositories';
 import { MISSING_SCOPE_MESSAGE } from './access';
+import { withPullWrites } from './protected';
 import { policyNodes, publishedPolicyNodes } from './transfer';
 import { assertTransferAllowed } from './type-policies/enforce';
 
@@ -220,11 +221,15 @@ export async function removeMember(
     if (!(await txRepos.memberships.remove(tenantId, userId))) throw ApiError.notFound('Member');
   };
 
-  if (destination || !personal) {
-    await ctx.database.db.transaction(finish);
-  } else {
-    await removeWithWipe(ctx, tenantId, auth.user.id, userId, target.role, personal.id, finish);
-  }
+  // user management is never refused on a protected workspace: the work moves or goes under the internal
+  // write bypass a pull uses, and every step is awaited inside it (decisions, S4 end review call 6)
+  await withPullWrites(async () => {
+    if (destination || !personal) {
+      await ctx.database.db.transaction(finish);
+    } else {
+      await removeWithWipe(ctx, tenantId, auth.user.id, userId, target.role, personal.id, finish);
+    }
+  });
   // P6-15: deletes the removed member's private credential entries in this workspace
   await ctx.privateCredentials.afterAccessChange(tenantId, { userId });
 }
@@ -268,14 +273,17 @@ export async function transferPersonalWork(
 ): Promise<void> {
   const personal = await ctx.repos.projects.getPersonal(tenantId, userId);
   if (!personal) return;
+  // SCIM deprovisioning and LDAP reset: never refused on a protected workspace, as a member removal
   if (targetProjectId === null) {
-    await wipeWork(ctx, tenantId, null, personal.id, async () => undefined);
+    await withPullWrites(() => wipeWork(ctx, tenantId, null, personal.id, async () => undefined));
     return;
   }
   const target = await requireTarget(ctx, tenantId, personal, targetProjectId);
-  await ctx.database.db.transaction(async (tx) => {
-    // P6-51: the final check, in the move transaction
-    await assertProjectWorkAllowed(ctx.serviceDeps, tenantId, personal.id, target.id, tx);
-    await createRepositories(tx).projects.moveResources(tenantId, personal.id, target.id);
-  });
+  await withPullWrites(() =>
+    ctx.database.db.transaction(async (tx) => {
+      // P6-51: the final check, in the move transaction
+      await assertProjectWorkAllowed(ctx.serviceDeps, tenantId, personal.id, target.id, tx);
+      await createRepositories(tx).projects.moveResources(tenantId, personal.id, target.id);
+    }),
+  );
 }

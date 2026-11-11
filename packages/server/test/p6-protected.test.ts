@@ -4,7 +4,10 @@
  * publish, retry, credential update and delete, variable value update, data table rows and every read stay
  * allowed. The switch works with no Git connection, only a user with `sourceControl:manage` sets it, and turning
  * it off lifts the lock at once. PUT /workflows/:id/tags (public) and the `import:workflow` and
- * `import:credentials` commands meet the same lock. A pull is the one writer that passes (`withPullWrites`).
+ * `import:credentials` commands meet the same lock. Moving a workflow, folder, credential or variable to
+ * another place is refused too. A pull is the one writer that passes (`withPullWrites`), and only while it runs;
+ * a member removal and a SCIM deprovisioning run under the same bypass and are never refused. The allow and
+ * deny cases run as a true member (`realMember`, `addToProject`).
  */
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -15,9 +18,11 @@ import type { CommandIo } from '../src/commands/command-io';
 import { exportCredentialsCommand } from '../src/commands/credentials-export';
 import { importCredentialsCommand } from '../src/commands/credentials-import';
 import { importWorkflowCommand } from '../src/commands/workflow-import';
+import { transferPersonalWork } from '../src/services/member-removal';
 import {
   assertNotProtected,
   assertTenantWritable,
+  inPullWrite,
   PROTECTED_TEXT,
   type ProtectedAction,
   ProtectedWorkspaceError,
@@ -25,15 +30,19 @@ import {
   withPullWrites,
 } from '../src/services/protected';
 import {
+  addToProject,
   createTestServer,
   createWorkflow,
+  dataTableIn,
   node,
+  projectIn,
   protectWorkspace,
   realMember,
   resetDatabase,
   signup,
   type TestServer,
   waitForExecution,
+  workflowIn,
 } from './helpers';
 
 let server: TestServer;
@@ -56,7 +65,17 @@ beforeEach(async () => {
 const world = () => signup(server.app, { remoteAddress: `127.8.7.${(ip++ % 250) + 1}` });
 type World = Awaited<ReturnType<typeof world>>;
 
-async function keyOf(w: World): Promise<string> {
+/** a true member of `w`'s workspace with `role` in the owner's team project, creating there */
+async function memberIn(w: World, role = 'project:editor') {
+  const team = w.client.defaultProjectId;
+  if (!team) throw new Error('The workspace has no team project');
+  const m = await realMember(w);
+  await addToProject(server, w.tenant.id, team, m.user.id, role);
+  m.client.defaultProjectId = team;
+  return m;
+}
+
+async function keyOf(w: { client: World['client'] }): Promise<string> {
   keyCount += 1;
   const made = await w.client.data(w.client.post('/rest/api-keys', { name: `prot${keyCount}` }));
   return made.key as string;
@@ -108,8 +127,9 @@ async function seeded(w: World) {
   const credential = await client.data<{ id: string }>(
     client.post('/rest/credentials', { name: 'Keep', type: 'testApi', data: { apiKey: 'k1' } }),
   );
+  // a project variable: a member edits variables of its projects, not the global ones
   const variable = await client.data<{ id: string }>(
-    client.post('/rest/variables', { key: 'prot_var', value: '1' }),
+    client.post('/rest/variables', { key: 'prot_var', value: '1', projectId: client.defaultProjectId }),
   );
   const folder = await client.data<{ id: string }>(client.post('/rest/folders', { name: 'Ops' }));
   const table = await client.data<{ id: string }>(
@@ -119,8 +139,12 @@ async function seeded(w: World) {
     client.post(`/rest/data-tables/${table.id}/columns`, { name: 'qty', type: 'number' }),
   );
   const tag = await client.data<{ id: string }>(client.post('/rest/tags', { name: 'nightly' }));
+  // the caller of every allow and deny case: a true member, editor of the project the work is in
+  const m = await memberIn(w);
   await protectWorkspace(server, w.tenant.id);
   return {
+    m,
+    team: client.defaultProjectId as string,
     hooked,
     wf,
     archived,
@@ -209,7 +233,7 @@ describe('a protected workspace refuses each direct change with its text (editor
   it('workflows: create, save, manual run, archive, restore, delete', async () => {
     const w = await world();
     const s = await seeded(w);
-    const { client } = w;
+    const { client } = s.m;
     refused(
       await client.post('/rest/workflows', { name: 'New', nodes: [], connections: {}, settings: {} }),
       'workflowCreate',
@@ -234,7 +258,7 @@ describe('a protected workspace refuses each direct change with its text (editor
   it('credentials: create is refused; update and delete are allowed', async () => {
     const w = await world();
     const s = await seeded(w);
-    const { client } = w;
+    const { client } = s.m;
     refused(
       await client.post('/rest/credentials', { name: 'New', type: 'testApi', data: { apiKey: 'x' } }),
       'credentialCreate',
@@ -247,8 +271,11 @@ describe('a protected workspace refuses each direct change with its text (editor
   it('variables: create, delete and a key rename are refused; a value update is allowed', async () => {
     const w = await world();
     const s = await seeded(w);
-    const { client } = w;
-    refused(await client.post('/rest/variables', { key: 'other', value: '1' }), 'variableCreate');
+    const { client } = s.m;
+    refused(
+      await client.post('/rest/variables', { key: 'other', value: '1', projectId: s.team }),
+      'variableCreate',
+    );
     refused(await client.delete(`/rest/variables/${s.variable.id}`), 'variableDelete');
     refused(await client.patch(`/rest/variables/${s.variable.id}`, { key: 'renamed' }), 'variableRename');
     const value = await client.patch(`/rest/variables/${s.variable.id}`, { value: '2' });
@@ -259,17 +286,18 @@ describe('a protected workspace refuses each direct change with its text (editor
   it('folders and projects', async () => {
     const w = await world();
     const s = await seeded(w);
-    const { client } = w;
+    const { client } = s.m;
     refused(await client.post('/rest/folders', { name: 'New' }), 'folderCreate');
     refused(await client.patch(`/rest/folders/${s.folder.id}`, { name: 'Renamed' }), 'folderUpdate');
     refused(await client.delete(`/rest/folders/${s.folder.id}`), 'folderDelete');
-    refused(await client.post('/rest/projects', { name: 'Second' }), 'projectCreate');
+    // a member holds no project:create, so only an admin's create can meet the lock
+    refused(await w.client.post('/rest/projects', { name: 'Second' }), 'projectCreate');
   });
 
   it('data tables: create, rename, delete and every column change are refused; rows and reads pass', async () => {
     const w = await world();
     const s = await seeded(w);
-    const { client } = w;
+    const { client } = s.m;
     refused(
       await client.post('/rest/data-tables', { name: 'new', columns: [{ name: 'a', type: 'string' }] }),
       'dataTableCreate',
@@ -306,7 +334,7 @@ describe('a protected workspace refuses each direct change with its text (editor
   it('publish, unpublish, retry and the read paths stay allowed', async () => {
     const w = await world();
     const s = await seeded(w);
-    const { client } = w;
+    const { client } = s.m;
     const published = await client.post(`/rest/workflows/${s.hooked.id}/activate`, {});
     expect(published.statusCode, published.body).toBe(200);
     expect((await client.post(`/rest/workflows/${s.hooked.id}/deactivate`, {})).statusCode).toBe(200);
@@ -338,8 +366,8 @@ describe('a protected workspace refuses each direct change with its text (editor
 describe('an API key meets the same lock', () => {
   it('refuses a workflow create, save, delete and tag change; lets a credential update and a retry pass', async () => {
     const w = await world();
-    const key = await keyOf(w);
     const s = await seeded(w);
+    const key = await keyOf(s.m);
     refused(
       await api(key, 'POST', '/workflows', {
         name: 'Api made',
@@ -510,22 +538,173 @@ describe('the server commands meet the lock', () => {
 describe('a pull is the one writer that passes', () => {
   it('creates a workflow, a credential, a folder and a table inside withPullWrites on a protected workspace', async () => {
     const w = await world();
+    const { client } = await memberIn(w);
     await protectWorkspace(server, w.tenant.id);
     await withPullWrites(async () => {
-      expect((await w.client.post('/rest/folders', { name: 'Pulled' })).statusCode).toBe(200);
+      expect((await client.post('/rest/folders', { name: 'Pulled' })).statusCode).toBe(200);
       expect(
-        (await w.client.post('/rest/credentials', { name: 'Pulled', type: 'testApi', data: { apiKey: 'x' } }))
+        (await client.post('/rest/credentials', { name: 'Pulled', type: 'testApi', data: { apiKey: 'x' } }))
           .statusCode,
       ).toBe(200);
       expect(
         (
-          await w.client.post('/rest/data-tables', {
+          await client.post('/rest/data-tables', {
             name: 'pulled',
             columns: [{ name: 'a', type: 'string' }],
           })
         ).statusCode,
       ).toBe(200);
     });
+    refused(await client.post('/rest/folders', { name: 'After' }), 'folderCreate');
+  });
+
+  it('a timer started inside withPullWrites that fires after it returns gets no bypass', async () => {
+    const w = await world();
+    await protectWorkspace(server, w.tenant.id);
+    const deps = server.ctx.serviceDeps;
+    let returned!: () => void;
+    const afterReturn = new Promise<void>((resolve) => {
+      returned = resolve;
+    });
+    let fired!: Promise<{ inside: boolean; error: unknown }>;
+    await withPullWrites(async () => {
+      expect(inPullWrite()).toBe(true);
+      // as a Cron or a trigger a pull's publish starts: it inherits the store and outlives the pull
+      fired = new Promise((resolve) => {
+        setTimeout(async () => {
+          await afterReturn;
+          const inside = inPullWrite();
+          const error = await assertTenantWritable(deps, w.tenant.id, 'dataTableStructure').then(
+            () => null,
+            (caught: unknown) => caught,
+          );
+          resolve({ inside, error });
+        }, 0);
+      });
+    });
+    returned();
+    const { inside, error } = await fired;
+    expect(inside).toBe(false);
+    expect(error).toBeInstanceOf(ProtectedWorkspaceError);
+    expect((error as ProtectedWorkspaceError).message).toBe(PROTECTED_TEXT.dataTableStructure);
+    expect(inPullWrite()).toBe(false);
+  });
+});
+
+describe('moves to another place are refused (S4 end review call 5)', () => {
+  /** a member who is project admin of the team project and of a second project, so a move is in its rights */
+  async function movers() {
+    const w = await world();
+    const m = await memberIn(w, 'project:admin');
+    const away = await projectIn(server, w.tenant.id, 'Away');
+    await addToProject(server, w.tenant.id, away.id, m.user.id, 'project:admin');
+    const { client } = m;
+    const wf = await createWorkflow(client, { name: 'Mover', nodes: [node('Start', 'core.manualTrigger')] });
+    const other = await createWorkflow(client, {
+      name: 'Other',
+      nodes: [node('Start', 'core.manualTrigger')],
+    });
+    const credential = await client.data<{ id: string }>(
+      client.post('/rest/credentials', { name: 'Moving', type: 'testApi', data: { apiKey: 'k1' } }),
+    );
+    const folder = await client.data<{ id: string }>(client.post('/rest/folders', { name: 'Moving' }));
+    const variable = await client.data<{ id: string }>(
+      client.post('/rest/variables', { key: 'moving_var', value: '1', projectId: client.defaultProjectId }),
+    );
+    const key = await keyOf(m);
+    await protectWorkspace(server, w.tenant.id);
+    return { w, m, away, wf, other, credential, folder, variable, key };
+  }
+
+  it('REST: a workflow, folder and credential transfer and a variable move get 403 with their texts', async () => {
+    const t = await movers();
+    const { client } = t.m;
+    const to = { destinationProjectId: t.away.id };
+    refused(await client.put(`/rest/workflows/${t.wf.id}/transfer`, to), 'workflowUpdate');
+    refused(await client.put(`/rest/folders/${t.folder.id}/transfer`, to), 'folderUpdate');
+    refused(await client.put(`/rest/credentials/${t.credential.id}/transfer`, to), 'credentialMove');
+    refused(await client.patch(`/rest/variables/${t.variable.id}`, { projectId: t.away.id }), 'variableMove');
+    const rows = await server.ctx.database.pool.query(
+      'select project_id from workflows where tenant_id = $1 and id = $2',
+      [t.w.tenant.id, t.wf.id],
+    );
+    expect(rows.rows[0].project_id).toBe(t.w.client.defaultProjectId);
+    // the same member moves it once the switch is off: the refusal was the lock, not a missing right
+    await protectWorkspace(server, t.w.tenant.id, false);
+    const moved = await client.put(`/rest/workflows/${t.wf.id}/transfer`, to);
+    expect(moved.statusCode, moved.body).toBe(200);
+  });
+
+  it('public API: a workflow and a credential transfer and a variable move get 403 with their texts', async () => {
+    const t = await movers();
+    const to = { destinationProjectId: t.away.id };
+    refused(await api(t.key, 'PUT', `/workflows/${t.other.id}/transfer`, to), 'workflowUpdate');
+    refused(await api(t.key, 'PUT', `/credentials/${t.credential.id}/transfer`, to), 'credentialMove');
+    refused(await api(t.key, 'PUT', `/variables/${t.variable.id}`, { projectId: t.away.id }), 'variableMove');
+  });
+});
+
+describe('user management is never refused (S4 end review call 6)', () => {
+  /** a true member whose personal project holds a workflow and a data table */
+  async function leaver(w: World) {
+    const m = await realMember(w);
+    const personal = await server.ctx.repos.projects.getPersonal(w.tenant.id, m.user.id);
+    if (!personal) throw new Error('The member has no personal project');
+    await workflowIn(server, w.tenant.id, personal.id, { name: 'Personal flow' });
+    await dataTableIn(server, w.tenant.id, personal.id, 'mine');
+    return { m, personal };
+  }
+
+  const workIn = async (tenantId: string, projectId: string) =>
+    (
+      await server.ctx.database.pool.query(
+        `select (select count(*)::int from workflows where tenant_id = $1 and project_id = $2) as workflows,
+                (select count(*)::int from data_tables where tenant_id = $1 and project_id = $2) as tables`,
+        [tenantId, projectId],
+      )
+    ).rows[0] as { workflows: number; tables: number };
+
+  it('removing a member and deleting their work passes on a protected workspace (REST and public API)', async () => {
+    const w = await world();
+    const a = await leaver(w);
+    const b = await leaver(w);
+    const ownerKey = await keyOf(w);
+    await protectWorkspace(server, w.tenant.id);
+    const rest = await w.client.request('DELETE', `/rest/members/${a.m.user.id}`, { deleteData: true });
+    expect(rest.statusCode, rest.body).toBe(200);
+    expect(await workIn(w.tenant.id, a.personal.id)).toEqual({ workflows: 0, tables: 0 });
+    const pub = await api(ownerKey, 'DELETE', `/users/${b.m.user.id}`);
+    expect(pub.statusCode, pub.body).toBeLessThan(300);
+    expect(await workIn(w.tenant.id, b.personal.id)).toEqual({ workflows: 0, tables: 0 });
+    // the bypass ends with the removal
     refused(await w.client.post('/rest/folders', { name: 'After' }), 'folderCreate');
+  });
+
+  it('removing a member and moving their work passes on a protected workspace', async () => {
+    const w = await world();
+    const a = await leaver(w);
+    await protectWorkspace(server, w.tenant.id);
+    const team = w.client.defaultProjectId as string;
+    const res = await w.client.request('DELETE', `/rest/members/${a.m.user.id}`, {
+      transferToProjectId: team,
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await workIn(w.tenant.id, team)).workflows).toBe(1);
+  });
+
+  it('the SCIM deprovisioning step (transferPersonalWork) deletes or moves the work on a protected workspace', async () => {
+    const w = await world();
+    const a = await leaver(w);
+    const b = await leaver(w);
+    await protectWorkspace(server, w.tenant.id);
+    await transferPersonalWork(server.ctx, w.tenant.id, a.m.user.id, null);
+    expect(await workIn(w.tenant.id, a.personal.id)).toEqual({ workflows: 0, tables: 0 });
+    const team = w.client.defaultProjectId as string;
+    await transferPersonalWork(server.ctx, w.tenant.id, b.m.user.id, team);
+    expect(await workIn(w.tenant.id, b.personal.id)).toEqual({ workflows: 0, tables: 0 });
+    expect(inPullWrite()).toBe(false);
+    await expect(
+      assertTenantWritable(server.ctx.serviceDeps, w.tenant.id, 'workflowDelete'),
+    ).rejects.toBeInstanceOf(ProtectedWorkspaceError);
   });
 });

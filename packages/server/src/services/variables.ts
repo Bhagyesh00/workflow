@@ -136,6 +136,8 @@ export class VariableService {
     const key = patch.key ?? row.key;
     // a value change stays allowed on a protected workspace; a key rename does not (decisions H)
     if (key !== row.key) await assertTenantWritable(this.deps, tenantId, 'variableRename');
+    // a move deletes the variable at one place and makes it at another, both refused there
+    if (destination !== row.projectId) await assertTenantWritable(this.deps, tenantId, 'variableMove');
     if (destination !== row.projectId) {
       // moving needs the right to make a variable at the other place
       if (!(await this.allowed(auth, destination, 'create'))) {

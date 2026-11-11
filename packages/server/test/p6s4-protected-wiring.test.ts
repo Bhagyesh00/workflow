@@ -42,9 +42,11 @@ const ACTIONS: ProtectedAction[] = [
   'workflowArchive',
   'workflowRestore',
   'credentialCreate',
+  'credentialMove',
   'variableCreate',
   'variableDelete',
   'variableRename',
+  'variableMove',
   'folderCreate',
   'folderUpdate',
   'folderDelete',
@@ -97,17 +99,19 @@ describe('protected.ts names', () => {
 });
 
 describe('withPullWrites and inPullWrite', () => {
-  it('is true inside withPullWrites and in a promise started there, false outside', async () => {
+  it('is true inside withPullWrites and in work it awaits, false outside and in a timer that fires after it returns', async () => {
     expect(inPullWrite()).toBe(false);
     let later: Promise<boolean> | undefined;
     const result = await withPullWrites(async () => {
       expect(inPullWrite()).toBe(true);
+      // S4 end review call 7: a timer (a Cron, a trigger) started inside sees no bypass once the pull returned
       later = new Promise((resolve) => setTimeout(() => resolve(inPullWrite()), 10));
-      await Promise.resolve();
+      const awaited = await new Promise<boolean>((resolve) => setTimeout(() => resolve(inPullWrite()), 1));
+      expect(awaited).toBe(true);
       return inPullWrite();
     });
     expect(result).toBe(true);
-    expect(await later).toBe(true);
+    expect(await later).toBe(false);
     expect(inPullWrite()).toBe(false);
   });
 
