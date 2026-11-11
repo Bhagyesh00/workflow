@@ -82,6 +82,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
       ? (await ctx.access.scopesForAuth(auth)).has('securitySettings:manage')
       : false;
     const usage = auth ? await repos.usage.get(auth.tenant.id, currentPeriod()) : undefined;
+    // P6-84: active workflows (tenant scoped) against `limits.activeWorkflows`
+    const activeWorkflows = auth ? await repos.workflows.countActive(auth.tenant.id) : 0;
     return {
       data: {
         brand,
@@ -109,8 +111,16 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
           /** P5-67: the Assistant on/off and whether a model is set; never a credential id */
           assistant: assistantFeature(config, tenantSettings, registries.nodeTypes),
         },
-        ...(usage
-          ? { usage: { period: usage.period, executions: usage.executions, executionMs: usage.executionMs } }
+        // P6-84: the active count is sent even before any run of the month (no usage row yet)
+        ...(auth
+          ? {
+              usage: {
+                period: usage?.period ?? currentPeriod(),
+                executions: usage?.executions ?? 0,
+                executionMs: usage?.executionMs ?? 0,
+                activeWorkflows,
+              },
+            }
           : {}),
         autosaveEnabled: !config.autosaveDisabled,
         workflowReviews: { enabled: tenantSettings.workflowReviews?.enabled === true },
