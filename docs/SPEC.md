@@ -251,8 +251,8 @@
 | --------------------------------------------------------------------------------- | --- | ------ |
 | Version on every save, restore, optimistic concurrency (409)                      | M1  | 🔨     |
 | Semantic diff, named versions, publish vs save, in-flight version pinning (NF-10) | M1  | ✅     |
-| Git sync, workflow-as-code SDK and CLI (NF-11)                                    | M2  | 📋     |
-| Environments / workspace forks with credential bindings (NF-13)                   | M3  | 📋     |
+| Git sync and CLI: push and pull workflows to Git as plain JSON files, with status, conflicts and force, and a command line tool on the public API. | M2  | ✅     |
+| Environments: separate workspaces (for example test and live), each on its own branch of one Git repository, with their own credentials. Changes move by push, merge on the Git host, then pull. A protected workspace refuses direct changes. | M3  | ✅     |
 | Workflow reviews/approvals before publish                                         | M3  | ✅     |
 | Publish timeline                                                                  | M2  | ✅     |
 | Version history compaction (hourly optimize, daily trim)                          | M2  | ✅     |
@@ -303,7 +303,7 @@ Each feature fixes a ranked user pain point (PP-xx in the research report). Mile
 | NF-07 | Agency client portal: read-only runs, toggles, input forms, credential connect links, reports                                                | PP-07                |
 | NF-08 | Keyed flow control: concurrency keys by expression, throttle, debounce, singleton, fair queues, worker pools                                 | PP-16, PP-10         |
 | NF-09 | Shared rate limiter per credential/host (token bucket across workers)                                                                        | PP-16                |
-| NF-11 | Workflow-as-code SDK, canonical diff-friendly format, CLI, free two-way Git sync                                                             | PP-05, PP-11         |
+| NF-11 | Git sync and CLI: push and pull workflows to Git as plain JSON files, with status, conflicts and force, and a command line tool on the public API. | PP-05, PP-11         |
 | NF-12 | Workflow test suites: fixtures, assertions, HTTP record/replay, CI gate before publish                                                       | PP-17, PP-18         |
 | NF-14 | Step debugger: breakpoints, step over/into, sub-workflow drill-down, item lineage                                                            | PP-02, PP-21         |
 | NF-16 | Guided data mapping and simple mode for non-coders                                                                                           | PP-01                |
@@ -328,7 +328,7 @@ Each feature fixes a ranked user pain point (PP-xx in the research report). Mile
 
 | ID    | Feature                                                                                | Solves       |
 | ----- | -------------------------------------------------------------------------------------- | ------------ |
-| NF-13 | Workspace forks with their own credentials, promote/merge                              | PP-17, PP-22 |
+| NF-13 | Environments: separate workspaces (for example test and live), each on its own branch of one Git repository, with their own credentials. Changes move by push, merge on the Git host, then pull. A protected workspace refuses direct changes. | PP-17, PP-22 |
 | NF-32 | Package-enabled sandboxed code (per-tenant npm/PyPI allowlists, lockfiles, scanning)   | PP-24        |
 | NF-33 | Multiplayer editing, node locks, execute-only role                                     | PP-22        |
 | NF-34 | Upgrade shadow runs (replay recent inputs on the new version with side effects mocked) | PP-18        |
