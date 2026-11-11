@@ -326,12 +326,10 @@ describe('RemoteDiffDialog', () => {
     const gitId = '11111111-2222-4333-8444-555555555555';
     // like the server: a git id that maps to a local id answers with the local id
     const original = sourceControlApi.remoteContent.bind(sourceControlApi);
-    const remoteSpy = vi
-      .spyOn(sourceControlApi, 'remoteContent')
-      .mockImplementation(async (type, id) => ({
-        ...(await original(type, wf.id)),
-        id: id === gitId ? wf.id : id,
-      }));
+    const remoteSpy = vi.spyOn(sourceControlApi, 'remoteContent').mockImplementation(async (type, id) => ({
+      ...(await original(type, wf.id)),
+      id: id === gitId ? wf.id : id,
+    }));
     const localSpy = vi.spyOn(workflowsApi, 'get');
     const file: SourceControlledFile = {
       file: `workflows/${gitId}.json`,
