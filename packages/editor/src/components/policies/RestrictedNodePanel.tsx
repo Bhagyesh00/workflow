@@ -35,7 +35,8 @@ export function RestrictedNodePanel({ node }: RestrictedNodePanelProps): ReactNo
     <Callout tone="err" title="This node is restricted" className="mb-4">
       <p>{restrictedReason(entry)}</p>
       <p className="mt-1">
-        It can stay in the workflow, but the workflow will not save, publish or run with it.
+        It can stay in the workflow, but the workflow will not publish or run with it, and a newly added one
+        will not save.
       </p>
       <div className="mt-2 flex flex-wrap gap-2">
         {!readOnly && (

@@ -4,20 +4,28 @@
  * lock badge; the workflows page filters by `executionBlockedBy` and badges the rows. All on the demo backend.
  */
 
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Connections, NodeTypeDescription, WorkflowNode } from '@workflow/workflow';
+import { useState } from 'react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { AvailableType } from '../src/api/types';
 import { demoNodeTypes } from '../src/demo/fixtures';
 import { allowDemoTypes, denyDemoTypes } from '../src/demo/mock-type-policies';
 import { addNodeFromDescription } from '../src/features/editor/add-node';
 import { buildCatalog, filterCatalog } from '../src/lib/node-catalog';
-import { adminsOf, restrictedReason, restrictedRows, violationText } from '../src/lib/policy-violations';
+import {
+  adminsOf,
+  restrictedEntry,
+  restrictedReason,
+  restrictedRows,
+  useRestrictedTypes,
+  violationText,
+} from '../src/lib/policy-violations';
 import { useToastStore, useUiStore } from '../src/stores/ui-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
 import { backend, signedIn } from './backend';
-import { renderApp } from './utils';
+import { renderApp, withProviders } from './utils';
 
 const mk = (id: string, name: string, type: string, x: number): WorkflowNode => ({
   id,
@@ -89,6 +97,41 @@ describe('policy-violations helpers', () => {
       { userId: '5', email: 'p@x', name: 'P', role: 'admin', status: 'pending' },
     ] as const;
     expect(adminsOf([...members]).map((m) => m.userId)).toEqual(['1', '3']);
+  });
+});
+
+function Reader({ name }: { name: string }) {
+  const { restricted } = useRestrictedTypes();
+  return <span data-testid={name}>{restricted.size}</span>;
+}
+
+function Both() {
+  const [first, setFirst] = useState(true);
+  return (
+    <>
+      {first && <Reader name="first" />}
+      <Reader name="second" />
+      <button type="button" onClick={() => setFirst(false)}>
+        Drop first
+      </button>
+    </>
+  );
+}
+
+describe('restricted types registry', () => {
+  it('stays published while another hook is mounted and clears with the last one', async () => {
+    signedIn();
+    denyDemoTypes(backend(), backend().session!.tenantId, ['core.set']);
+    const view = withProviders(<Both />);
+    await waitFor(() => expect(screen.getByTestId('second').textContent).toBe('1'));
+    expect(restrictedEntry('core.set')).toBeDefined();
+    // the first hook unmounts, the second stays: the registry keeps the rows
+    fireEvent.click(screen.getByRole('button', { name: 'Drop first' }));
+    await waitFor(() => expect(screen.queryByTestId('first')).toBeNull());
+    await waitFor(() => expect(screen.getByTestId('second').textContent).toBe('1'));
+    expect(restrictedEntry('core.set')).toBeDefined();
+    view.unmount();
+    expect(restrictedEntry('core.set')).toBeUndefined();
   });
 });
 
@@ -189,6 +232,83 @@ describe('node creator and canvas', () => {
       openNdv: false,
     });
     expect(ok).not.toBeNull();
+  });
+
+  it('keeps refusing the command bar add after the node creator closes with other hooks mounted', async () => {
+    signedIn();
+    denyDemoTypes(backend(), backend().session!.tenantId, ['core.set']);
+    await openEditor([mk('n1', 'Start', 'core.manualTrigger', 0)]);
+    const flow = { screenToFlowPosition: (p: { x: number; y: number }) => p };
+    const descriptions = { get: (t: string) => demoNodeTypes.find((d) => d.name === t) };
+    act(() => useUiStore.getState().openCreator());
+    await screen.findByRole('button', { name: 'Why Edit Fields (Set) is restricted' });
+    // an allowed node goes in while the creator is open, then the creator closes
+    const ok = addNodeFromDescription(demoNodeTypes.find((d) => d.name === 'core.noOp')!, {
+      flow,
+      descriptions,
+      openNdv: false,
+    });
+    expect(ok).not.toBeNull();
+    act(() => useUiStore.getState().setSidePanel(null));
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Node creator' })).toBeNull());
+    useToastStore.setState({ toasts: [] });
+    const before = useWorkflowStore.getState().nodes.length;
+    const added = addNodeFromDescription(demoNodeTypes.find((d) => d.name === 'core.set')!, {
+      flow,
+      descriptions,
+      openNdv: false,
+    });
+    expect(added).toBeNull();
+    expect(useWorkflowStore.getState().nodes).toHaveLength(before);
+    expect(useToastStore.getState().toasts.some((t) => t.title.includes('restricted'))).toBe(true);
+  });
+
+  it('adds nothing when a paste holds a blocked type, and pastes an allowed one', async () => {
+    signedIn();
+    denyDemoTypes(backend(), backend().session!.tenantId, ['core.set']);
+    await openEditor([mk('n1', 'Start', 'core.manualTrigger', 0)]);
+    const paste = (type: string, name: string) =>
+      fireEvent.paste(document, {
+        clipboardData: {
+          getData: () =>
+            JSON.stringify({ nodes: [{ name, type, position: [10, 10], parameters: {} }], connections: {} }),
+        },
+      });
+    // the blocked rows are published once the editor's available-types query has answered
+    await waitFor(() => {
+      useToastStore.setState({ toasts: [] });
+      paste('core.set', 'Shape');
+      expect(useToastStore.getState().toasts.map((t) => t.title)).toContain('Shape is restricted');
+    });
+    expect(useWorkflowStore.getState().nodes.map((n) => n.name)).toEqual(['Start']);
+    paste('core.noOp', 'Keep');
+    expect(useWorkflowStore.getState().nodes.map((n) => n.name)).toEqual(['Start', 'Keep']);
+  });
+
+  it('adds nothing from Import from URL when the file holds a blocked type, and the dialog stays open', async () => {
+    signedIn();
+    const b = backend();
+    denyDemoTypes(b, b.session!.tenantId, ['core.set']);
+    const url = 'https://example.com/blocked.json';
+    b.setUrlFixture(url, {
+      name: 'Remote',
+      nodes: [
+        { id: 'r1', name: 'Shape', type: 'core.set', typeVersion: 1, position: [0, 0], parameters: {} },
+      ],
+      connections: {},
+    });
+    await openEditor([mk('n1', 'Start', 'core.manualTrigger', 0)]);
+    // the blocked rows are published once the editor's available-types query has answered
+    await waitFor(() => expect(restrictedEntry('core.set')).toBeDefined());
+    act(() => useUiStore.getState().setImportUrlOpen(true));
+    fireEvent.change(await screen.findByLabelText('Workflow URL'), { target: { value: url } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    await waitFor(() =>
+      expect(useToastStore.getState().toasts.map((t) => t.title)).toContain('Shape is restricted'),
+    );
+    expect(useWorkflowStore.getState().nodes.map((n) => n.name)).toEqual(['Start']);
+    expect(useUiStore.getState().importUrlOpen).toBe(true);
+    expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('draws a lock badge on a canvas node of a blocked type only', async () => {

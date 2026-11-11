@@ -33,8 +33,9 @@ export function ToolRestrictedCallout({ node }: ToolRestrictedCalloutProps): Rea
     <Callout tone="warn" title="Some tools of this node are restricted" className="mb-4">
       <p>
         A policy blocks {blocked.length === 1 ? 'this tool' : 'these tools'}: {blocked.join(', ')}. The agent
-        cannot call {blocked.length === 1 ? 'it' : 'them'}, and the workflow will not save, publish or run
-        until {blocked.length === 1 ? 'it is' : 'they are'} replaced or allowed.
+        cannot call {blocked.length === 1 ? 'it' : 'them'}, and the workflow will not publish or run until{' '}
+        {blocked.length === 1 ? 'it is' : 'they are'} replaced or allowed. A newly added tool of this kind
+        will not save.
       </p>
     </Callout>
   );

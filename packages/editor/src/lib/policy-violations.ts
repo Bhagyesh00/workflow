@@ -9,26 +9,47 @@ import { projectsApi } from '../api/endpoints';
 import { queryKeys, useAvailableTypes } from '../api/queries';
 import type { AvailableType, Member, TypePolicyViolation } from '../api/types';
 import { useWorkingProjectId } from '../features/editor/open-resources';
+import { toast } from '../stores/ui-store';
 
 export type RestrictedMap = ReadonlyMap<string, AvailableType>;
 
 const NONE: RestrictedMap = new Map();
 
-/** the rows the last mounted `useRestrictedTypes` published, for code that runs outside React (add-node.ts) */
-let published: RestrictedMap = NONE;
+/**
+ * The rows each mounted `useRestrictedTypes` holds, for code that runs outside React (add-node.ts, paste).
+ * One entry per mounted hook: the registry reads the newest, and only the last hook to go leaves it empty.
+ */
+const mounted = new Set<{ rows: RestrictedMap }>();
 
-function sameRows(a: RestrictedMap, b: RestrictedMap): boolean {
-  if (a.size !== b.size) return false;
-  for (const [type, row] of a) {
-    const other = b.get(type);
-    if (!other || other.reason !== row.reason || other.scope !== row.scope) return false;
-  }
-  return true;
+function publishedRows(): RestrictedMap {
+  let latest: RestrictedMap = NONE;
+  for (const entry of mounted) latest = entry.rows;
+  return latest;
 }
 
 /** the unavailable row for `type` as last published, if any */
 export function restrictedEntry(type: string): AvailableType | undefined {
-  return published.get(type);
+  return publishedRows().get(type);
+}
+
+/** the names of the nodes in `nodes` whose type a policy blocks (a paste or an import adds none of them) */
+export function restrictedNodeNames(nodes: readonly { name: string; type: string }[]): string[] {
+  const rows = publishedRows();
+  return nodes.filter((n) => rows.has(n.type)).map((n) => n.name);
+}
+
+/**
+ * True, with the toast shown, when `nodes` hold a type a policy blocks: a paste or an import then adds
+ * nothing, as the node creator does for one picked node.
+ */
+export function refuseRestrictedNodes(nodes: readonly { name: string; type: string }[]): boolean {
+  const names = restrictedNodeNames(nodes);
+  if (!names.length) return false;
+  toast.error(
+    names.length === 1 ? `${names[0]} is restricted` : `${names.length} nodes are restricted`,
+    `A policy blocks ${names.length === 1 ? 'this node' : `these nodes: ${names.join(', ')}`}, so nothing was added. Ask an admin to allow ${names.length === 1 ? 'it' : 'them'}.`,
+  );
+  return true;
 }
 
 /** only the rows a policy blocks, keyed by node type */
@@ -52,10 +73,11 @@ export function useRestrictedTypes(): { restricted: RestrictedMap; isLoading: bo
   const rows = useAvailableTypes(projectId);
   const restricted = useMemo(() => restrictedRows(rows.data), [rows.data]);
   useEffect(() => {
-    if (!sameRows(published, restricted)) published = restricted;
+    const entry = { rows: restricted };
+    mounted.add(entry);
     return () => {
       // the last hook to go leaves nothing published (a stale project's rows must not block another's adds)
-      if (published === restricted) published = NONE;
+      mounted.delete(entry);
     };
   }, [restricted]);
   return { restricted, isLoading: rows.isLoading };

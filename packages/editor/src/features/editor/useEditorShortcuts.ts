@@ -3,6 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { useEffect } from 'react';
 import { setGroupsExpanded } from '../../lib/group-view';
 import { groupsOfNodes } from '../../lib/node-groups';
+import { refuseRestrictedNodes, useRestrictedTypes } from '../../lib/policy-violations';
 import { parseClipboard } from '../../lib/workflow-ops';
 import { useBuilderStore } from '../../stores/builder-store';
 import { useRunStore } from '../../stores/run-store';
@@ -79,6 +80,8 @@ export function useEditorShortcuts(handlers: {
   descriptions?: EditorDeps['descriptions'];
 }) {
   const flow = useReactFlow();
+  // P6-50: keeps the blocked types published while the editor is open, for add-node.ts and paste
+  useRestrictedTypes();
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -202,6 +205,8 @@ export function useEditorShortcuts(handlers: {
       event.preventDefault();
       const store = useWorkflowStore.getState();
       if (store.readOnly || useBuilderStore.getState().streaming) return;
+      // P6-50: a block holding a type a policy blocks adds nothing, as the node creator does
+      if (refuseRestrictedNodes(payload.nodes)) return;
       // drop the pasted block around the centre of the visible canvas
       const xs = [
         ...payload.nodes.map((n) => n.position[0]),

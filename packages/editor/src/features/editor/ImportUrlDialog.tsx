@@ -3,7 +3,8 @@
  * must match /^https?:\/\/.+/i; workflowsApi.importFromUrl sends it in the body (the server
  * fetches it, the browser never does); the result is checked and pasted into the open workflow as
  * one undo step. A result that arrives after the user left the workflow (or closed the dialog)
- * is dropped.
+ * is dropped. P6-50: a result that holds a node type a policy blocks adds nothing (the toast says
+ * why) and the dialog stays open.
  */
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { errorMessage } from '../../api/client';
@@ -11,6 +12,7 @@ import { workflowsApi } from '../../api/endpoints';
 import { Button } from '../../components/ui/Button';
 import { Dialog } from '../../components/ui/Dialog';
 import { FormField, TextInput } from '../../components/ui/Field';
+import { refuseRestrictedNodes } from '../../lib/policy-violations';
 import { parseClipboard } from '../../lib/workflow-ops';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
@@ -69,6 +71,10 @@ export function ImportUrlDialog() {
         return;
       }
       const store = useWorkflowStore.getState();
+      if (refuseRestrictedNodes(payload.nodes)) {
+        setBusy(false);
+        return;
+      }
       const names = store.paste(payload, offsetBelowExisting(payload.nodes, store.nodes));
       setOpen(false);
       toast.info(`Imported ${names.length} node${names.length === 1 ? '' : 's'}`);
