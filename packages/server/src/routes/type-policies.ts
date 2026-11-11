@@ -283,9 +283,10 @@ function ancestorsOf(ctx: ServerContext, type: string): string[] {
 }
 
 /**
- * Would `sub` start from a workflow of `projectId`: its node and credential types judged as a start, with no
- * audit row (a preview refuses nothing). The same decision as enforcement: the workspace scope composed with
- * the project's.
+ * Would `sub` start: its node and credential types judged as a start under `projectId`, with no audit row (a
+ * preview refuses nothing). The same decision as enforcement: the workspace scope composed with the project's.
+ * The caller passes the sub-workflow's own project, because the run gate judges a sub-run under the project of
+ * the workflow it runs, not the project of the workflow that calls it.
  */
 async function previewStart(
   ctx: ServerContext,
@@ -412,7 +413,7 @@ export function registerTypePolicyRoutes(app: FastifyInstance, ctx: ServerContex
     if (!caller || !sub) throw ApiError.notFound('Workflow');
     const held = await request.server.access.scopesForAuth(auth, { workflowId: sub.id });
     if (!held.has('workflow:read')) throw ApiError.notFound('Workflow');
-    const violations = await previewStart(ctx, tenantId, caller.projectId, sub);
+    const violations = await previewStart(ctx, tenantId, sub.projectId, sub);
     return { data: { allowed: violations.length === 0, violations } };
   });
 }

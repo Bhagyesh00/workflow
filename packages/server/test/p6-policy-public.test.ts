@@ -7,15 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PUBLIC_TYPE_POLICY_ROUTES } from '../src/routes/public-type-policies';
-import {
-  addToProject,
-  createTestServer,
-  projectIn,
-  realMember,
-  resetDatabase,
-  signup,
-  type TestServer,
-} from './helpers';
+import { createTestServer, projectIn, realMember, resetDatabase, signup, type TestServer } from './helpers';
 
 let server: TestServer;
 
@@ -198,10 +190,10 @@ describe('public type policy rows', () => {
     expect(await audits(tenantId)).toContain('type_policy.attachments.updated');
   });
 
-  it('read a project scope with a key whose user administers that project, and not another project', async () => {
-    const { owner, member, tenantId, alpha, beta, keyOf } = await setup();
-    await addToProject(server, tenantId, alpha.id, member.user.id, 'project:admin');
-    // the owner makes the key; a project admin holds the scope in its project only
+  it('an owner key reads and writes any project scope, never delegates one, and 404s an unknown project', async () => {
+    // a member cannot mint a key with this scope (see above), so a project admin's own-project limit is
+    // tested on the REST route in p6-policy-project.test.ts
+    const { owner, alpha, beta, keyOf } = await setup();
     const ownerKey = await keyOf(owner.client, ['nodeTypePolicy:manage']);
     const read = await call(ownerKey, 'GET', `/node-type-policies/projects/${alpha.id}`);
     expect(read.statusCode).toBe(200);

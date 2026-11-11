@@ -193,7 +193,9 @@ describe('P6 S3 REST routes', () => {
     expect(routes).toHaveLength(39);
     for (const [method, path] of routes) {
       const res = await owner.client.request(method, `/rest${path}`, method === 'GET' ? undefined : {});
-      expect(res.statusCode, `${method} ${path}`).not.toBe(404);
+      // a handler answers 404 for an unknown id (`Policy not found`); only the router's own 404 says the route is missing
+      const body = res.statusCode === 404 ? res.json() : undefined;
+      expect(body?.error?.message ?? '', `${method} ${path}`).not.toMatch(/^Route .* not found$/);
     }
   });
 

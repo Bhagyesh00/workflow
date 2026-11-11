@@ -389,6 +389,25 @@ describe('sub-workflow policy check', () => {
     expect(await audits(tenantId)).not.toContain('policy.blocked');
   });
 
+  it('judges the sub-workflow under its own project, not the caller project (P6-49)', async () => {
+    const { owner, tenantId, alpha, beta } = await setup();
+    const url = (callerId: string, subId: string) =>
+      `/rest/workflows/${callerId}/sub-workflows/${subId}/policy-check`;
+    // a deny on the sub-workflow's project only: the sub-run fails, so the preview says so
+    await policyDeny(server, tenantId, 'node', 'core.code', beta.id);
+    const first = await pair(tenantId, alpha.id, beta.id);
+    const blocked = await owner.client.data(owner.client.get(url(first.caller.id, first.sub.id)));
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.violations).toEqual([
+      expect.objectContaining({ kind: 'node-type-unavailable', type: 'core.code', scope: 'project' }),
+    ]);
+    // a deny on the caller's project only does not stop a sub-workflow of another project
+    await policyDeny(server, tenantId, 'node', 'core.set', alpha.id);
+    const second = await pair(tenantId, alpha.id, beta.id);
+    const answer = await owner.client.data(owner.client.get(url(second.caller.id, second.sub.id)));
+    expect(answer.violations.map((v: { type: string }) => v.type)).toEqual(['core.code']);
+  });
+
   it('hides a sub-workflow the caller cannot read (404) and gates the caller on workflow:update', async () => {
     const { owner, member, tenantId, alpha, beta } = await setup();
     await addToProject(server, tenantId, alpha.id, member.user.id, 'project:editor');
