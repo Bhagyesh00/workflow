@@ -1,7 +1,8 @@
 /**
  * P6-72 (S4 L1): the remote URL rules of `parseRemoteUrl`. https, http, ssh and the scp form pass; every other
- * scheme, `ext::`, `file://`, control characters, a leading `-`, `::`, a password and a path with a quote, `$`,
- * `;`, a backtick, `\` or whitespace are refused, and the error never echoes the URL.
+ * scheme, `ext::`, `file://`, control characters, a leading `-`, `::`, a password, a user name in an http(s) URL
+ * (the token has its own user name field), a user name that does not decode, and a path with a quote, `$`, `;`, a
+ * backtick, `\`, whitespace, or a `?` or `#` once decoded are refused (400), and the error never echoes the URL.
  */
 import { describe, expect, it } from 'vitest';
 import { parseRemoteUrl } from '../src/services/source-control/url';
@@ -22,15 +23,6 @@ describe('parseRemoteUrl accepts', () => {
       host: '127.0.0.1',
       port: 8080,
       path: '/repo.git',
-    });
-  });
-
-  it('https with a user name and no password', () => {
-    expect(parseRemoteUrl('https://deploy@git.example.com/team/repo.git')).toMatchObject({
-      kind: 'https',
-      host: 'git.example.com',
-      user: 'deploy',
-      path: '/team/repo.git',
     });
   });
 
@@ -98,6 +90,15 @@ describe('parseRemoteUrl refuses', () => {
     ['a space in the path', 'git@example.com:my repo.git'],
     ['an encoded quote in the path', 'ssh://git@example.com/repo%27.git'],
     ['an encoded space in the path', 'https://example.com/my%20repo.git'],
+    ['a user name in https://', 'https://deploy@git.example.com/team/repo.git'],
+    ['a token typed as the user name', 'https://ghp_secret0123456789@github.com/acme/flows.git'],
+    ['a user name in http://', 'http://deploy@127.0.0.1:8080/repo.git'],
+    ['a user name that does not decode (ssh://)', 'ssh://%zz@git.example.com/repo.git'],
+    ['a user name that does not decode (https://)', 'https://%zz@git.example.com/repo.git'],
+    ['an encoded ? in the path', 'https://example.com/r%3F.git'],
+    ['an encoded # in the path', 'https://example.com/r%23x.git'],
+    ['an encoded ? in an ssh:// path', 'ssh://git@example.com/repo%3Fx.git'],
+    ['a ? in the scp path', 'git@example.com:repo?.git'],
     ['a query string', 'https://example.com/r.git?x=1'],
     ['a fragment', 'https://example.com/r.git#main'],
     ['no host', 'https:///r.git'],

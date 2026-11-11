@@ -3,7 +3,8 @@
  * ssh2 `exec` of `X '<path>'` (path quoted, no other command); POST writes the body to the same channel. The
  * socket comes from `ctx.http.resolveAllowedHost` with its pinned `lookup` (handed to ssh2 as `sock`);
  * `hostVerifier` keeps the first SHA256 fingerprint through `onFirstSeen` and refuses a changed one with
- * `GitHostKeyChangedError`. Connect timeout 30 s. Keys stay in memory.
+ * `GitHostKeyChangedError`. Connect timeout 30 s; after it each channel has the HTTP client's bound (300 s in all)
+ * and an idle timer while a read waits (120 s), and ssh2 keepalives notice a dead peer. Keys stay in memory.
  *
  * Over SSH the Git services speak the stateful protocol: the advertisement comes first on the channel, then the
  * client's request, then the answer. isomorphic-git speaks Smart HTTP (stateless), so the adapter reads the
@@ -35,6 +36,18 @@ type PluginRequest = Parameters<GitHttpPlugin['request']>[0];
 type PluginResponse = Awaited<ReturnType<GitHttpPlugin['request']>>;
 
 export const SSH_CONNECT_TIMEOUT_MS = 30_000;
+/** how long one channel (one request) may take in all: the HTTP client's default request timeout */
+export const SSH_TOTAL_TIMEOUT_MS = 300_000;
+/** how long a read may wait for the next chunk */
+export const SSH_IDLE_TIMEOUT_MS = 120_000;
+const SSH_KEEPALIVE_INTERVAL_MS = 15_000;
+const SSH_KEEPALIVE_COUNT_MAX = 4;
+
+/** the bounds of one channel (tests pass short ones) */
+export interface SshTimeouts {
+  totalMs: number;
+  idleMs: number;
+}
 /** the same cap the guarded HTTP client puts on one response (100 MiB) */
 export const SSH_MAX_RESPONSE_BYTES = 100 * 1024 * 1024;
 /** an advertisement larger than this is refused (a repository with a huge number of refs) */
@@ -68,17 +81,24 @@ function advertisementEnd(buf: Buffer): number {
   return -1;
 }
 
-/** reads a channel's stdout chunk by chunk, with a byte cap over the channel's whole life */
+/** reads a channel's stdout chunk by chunk, with a byte cap and a deadline over the channel's whole life */
 class ChannelReader {
   private readonly chunks: Buffer[] = [];
   private ended = false;
   private failure: Error | undefined;
   private wake: (() => void) | undefined;
+  private idle: NodeJS.Timeout | undefined;
+  private readonly deadline: NodeJS.Timeout;
   private total = 0;
   exitCode: number | null = null;
   stderr = '';
 
-  constructor(readonly channel: ClientChannel) {
+  constructor(
+    readonly channel: ClientChannel,
+    private readonly timeouts: SshTimeouts,
+  ) {
+    this.deadline = setTimeout(() => this.timeOut(), timeouts.totalMs);
+    this.deadline.unref();
     channel.on('data', (chunk: Buffer) => {
       this.total += chunk.length;
       if (this.total > SSH_MAX_RESPONSE_BYTES) {
@@ -98,12 +118,17 @@ class ChannelReader {
     });
     channel.on('close', () => {
       this.ended = true;
+      clearTimeout(this.deadline);
       this.notify();
     });
     channel.on('error', (error: Error) => this.fail(error));
   }
 
   private notify() {
+    if (this.idle) {
+      clearTimeout(this.idle);
+      this.idle = undefined;
+    }
     const wake = this.wake;
     this.wake = undefined;
     wake?.();
@@ -112,7 +137,15 @@ class ChannelReader {
   private fail(error: Error) {
     this.failure ??= error;
     this.ended = true;
+    clearTimeout(this.deadline);
     this.notify();
+  }
+
+  /** the server sent nothing for too long, or the channel ran past its deadline */
+  private timeOut() {
+    if (this.ended) return;
+    this.fail(new GitRemoteError('The Git server did not answer in time.'));
+    this.channel.destroy();
   }
 
   /** the next chunk, or null once the channel closed */
@@ -124,6 +157,8 @@ class ChannelReader {
       if (this.ended) return null;
       await new Promise<void>((resolve) => {
         this.wake = resolve;
+        this.idle = setTimeout(() => this.timeOut(), this.timeouts.idleMs);
+        this.idle.unref();
       });
     }
   }
@@ -144,6 +179,7 @@ export function gitSshTransport(
   remote: ParsedRemote,
   key: { privateKey: string },
   hostKey: HostKeyCheck,
+  timeouts: SshTimeouts = { totalMs: SSH_TOTAL_TIMEOUT_MS, idleMs: SSH_IDLE_TIMEOUT_MS },
 ): GitSshPlugin {
   if (remote.kind !== 'ssh') throw new GitRemoteError('The SSH transport needs an SSH repository URL.');
   let connection: Promise<Client> | undefined;
@@ -185,6 +221,9 @@ export function gitSshTransport(
           username: remote.user ?? 'git',
           privateKey: key.privateKey,
           readyTimeout: SSH_CONNECT_TIMEOUT_MS,
+          // a peer that stops answering is noticed and the connection closed
+          keepaliveInterval: SSH_KEEPALIVE_INTERVAL_MS,
+          keepaliveCountMax: SSH_KEEPALIVE_COUNT_MAX,
           hostVerifier: (raw: Buffer, verify: (valid: boolean) => void) => {
             const fingerprint = hostKeyFingerprint(raw);
             if (hostKey.fingerprint === null) {
@@ -212,12 +251,19 @@ export function gitSshTransport(
     // the only command ever run: one of the two service names and the quoted path (url.ts refuses a quote in it)
     const command = `${service} '${remote.path}'`;
     const channel = await new Promise<ClientChannel>((resolve, reject) => {
+      // a server that never opens the channel; close() ends the connection and any channel it opens later
+      const timer = setTimeout(
+        () => reject(new GitRemoteError('The Git server did not answer in time.')),
+        SSH_CONNECT_TIMEOUT_MS,
+      );
+      timer.unref();
       ssh.exec(command, (error, stream) => {
+        clearTimeout(timer);
         if (error) reject(new GitRemoteError('The Git server refused the repository.', error));
         else resolve(stream);
       });
     });
-    const entry: OpenService = { service, reader: new ChannelReader(channel) };
+    const entry: OpenService = { service, reader: new ChannelReader(channel, timeouts) };
     open.add(entry);
     channel.on('close', () => open.delete(entry));
     return entry;

@@ -7,7 +7,8 @@
  *   (Smart HTTP), with an optional Basic token and an optional redirect for every request.
  * - `startGitSshServer(repo)`: an ssh2 `Server` on 127.0.0.1 with a generated host key that runs
  *   `git upload-pack` or `git receive-pack` for an `exec` of `git-upload-pack '<path>'` or
- *   `git-receive-pack '<path>'`; `swapHostKey()` answers later connections with a new key.
+ *   `git-receive-pack '<path>'`; `swapHostKey()` answers later connections with a new key; `stall: true` sends
+ *   the advertisement and then never answers (the client's request is dropped).
  * This file and e2e/helpers/git-http.ts are the only places that run the `git` binary, always as a spawn with an
  * argument list (never a shell). A test that finds no `git` fails: `requireGit()` throws.
  */
@@ -94,6 +95,14 @@ export interface BareRepo {
     files: TreeFile[],
     options?: { branch?: string; message?: string; parent?: string | null },
   ): Promise<string>;
+  /** writes a blob; returns its id */
+  blob(data: string | Uint8Array): Promise<string>;
+  /** writes a raw tree object (a folder's mode is 40000; the same id may appear many times); returns its id */
+  tree(entries: Array<{ mode: string; name: string; oid: string }>): Promise<string>;
+  /** a commit of `tree` on `branch` (default main), on its head, and moves the branch to it */
+  commitTree(tree: string, options?: { branch?: string; message?: string }): Promise<string>;
+  /** every entry of `ref` (ls-tree -r: blobs, links and submodules) with its mode and id, by path */
+  entries(ref: string): Promise<Map<string, { mode: string; oid: string }>>;
   /** the commit `refs/heads/<branch>` names, or null */
   head(branch?: string): Promise<string | null>;
   /** every branch name */
@@ -154,6 +163,19 @@ export async function createBareRepo(): Promise<BareRepo> {
     return writeTree(entries);
   };
 
+  const commitTree = async (
+    tree: string,
+    options: { branch?: string; message?: string; parent?: string | null } = {},
+  ): Promise<string> => {
+    const branch = options.branch ?? 'main';
+    const parent = options.parent === undefined ? await head(branch) : options.parent;
+    const args = ['commit-tree', tree, '-m', options.message ?? 'seed'];
+    if (parent) args.push('-p', parent);
+    const commit = (await git(args)).toString('utf8').trim();
+    await git(['update-ref', `refs/heads/${branch}`, commit]);
+    return commit;
+  };
+
   const head = async (branch = 'main'): Promise<string | null> => {
     try {
       return (await git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]))
@@ -169,14 +191,21 @@ export async function createBareRepo(): Promise<BareRepo> {
     dir,
     urlPath: '/repo.git',
     async commit(files, options = {}) {
-      const branch = options.branch ?? 'main';
       const tree = await buildTree(files.map((f) => ({ ...f, rest: f.path.split('/') })));
-      const parent = options.parent === undefined ? await head(branch) : options.parent;
-      const args = ['commit-tree', tree, '-m', options.message ?? 'seed'];
-      if (parent) args.push('-p', parent);
-      const commit = (await git(args)).toString('utf8').trim();
-      await git(['update-ref', `refs/heads/${branch}`, commit]);
-      return commit;
+      return commitTree(tree, options);
+    },
+    blob: writeBlob,
+    tree: writeTree,
+    commitTree: (tree, options) => commitTree(tree, options),
+    async entries(ref) {
+      const list = (await git(['ls-tree', '-r', '-z', '--full-tree', ref])).toString('utf8');
+      const result = new Map<string, { mode: string; oid: string }>();
+      for (const line of list.split('\0').filter(Boolean)) {
+        const tab = line.indexOf('\t');
+        const [mode, , oid] = line.slice(0, tab).split(' ');
+        result.set(line.slice(tab + 1), { mode: String(mode), oid: String(oid) });
+      }
+      return result;
     },
     head,
     async branches() {
@@ -323,11 +352,16 @@ export interface SshKeyPair {
 }
 
 export function generateSshKey(type: 'ed25519' | 'rsa' = 'ed25519'): SshKeyPair {
-  const pair =
-    type === 'rsa'
-      ? sshUtils.generateKeyPairSync('rsa', { bits: 2048 })
-      : sshUtils.generateKeyPairSync('ed25519');
-  return { privateKey: pair.private, publicKey: pair.public };
+  // ssh2 makes an ed25519 key its own parser refuses about once in 250 tries: such a key is made again
+  for (let attempt = 0; ; attempt++) {
+    const pair =
+      type === 'rsa'
+        ? sshUtils.generateKeyPairSync('rsa', { bits: 2048 })
+        : sshUtils.generateKeyPairSync('ed25519');
+    if (!(sshUtils.parseKey(pair.private) instanceof Error) || attempt >= 20) {
+      return { privateKey: pair.private, publicKey: pair.public };
+    }
+  }
 }
 
 /** OpenSSH's `SHA256:<base64>` fingerprint of a public key */
@@ -361,7 +395,10 @@ const EXEC_RE = /^(git-upload-pack|git-receive-pack) '([^']*)'$/;
  * An ssh2 server for the bare repo: public key auth for user `git` with `clientKey`, `exec` of the two Git
  * services with the quoted repository path (`/repo.git` or `repo.git`); anything else is refused.
  */
-export async function startGitSshServer(repo: BareRepo): Promise<GitSshServer> {
+export async function startGitSshServer(
+  repo: BareRepo,
+  options: { stall?: boolean } = {},
+): Promise<GitSshServer> {
   const clientKey = generateSshKey();
   const allowed = sshUtils.parseKey(clientKey.publicKey) as ParsedKey;
   const commands: string[] = [];
@@ -398,8 +435,13 @@ export async function startGitSshServer(repo: BareRepo): Promise<GitSshServer> {
             });
             child.stdout.pipe(stream, { end: false });
             child.stderr.on('data', (c: Buffer) => stream.stderr.write(c));
-            stream.on('data', (c: Buffer) => child.stdin.write(c));
-            stream.on('end', () => child.stdin.end());
+            // stall: the service never sees the request, so it never answers
+            stream.on('data', (c: Buffer) => {
+              if (!options.stall) child.stdin.write(c);
+            });
+            stream.on('end', () => {
+              if (!options.stall) child.stdin.end();
+            });
             stream.on('close', () => {
               if (child.exitCode === null) child.kill();
             });

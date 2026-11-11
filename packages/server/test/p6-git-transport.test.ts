@@ -3,7 +3,8 @@
  * the internet and no real token or key is used.
  * Step 1 (the spike, plan-S4.md section 7 note 5): a push over SSH on top of a `depth: 1` fetch, through the
  * SSH adapter and isomorphic-git (fetch, writeTree, writeCommit, push). Then `withRepo` over SSH and HTTP: fetch,
- * push, list branches, the response cap, private hosts, redirects, the token rules, host key memory and the temp
+ * push, list branches, the response cap, private hosts, redirects, the token rules, host key memory, the SSH
+ * timeouts (a server that stalls after the advertisement), the token's host for an IPv6 literal and the temp
  * folder.
  *
  * The HTTP fake is plain HTTP, and a token is never sent over http://. For the token cases the test uses
@@ -15,7 +16,11 @@ import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { HttpClient } from '@workflow/core';
-import { type HttpRequestOptions, SOURCE_CONTROL_LIMITS } from '@workflow/workflow';
+import {
+  assertCredentialUrlAllowed,
+  type HttpRequestOptions,
+  SOURCE_CONTROL_LIMITS,
+} from '@workflow/workflow';
 import git from 'isomorphic-git';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -343,6 +348,59 @@ describe('withRepo over SSH', () => {
     expect(server.commands).toEqual(["git-upload-pack '/other.git'"]);
   });
 
+  it('fails a server that stalls after the advertisement, on the idle timer and on the deadline', async () => {
+    const repo = await createBareRepo();
+    const server = await startGitSshServer(repo, { stall: true });
+    cleanups.push(
+      () => repo.cleanup(),
+      () => server.close(),
+    );
+    await repo.commit([{ path: WF, data: '{}' }]);
+    const base = 'https://ssh.invalid/repo.git';
+    for (const timeouts of [
+      { totalMs: 60_000, idleMs: 1_500 },
+      { totalMs: 4_000, idleMs: 60_000 },
+    ]) {
+      const transport = gitSshTransport(
+        localClient(),
+        parseRemoteUrl(server.url),
+        { privateKey: server.clientKey.privateKey },
+        memoryHostKey(),
+        timeouts,
+      );
+      try {
+        // the advertisement still comes
+        const refs = await transport.request({
+          url: `${base}/info/refs?service=git-upload-pack`,
+          method: 'GET',
+          headers: {},
+        });
+        expect(refs.statusCode).toBe(200);
+        const answer = await transport.request({
+          url: `${base}/git-upload-pack`,
+          method: 'POST',
+          headers: {},
+          body: (async function* () {
+            yield new TextEncoder().encode('0000');
+          })(),
+        });
+        const started = Date.now();
+        const error = await rejection(
+          (async () => {
+            for await (const _chunk of answer.body ?? []) {
+              // the server never answers
+            }
+          })(),
+        );
+        expect(error, JSON.stringify(timeouts)).toBeInstanceOf(GitRemoteError);
+        expect(error.message).toBe('The Git server did not answer in time.');
+        expect(Date.now() - started).toBeLessThan(10_000);
+      } finally {
+        await transport.close();
+      }
+    }
+  });
+
   it('gitSshTransport refuses a non-SSH remote', () => {
     expect(() =>
       gitSshTransport(
@@ -426,6 +484,23 @@ describe('withRepo over HTTP', () => {
     expect(() =>
       gitHttpTransport(localClient(), parseRemoteUrl(server.url), { username: 'u', token: TOKEN }),
     ).toThrow(/never sent over plain http/);
+  });
+
+  it('names an IPv6 literal bracketed in allowedDomains, so the token can reach it', async () => {
+    const seen: HttpRequestOptions[] = [];
+    const stub = {
+      async request(options: HttpRequestOptions) {
+        seen.push(options);
+        return { statusCode: 200, statusMessage: 'OK', headers: {}, body: undefined };
+      },
+    } as unknown as HttpClient;
+    const remote = parseRemoteUrl('https://[2001:db8::10]/org/repo.git');
+    const plugin = gitHttpTransport(stub, remote, { username: 'deploy', token: TOKEN });
+    const url = 'https://[2001:db8::10]:443/org/repo.git/info/refs?service=git-upload-pack';
+    await plugin.request({ url, method: 'GET', headers: {} });
+    expect(seen[0]?.allowedDomains).toEqual(['[2001:db8::10]']);
+    // the check the client runs before it sends the token
+    expect(() => assertCredentialUrlAllowed(url, seen[0]?.allowedDomains)).not.toThrow();
   });
 
   it('lists branches', async () => {
@@ -544,7 +619,8 @@ describe('withRepo temp folder', () => {
 
   it('is removed after a throw from fn and after a refused tree', async () => {
     const { repo, server } = await httpFixture();
-    await repo.commit([{ path: 'README.md', data: 'hello' }]);
+    // a symbolic link in a managed folder: refused by readFiles (a README.md is skipped, never refused)
+    await repo.commit([{ path: WF, data: 'README.md', mode: '120000' }]);
     const auth = { kind: 'https' as const, username: '', token: '' };
     let seen: string[] = [];
     const thrown = await rejection(

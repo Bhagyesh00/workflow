@@ -1,7 +1,9 @@
 /**
  * P6-72 (L1): the remote URL rules. Accepts `https://`, `http://`, `ssh://` and the scp form `user@host:path`;
  * refuses every other scheme, `ext::`, `file://`, control characters, a leading `-`, `::`, any password in a URL,
- * and a path holding a quote, a backslash, a backtick, `$`, `;` or whitespace (the SSH `exec` quotes the path).
+ * a user name in an `https://` or `http://` URL (the token and its user name have their own fields), and a path
+ * holding a quote, a backslash, a backtick, `$`, `;`, whitespace (the SSH `exec` quotes the path), `?` or `#` (a
+ * decoded `%3F` or `%23` would move the rest of the path into a query string or a fragment).
  * No error text echoes the URL: it can hold a password.
  */
 import { ApiError } from '../../http/errors';
@@ -28,6 +30,8 @@ const DEFAULT_PORTS = { https: 443, http: 80, ssh: 22 } as const;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 /** characters a path may not hold: the SSH exec puts the path inside '...' */
 const PATH_FORBIDDEN = /['"\\`$;\s]/;
+/** `?` and `#` in a decoded path: the base URL would end its path there */
+const PATH_QUERY = /[?#]/;
 const SCHEME = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//;
 /** `user@host:path`; the user and host hold no `@`, `/`, `:` or whitespace (an IPv6 host is bracketed) */
 const SCP = /^([^@/:\s[\]]+)@([^@/:\s[\]]+|\[[0-9a-fA-F:.]+\]):(.+)$/;
@@ -39,6 +43,7 @@ function checkPath(path: string): string {
   if (CONTROL.test(path) || PATH_FORBIDDEN.test(path)) {
     throw new GitUrlError('the repository path holds a quote, a backslash, a backtick, $, ; or whitespace');
   }
+  if (PATH_QUERY.test(path)) throw new GitUrlError('the repository path holds ? or #');
   if (path.startsWith('-')) throw new GitUrlError('the repository path starts with -');
   return path;
 }
@@ -103,7 +108,21 @@ export function parseRemoteUrl(url: string): ParsedRemote {
       port: parsed.port ? Number(parsed.port) : DEFAULT_PORTS[kind],
       path,
     };
-    if (parsed.username) result.user = checkUser(decodeURIComponent(parsed.username));
+    if (parsed.username) {
+      // a token typed as the user name would be stored in the URL and shown with it
+      if (kind !== 'ssh') {
+        throw new GitUrlError(
+          'a user name in an https:// or http:// URL is not allowed; use the user name field',
+        );
+      }
+      let user: string;
+      try {
+        user = decodeURIComponent(parsed.username);
+      } catch {
+        throw new GitUrlError('the user name is not valid');
+      }
+      result.user = checkUser(user);
+    }
     return result;
   }
 

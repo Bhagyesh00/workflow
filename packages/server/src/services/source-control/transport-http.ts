@@ -38,6 +38,8 @@ export function gitHttpTransport(
     throw new GitRemoteError('A token is never sent over plain http://. Use an https:// repository URL.');
   }
   const base = remoteBaseUrl(remote);
+  // an IPv6 literal matches the allow list only in its bracketed form
+  const allowedHost = remote.host.includes(':') ? `[${remote.host}]` : remote.host;
   const authorization = auth
     ? `Basic ${Buffer.from(`${auth.username || 'git'}:${auth.token}`, 'utf8').toString('base64')}`
     : undefined;
@@ -69,7 +71,7 @@ export function gitHttpTransport(
         ignoreHttpStatusErrors: true,
         returnFullResponse: true,
         // the token goes to the remote host only: a redirect to any other host is refused before it is sent
-        allowedDomains: authorization ? [remote.host] : undefined,
+        allowedDomains: authorization ? [allowedHost] : undefined,
       })) as HttpFullResponse<AsyncIterable<Uint8Array>>;
       const stream = response.body;
       return {
