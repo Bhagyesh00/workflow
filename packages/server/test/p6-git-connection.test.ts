@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 import { HttpClient } from '@workflow/core';
 import { type HttpRequestOptions, SOURCE_CONTROL_DEFAULTS } from '@workflow/workflow';
 import { and, eq } from 'drizzle-orm';
+import ssh2 from 'ssh2';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sourceControlSettings } from '../src/db/schema';
 import {
@@ -29,7 +30,15 @@ import {
   startGitHttpServer,
   startGitSshServer,
 } from './fakes/git-server';
-import { createTestServer, realMember, resetDatabase, signup, type TestServer } from './helpers';
+import {
+  addToProject,
+  createTestServer,
+  realMember,
+  resetDatabase,
+  signup,
+  type TestServer,
+  teamProjectOf,
+} from './helpers';
 
 const spies = vi.hoisted(() => ({ setReadOnly: vi.fn() }));
 vi.mock('../src/services/protected', async (importOriginal) => {
@@ -168,6 +177,36 @@ describe('GET preferences', () => {
     expect(answer.httpsUsername).toBeUndefined();
   });
 
+  it('keeps the first key pair when several first reads run at once (connection-2)', async () => {
+    const w = await world();
+    const answers = await Promise.all([prefs(w), prefs(w), prefs(w), prefs(w)]);
+    const stored = (await rowOf(w))?.publicKey;
+    expect(stored).toMatch(/^ssh-ed25519 /);
+    for (const answer of answers) expect(answer.publicKey).toBe(stored);
+  });
+
+  it('a later first-key write never replaces a pair that is stored (connection-2)', async () => {
+    const w = await world();
+    const repo = server.ctx.repos.sourceControl;
+    const make = (publicKey: string) => ({
+      keyType: 'ed25519' as const,
+      publicKey,
+      privateKeyEnc: server.ctx.cipher.encrypt(`private ${publicKey}`, {
+        tenantId: w.tenant.id,
+        credentialId: `sourceControl:${w.tenant.id}`,
+      }),
+    });
+    const first = await repo.upsertKeyPairIfMissing(w.tenant.id, make('ssh-ed25519 FIRST'));
+    const second = await repo.upsertKeyPairIfMissing(w.tenant.id, make('ssh-ed25519 SECOND'));
+    expect(first.publicKey).toBe('ssh-ed25519 FIRST');
+    expect(second.publicKey).toBe('ssh-ed25519 FIRST');
+    expect((await rowOf(w))?.publicKey).toBe('ssh-ed25519 FIRST');
+    // a row with no key yet (an HTTPS connection saved first) still gets one
+    await repo.upsert(w.tenant.id, { publicKey: null, privateKeyEnc: null });
+    const third = await repo.upsertKeyPairIfMissing(w.tenant.id, make('ssh-ed25519 THIRD'));
+    expect(third.publicKey).toBe('ssh-ed25519 THIRD');
+  });
+
   it('answers a signed-out caller 401', async () => {
     const res = await server.app.inject({ method: 'GET', url: '/rest/source-control/preferences' });
     expect(res.statusCode).toBe(401);
@@ -206,6 +245,31 @@ describe('generate key pair', () => {
     const res = await w.client.post('/rest/source-control/generate-key-pair', {});
     expect(res.statusCode).toBe(400);
     expect((await prefs(w)).publicKey).toBe(ssh.clientKey.publicKey);
+  });
+
+  it('makes the key again when ssh2 cannot parse the one it made (it could never sign in)', async () => {
+    const w = await world();
+    const real = ssh2.utils.generateKeyPairSync;
+    const bad = {
+      private: '-----BEGIN OPENSSH PRIVATE KEY-----\nbm90IGEga2V5\n-----END OPENSSH PRIVATE KEY-----\n',
+      public: 'ssh-ed25519 BROKEN',
+    };
+    const make = vi
+      .spyOn(ssh2.utils, 'generateKeyPairSync')
+      .mockImplementationOnce((() => bad) as unknown as typeof real);
+    try {
+      const res = await w.client.post('/rest/source-control/generate-key-pair', {
+        keyGeneratorType: 'ed25519',
+      });
+      expect(res.statusCode).toBe(200);
+      expect(make).toHaveBeenCalledTimes(2);
+      const publicKey = res.json().data.publicKey;
+      expect(publicKey).toMatch(/^ssh-ed25519 /);
+      expect(publicKey).not.toBe(bad.public);
+      expect(ssh2.utils.parseKey(publicKey)).not.toBeInstanceOf(Error);
+    } finally {
+      make.mockRestore();
+    }
   });
 });
 
@@ -554,13 +618,96 @@ describe('while connected', () => {
     ).toBe(400);
   });
 
-  it('a member sees connected and the branch only through pushable projects, never the URL or the key', async () => {
-    const { w } = await connected();
-    const member = await realMember(w);
-    const answer = await prefs(member);
+  it('a project admin sees connected, the branch and the colour, never the URL, the key or the user (connection-3)', async () => {
+    const { w, ssh } = await connected();
+    const colour = await w.client.patch('/rest/source-control/preferences', { branchColor: '#112233' });
+    expect(colour.statusCode).toBe(200);
+    const admin = await realMember(w);
+    const project = await teamProjectOf(server, w.tenant.id);
+    await addToProject(server, w.tenant.id, project, admin.user.id, 'project:admin');
+    const answer = await prefs(admin);
+    expect(answer).toMatchObject({ connected: true, branchName: 'main', branchColor: '#112233' });
+    expect(answer.branchReadOnly).toBe(false);
     expect(answer.publicKey).toBeUndefined();
     expect(answer.repositoryUrl).toBeUndefined();
-    expect(answer.branchReadOnly).toBe(false);
+    expect(answer.connectionType).toBeUndefined();
+    expect(answer.httpsUsername).toBeUndefined();
+    expect(JSON.stringify(answer)).not.toContain(ssh.url);
+  });
+
+  it('a member with no pushable project sees not connected and the default branch (connection-3)', async () => {
+    const { w } = await connected();
+    const colour = await w.client.patch('/rest/source-control/preferences', { branchColor: '#112233' });
+    expect(colour.statusCode).toBe(200);
+    const member = await realMember(w);
+    const answer = await prefs(member);
+    expect(answer).toMatchObject({
+      connected: false,
+      branchName: SOURCE_CONTROL_DEFAULTS.branchName,
+      branchColor: SOURCE_CONTROL_DEFAULTS.branchColor,
+      branchReadOnly: false,
+    });
+    expect(answer.publicKey).toBeUndefined();
+    expect(answer.repositoryUrl).toBeUndefined();
+    expect(answer.httpsUsername).toBeUndefined();
+  });
+
+  it('disconnect answers 409 source_control_busy while an operation holds the lease and keeps the connection (connection-1)', async () => {
+    const { w, ssh } = await connected();
+    const lease = await acquireLease(server.ctx.serviceDeps, w.tenant.id);
+    for (const body of [{ keepKeyPair: true }, {}]) {
+      const refused = await w.client.post('/rest/source-control/disconnect', body);
+      expect(refused.statusCode).toBe(409);
+      expect(JSON.stringify(refused.json())).toContain('source_control_busy');
+      const row = await rowOf(w);
+      expect(row?.connected).toBe(true);
+      expect(row?.repositoryUrl).toBe(ssh.url);
+      // the holder keeps its lease: a second operation is still refused and the holder can extend
+      await expect(acquireLease(server.ctx.serviceDeps, w.tenant.id)).rejects.toMatchObject({
+        statusCode: 409,
+      });
+      await lease.extend();
+    }
+    await lease.release();
+    const ok = await w.client.post('/rest/source-control/disconnect', { keepKeyPair: true });
+    expect(ok.statusCode).toBe(200);
+    expect((await rowOf(w))?.lockedUntil ?? null).toBeNull();
+    expect((await rowOf(w))?.connected).toBe(false);
+  });
+
+  it('disconnect works on a workspace with no row, and an expired lease does not block it', async () => {
+    const fresh = await world();
+    expect((await fresh.client.post('/rest/source-control/disconnect', {})).statusCode).toBe(200);
+    const { w } = await connected();
+    await acquireLease(server.ctx.serviceDeps, w.tenant.id);
+    await server.ctx.database.pool.query(
+      "update source_control_settings set locked_until = now() - interval '1 minute' where tenant_id = $1",
+      [w.tenant.id],
+    );
+    expect((await w.client.post('/rest/source-control/disconnect', {})).statusCode).toBe(200);
+  });
+
+  it('PATCH with a branch name answers 409 source_control_busy while an operation holds the lease', async () => {
+    const { w, ssh } = await connected();
+    const repo = await sshRemoteRepoOf(ssh);
+    await repo.commit([{ path: FILE, data: '{"b":2}' }], { branch: 'staging' });
+    const lease = await acquireLease(server.ctx.serviceDeps, w.tenant.id);
+    const busy = await w.client.patch('/rest/source-control/preferences', { branchName: 'staging' });
+    expect(busy.statusCode).toBe(409);
+    expect(JSON.stringify(busy.json())).toContain('source_control_busy');
+    expect((await rowOf(w))?.branchName).toBe('main');
+    // the colour needs no lease
+    const colour = await w.client.patch('/rest/source-control/preferences', { branchColor: '#010203' });
+    expect(colour.statusCode).toBe(200);
+    await lease.release();
+    const ok = await w.client.patch('/rest/source-control/preferences', { branchName: 'staging' });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().data.branchName).toBe('staging');
+    // the PATCH released its own lease, also when it fails
+    expect((await rowOf(w))?.lockedUntil ?? null).toBeNull();
+    const missing = await w.client.patch('/rest/source-control/preferences', { branchName: 'gone' });
+    expect(missing.statusCode).toBe(400);
+    expect((await rowOf(w))?.lockedUntil ?? null).toBeNull();
   });
 
   it('disconnect clears the connection, drops or keeps the key pair, and calls setReadOnly(false)', async () => {

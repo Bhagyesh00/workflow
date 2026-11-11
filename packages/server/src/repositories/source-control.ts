@@ -42,6 +42,27 @@ export class SourceControlRepository {
   }
 
   /**
+   * writes a first key pair only while the row has none (a read that found none and a write that comes later must not
+   * replace a pair another caller stored in between); answers the row as stored
+   */
+  async upsertKeyPairIfMissing(
+    tenantId: string,
+    values: SourceControlSettingsValues,
+  ): Promise<SourceControlSettingsRow> {
+    const [row] = await this.db
+      .insert(sourceControlSettings)
+      .values({ ...values, tenantId })
+      .onConflictDoUpdate({
+        target: sourceControlSettings.tenantId,
+        set: { ...values, updatedAt: sql`now()` },
+        setWhere: or(isNull(sourceControlSettings.publicKey), isNull(sourceControlSettings.privateKeyEnc)),
+      })
+      .returning();
+    if (row) return row;
+    return (await this.get(tenantId)) as SourceControlSettingsRow;
+  }
+
+  /**
    * drops the connection and the lease; `keepKeyPair` keeps the key type and both keys (n8n's disconnect body), else
    * the row goes (the next read starts from the defaults and makes a new key pair)
    */

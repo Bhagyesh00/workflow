@@ -21,6 +21,7 @@ import { ApiError } from '../../http/errors';
 import type { SourceControlSettingsValues } from '../../repositories/source-control';
 import { isProtected, setReadOnly } from '../protected';
 import { type GitDeps, type GitRemote, GitRemoteError, withRepo } from './git-repo';
+import { acquireSettingsLease } from './lock';
 import { pushableProjects } from './scope';
 import { parseRemoteUrl } from './url';
 
@@ -93,10 +94,14 @@ export class SourceControlSettingsService {
 
   /** a new key pair of `type`, the private half already encrypted for the row */
   private generateKeys(tenantId: string, type: KeyType): SourceControlSettingsValues {
-    const pair =
+    const make = () =>
       type === 'rsa'
         ? ssh2.utils.generateKeyPairSync('rsa', { bits: RSA_BITS, comment: 'workflow deploy key' })
         : ssh2.utils.generateKeyPairSync('ed25519', { comment: 'workflow deploy key' });
+    // ssh2 makes an ed25519 key its own parser refuses about once in 250 tries: such a key could never sign in, so it is made again
+    let pair = make();
+    for (let attempt = 1; attempt < 20 && ssh2.utils.parseKey(pair.private) instanceof Error; attempt++)
+      pair = make();
     return {
       keyType: type,
       publicKey: pair.public.trim(),
@@ -108,7 +113,8 @@ export class SourceControlSettingsService {
   private async withKeyPair(tenantId: string, row: SourceControlSettingsRow | undefined) {
     if (row?.publicKey && row.privateKeyEnc) return row;
     const type = this.deps.config.sourceControl.defaultKeyType;
-    return this.repo.upsert(tenantId, this.generateKeys(tenantId, type));
+    // conditional: two first reads at once, or a read that races a connect, keep the pair that was stored first
+    return this.repo.upsertKeyPairIfMissing(tenantId, this.generateKeys(tenantId, type));
   }
 
   /** the answer for `sourceControl:manage`: everything but the secrets */
@@ -267,25 +273,32 @@ export class SourceControlSettingsService {
     if (fields.some((key) => !PATCH_FIELDS.has(key))) {
       throw bad('Only the branch, the branch colour and read-only can be changed while connected.');
     }
-    const row = await this.repo.get(tenantId);
-    const values: SourceControlSettingsValues = {};
-    if (input.branchName !== undefined) {
-      this.checkBranch(input.branchName);
-      if (row?.connected && input.branchName !== row.branchName) {
-        const branches = await this.withRemote(tenantId, (remote) =>
-          withRepo(this.gitDeps(), remote, (session) => session.listBranches()),
-        );
-        if (!branches.includes(input.branchName)) {
-          throw bad(`The branch ${input.branchName} was not found in the repository.`);
+    // a branch change waits for a running status, push or pull (409 source_control_busy): the operation reads the branch
+    const lease = input.branchName !== undefined ? await acquireSettingsLease(this.deps, tenantId) : null;
+    try {
+      const row = await this.repo.get(tenantId);
+      const values: SourceControlSettingsValues = {};
+      if (input.branchName !== undefined) {
+        this.checkBranch(input.branchName);
+        if (row?.connected && input.branchName !== row.branchName) {
+          const branches = await this.withRemote(tenantId, (remote) =>
+            withRepo(this.gitDeps(), remote, (session) => session.listBranches()),
+          );
+          if (!branches.includes(input.branchName)) {
+            throw bad(`The branch ${input.branchName} was not found in the repository.`);
+          }
         }
+        values.branchName = input.branchName;
       }
-      values.branchName = input.branchName;
+      if (input.branchColor !== undefined) {
+        this.checkColor(input.branchColor);
+        values.branchColor = input.branchColor;
+      }
+      await lease?.extend();
+      if (Object.keys(values).length > 0) await this.repo.upsert(tenantId, values);
+    } finally {
+      await lease?.release();
     }
-    if (input.branchColor !== undefined) {
-      this.checkColor(input.branchColor);
-      values.branchColor = input.branchColor;
-    }
-    if (Object.keys(values).length > 0) await this.repo.upsert(tenantId, values);
     if (input.branchReadOnly !== undefined) await setReadOnly(this.deps, auth, input.branchReadOnly);
     await this.audit(auth, 'preferences_updated', {
       fields,
@@ -300,7 +313,14 @@ export class SourceControlSettingsService {
   ): Promise<SourceControlPreferences> {
     const tenantId = auth.tenant.id;
     const keepKeyPair = input.keepKeyPair === true;
-    await this.repo.clear(tenantId, { keepKeyPair });
+    // a running status, push or pull holds the lease: the connection is not dropped under it (409 source_control_busy)
+    const lease = await acquireSettingsLease(this.deps, tenantId);
+    try {
+      await this.repo.clear(tenantId, { keepKeyPair });
+    } finally {
+      // clear() already dropped the lease with the row or the column; release matches only our own `until`
+      await lease?.release();
+    }
     // n8n (source-control.service.ee.ts:196): a disconnect also lifts the protected switch
     await setReadOnly(this.deps, auth, false);
     await this.audit(auth, 'disconnected', { keepKeyPair });

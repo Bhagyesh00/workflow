@@ -33,22 +33,16 @@ function leaseEnd(): Date {
   return new Date(Math.floor(Date.now()) + SOURCE_CONTROL_LEASE_MS);
 }
 
-/**
- * takes the workspace's lease: 412 when source control is not connected, 409 `source_control_busy` while another
- * operation holds it
- */
-export async function acquireLease(deps: ServiceDeps, tenantId: string): Promise<SourceControlLease> {
-  const context = deps.context();
-  await context.sourceControl.requireConnected(tenantId);
+const busy = () =>
+  new ApiError(
+    409,
+    'source_control_busy',
+    'Another source control operation is running in this workspace. Try again in a moment.',
+  );
+
+function leaseOf(deps: ServiceDeps, tenantId: string, first: Date): SourceControlLease {
   const repo = deps.repos.sourceControl;
-  let held = await repo.tryLock(tenantId, leaseEnd());
-  if (!held) {
-    throw new ApiError(
-      409,
-      'source_control_busy',
-      'Another source control operation is running in this workspace. Try again in a moment.',
-    );
-  }
+  let held: Date | null = first;
   return {
     async extend() {
       if (!held) throw new GitLeaseLostError();
@@ -63,4 +57,31 @@ export async function acquireLease(deps: ServiceDeps, tenantId: string): Promise
       await repo.unlock(tenantId, current);
     },
   };
+}
+
+/**
+ * takes the workspace's lease: 412 when source control is not connected, 409 `source_control_busy` while another
+ * operation holds it
+ */
+export async function acquireLease(deps: ServiceDeps, tenantId: string): Promise<SourceControlLease> {
+  const context = deps.context();
+  await context.sourceControl.requireConnected(tenantId);
+  const first = await deps.repos.sourceControl.tryLock(tenantId, leaseEnd());
+  if (!first) throw busy();
+  return leaseOf(deps, tenantId, first);
+}
+
+/**
+ * the lease for a settings change (a disconnect, a branch change): taken whether or not the workspace is connected,
+ * 409 `source_control_busy` while a status, push or pull holds it. A workspace with no settings row has no operation
+ * to wait for, so it answers null.
+ */
+export async function acquireSettingsLease(
+  deps: ServiceDeps,
+  tenantId: string,
+): Promise<SourceControlLease | null> {
+  if (!(await deps.repos.sourceControl.get(tenantId))) return null;
+  const first = await deps.repos.sourceControl.tryLock(tenantId, leaseEnd());
+  if (!first) throw busy();
+  return leaseOf(deps, tenantId, first);
 }
