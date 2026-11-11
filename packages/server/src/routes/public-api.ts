@@ -20,7 +20,12 @@ import {
   workflowUpdateSchema,
 } from '../http/schemas';
 import type { AccessTarget } from '../services/access';
-import { checkBadKeyRate, checkRateLimit, type RateLimitResult } from '../services/public-api-rate-limit';
+import {
+  checkBadKeyRate,
+  checkRateLimit,
+  peekBadKeyRate,
+  type RateLimitResult,
+} from '../services/public-api-rate-limit';
 import {
   beginIdempotent,
   finishIdempotent,
@@ -1314,6 +1319,12 @@ export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerC
       method: route.method,
       url: route.path,
       handler: async (request, reply) => {
+        // an IP already over the bad key limit is refused before the key lookup (it costs no database read)
+        const over = await peekBadKeyRate(ctx.serviceDeps, request.ip);
+        if (!over.allowed) {
+          setRateHeaders(reply, over);
+          throw ApiError.tooMany('Too many requests, please try again later');
+        }
         try {
           await loadApiKey(request, ctx.auth);
         } catch (error) {

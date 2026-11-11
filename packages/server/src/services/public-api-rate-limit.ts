@@ -132,6 +132,37 @@ export async function checkRateLimit(deps: ServiceDeps, request: RateLimitReques
     : pool.reduce((a, b) => (b.remaining < a.remaining ? b : a));
 }
 
+/** the count of a key so far, read without adding to it (Redis when the server has it, else this process) */
+async function peek(deps: ServiceDeps, key: string, windowSeconds: number): Promise<Counted> {
+  const redis = deps.context().redis;
+  if (redis) {
+    try {
+      const full = `${deps.config.queue.prefix}:pubrl:${key}`;
+      const result = (await redis.eval(
+        "return {tonumber(redis.call('GET', KEYS[1]) or 0), redis.call('TTL', KEYS[1])}",
+        1,
+        full,
+      )) as [number, number];
+      return { count: result[0], resetSeconds: result[1] > 0 ? result[1] : windowSeconds };
+    } catch {
+      // Redis down: read this process, as count() does
+    }
+  }
+  const entry = memory.get(key);
+  if (!entry || entry.expires <= Date.now()) return { count: 0, resetSeconds: windowSeconds };
+  return { count: entry.count, resetSeconds: Math.max(1, Math.ceil((entry.expires - Date.now()) / 1000)) };
+}
+
+/**
+ * Whether an IP is already over its bad key limit, asked before the key lookup so a flood of well-formed
+ * unknown keys costs no database read once the 429 is due. It adds nothing to the count.
+ */
+export async function peekBadKeyRate(deps: ServiceDeps, ip: string): Promise<RateLimitResult> {
+  const counted = await peek(deps, `badkey:${ip}`, FIXED_WINDOW_SECONDS);
+  // the call that follows would be the next one counted: it is refused when this many already are
+  return resultOf({ ...counted, count: counted.count + 1 }, FIXED_LIMIT);
+}
+
 /** the per-IP counter of calls with a missing or bad key: 600 per minute */
 export async function checkBadKeyRate(deps: ServiceDeps, ip: string): Promise<RateLimitResult> {
   return resultOf(await count(deps, `badkey:${ip}`, FIXED_WINDOW_SECONDS), FIXED_LIMIT);

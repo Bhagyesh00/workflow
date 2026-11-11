@@ -4,7 +4,7 @@
  * key, a bad key flood from one IP gets 429, a second workspace has its own counters.
  */
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   signup as baseSignup,
   createTestServer,
@@ -172,6 +172,27 @@ describe('bad keys', () => {
     expect(firstRefused).toBe(601);
     // another IP is not counted
     expect((await call(bad, 'GET', '/tags', undefined, '127.78.0.10')).statusCode).toBe(401);
+  }, 120_000);
+
+  it('refuses an IP over the bad key limit before the key lookup, with the headers', async () => {
+    const bad = `wfk_deadbeef_${'y'.repeat(24)}`;
+    const from = `127.79.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250) + 1}`;
+    for (let i = 1; i <= 600; i++)
+      expect((await call(bad, 'GET', '/tags', undefined, from)).statusCode).toBe(401);
+    const lookup = vi.spyOn(server.ctx.repos.apiKeys, 'getByHash');
+    try {
+      const over = await call(bad, 'GET', '/tags', undefined, from);
+      expect(over.statusCode).toBe(429);
+      expect(over.headers['x-ratelimit-limit']).toBe('600');
+      expect(over.headers['x-ratelimit-remaining']).toBe('0');
+      expect(Number(over.headers['retry-after'])).toBeGreaterThan(0);
+      expect(lookup).not.toHaveBeenCalled();
+      // another IP still looks the key up and gets 401
+      expect((await call(bad, 'GET', '/tags', undefined, '127.78.0.11')).statusCode).toBe(401);
+      expect(lookup).toHaveBeenCalledTimes(1);
+    } finally {
+      lookup.mockRestore();
+    }
   }, 120_000);
 });
 
