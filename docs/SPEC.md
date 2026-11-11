@@ -110,7 +110,7 @@
 | Per-workflow settings: save success/error/manual/progress, timeout, timezone, error workflow, caller policy | M1  | ✅ engine · 🔨 server         |
 | Cancellation and timeouts through the whole stack (including the Code sandbox)                              | M1  | ✅                            |
 | Debug a past run in the editor (load its data as pinned data)                                               | M2  | 📋                            |
-| Execution annotations (tags, rating), redaction policies                                                    | M2  | ✅ annotations · 📋 redaction |
+| Execution annotations (tags, rating), redaction policies                                                    | M2  | ✅ annotations · ✅ redaction |
 
 ### 1.6 Error handling
 
@@ -171,7 +171,7 @@
 | Connector factory: generate declarative connectors from OpenAPI, Postman or cURL (NF-38), so the long tail of 400+ services comes from specs rather than hand-written nodes                                                                                                                                                      | M2  | 📋                                           |
 | Node type versions (old workflows keep old behaviour)                                                                                                                                                                                                                                                                            | M1  | ✅ `typeVersion` + `@version` displayOptions |
 | Community/private node packages, signed and sandboxed with declared capabilities                                                                                                                                                                                                                                                 | M3  | 📋                                           |
-| Node blocking per tenant (policy packs)                                                                                                                                                                                                                                                                                          | M2  | 📋                                           |
+| Node blocking per tenant (policy packs)                                                                                                                                                                                                                                                                                          | M2  | ✅                                           |
 
 ### 1.11 Binary data
 
@@ -267,7 +267,7 @@
 | Public REST API `/api/v1` with OpenAPI document                          | M1  | 🔨     |
 | Public API folder routes                                                 | M2  | ✅     |
 | Docker image + docker-compose (Postgres+pgvector, Redis, main, worker)   | M1  | 🔨     |
-| Insights dashboard (runs, failures, duration, time saved)                | M2  | 📋     |
+| Insights dashboard (runs, failures, duration, time saved)                | M2  | ✅     |
 | OpenTelemetry traces, log streaming (webhook/syslog/Sentry)              | M2  | 📋     |
 | Webhook processor and ingress split, multi-main HA                       | M2  | 📋     |
 | Helm chart                                                               | M3  | 📋     |
