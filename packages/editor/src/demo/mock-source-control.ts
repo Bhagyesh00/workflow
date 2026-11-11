@@ -407,6 +407,7 @@ export function registerSourceControlRoutes(backend: MockBackend): void {
     const { state } = connectedState();
     const found = params[0] === 'workflow' ? state.remoteWorkflows.get(params[1]) : undefined;
     if (!found) throw new HttpError(404, 'not_found', 'Workflow not found in the remote repository');
-    return copy(found.definition);
+    // like the server: the answer names the local workflow id
+    return { ...copy(found.definition), id: params[1] };
   });
 }

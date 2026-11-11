@@ -7,6 +7,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { WorkflowNode } from '@workflow/workflow';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { sourceControlApi, workflowsApi } from '../src/api/endpoints';
 import type { PullResult, PushResult, SourceControlledFile } from '../src/api/types';
 import { PullModal } from '../src/components/source-control/PullModal';
 import { PullResultModal } from '../src/components/source-control/PullResultModal';
@@ -309,6 +310,47 @@ describe('RemoteDiffDialog', () => {
     const dialog = await screen.findByRole('dialog', { name: /Alpha flow/ }, T);
     expect(await within(dialog).findByText('Extra step', {}, T)).toBeTruthy();
     expect(within(dialog).getByText('Adds')).toBeTruthy();
+  });
+
+  it('reads the local copy by the id the remote answer names when the git id differs', async () => {
+    signedIn();
+    await connect();
+    const wf = await workflow('Pulled flow');
+    await pushAll();
+    const extra: WorkflowNode = { ...trigger, id: 'n2', name: 'Extra step', type: 'core.noOp' };
+    await call('PATCH', `/workflows/${wf.id}`, {
+      versionId: wf.versionId,
+      nodes: [trigger, extra],
+      connections: {},
+    });
+    const gitId = '11111111-2222-4333-8444-555555555555';
+    // like the server: a git id that maps to a local id answers with the local id
+    const original = sourceControlApi.remoteContent.bind(sourceControlApi);
+    const remoteSpy = vi
+      .spyOn(sourceControlApi, 'remoteContent')
+      .mockImplementation(async (type, id) => ({
+        ...(await original(type, wf.id)),
+        id: id === gitId ? wf.id : id,
+      }));
+    const localSpy = vi.spyOn(workflowsApi, 'get');
+    const file: SourceControlledFile = {
+      file: `workflows/${gitId}.json`,
+      id: gitId,
+      name: 'Pulled flow',
+      type: 'workflow',
+      status: 'modified',
+      location: 'local',
+      conflict: true,
+      updatedAt: '2026-11-11T10:00:00.000Z',
+    };
+    withProviders(<RemoteDiffDialog file={file} onClose={() => undefined} />);
+    const dialog = await screen.findByRole('dialog', { name: /Pulled flow/ }, T);
+    expect(await within(dialog).findByText('Extra step', {}, T)).toBeTruthy();
+    expect(remoteSpy).toHaveBeenCalledWith('workflow', gitId);
+    expect(localSpy).toHaveBeenCalledWith(wf.id);
+    expect(localSpy).not.toHaveBeenCalledWith(gitId);
+    remoteSpy.mockRestore();
+    localSpy.mockRestore();
   });
 
   it('says so when the workflow is not on the remote yet', async () => {

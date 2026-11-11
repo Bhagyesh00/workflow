@@ -30,10 +30,13 @@ function DiffBody({ file }: { file: SourceControlledFile }) {
     retry: false,
     staleTime: 0,
   });
+  // a status row carries the git id; a workflow that came in by a pull has another local id, which the
+  // remote-content answer names, so the local copy is read by that id
+  const localId = remote.data ? (remote.data.id ?? file.id) : undefined;
   const local = useQuery({
-    queryKey: [...queryKeys.sourceControl, 'local-workflow', file.id],
-    queryFn: () => workflowsApi.get(file.id),
-    enabled: isWorkflow,
+    queryKey: [...queryKeys.sourceControl, 'local-workflow', localId],
+    queryFn: () => workflowsApi.get(localId as string),
+    enabled: isWorkflow && localId !== undefined,
     retry: false,
     staleTime: 0,
   });
@@ -51,7 +54,8 @@ function DiffBody({ file }: { file: SourceControlledFile }) {
   );
 
   if (!isWorkflow) return <p className="text-sm text-ink-2">A diff is only shown for workflows.</p>;
-  if (remote.isLoading || local.isLoading) return <PageLoader label="Reading the remote copy" />;
+  if (remote.isLoading || (localId !== undefined && local.isLoading))
+    return <PageLoader label="Reading the remote copy" />;
   if (isApiError(remote.error, 404))
     return <p className="text-sm text-ink-2">This workflow is not on the remote yet. A push adds it.</p>;
   if (remote.error) return <Callout tone="err">{errorMessage(remote.error)}</Callout>;
