@@ -257,6 +257,28 @@ describe('P6-78 import:credentials', () => {
     expect((await credentialsOf(b.tenantId))[0].projectId).toBe(b.teamId);
   });
 
+  it('with --projectId refuses a credential id that sits in another project of the workspace', async () => {
+    const a = await workspace(true);
+    const { row, secret } = await seeded(a);
+    const file = JSON.stringify([{ id: row.id, name: row.name, type: 'testApi', data: { apiKey: secret } }]);
+    const refused = fakeIo({ '/c.json': file });
+    expect(
+      await importCredentialsCommand(
+        server.ctx,
+        ['--tenant', a.slug, '--input', '/c.json', '--projectId', a.teamId as string],
+        refused.io,
+      ),
+    ).toBe(1);
+    expect(refused.stderr()).toContain('another project');
+    expect(refused.stderr()).not.toContain(secret);
+    expect(await credentialsOf(a.tenantId)).toHaveLength(1);
+    // without --projectId the personal project is the target and the same file imports
+    const ok = fakeIo({ '/c.json': file });
+    expect(
+      await importCredentialsCommand(server.ctx, ['--tenant', a.slug, '--input', '/c.json'], ok.io),
+    ).toBe(0);
+  });
+
   it('refuses a blocked credential type with its violation and a non-zero exit', async () => {
     const a = await workspace();
     const b = await workspace();

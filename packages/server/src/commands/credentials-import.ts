@@ -8,7 +8,8 @@
  * workspace and credential id), so any other is refused with the way out (`--decrypted`). Each credential goes
  * through `CredentialService.create`: the credential type policy and the protected lock run, and a refusal
  * names the credential and sets the exit to 1. The project is `--projectId` (a project of `--tenant`) or the
- * personal project of the workspace owner. No value is ever printed.
+ * personal project of the workspace owner; with `--projectId`, a credential whose id already belongs to another
+ * project of the workspace is refused. No value is ever printed.
  */
 import type { DataObject } from '@workflow/workflow';
 import type { ServerContext } from '../context';
@@ -60,6 +61,7 @@ export function importCredentialsCommand(
     const actor = await commandActor(ctx, tenant.id);
     // the project is checked before the file is read, so a bad --projectId imports nothing
     const projectId = await importProject(ctx, tenant.id, args, actor);
+    const projectGiven = args.value('projectId') !== undefined;
     let parsed: unknown;
     try {
       parsed = JSON.parse(await out.readFile(input));
@@ -76,6 +78,13 @@ export function importCredentialsCommand(
       const label = typeof entry === 'string' ? `credential #${index + 1}` : `"${entry.name.slice(0, 128)}"`;
       try {
         if (typeof entry === 'string') throw new Error(entry);
+        // with --projectId, a credential of this workspace that sits in another project is not imported
+        if (projectGiven && entry.id) {
+          const held = await ctx.repos.credentials.get(tenant.id, entry.id);
+          if (held && held.projectId !== projectId) {
+            throw new Error('it already exists in another project of the workspace');
+          }
+        }
         let data: DataObject;
         if (typeof entry.data === 'string') {
           // ciphertext is bound to its workspace and credential id

@@ -4,19 +4,23 @@
  * `processIo()`), so tests capture it.
  * - import:workflow: `--tenant <slug> --input <path>`, `--separate` (the input is a folder of files), `--projectId`
  * A file holds one workflow or a list. An id that is already a workflow of this workspace is kept (the workflow
- * is updated); any other gets a new id, and a reference to an imported workflow (a sub-workflow node, an error
- * workflow) is rewritten through a local map by `rewriteUuids`, so another workspace's id never reaches the
- * database or the output. Each file goes through the `contentImport` policy (a violation refuses that file and
+ * is updated); an id no workflow of any workspace has is kept too (the new workflow takes it, so a second import
+ * of the same file updates instead of duplicating); an id another workspace holds gets a new id and never touches
+ * that row. With `--projectId`, a workflow of this workspace that sits in another project is refused. A
+ * reference to an imported workflow (a sub-workflow node, an error workflow) is rewritten through a local map
+ * by `rewriteUuids`, so another workspace's id never reaches the database or the output. Each file goes through the `contentImport` policy (a violation refuses that file and
  * the exit is 1) and then through `WorkflowService`, which runs the save policy, the deprecated node check and
  * the protected lock. A folder, tag or credential of the file is not imported: it holds none of them.
  */
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
+import type { z } from 'zod';
 import type { ServerContext } from '../context';
-import { workflowCreateSchema } from '../http/schemas';
+import { workflowCreateSchema, type workflowUpdateSchema } from '../http/schemas';
 import { rewriteUuids } from '../services/rewrite-uuids';
 import { evaluateWorkflow } from '../services/type-policies/enforce';
 import { PolicyViolationError } from '../services/type-policies/errors';
+import type { WorkflowDTO } from '../services/workflow-model';
 import {
   CommandUsageError,
   commandActor,
@@ -33,13 +37,10 @@ export const IMPORT_WORKFLOW_USAGE =
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type Content = Omit<ReturnType<typeof workflowCreateSchema.parse>, 'folderId' | 'tagIds'>;
-
 interface Imported {
   label: string;
-  id: string;
-  versionId: string;
-  content: Content;
+  /** what the first pass stored: the second pass rewrites from it, so what the service added stays */
+  dto: WorkflowDTO;
 }
 
 /** the workflows of the input: a file with one or a list, or with `--separate` every `.json` file of a folder */
@@ -82,6 +83,7 @@ export function importWorkflowCommand(ctx: ServerContext, argv: string[], io?: C
     const actor = await commandActor(ctx, tenant.id);
     // the project is checked before the first file is read, so a bad --projectId imports nothing
     const targetProject = await importProject(ctx, tenant.id, args, actor);
+    const projectGiven = args.value('projectId') !== undefined;
     const items = await readInput(out, input, args.flag('separate'));
 
     let failed = 0;
@@ -107,6 +109,9 @@ export function importWorkflowCommand(ctx: ServerContext, argv: string[], io?: C
       const sourceId = typeof wanted === 'string' && UUID.test(wanted) ? wanted.toLowerCase() : undefined;
       try {
         const existing = sourceId ? await ctx.repos.workflows.get(tenant.id, sourceId) : undefined;
+        if (existing && projectGiven && existing.projectId !== targetProject) {
+          throw new Error('it already exists in another project of the workspace');
+        }
         await evaluateWorkflow(ctx.serviceDeps, 'contentImport', {
           tenantId: tenant.id,
           projectId: existing?.projectId ?? targetProject,
@@ -120,9 +125,15 @@ export function importWorkflowCommand(ctx: ServerContext, argv: string[], io?: C
               actor,
               'Imported',
             )
-          : await ctx.workflows.create(tenant.id, { ...content, projectId: targetProject }, actor);
+          : await ctx.workflows.create(
+              tenant.id,
+              { ...content, projectId: targetProject },
+              actor,
+              // kept when no workflow row of any workspace has it, else the service makes a new one
+              { id: sourceId },
+            );
         if (sourceId) idMap.set(sourceId, result.id);
-        saved.push({ label, id: result.id, versionId: result.versionId, content });
+        saved.push({ label, dto: result });
         out.stdout(`Imported workflow ${label} (${result.id})\n`);
       } catch (error) {
         fail(label, refusal(error));
@@ -131,13 +142,19 @@ export function importWorkflowCommand(ctx: ServerContext, argv: string[], io?: C
 
     // second pass: a file that points at another imported workflow now points at its new id
     for (const file of saved) {
-      const rewritten = rewriteUuids(file.content, (id) => idMap.get(id));
-      if (JSON.stringify(rewritten) === JSON.stringify(file.content)) continue;
+      const { dto } = file;
+      const stored = {
+        nodes: dto.nodes,
+        connections: dto.connections,
+        settings: dto.settings,
+      } as unknown as Pick<z.output<typeof workflowUpdateSchema>, 'nodes' | 'connections' | 'settings'>;
+      const rewritten = rewriteUuids(stored, (id) => idMap.get(id));
+      if (JSON.stringify(rewritten) === JSON.stringify(stored)) continue;
       try {
         await ctx.workflows.update(
           tenant.id,
-          file.id,
-          { ...rewritten, versionId: file.versionId },
+          dto.id,
+          { ...rewritten, versionId: dto.versionId },
           actor,
           'Imported: references updated',
         );

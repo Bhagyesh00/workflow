@@ -232,6 +232,113 @@ describe('P6-78 export:workflow and import:workflow', () => {
     expect(after[0].name).toBe('Kept and renamed');
   });
 
+  it('keeps a free id, and a second import of the same file updates it instead of adding a row', async () => {
+    const b = await workspace();
+    const id = randomUUID();
+    const file = (name: string) =>
+      JSON.stringify([{ id, name, nodes: [node('Start', 'core.manualTrigger')], connections: {} }]);
+    const first = fakeIo({ '/f.json': file('Fresh') });
+    expect(
+      await importWorkflowCommand(server.ctx, ['--tenant', b.slug, '--input', '/f.json'], first.io),
+    ).toBe(0);
+    expect((await rowsOf(b.tenantId)).map((w) => w.id)).toEqual([id]);
+    expect(first.stdout()).toContain(id);
+    const again = fakeIo({ '/f.json': file('Fresh again') });
+    expect(
+      await importWorkflowCommand(server.ctx, ['--tenant', b.slug, '--input', '/f.json'], again.io),
+    ).toBe(0);
+    const rows = await rowsOf(b.tenantId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id, name: 'Fresh again' });
+  });
+
+  it('gives a new id to an id another workspace holds and never touches that row', async () => {
+    const a = await workspace();
+    const b = await workspace();
+    const wf = await workflowIn(server, a.tenantId, a.personalId, {
+      name: 'Theirs',
+      nodes: [node('Start', 'core.manualTrigger')],
+    });
+    const file = JSON.stringify([
+      { id: wf.id, name: 'Mine', nodes: [node('Start', 'core.manualTrigger')], connections: {} },
+    ]);
+    const f = fakeIo({ '/t.json': file });
+    expect(await importWorkflowCommand(server.ctx, ['--tenant', b.slug, '--input', '/t.json'], f.io)).toBe(0);
+    const inB = await rowsOf(b.tenantId);
+    expect(inB).toHaveLength(1);
+    expect(inB[0].id).not.toBe(wf.id);
+    const inA = await rowsOf(a.tenantId);
+    expect(inA).toHaveLength(1);
+    expect(inA[0]).toMatchObject({ id: wf.id, name: 'Theirs' });
+  });
+
+  it('with --projectId refuses a workflow of this workspace that sits in another project', async () => {
+    const a = await workspace(true);
+    const wf = await workflowIn(server, a.tenantId, a.personalId, {
+      name: 'Personal',
+      nodes: [node('Start', 'core.manualTrigger')],
+    });
+    const file = JSON.stringify([
+      { id: wf.id, name: 'Renamed', nodes: [node('Start', 'core.manualTrigger')], connections: {} },
+    ]);
+    const refused = fakeIo({ '/p.json': file });
+    expect(
+      await importWorkflowCommand(
+        server.ctx,
+        ['--tenant', a.slug, '--input', '/p.json', '--projectId', a.teamId as string],
+        refused.io,
+      ),
+    ).toBe(1);
+    expect(refused.stderr()).toContain('another project');
+    expect((await rowsOf(a.tenantId))[0]).toMatchObject({
+      id: wf.id,
+      name: 'Personal',
+      project_id: a.personalId,
+    });
+    // without --projectId, or with its own project, the workflow is updated in place
+    const ok = fakeIo({ '/p.json': file });
+    expect(
+      await importWorkflowCommand(
+        server.ctx,
+        ['--tenant', a.slug, '--input', '/p.json', '--projectId', a.personalId],
+        ok.io,
+      ),
+    ).toBe(0);
+    expect((await rowsOf(a.tenantId))[0].name).toBe('Renamed');
+  });
+
+  it('the reference rewrite keeps what the first save added (MCP availability of an auto exposing workspace)', async () => {
+    const a = await workspace();
+    const b = await workspace();
+    await b.client.patch('/rest/mcp/settings', { mcpAccessEnabled: true, autoExposeNewWorkflows: true });
+    const child = await workflowIn(server, a.tenantId, a.personalId, {
+      name: 'Child',
+      nodes: [node('Start', 'core.manualTrigger')],
+    });
+    await workflowIn(server, a.tenantId, a.personalId, {
+      name: 'Parent',
+      nodes: [node('Start', 'core.manualTrigger'), subWorkflowNode('Call', child.id)],
+      settings: { errorWorkflow: child.id },
+    });
+    const exported = fakeIo();
+    await exportWorkflowCommand(
+      server.ctx,
+      ['--tenant', a.slug, '--all', '--output', '/r.json'],
+      exported.io,
+    );
+    const imported = fakeIo({ '/r.json': exported.files.get('/r.json') ?? '' });
+    expect(
+      await importWorkflowCommand(server.ctx, ['--tenant', b.slug, '--input', '/r.json'], imported.io),
+    ).toBe(0);
+    const inB = await rowsOf(b.tenantId);
+    const newChild = inB.find((w) => w.name === 'Child')!;
+    const newParent = inB.find((w) => w.name === 'Parent')!;
+    // the reference was rewritten (a second save of the parent) and both stay available in MCP
+    expect(newParent.settings.errorWorkflow).toBe(newChild.id);
+    expect(newParent.settings.availableInMCP).toBe(true);
+    expect(newChild.settings.availableInMCP).toBe(true);
+  });
+
   it('writes one file per workflow with --separate and reads a folder back', async () => {
     const a = await workspace();
     const b = await workspace();
