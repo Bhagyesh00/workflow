@@ -4,9 +4,7 @@
  * credential, variable, folder, project and data table structure writes, and Git push. Pulls still write:
  * they run inside `withPullWrites`, an internal flag on one `AsyncLocalStorage` that no request can set.
  *
- * C0 (commit 0): the names, texts, error, `isProtected` and the pull flag are final. `assertNotProtected`,
- * `assertTenantWritable` and `setReadOnly` are stubs that PASS (every wired service method calls
- * `assertTenantWritable` first); L7 fills them.
+ * Every wired service method calls `assertTenantWritable` first; `setReadOnly` is the one writer of the flag.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ServiceDeps } from '../context';
@@ -83,33 +81,44 @@ export function inPullWrite(): boolean {
 }
 
 /**
- * stub (L7), PASSES in C0: throws `ProtectedWorkspaceError(action)` when `isProtected(settings)` and not
- * `inPullWrite()`
+ * throws `ProtectedWorkspaceError(action)` when `isProtected(settings)` and the caller is not a pull's write
+ * (`inPullWrite()`); the one place the refusal is decided
  */
 export function assertNotProtected(
-  _settings: TenantSettings | null | undefined,
-  _action: ProtectedAction,
+  settings: TenantSettings | null | undefined,
+  action: ProtectedAction,
 ): void {
-  // stub (L7): passes
+  if (inPullWrite()) return;
+  if (isProtected(settings)) throw new ProtectedWorkspaceError(action);
 }
 
 /**
- * stub (L7), PASSES in C0: reads the tenant's settings and calls `assertNotProtected`. Wired first in every
- * refused service method (workflows, archive, credentials, folders, variables, projects, data tables).
+ * reads the tenant's settings once and calls `assertNotProtected`; passes without a read inside a pull's write.
+ * Wired first in every refused service method (workflows, archive, credentials, folders, variables, projects,
+ * data tables). The row is read on every call, so a switch turned on or off takes effect on the next call.
  */
 export async function assertTenantWritable(
-  _deps: ServiceDeps,
-  _tenantId: string,
-  _action: ProtectedAction,
+  deps: ServiceDeps,
+  tenantId: string,
+  action: ProtectedAction,
 ): Promise<void> {
-  // stub (L7): passes
+  if (inPullWrite()) return;
+  const tenant = await deps.repos.tenants.get(tenantId);
+  assertNotProtected(tenant?.settings as TenantSettings | null | undefined, action);
 }
 
 /**
- * stub (L7), PASSES in C0 with no write: L7 writes one
- * `deps.repos.tenants.mergeSettings(auth.tenant.id, { sourceControl: { readOnly: value } })`
- * (`sourceControl` holds only that key)
+ * turns the protected switch on or off: one `mergeSettings` statement that writes only the `sourceControl` key,
+ * so a racing PATCH /settings (which never writes it) cannot undo it, and one audit row for each call
  */
-export async function setReadOnly(_deps: ServiceDeps, _auth: AuthContext, _value: boolean): Promise<void> {
-  // stub (L7): passes, no write
+export async function setReadOnly(deps: ServiceDeps, auth: AuthContext, value: boolean): Promise<void> {
+  const tenantId = auth.tenant.id;
+  await deps.repos.tenants.mergeSettings(tenantId, { sourceControl: { readOnly: value } });
+  await deps.repos.audit.add(tenantId, {
+    userId: auth.user.id,
+    action: 'source_control.read_only_changed',
+    resourceType: 'source_control',
+    resourceId: tenantId,
+    metadata: { readOnly: value },
+  });
 }
