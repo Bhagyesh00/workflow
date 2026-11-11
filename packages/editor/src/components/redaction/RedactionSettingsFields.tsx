@@ -1,6 +1,8 @@
 /**
  * P6-53 (L8): workflow settings fields: redact production runs, manual runs, and callers' copies
- * (`redactionPolicy`, `redactCallerExecutions`); never weaker than the workspace floor.
+ * (`redactionPolicy`, `redactCallerExecutions`); never weaker than the workspace floor. A switch whose
+ * change would raise the saved setting needs `workflow:enableRedaction` on the open workflow, one that
+ * would lower it `workflow:disableRedaction` (as the server judges a save); turning a switch back is free.
  */
 
 import {
@@ -9,8 +11,10 @@ import {
   type RedactionPolicy,
   type WorkflowSettings,
 } from '@workflow/workflow';
-import type { ReactNode } from 'react';
+import { type ReactNode, useState } from 'react';
 import { useSettings } from '../../api/queries';
+import { useOpenWorkflowCan, useOpenWorkflowStore } from '../../features/editor/open-resources';
+import { useWorkflowStore } from '../../stores/workflow-store';
 import { Switch } from '../ui/Field';
 
 export interface RedactionSettingsFieldsProps {
@@ -33,18 +37,49 @@ function policyOf(channels: RedactionChannels): RedactionPolicy {
   return channels.manual ? 'manual-only' : 'none';
 }
 
+/** the channels and the callers' copy a setting redacts */
+type Redacts = RedactionChannels & { callers: boolean };
+
+const redactsOf = (settings: WorkflowSettings): Redacts => ({
+  ...channelsOf(settings.redactionPolicy),
+  callers: settings.redactCallerExecutions !== false,
+});
+
 export function RedactionSettingsFields({ draft, set }: RedactionSettingsFieldsProps): ReactNode {
   const floor = floorToChannels(useSettings().redactionFloor);
+  const can = useOpenWorkflowCan();
+  // a workflow not saved yet has no scopes of its own: the server judges it in its project on the first save
+  const openId = useOpenWorkflowStore((s) => s.id);
+  const workflowId = useWorkflowStore((s) => s.meta.id);
+  const known = Boolean(openId && openId === workflowId);
+  const may = (scope: 'workflow:enableRedaction' | 'workflow:disableRedaction') => !known || can(scope);
+  // what the workflow had when the fields opened: the server judges a save against it
+  const [saved] = useState(() => redactsOf(draft));
   const own = channelsOf(draft.redactionPolicy);
   const shown: RedactionChannels = {
     production: own.production || floor.production,
     manual: own.manual || floor.manual,
   };
-  const change = (patch: Partial<RedactionChannels>) => {
+  const nextOf = (patch: Partial<RedactionChannels>): RedactionChannels => {
     const next = { ...shown, ...patch };
     if (!next.production) next.manual = false;
-    set({ redactionPolicy: policyOf(next) });
+    return next;
   };
+  const change = (patch: Partial<RedactionChannels>) => set({ redactionPolicy: policyOf(nextOf(patch)) });
+  /** whether the user may move the setting from `saved` to `after` */
+  const allowed = (after: Redacts) => {
+    const keys = ['production', 'manual', 'callers'] as const;
+    const raising = keys.some((key) => after[key] && !saved[key]);
+    const lowering = keys.some((key) => !after[key] && saved[key]);
+    return (!raising || may('workflow:enableRedaction')) && (!lowering || may('workflow:disableRedaction'));
+  };
+  const callers = draft.redactCallerExecutions !== false;
+  const flip = (patch: Partial<RedactionChannels>) =>
+    allowed({ ...channelsOf(policyOf(nextOf(patch))), callers });
+  const productionOk = flip({ production: !shown.production });
+  const manualOk = flip({ manual: !shown.manual });
+  const callersOk = allowed({ ...own, callers: !callers });
+  const locked = !productionOk || !manualOk || !callersOk;
   const floored = floor.production || floor.manual;
   return (
     <fieldset className="flex flex-col gap-3 rounded-xl border border-line p-3">
@@ -59,7 +94,7 @@ export function RedactionSettingsFields({ draft, set }: RedactionSettingsFieldsP
         <Switch
           label="Redact production runs"
           checked={shown.production}
-          disabled={floor.production}
+          disabled={floor.production || !productionOk}
           onChange={(v) => change({ production: v })}
         />
       </div>
@@ -68,7 +103,7 @@ export function RedactionSettingsFields({ draft, set }: RedactionSettingsFieldsP
         <Switch
           label="Redact manual runs"
           checked={shown.manual}
-          disabled={floor.manual || !shown.production}
+          disabled={floor.manual || !shown.production || !manualOk}
           onChange={(v) => change({ manual: v })}
         />
       </div>
@@ -76,10 +111,12 @@ export function RedactionSettingsFields({ draft, set }: RedactionSettingsFieldsP
         <span className="text-sm">Redact the copy a calling workflow keeps of this one's output</span>
         <Switch
           label="Redact callers' copies"
-          checked={draft.redactCallerExecutions !== false}
+          checked={callers}
+          disabled={!callersOk}
           onChange={(v) => set({ redactCallerExecutions: v })}
         />
       </div>
+      {locked && <p className="text-xs text-ink-3">You need permission to change data redaction.</p>}
     </fieldset>
   );
 }

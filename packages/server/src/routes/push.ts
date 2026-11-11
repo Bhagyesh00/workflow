@@ -8,6 +8,7 @@
  * with no workflow) needs the global scope, so it reaches owner and admin only; `workflowReviewChanged` stays
  * for the whole workspace. The answers are cached per stream until the next ping tick, so a lost project, a
  * removed relation or a narrowed role takes effect within one ping. A failed lookup sends nothing.
+ * P6-53: an event meant for one user (a manual run's node data) reaches every other stream as othersData, or not at all.
  */
 import type { Scope } from '@workflow/workflow';
 import type { FastifyInstance } from 'fastify';
@@ -105,7 +106,9 @@ export function registerPushRoutes(app: FastifyInstance, ctx: ServerContext): vo
       delivery = delivery
         .then(async () => {
           if (res.writableEnded || !(await filter.allows(event))) return;
-          if (!res.writableEnded) res.write(frame(event.type, event.data));
+          const own = !event.userId || event.userId === auth.user.id;
+          if (!own && event.othersData === undefined) return;
+          if (!res.writableEnded) res.write(frame(event.type, own ? event.data : event.othersData));
         })
         .catch(() => {});
     });

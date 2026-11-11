@@ -8,6 +8,8 @@ import { randomUUID } from 'node:crypto';
 import type { DataObject, WorkflowDefinition } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { executionContext } from '../src/services/ai-builder/context';
+import { BuilderDraft } from '../src/services/ai-builder/draft';
+import { createBuilderTools } from '../src/services/ai-builder/tools';
 import { MCP_KEY_AUDIENCE, MCP_KEY_LABEL } from '../src/services/mcp/types';
 import {
   type AssistantHarness,
@@ -20,6 +22,7 @@ import {
   chain,
   createWorkflow,
   node,
+  realMember,
   setNode,
   startMcpTestServer,
   TestClient,
@@ -106,6 +109,36 @@ describe('the Assistant', () => {
     expect(sent.slice(at)).not.toContain(CANARY);
   });
 
+  it('run_workflow sends no error text of a redacted run', async () => {
+    const failing = (settings: DataObject) =>
+      createWorkflow(h.owner.client, {
+        name: `AI failing ${randomUUID().slice(0, 6)}`,
+        nodes: [
+          node('Start', 'core.manualTrigger'),
+          node('Boom', 'test.fail', { message: CANARY_ERROR }, [200, 0]),
+        ],
+        connections: chain('Start', 'Boom'),
+        settings,
+      });
+    expect(await approved('run_workflow', { workflowId: (await failing({})).id })).toContain(CANARY_ERROR);
+    const result = await approved('run_workflow', {
+      workflowId: (await failing({ redactionPolicy: 'all' })).id,
+    });
+    expect(result).toContain('Boom');
+    expect(result).not.toContain(CANARY_ERROR);
+  });
+
+  it('execute_node sends no error text with the floor on all', async () => {
+    const args = { type: 'test.fail', version: 1, config: { parameters: { message: CANARY_ERROR } } };
+    expect(await approved('execute_node', args)).toContain(CANARY_ERROR);
+    await setFloor('all');
+    try {
+      expect(await approved('execute_node', args)).not.toContain(CANARY_ERROR);
+    } finally {
+      await setFloor('off');
+    }
+  });
+
   it('execute_node returns no value with the floor on all', async () => {
     const args = {
       type: 'core.set',
@@ -152,7 +185,8 @@ describe('the Assistant', () => {
   });
 
   it('verify_workflow gives the model counts and statuses only for a redacted draft', async () => {
-    const draft = async (settings: DataObject) => {
+    const made = () => [node('Start', 'core.manualTrigger'), setNode('Make', 'secret', COMPUTED)];
+    const draft = async (settings: DataObject, nodes = made()) => {
       const threadId = await h.createThread(h.owner);
       const draftId = randomUUID();
       await h.ctx.assistantDrafts.put(h.tenantId, threadId, {
@@ -162,8 +196,8 @@ describe('the Assistant', () => {
         baseVersionId: null,
         definition: {
           name: 'Verify draft',
-          nodes: [node('Start', 'core.manualTrigger'), setNode('Make', 'secret', COMPUTED)],
-          connections: chain('Start', 'Make'),
+          nodes,
+          connections: chain(...nodes.map((n) => n.name)),
           settings,
         } as unknown as WorkflowDefinition,
         createdAt: new Date().toISOString(),
@@ -171,8 +205,8 @@ describe('the Assistant', () => {
       });
       return { threadId, draftId };
     };
-    const verify = async (settings: DataObject) => {
-      const { threadId, draftId } = await draft(settings);
+    const verify = async (settings: DataObject, nodes?: ReturnType<typeof made>) => {
+      const { threadId, draftId } = await draft(settings, nodes);
       calls += 1;
       const id = `p6_verify_${calls}`;
       while (h.script.length < h.fake.requests.length) h.script.push({ status: 500, error: 'used up' });
@@ -191,6 +225,19 @@ describe('the Assistant', () => {
     expect(redacted).not.toContain(CANARY);
     expect(redacted).toContain('"ran":true');
     expect(redacted).toContain('redacted');
+    // a failing draft: its reason is the status, never the error text of a redacted run. The failing node is
+    // a data-only one verify runs for real (test.fail would be simulated): its error names the missing field.
+    const failing = [
+      node('Start', 'core.manualTrigger'),
+      node('Boom', 'core.aggregate', {
+        aggregate: 'aggregateIndividualFields',
+        fieldsToAggregate: { fieldToAggregate: [{ fieldToAggregate: CANARY_ERROR }] },
+      }),
+    ];
+    expect(await verify({}, failing)).toContain(CANARY_ERROR);
+    const failed = await verify({ redactionPolicy: 'all' }, failing);
+    expect(failed).not.toContain(CANARY_ERROR);
+    expect(failed).toContain('The run ended with status');
   });
 });
 
@@ -237,6 +284,54 @@ describe('the builder', () => {
     expect(text).toContain('Make');
     // no identified user: the same, and a floor raised later does not matter to an old run
     expect(await contextOf(closed)).not.toContain(CANARY);
+  });
+
+  it('get_execution_schema reads a credentialed run as the user who builds', async () => {
+    const credential = await h.owner.client.data<{ id: string }>(
+      h.owner.client.post('/rest/credentials', {
+        name: `Header ${randomUUID().slice(0, 6)}`,
+        type: 'httpHeaderAuth',
+        data: { name: 'X-Token', value: 'header-value' },
+      }),
+    );
+    const wf = await createWorkflow(h.owner.client, {
+      name: `Builder credentialed ${randomUUID().slice(0, 6)}`,
+      nodes: [
+        node('Start', 'core.manualTrigger'),
+        setNode('Make', 'secret', CANARY),
+        // not connected: never runs, but the run's workflow names its credential
+        node('Fetch', 'core.httpRequest', { url: 'https://example.com' }, [400, 200], {
+          credentials: { httpHeaderAuth: { id: credential.id, name: 'Header' } },
+        }),
+      ],
+      connections: chain('Start', 'Make'),
+    });
+    const { executionId } = await h.owner.client.data<{ executionId: string }>(
+      h.owner.client.post(`/rest/workflows/${wf.id}/run`, {}),
+    );
+    await waitForExecution(h.ctx, h.tenantId, executionId);
+    const tenant = (await h.ctx.repos.tenants.get(h.tenantId))!;
+    const schemaAs = async (userId: string) => {
+      const draft = new BuilderDraft(
+        { name: 'Draft', nodes: [], connections: {} } as unknown as WorkflowDefinition,
+        h.ctx.registries.nodeTypes,
+      );
+      const tools = createBuilderTools(draft, {
+        ctx: h.ctx,
+        tenant,
+        emit: () => {},
+        workflowId: wf.id,
+        sendValues: true,
+        userId,
+      });
+      return String(await tools.find((t) => t.name === 'get_execution_schema')!.invoke({}));
+    };
+    expect(await schemaAs(h.owner.userId)).toContain(CANARY);
+    // a member who cannot use the credential reads the run redacted
+    const member = await realMember(h.owner);
+    const theirs = await schemaAs(member.user.id);
+    expect(theirs).not.toContain(CANARY);
+    expect(theirs).toContain('redacted');
   });
 });
 

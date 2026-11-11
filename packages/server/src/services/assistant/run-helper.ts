@@ -26,6 +26,7 @@ import {
 import type { ServerContext } from '../../context';
 import { wrapUntrusted } from '../ai-builder/context';
 import type { ExecutionOutcome, StartExecutionInput, StoredRunOptions } from '../executions';
+import { REDACTED_ERROR_MESSAGE } from '../redaction/policy';
 import type { AssistantRunScope } from './types';
 
 /** what a tool may pass: everything but the mode (always `manual`), `wait`, the tenant and the user */
@@ -232,6 +233,7 @@ function previewItem(item: Item): DataObject {
 /**
  * What the model may read of a run, as one wrapped text: status, error, and per node its last run's
  * status, item counts and (with `sendValues`) the first items. Binary data never: name, type and size.
+ * P6-53: a redacted run shows no error text either, only the node it failed in.
  */
 export function previewOutput(outcome: RunOutcome, sendValues: boolean): string {
   // P6 S3 (C0): a run whose manual channel is redacted (its own snapshot or a sub-workflow's report) shows
@@ -252,7 +254,7 @@ export function previewOutput(outcome: RunOutcome, sendValues: boolean): string 
       status: last?.executionStatus ?? null,
       runs: Array.isArray(runs) ? runs.length : 0,
       outputs,
-      ...(last?.error?.message ? { error: previewString(String(last.error.message)) } : {}),
+      ...(last?.error?.message && !redacted ? { error: previewString(String(last.error.message)) } : {}),
     };
   });
   const body = {
@@ -261,7 +263,7 @@ export function previewOutput(outcome: RunOutcome, sendValues: boolean): string 
     ...(outcome.error
       ? {
           error: {
-            message: previewString(outcome.error.message),
+            message: redacted ? REDACTED_ERROR_MESSAGE : previewString(outcome.error.message),
             ...(outcome.error.node ? { node: previewString(outcome.error.node) } : {}),
           },
         }

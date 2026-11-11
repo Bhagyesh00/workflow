@@ -263,10 +263,11 @@ async function assertBinaryAccess(
   const run = await ctx.repos.executions.get(auth.tenant.id, folder);
   if (run) {
     await requireScope(request, 'execution:read', { executionId: folder });
-    // P6-53 (S3): a run's file follows its data: the same decision as `redactExecution` (no data loaded; L8
-    // judges the run's `redactionFacts` against the viewer). Redacted for this viewer: 403; with reveal, the
-    // reveal rules apply (`redactExecution` refuses or reveals).
-    const read = await redactExecution(ctx.serviceDeps, viewerOf(auth), run, undefined, { reveal });
+    // P6-53 (S3): a run's file follows its data: the same decision as the detail read, over the stored data
+    // (the channels and credentials its sub-workflows reported, a copied child file included). Redacted for
+    // this viewer: 403; with reveal, the reveal rules apply (`redactExecution` refuses or reveals).
+    const data = await ctx.repos.executions.getData(auth.tenant.id, folder);
+    const read = await redactExecution(ctx.serviceDeps, viewerOf(auth), run, data, { reveal });
     if (read.redactionInfo?.isRedacted) {
       throw new ApiError(
         403,

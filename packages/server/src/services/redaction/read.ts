@@ -4,8 +4,10 @@
  * rule (credential-rule.ts); a redacted read clears the items, moves the error to `redactedError`, blanks the
  * row's `errorMessage` and says why in `redactionInfo`. `{ reveal: true }` (`?redactExecutionData=false`)
  * reveals with `execution:reveal` (audit `execution.data.revealed`), else 403 `EXECUTION_REVEAL_FORBIDDEN`
- * (audit `execution.data.reveal_failed`); the credential rule is never bypassed. `redactSummaries` judges a
- * page of rows with one `repos.executions.redactionFacts` query. A tool never passes `reveal`.
+ * (audit `execution.data.reveal_failed`); the credential rule is never bypassed. A read without data (the
+ * row only, a file of the run) still judges the stored data, so a sub-workflow's channel and credentials
+ * count there too. `redactSummaries` judges a page of rows with one `repos.executions.redactionFacts` query.
+ * Custom data stays readable, as in n8n. A tool never passes `reveal`.
  */
 import {
   type ExecutionErrorShape,
@@ -60,20 +62,48 @@ interface RunFacts {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** the facts of a run whose data is in hand */
+/** a stored state: an object whose `resultData` is an object (its fields are still read with care) */
+function isExecutionState(value: unknown): value is ExecutionState {
+  return isRecord(value) && isRecord(value.resultData);
+}
+
+/** the stored state, when it is one */
+const stateOf = (value: unknown): ExecutionState | undefined => (isExecutionState(value) ? value : undefined);
+
+/** the run data of a stored state, when it has any */
+function runDataOf(state: ExecutionState | undefined): RunData | undefined {
+  const runData = state?.resultData.runData;
+  return isRecord(runData) ? runData : undefined;
+}
+
+/** a stored snapshot (`run_options.redaction`); null when the run kept none */
+function snapshotOf(value: unknown): RunFacts['snapshot'] {
+  if (!isRecord(value)) return null;
+  return {
+    production: value.production === true,
+    manual: value.manual === true,
+    ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+  };
+}
+
+/** string ids, no blanks */
+const idsOf = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string' && id !== '') : [];
+
+/**
+ * The facts of a run whose data is in hand. `run_options.usedCredentialIds` holds the ids an earlier run of
+ * the same data used (a retry: its original's), judged with the run's own.
+ */
 function factsOfData(row: ExecutionRow, data: ExecutionDataRow): RunFacts {
   const runOptions = isRecord(data.runOptions) ? data.runOptions : {};
-  const state = isRecord(data.state) ? (data.state as unknown as ExecutionState) : undefined;
-  const runData: RunData | undefined = state?.resultData?.runData;
+  const runData = runDataOf(stateOf(data.state));
   const workflowNodes = isRecord(data.workflowData) ? data.workflowData.nodes : undefined;
-  const snapshot = isRecord(runOptions.redaction)
-    ? (runOptions.redaction as unknown as ExecutionRedactionFacts['redaction'])
-    : null;
+  const referenced = runReferencedCredentialIds(Array.isArray(workflowNodes) ? workflowNodes : [], runData);
   return {
-    snapshot,
+    snapshot: snapshotOf(runOptions.redaction),
     reported: reportedChannels(runData),
     userId: typeof runOptions.userId === 'string' && runOptions.userId !== '' ? runOptions.userId : null,
-    credentialIds: runReferencedCredentialIds(Array.isArray(workflowNodes) ? workflowNodes : [], runData),
+    credentialIds: [...new Set([...referenced, ...idsOf(runOptions.usedCredentialIds)])].sort(),
     usedPrivateCredentials: row.usedPrivateCredentials,
   };
 }
@@ -109,25 +139,26 @@ function privateMiss(viewer: ExecutionViewer, facts: RunFacts): boolean {
   return facts.usedPrivateCredentials && facts.userId !== viewer.userId;
 }
 
-/** a run's `state` without items, error text or stored stacks */
+/** a run's `state` without items, error text or stored stacks; its custom data is kept (as n8n) */
 function redactState(state: ExecutionDataRow['state']): ExecutionDataRow['state'] {
   if (!isRecord(state)) return state;
-  const source = state as unknown as ExecutionState;
-  const resultData = isRecord(source.resultData) ? source.resultData : undefined;
+  const resultData = stateOf(state)?.resultData;
   const runData: RunData = {};
-  for (const [name, tasks] of Object.entries(resultData?.runData ?? {})) {
+  for (const [name, tasks] of Object.entries(runDataOf(stateOf(state)) ?? {})) {
     runData[name] = Array.isArray(tasks) ? tasks.map(clearTask) : [];
   }
-  const pinData = resultData?.pinData
+  const pinData = isRecord(resultData?.pinData)
     ? Object.fromEntries(Object.keys(resultData.pinData).map((name) => [name, []]))
     : undefined;
-  const cleared: ExecutionState = {
-    startData: source.startData,
+  return {
+    startData: isRecord(state.startData) ? state.startData : {},
     resultData: {
       runData,
       ...(pinData ? { pinData } : {}),
-      ...(resultData?.lastNodeExecuted ? { lastNodeExecuted: resultData.lastNodeExecuted } : {}),
-      customData: {},
+      ...(typeof resultData?.lastNodeExecuted === 'string'
+        ? { lastNodeExecuted: resultData.lastNodeExecuted }
+        : {}),
+      ...(isRecord(resultData?.customData) ? { customData: resultData.customData } : {}),
     },
     executionData: {
       nodeExecutionStack: [],
@@ -136,15 +167,12 @@ function redactState(state: ExecutionDataRow['state']): ExecutionDataRow['state'
       contextData: {},
     },
   };
-  return cleared as unknown as ExecutionDataRow['state'];
 }
 
-/** a row or summary with the texts that can carry run values blanked */
+/** a row or summary with the error text blanked (it can carry run values); custom data is kept, as n8n */
 function blanked<R extends object>(row: R): R {
-  const out: Record<string, unknown> = { ...(row as Record<string, unknown>) };
-  if (typeof out.errorMessage === 'string' && out.errorMessage !== '') out.errorMessage = '';
-  if (isRecord(out.customData)) out.customData = {};
-  return out as R;
+  if (!('errorMessage' in row) || typeof row.errorMessage !== 'string' || row.errorMessage === '') return row;
+  return { ...row, errorMessage: '' };
 }
 
 async function hasRevealScope(deps: ServiceDeps, viewer: ExecutionViewer, runId: string): Promise<boolean> {
@@ -177,8 +205,11 @@ export async function redactExecution(
   data: ExecutionDataRow | undefined,
   options: { reveal?: boolean } = {},
 ): Promise<RedactedRead> {
+  // a read without data (the row alone, a file of the run) judges the stored data all the same: the channels
+  // and the credentials its sub-workflows reported live only there
+  const stored = data ?? (await deps.repos.executions.getData(viewer.tenantId, row.id));
   let facts: RunFacts | undefined;
-  if (data) facts = factsOfData(row, data);
+  if (stored) facts = factsOfData(row, stored);
   else {
     const found = (await deps.repos.executions.redactionFacts(viewer.tenantId, [row.id])).get(row.id);
     if (found) facts = factsOfRow(found);
@@ -206,10 +237,8 @@ export async function redactExecution(
     redactionInfo: { isRedacted: true, reason, canReveal },
   };
   if (data) {
-    const error = isRecord(data.state)
-      ? (data.state as unknown as ExecutionState).resultData?.error
-      : undefined;
-    result.redactedError = error && isRecord(error) ? redactedErrorShape(error) : null;
+    const error = stateOf(data.state)?.resultData.error;
+    result.redactedError = isRecord(error) ? redactedErrorShape(error) : null;
   }
   return result;
 }

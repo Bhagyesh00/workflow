@@ -90,7 +90,7 @@ export function redactDemoExecution<T extends object>(
   return {
     ...run,
     errorMessage: run.errorMessage ? '' : run.errorMessage,
-    customData: run.customData ? {} : run.customData,
+    // custom data stays readable on a redacted run, as on the server (and n8n)
     state: { ...run.state, resultData: runData },
     redactionInfo: { isRedacted: true, reason: 'workflow_redaction_policy', canReveal },
     redactedError: error ? stripError(error) : null,

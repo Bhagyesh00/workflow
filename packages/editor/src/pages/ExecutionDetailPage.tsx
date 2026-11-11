@@ -2,11 +2,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ReactFlowProvider } from '@xyflow/react';
 import { ArrowLeft, Bug, ExternalLink, RotateCcw, Square, Trash2 } from 'lucide-react';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { errorMessage, isApiError } from '../api/client';
 import { executionsApi } from '../api/endpoints';
 import { queryKeys, useNodeTypes } from '../api/queries';
+import type { ExecutionDetail } from '../api/types';
 import { readOnlyActions } from '../components/canvas/actions';
 import { FlowCanvas } from '../components/canvas/FlowCanvas';
 import { ExecutionAnnotationPanel } from '../components/executions/ExecutionAnnotationPanel';
@@ -43,9 +44,12 @@ export function ExecutionDetailPage() {
     refetchInterval: (q) =>
       ['running', 'waiting', 'new'].includes(q.state.data?.status ?? '') ? 2000 : false,
   });
+  // P6-53: a revealed run stays on this page only (never in the query cache other views read), for this id
+  const [revealed, setRevealed] = useState<{ id: string; execution: ExecutionDetail } | null>(null);
+  const shown = revealed?.id === id ? revealed.execution : execution.data;
 
   useEffect(() => {
-    const data = execution.data;
+    const data = shown;
     if (!data) return;
     useWorkflowStore.getState().load(
       {
@@ -61,7 +65,7 @@ export function ExecutionDetailPage() {
       { readOnly: true },
     );
     useRunStore.getState().loadExecution(data);
-  }, [execution.data]);
+  }, [shown]);
 
   useEffect(
     () => () => {
@@ -93,7 +97,7 @@ export function ExecutionDetailPage() {
   const remove = () => deleteExecution(id, commandDeps);
 
   if (execution.isLoading || nodeTypes.isLoading) return <PageLoader label="Loading execution" />;
-  if (execution.error || !execution.data) {
+  if (execution.error || !shown) {
     return (
       <EmptyState
         className="h-full"
@@ -107,7 +111,7 @@ export function ExecutionDetailPage() {
       />
     );
   }
-  const data = execution.data;
+  const data = shown;
   const finished = !['running', 'waiting', 'new'].includes(data.status);
   // retry and stop need `workflow:execute` and delete `execution:delete`, by the execution's own scopes
   const canRun = can('workflow:execute', data);
@@ -213,7 +217,7 @@ export function ExecutionDetailPage() {
           <RedactedDataState
             info={data.redactionInfo}
             executionId={data.id}
-            onRevealed={(revealed) => queryClient.setQueryData(queryKeys.execution(id), revealed)}
+            onRevealed={(detail) => setRevealed({ id, execution: detail })}
           />
         </div>
       )}

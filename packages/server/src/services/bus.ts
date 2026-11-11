@@ -116,6 +116,10 @@ export interface PushEvent {
    * stream sends it to owner and admin only, except the workspace events (`workflowReviewChanged`).
    */
   workflowId?: string;
+  /** P6-53: the user `data` is for (a manual run's node data); every other stream gets `othersData` instead */
+  userId?: string;
+  /** P6-53: what every stream but `userId`'s gets in place of `data`; absent = those streams get nothing */
+  othersData?: unknown;
 }
 
 /**
@@ -125,10 +129,19 @@ export interface PushEvent {
 export class PushService {
   constructor(private readonly bus: MessageBus) {}
 
-  send(tenantId: string, type: string, data: unknown, options: { workflowId?: string } = {}): void {
-    const event: PushEvent = options.workflowId
-      ? { type, data, workflowId: options.workflowId }
-      : { type, data };
+  send(
+    tenantId: string,
+    type: string,
+    data: unknown,
+    options: { workflowId?: string; userId?: string; othersData?: unknown } = {},
+  ): void {
+    const event: PushEvent = {
+      type,
+      data,
+      ...(options.workflowId ? { workflowId: options.workflowId } : {}),
+      ...(options.userId ? { userId: options.userId } : {}),
+      ...(options.userId && options.othersData !== undefined ? { othersData: options.othersData } : {}),
+    };
     void this.bus.publish(`push:${tenantId}`, event).catch(() => {});
   }
 

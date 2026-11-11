@@ -7,9 +7,10 @@
  *   is a server path: no scope read, the floor still holds.
  * - `seedRedactionSettings`: a new workflow's settings seeded from the floor.
  * - `snapshotRedaction`: the run's channels at start (`StoredRunOptions.redaction`); a sub-run takes the
- *   strictest of its own and its parent's.
+ *   strictest of its own and its parent's (`inheritedChannels`: both once the parent's own run is redacted).
  * - `pushableTaskData`, `pushableError`: what the manual push may carry once a channel is on (the run's
- *   snapshot merged with `reportedChannels(state.resultData.runData)`).
+ *   snapshot merged with `reportedChannels(state.resultData.runData)`); the push sends it to the run's user
+ *   only, every other reader gets `clearTask` and `redactedErrorShape` (services/executions.ts).
  * The clearing helpers at the end are shared with read.ts.
  */
 import {
@@ -177,6 +178,20 @@ export async function snapshotRedaction(
   return { ...merged, reason: fromOwn ? REASON_WORKFLOW : REASON_SUB_WORKFLOW };
 }
 
+/**
+ * What a sub-run inherits of its parent: the parent's channels (raised by what its earlier calls reported),
+ * and both channels once the channel of the parent's own mode is on, since the sub-run holds the parent's
+ * redacted data (a manual parent that redacts its manual runs only still protects its integrated child).
+ */
+export function inheritedChannels(
+  parent: RedactionChannels | undefined,
+  parentMode: string,
+): RedactionChannels | undefined {
+  if (!parent) return undefined;
+  const own = parentMode === 'manual' ? parent.manual : parent.production;
+  return own ? { production: true, manual: true } : { production: parent.production, manual: parent.manual };
+}
+
 /** the channels a push may rely on: the snapshot raised by what the run's sub-workflows reported */
 function effectiveChannels(
   snapshot: RedactionSnapshot | undefined,
@@ -199,11 +214,18 @@ export function pushableError(
   snapshot: RedactionSnapshot | undefined,
   error: ExecutionErrorShape | undefined,
   state: ExecutionState | undefined,
+  /** the run's mode: the channel of that mode decides; absent, a channel on in either hides the text */
+  mode?: string,
 ): ExecutionErrorShape | undefined {
   if (!error) return error;
-  // the finished event goes out for every mode and carries no mode: a channel on in either hides the text
   const channels = effectiveChannels(snapshot, state);
-  return channels.manual || channels.production ? redactedErrorShape(error) : error;
+  const redacted =
+    mode === undefined
+      ? channels.manual || channels.production
+      : mode === 'manual'
+        ? channels.manual
+        : channels.production;
+  return redacted ? redactedErrorShape(error) : error;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -232,9 +254,24 @@ function clearConnections(connections: NonNullable<TaskData['data']>): NonNullab
   return out;
 }
 
-/** one task without its items, input overrides, hints and error text */
+/** the task metadata the engine writes; a node's own (`setMetadata`: tracing, a form URL) can hold values */
+const ENGINE_METADATA: ReadonlySet<string> = new Set([
+  'subExecution',
+  'attempt',
+  'usedCredentialIds',
+  'subWorkflowRedaction',
+  'timeSaved',
+]);
+
+/** one task without its items, input overrides, hints, error text and node-set metadata */
 export function clearTask(task: TaskData): TaskData {
   const out: TaskData = { ...task };
+  if (task.metadata && typeof task.metadata === 'object') {
+    const kept = { ...task.metadata };
+    for (const key of Object.keys(kept)) if (!ENGINE_METADATA.has(key)) delete kept[key];
+    if (Object.keys(kept).length) out.metadata = kept;
+    else delete out.metadata;
+  }
   if (task.data && typeof task.data === 'object') out.data = clearConnections(task.data);
   if (task.inputOverride && typeof task.inputOverride === 'object') {
     out.inputOverride = clearConnections(task.inputOverride);

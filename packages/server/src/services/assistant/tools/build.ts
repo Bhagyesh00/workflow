@@ -304,6 +304,8 @@ export const buildWorkflowTool: AssistantToolDefinition<BuildInput> = {
         },
         ...(start.workflowId ? { workflowId: start.workflowId } : {}),
         sendValues: run.sendValues,
+        // P6-53: `get_execution_schema` reads the last run as this user
+        userId: run.user.id,
       };
       const context = await contextText(ctx, run, start, draft.definition());
       const result = await runtime.runAgent({
@@ -394,7 +396,9 @@ function fixtureItems(list: Array<Record<string, unknown>>): Item[] {
 }
 
 /** how a verify run ended: only `success` passes; `waiting`, a timeout and a stop are failures */
-export function verifyVerdict(outcome: Pick<RunOutcome, 'status' | 'aborted' | 'error'>): {
+export function verifyVerdict(
+  outcome: Pick<RunOutcome, 'status' | 'aborted' | 'error'> & Partial<Pick<RunOutcome, 'redaction'>>,
+): {
   success: boolean;
   reason?: string;
 } {
@@ -408,9 +412,11 @@ export function verifyVerdict(outcome: Pick<RunOutcome, 'status' | 'aborted' | '
     default:
       return {
         success: false,
-        reason: outcome.error?.message
-          ? redactSecrets(outcome.error.message).slice(0, 1000)
-          : `The run ended with status "${outcome.status}".`,
+        // P6-53: a redacted run's error text never reaches the model
+        reason:
+          outcome.error?.message && !isManualRedacted(outcome)
+            ? redactSecrets(outcome.error.message).slice(0, 1000)
+            : `The run ended with status "${outcome.status}".`,
       };
   }
 }
@@ -501,7 +507,7 @@ function nodePreviews(
 }
 
 /** P6-53: the manual channel is on in the run's own snapshot or in what its sub-workflows reported */
-function isManualRedacted(outcome: RunOutcome): boolean {
+function isManualRedacted(outcome: Partial<Pick<RunOutcome, 'redaction'>>): boolean {
   return outcome.redaction?.own.manual === true || outcome.redaction?.fromSubWorkflows.manual === true;
 }
 

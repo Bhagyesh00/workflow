@@ -479,9 +479,10 @@ export class WorkflowService {
       next: { nodes: input.nodes as WorkflowNode[] },
       stored: null,
     });
+    // the scopes are read in the project the workflow goes to (a personal project's would pass everywhere)
     await assertRedactionChange(
       serviceDeps,
-      { tenantId, userId: actor.userId },
+      { tenantId, userId: actor.userId, projectId },
       null,
       undefined,
       input.settings as EngineWorkflowSettings | undefined,

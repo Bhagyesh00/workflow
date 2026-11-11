@@ -72,9 +72,13 @@ import type { Metrics } from './metrics';
 import { runtimeDefinition } from './published-workflow';
 import type { ExecutionJob, ExecutionQueue } from './queue';
 import {
+  clearTask,
+  inheritedChannels,
   pushableError,
   pushableTaskData,
+  REASON_SUB_WORKFLOW,
   type RedactionSnapshot,
+  redactedErrorShape,
   snapshotRedaction,
 } from './redaction/policy';
 import { checkSingleNode, evaluateWorkflow } from './type-policies/enforce';
@@ -137,6 +141,26 @@ export interface StoredRunOptions {
    * redacts and why. Absent = nothing redacted.
    */
   redaction?: RedactionChannels & { reason?: string };
+  /**
+   * P6-53: credential ids an earlier run of this data used (a retry: its original's, sub-workflows
+   * included); the read side judges them with the run's own.
+   */
+  usedCredentialIds?: string[];
+}
+
+/**
+ * P6-53: the run's effective redaction channels while it runs: the snapshot, raised (never lowered) by what
+ * its sub-workflows report. The push reads it, and a later sub-workflow call starts from it.
+ */
+export interface RedactionHolder {
+  current: RedactionSnapshot | undefined;
+}
+
+/** raises the holder by the channels a sub-workflow reported */
+function raiseRedaction(holder: RedactionHolder, reported: RedactionChannels | undefined): void {
+  if (!reported || (!reported.production && !reported.manual)) return;
+  const base = { production: holder.current?.production === true, manual: holder.current?.manual === true };
+  holder.current = { ...holder.current, ...mergeChannels(base, reported) };
 }
 
 export interface ExecutionOutcome {
@@ -195,6 +219,10 @@ export interface StartExecutionInput {
   inlineSource?: boolean;
   /** P6 S3 (C0): a sub-run: the parent's snapshot channels, which the child's snapshot never goes below (L8) */
   parentRedaction?: RedactionChannels;
+  /** P6-53: a retry: the credential ids its original used (`StoredRunOptions.usedCredentialIds`) */
+  usedCredentialIds?: string[];
+  /** P6-53: a retry of a run that used a private connection starts with the run flagged */
+  usedPrivateCredentials?: boolean;
   executionId?: string;
   retryOf?: string;
   /** retry only: the state of the failed execution; the run continues at its `failedExecuteData` */
@@ -399,6 +427,7 @@ export class ExecutionService {
       forceOperation: input.forceOperation,
       projectId: input.projectId,
       inlineSource: input.inlineSource ? true : undefined,
+      usedCredentialIds: input.usedCredentialIds?.length ? input.usedCredentialIds : undefined,
     };
     // P6 S3 (C0): the redaction channels are fixed at start (L8); stored with the run, so a resume and a
     // worker read the same snapshot
@@ -422,6 +451,7 @@ export class ExecutionService {
           retryOf: input.retryOf ?? null,
           parentExecutionId: input.parentExecutionId ?? null,
           workflowVersionId: input.workflow.versionId ?? null,
+          ...(input.usedPrivateCredentials ? { usedPrivateCredentials: true } : {}),
         },
         {
           workflowData: workflowData as unknown as Record<string, unknown>,
@@ -665,6 +695,9 @@ export class ExecutionService {
         projectId,
         workflow: definition,
       });
+      // P6-53: the channels raised while the run goes: the push reads them, a later sub-workflow call starts
+      // from them
+      const redaction: RedactionHolder = { current: options.redaction };
       const services = await this.buildServices({
         tenant,
         executionId,
@@ -678,7 +711,8 @@ export class ExecutionService {
         startNode: options.startNode,
         workflow: definition,
         redaction: options.redaction,
-        hooks: this.hooks(tenant.id, row, definition, delivery, options.redaction),
+        redactionHolder: redaction,
+        hooks: this.hooks(tenant.id, row, definition, delivery, redaction, options.userId),
         signal,
       });
       engine = new WorkflowExecute(
@@ -863,8 +897,10 @@ export class ExecutionService {
     row: ExecutionRow,
     definition: WorkflowDefinition,
     delivery: Delivery,
-    /** P6 S3 (C0): the run's redaction snapshot (`StoredRunOptions.redaction`) */
-    snapshot?: RedactionSnapshot,
+    /** P6 S3 (C0): the run's redaction channels (`StoredRunOptions.redaction`, raised while it runs) */
+    redaction: RedactionHolder,
+    /** P6-53: the user who started the run: only their stream gets its node data */
+    runUserId?: string,
   ): ExecutionHooks {
     const { push, repos } = this.deps;
     const manual = row.mode === 'manual';
@@ -875,14 +911,11 @@ export class ExecutionService {
     const chunked = new Map<string, ChatChunkMeta>();
     // P6 S3 (C0): the run's effective channels: the snapshot, raised by what its sub-workflows report (the
     // whole run data once, a resume included, then each task). Channels only go up
-    let channels: RedactionSnapshot | undefined = snapshot;
     let seeded = false;
-    const raise = (runData: RunData) => {
-      const reported = reportedChannels(runData);
-      if (!reported.production && !reported.manual) return;
-      const base = { production: channels?.production === true, manual: channels?.manual === true };
-      channels = { ...channels, ...mergeChannels(base, reported) };
-    };
+    const raise = (runData: RunData) => raiseRedaction(redaction, reportedChannels(runData));
+    // P6-53: the node data of a manual run goes to the user who started it (n8n: that session only); every
+    // other reader of the workflow gets the event without items, and with no user every reader does
+    const toRunUser = { ...about, userId: runUserId };
     return {
       nodeExecuteBefore: (nodeName) => {
         if (manual) push.send(tenantId, 'nodeExecuteBefore', { executionId, nodeName }, about);
@@ -904,13 +937,16 @@ export class ExecutionService {
         }
         if (manual) {
           // P6 S3 (C0): a redacted manual run pushes no item data (L8)
-          const pushed = pushableTaskData(channels, taskData, state);
-          push.send(
-            tenantId,
-            'nodeExecuteAfter',
-            { executionId, nodeName, runIndex, taskData: pushed },
-            about,
-          );
+          const cleared = { executionId, nodeName, runIndex, taskData: clearTask(taskData) };
+          if (runUserId) {
+            const pushed = pushableTaskData(redaction.current, taskData, state);
+            push.send(
+              tenantId,
+              'nodeExecuteAfter',
+              { executionId, nodeName, runIndex, taskData: pushed },
+              { ...toRunUser, othersData: cleared },
+            );
+          } else push.send(tenantId, 'nodeExecuteAfter', cleared, about);
         }
         if (definition.settings?.saveExecutionProgress) {
           // progress is best effort: a failed write must not fail the node that just ran
@@ -937,9 +973,10 @@ export class ExecutionService {
         }
       },
       sendMessageToUI: (nodeName, args) => {
-        // P6 S3 (C0): a console message carries node data: none once the manual channel is redacted
-        if (channels?.manual) return;
-        push.send(tenantId, 'consoleMessage', { executionId, nodeName, args }, about);
+        // P6 S3 (C0): a console message carries node data: none once the manual channel is redacted, and
+        // only to the run's user (P6-53)
+        if (redaction.current?.manual || !runUserId) return;
+        push.send(tenantId, 'consoleMessage', { executionId, nodeName, args }, toRunUser);
       },
     };
   }
@@ -953,7 +990,7 @@ export class ExecutionService {
     result: ExecutionResult,
     delivery: Delivery,
     /** the stored run options: error chain, inline source, stored project, redaction snapshot */
-    run: Pick<StoredRunOptions, 'errorChain' | 'inlineSource' | 'projectId' | 'redaction'>,
+    run: Pick<StoredRunOptions, 'errorChain' | 'inlineSource' | 'projectId' | 'redaction' | 'userId'>,
     tally?: { counted: boolean },
   ): Promise<void> {
     const { repos, push, metrics, logger } = this.deps;
@@ -1004,6 +1041,18 @@ export class ExecutionService {
     }
     if (keep) {
       await repos.executions.saveState(tenant.id, row.id, state);
+      // P6-53: the channels its sub-workflows reported join the stored snapshot, so a read of the row alone
+      // (a list, a file, an error text) judges them too
+      const raised = this.raisedSnapshot(run.redaction, state.resultData.runData);
+      if (raised) {
+        const stored = await repos.executions.getData(tenant.id, row.id);
+        if (stored) {
+          await repos.executions.updateRunOptions(tenant.id, row.id, {
+            ...stored.runOptions,
+            redaction: raised,
+          });
+        }
+      }
       await repos.executions.update(tenant.id, row.id, {
         status,
         stoppedAt: status === 'waiting' ? null : new Date(result.stoppedAt),
@@ -1025,19 +1074,28 @@ export class ExecutionService {
       await this.removeBinaryData(tenant.id, row.id);
     }
 
-    // P6 S3 (C0): the pushed error of a redacted run carries no node data (L8)
-    const pushedError = pushableError(run.redaction, error, state);
-    push.send(
-      tenant.id,
-      'executionFinished',
-      {
-        executionId: row.id,
-        workflowId: row.workflowId,
-        status,
-        ...(pushedError ? { error: { message: pushedError.message, node: pushedError.node } } : {}),
-      },
-      { workflowId: row.workflowId ?? undefined },
-    );
+    // P6 S3 (C0): the pushed error of a redacted run carries no node data (L8); its text goes to the run's
+    // user only, every other reader gets it without text (P6-53)
+    const finishedOf = (shown: ExecutionErrorShape | undefined) => ({
+      executionId: row.id,
+      workflowId: row.workflowId,
+      status,
+      ...(shown ? { error: { message: shown.message, node: shown.node } } : {}),
+    });
+    const hidden = finishedOf(error ? redactedErrorShape(error) : undefined);
+    const about = { workflowId: row.workflowId ?? undefined };
+    if (run.userId) {
+      push.send(
+        tenant.id,
+        'executionFinished',
+        finishedOf(pushableError(run.redaction, error, state, row.mode)),
+        {
+          ...about,
+          userId: run.userId,
+          othersData: hidden,
+        },
+      );
+    } else push.send(tenant.id, 'executionFinished', hidden, about);
 
     if (status === 'error' || status === 'crashed') {
       await this.startErrorWorkflow(tenant.id, row, definition, state, run).catch((e) =>
@@ -1076,6 +1134,21 @@ export class ExecutionService {
       },
       delivery,
     );
+  }
+
+  /**
+   * P6-53: the stored snapshot raised by what the run's sub-workflows reported; undefined when they add no
+   * channel. A channel only a sub-workflow redacts is the sub-workflow's: the reason says so.
+   */
+  private raisedSnapshot(
+    snapshot: RedactionSnapshot | undefined,
+    runData: RunData,
+  ): RedactionSnapshot | undefined {
+    const own = { production: snapshot?.production === true, manual: snapshot?.manual === true };
+    const merged = mergeChannels(own, reportedChannels(runData));
+    if (merged.production === own.production && merged.manual === own.manual) return undefined;
+    const reason = own.production || own.manual ? snapshot?.reason : REASON_SUB_WORKFLOW;
+    return { ...merged, ...(reason ? { reason } : {}) };
   }
 
   /**
@@ -1256,6 +1329,11 @@ export class ExecutionService {
     workflow?: WorkflowDefinition;
     /** P6 S3 (C0): the run's redaction snapshot; a sub-workflow's snapshot starts from it (`parentRedaction`) */
     redaction?: RedactionChannels;
+    /**
+     * P6-53: the run's live channels (`RedactionHolder`); with it a sub-workflow call starts from its value at
+     * call time, and the channels the call reports raise it
+     */
+    redactionHolder?: RedactionHolder;
     hooks?: ExecutionHooks;
     /** aborts when the execution is stopped or times out; sub-workflows it waits for are canceled then */
     signal?: AbortSignal;
@@ -1319,8 +1397,9 @@ export class ExecutionService {
       limits: { maxTries: 5 },
       nodeLimits: config.nodeLimits,
       disablePublicChatTrigger: config.disablePublicChatTrigger,
-      executeSubWorkflow: (request) =>
-        this.executeSubWorkflow(
+      executeSubWorkflow: (request) => {
+        const holder = input.redactionHolder;
+        return this.executeSubWorkflow(
           request,
           input.projectId,
           depth,
@@ -1328,8 +1407,11 @@ export class ExecutionService {
           input.signal,
           input.rootMode ?? input.mode,
           input.endUserId,
-          input.redaction,
-        ),
+          // P6-53: the strictest the parent holds now, both channels once its own run is redacted
+          inheritedChannels(holder ? holder.current : input.redaction, input.mode),
+          holder ? (report) => raiseRedaction(holder, report.subWorkflowRedaction) : undefined,
+        );
+      },
     };
   }
 
@@ -1402,6 +1484,8 @@ export class ExecutionService {
     endUserId?: string,
     /** P6 S3 (C0): the parent's snapshot channels; the child's snapshot starts from them (L8) */
     parentRedaction?: RedactionChannels,
+    /** P6-53: told what the child reports, a failed child included */
+    onReport?: (report: SubWorkflowReport) => void,
   ): Promise<{ executionId: string; data: Item[][] | null; report?: SubWorkflowReport }> {
     if (depth >= MAX_SUB_WORKFLOW_DEPTH) {
       throw new Error(`Sub-workflows can be nested at most ${MAX_SUB_WORKFLOW_DEPTH} levels deep`);
@@ -1470,6 +1554,7 @@ export class ExecutionService {
     if (detached || !finished) return { executionId, data: [request.items] };
     const outcome = await this.awaitSubWorkflow(executionId, finished, signal);
     const report = subWorkflowReport(outcome, definition);
+    onReport?.(report);
     if (outcome.status === 'error' || outcome.status === 'crashed' || outcome.status === 'canceled') {
       // a failed child still raises its caller (n8n: attachSubWorkflowRedaction)
       throw attachSubWorkflowReport(
@@ -1704,6 +1789,7 @@ export class ExecutionService {
       throw ApiError.conflict('Only failed or stopped executions can be retried');
     }
     let definition = data.workflowData as unknown as WorkflowDefinition;
+    const original = definition;
     let workflowId = row.workflowId ?? undefined;
     const runOptions = (data.runOptions ?? {}) as StoredRunOptions;
     // the mode of the run this retry chain started from (a retry keeps it for its sub-workflows)
@@ -1718,6 +1804,30 @@ export class ExecutionService {
     }
     const state = data.state as unknown as ExecutionState | null;
     const names = new Set(definition.nodes.map((n) => n.name));
+    // P6-53: a retry carries its original's data, so it is at least as strict: the original's channels (its
+    // sub-workflows' reports included) start its snapshot, the credentials the original touched are judged
+    // with its own, and a run that used a private connection stays private: to its user when they retry it,
+    // to no one when someone else does
+    const strictest = mergeChannels(
+      {
+        production: runOptions.redaction?.production === true,
+        manual: runOptions.redaction?.manual === true,
+      },
+      reportedChannels(state?.resultData?.runData),
+    );
+    const privateRun = row.usedPrivateCredentials === true;
+    const strict: Partial<StartExecutionInput> = {
+      parentRedaction: strictest.production || strictest.manual ? strictest : undefined,
+      usedCredentialIds: [
+        ...new Set([
+          ...nodeCredentialIds(original.nodes),
+          ...reportedCredentialIds(state?.resultData?.runData),
+          ...(runOptions.usedCredentialIds ?? []),
+        ]),
+      ].sort(),
+      usedPrivateCredentials: privateRun || undefined,
+      userId: privateRun && runOptions.userId !== options.userId ? undefined : options.userId,
+    };
     // the retry owns copies of every binary file it references: the original may be pruned or deleted
     const retryId = randomUUID();
     // P6-25: the retry copies only the files the original run may reach (never another project's)
@@ -1747,6 +1857,7 @@ export class ExecutionService {
           // P6 S1: a run with no workflow row keeps the project it was started in
           projectId: runOptions.projectId,
           inlineSource: runOptions.inlineSource,
+          ...strict,
           ...input,
         });
       } catch (error) {

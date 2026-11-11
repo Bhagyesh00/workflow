@@ -9,6 +9,7 @@ import type { WorkflowDefinition } from '@workflow/workflow';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { auditLog } from '../src/db/schema';
+import { getExecution } from '../src/routes/executions';
 import {
   addToProject,
   chain,
@@ -148,6 +149,29 @@ describe('a redacted run', () => {
     const production = await detailOf(owner.client, await run(owner, row, 'trigger'));
     expect(production.redactionInfo?.isRedacted).toBe(true);
     expect(itemsOf(production, 'Set')).toHaveLength(0);
+  });
+
+  it('keeps its custom data, in the detail and in the list, as n8n', async () => {
+    const { owner, row } = await scene({ redactionPolicy: 'all' });
+    const started = await server.ctx.executions.start({
+      tenantId: owner.tenant.id,
+      workflow: definitionOf(row),
+      workflowId: row.id,
+      mode: 'manual',
+      startNode: 'Start',
+      userId: owner.user.id,
+      customData: { orderId: 'order-7' },
+      wait: true,
+    });
+    await started.finished;
+    const detail = await detailOf(owner.client, started.executionId);
+    expect(detail.redactionInfo?.isRedacted).toBe(true);
+    expect(detail.customData).toEqual({ orderId: 'order-7' });
+    expect(detail.state.resultData.customData).toEqual({ orderId: 'order-7' });
+    expect(itemsOf(detail, 'Set')).toHaveLength(0);
+    const list = await owner.client.data(owner.client.get(`/rest/executions?workflowId=${row.id}`));
+    const rows: any[] = Array.isArray(list) ? list : ((list as any).results ?? (list as any).data ?? []);
+    expect(rows.find((r) => r.id === started.executionId)?.customData).toEqual({ orderId: 'order-7' });
   });
 
   it('keeps the run in another workspace out of reach (404)', async () => {
@@ -354,6 +378,41 @@ describe('what a sub-workflow reports to its caller', () => {
     expect(detail.status).toBe('error');
     expect(detail.redactionInfo).toMatchObject({ isRedacted: true, reason: 'sub_workflow_redaction_policy' });
     expect(detail.errorMessage).toBe('');
+    // the caller's row holds the child's error text: blank in the list and in a read without data too
+    const list = await owner.client.data(
+      owner.client.get(`/rest/executions?workflowId=${detail.workflowId}`),
+    );
+    const rows: any[] = Array.isArray(list) ? list : ((list as any).results ?? (list as any).data ?? []);
+    expect(rows.find((r) => r.id === detail.id)?.errorMessage).toBe('');
+    const viewer = { tenantId: owner.tenant.id, userId: owner.user.id };
+    const summary = await getExecution(server.ctx, viewer, detail.id, { includeData: false });
+    expect(summary.errorMessage).toBe('');
+    expect(summary.redactionInfo).toMatchObject({
+      isRedacted: true,
+      reason: 'sub_workflow_redaction_policy',
+    });
+    expect(JSON.stringify(summary)).not.toContain(CANARY_ERROR);
+  });
+
+  it('a file in the folder of a run redacted only through its callee is refused without reveal', async () => {
+    const { owner, team, editor } = await scene();
+    const kid = await workflowIn(server, owner.tenant.id, team, child({ redactionPolicy: 'all' }));
+    const detail = await parentRun(owner, team, { redactionPolicy: 'none' }, call('Call', kid.id));
+    expect(detail.redactionInfo).toMatchObject({ isRedacted: true, reason: 'sub_workflow_redaction_policy' });
+    const stored = await server.ctx.executions
+      .binaryStore(owner.tenant.id)
+      .store(new TextEncoder().encode('parent file'.padEnd(70_000, '.')), {
+        mimeType: 'text/plain',
+        executionId: detail.id,
+      });
+    const url = `/rest/binary-data?id=${encodeURIComponent(stored.id!)}`;
+    const refused = await editor.client.get(url);
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json().error.code).toBe('EXECUTION_REVEAL_FORBIDDEN');
+    expect((await editor.client.get(`${url}&redactExecutionData=false`)).statusCode).toBe(403);
+    const served = await owner.client.get(`${url}&redactExecutionData=false`);
+    expect(served.statusCode).toBe(200);
+    expect(served.body.startsWith('parent file')).toBe(true);
   });
 
   it('a second call to a redacting child counts even when the first call is to a plain one', async () => {

@@ -43,6 +43,8 @@ export interface BuilderToolDeps {
   workflowId?: string;
   /** the tenant's "send data values" setting; off gives structure only */
   sendValues?: boolean;
+  /** P6-53: the user the builder works for: `get_execution_schema` reads the last run as them */
+  userId?: string;
 }
 
 /** one hit of `search_nodes` */
@@ -531,6 +533,7 @@ export function createBuilderTools(draft: BuilderDraft, deps: BuilderToolDeps): 
           tenant: deps.tenant,
           workflowId: deps.workflowId,
           sendValues: deps.sendValues !== false,
+          userId: deps.userId,
         });
       },
     ),

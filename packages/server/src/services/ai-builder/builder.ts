@@ -160,7 +160,8 @@ export class AiBuilderService {
       promptNotes: [],
       stopTurn: () => stop.abort(BUILDER_TURN_STOP),
     };
-    const deps: BuilderToolDeps = { ctx, tenant, emit, workflowId, sendValues };
+    // P6-53: the last run is read as the user who builds (no user reads every credentialed run as redacted)
+    const deps: BuilderToolDeps = { ctx, tenant, emit, workflowId, sendValues, userId: auth.user.id };
     const createdAt = new Date().toISOString();
     const userMessage: BuilderMessage | undefined = text.trim()
       ? { id: randomUUID(), role: 'user', text, createdAt }
@@ -208,6 +209,7 @@ export class AiBuilderService {
         workflowId,
         definition: draft.definition(),
         sendValues,
+        userId: auth.user.id,
       });
       const input = [
         context,

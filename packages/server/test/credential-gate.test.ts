@@ -278,14 +278,27 @@ const resourceOf = (s: TestServer, slug: string, path: string, base = s.ctx.conf
 
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
 
-/** the Who node's output of the workflow's newest run */
+/**
+ * The Who node's output of the workflow's newest run, read as the user who ran it (their client, else the
+ * stored data). P6-53: a run that used a private credential shows its data to that user only, so anyone
+ * else, the owner included, reads it redacted with no reveal.
+ */
 async function lastWho(s: Setup, workflowId: string): Promise<string | undefined> {
   const [run] = await executionsOf(server.ctx, s.tenantId, workflowId);
   await waitForExecution(server.ctx, s.tenantId, run.id, ['success']);
-  const execution = await s.owner.client.data<{ state: unknown }>(
-    s.owner.client.get(`/rest/executions/${run.id}`),
-  );
-  return outputOf(execution.state, 'Who')[0]?.who as string | undefined;
+  const stored = await server.ctx.repos.executions.getData(s.tenantId, run.id);
+  const runUser = stored?.runOptions.userId;
+  if (runUser !== s.owner.user.id) {
+    const asOwner = await s.owner.client.data<{ redactionInfo?: unknown }>(
+      s.owner.client.get(`/rest/executions/${run.id}`),
+    );
+    expect(asOwner.redactionInfo).toMatchObject({ isRedacted: true, canReveal: false });
+  }
+  const reader = [s.owner, s.editor, s.viewer].find((user) => user.user.id === runUser);
+  const state = reader
+    ? (await reader.client.data<{ state: unknown }>(reader.client.get(`/rest/executions/${run.id}`))).state
+    : stored?.state;
+  return outputOf(state, 'Who')[0]?.who as string | undefined;
 }
 
 // ---------------------------------------------------------------------------------------------

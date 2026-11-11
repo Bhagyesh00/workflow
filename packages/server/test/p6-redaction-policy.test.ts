@@ -18,6 +18,8 @@ import { auditLog } from '../src/db/schema';
 import { MISSING_SCOPE_MESSAGE } from '../src/services/access';
 import {
   assertRedactionChange,
+  clearTask,
+  inheritedChannels,
   pushableError,
   pushableTaskData,
   seedRedactionSettings,
@@ -27,6 +29,7 @@ import {
   addToProject,
   chain,
   createTestServer,
+  executionsOf,
   node,
   realMember,
   resetDatabase,
@@ -36,6 +39,7 @@ import {
   type TestServer,
   teamProjectOf,
   waitFor,
+  waitForExecution,
   workflowIn,
 } from './helpers';
 
@@ -346,6 +350,24 @@ describe('raising and lowering needs a scope', () => {
     const rename = await patchFlow(editor.client, id, { name: 'Edited by the editor' });
     expect(rename.statusCode).toBe(200);
   });
+
+  it("a create is judged in the project it goes to, not in the creator's personal project", async () => {
+    const owner = await fresh();
+    const team = await teamProjectOf(server, owner.tenant.id);
+    const editor = await realMember(owner);
+    await addToProject(server, owner.tenant.id, team, editor.user.id, 'project:editor');
+    for (const settings of [{ redactionPolicy: 'all' }, { redactCallerExecutions: false }]) {
+      const refused = await editor.client.post('/rest/workflows', { ...flow(settings), projectId: team });
+      expect(refused.statusCode, JSON.stringify(settings)).toBe(403);
+      expect(refused.json().error.message).toBe(MISSING_SCOPE_MESSAGE);
+    }
+    // with no redaction setting, and in the editor's own project, the create goes through
+    expect((await editor.client.post('/rest/workflows', { ...flow(), projectId: team })).statusCode).toBe(
+      200,
+    );
+    const own = await editor.client.post('/rest/workflows', { ...flow({ redactionPolicy: 'all' }) });
+    expect(own.statusCode).toBe(200);
+  });
 });
 
 describe('the snapshot a run takes', () => {
@@ -419,6 +441,182 @@ describe('the snapshot a run takes', () => {
       manual: false,
     });
   });
+
+  it("a sub-run inherits both channels once the channel of its parent's own mode is on", () => {
+    const manualOnly = { production: false, manual: true };
+    expect(inheritedChannels(manualOnly, 'manual')).toEqual({ production: true, manual: true });
+    expect(inheritedChannels(manualOnly, 'trigger')).toEqual(manualOnly);
+    expect(inheritedChannels({ production: true, manual: false }, 'integrated')).toEqual({
+      production: true,
+      manual: true,
+    });
+    expect(inheritedChannels(undefined, 'manual')).toBeUndefined();
+  });
+
+  /** a member who reads runs but cannot reveal them, the run of `childId` read as them */
+  async function childRunAs(owner: Owner, team: string, childId: string) {
+    const member = await realMember(owner);
+    await addToProject(server, owner.tenant.id, team, member.user.id, 'project:editor');
+    const [run] = await executionsOf(server.ctx, owner.tenant.id, childId);
+    expect(run, 'the child ran').toBeDefined();
+    return member.client.data(member.client.get(`/rest/executions/${run.id}`));
+  }
+
+  const called = (settings: Record<string, unknown>) => ({
+    name: `Called ${randomUUID().slice(0, 6)}`,
+    nodes: [node('Called', 'core.executeWorkflowTrigger'), setNode('Echo', 'seen', 'yes')],
+    connections: chain('Called', 'Echo'),
+    settings,
+  });
+  const caller = (settings: Record<string, unknown>, ...ids: string[]) => ({
+    name: `Caller ${randomUUID().slice(0, 6)}`,
+    nodes: [
+      node('Start', 'core.manualTrigger'),
+      setNode('Set', 'secret', 'canary-sub-value', [200, 0]),
+      ...ids.map((id, i) =>
+        node(`Call ${i + 1}`, 'test.callWorkflow', { workflowId: id }, [400 + 200 * i, 0]),
+      ),
+    ],
+    connections: chain('Start', 'Set', ...ids.map((_, i) => `Call ${i + 1}`)),
+    settings,
+  });
+  const runManually = async (owner: Owner, row: Parameters<typeof definitionOf>[0]) => {
+    const started = await server.ctx.executions.start({
+      tenantId: owner.tenant.id,
+      workflow: definitionOf(row),
+      workflowId: row.id,
+      mode: 'manual',
+      startNode: 'Start',
+      userId: owner.user.id,
+      wait: true,
+    });
+    await started.finished;
+  };
+
+  it('a manual parent that redacts its manual runs only still protects the child that holds its data', async () => {
+    const owner = await fresh();
+    const team = await teamProjectOf(server, owner.tenant.id);
+    const child = await workflowIn(server, owner.tenant.id, team, called({}));
+    // the legacy value, still accepted through the API
+    const parent = await workflowIn(
+      server,
+      owner.tenant.id,
+      team,
+      caller({ redactionPolicy: 'manual-only' }, child.id),
+    );
+    await runManually(owner, parent);
+    const detail = await childRunAs(owner, team, child.id);
+    expect(detail.redactionInfo).toMatchObject({ isRedacted: true, canReveal: false });
+    expect(JSON.stringify(detail.state)).not.toContain('canary-sub-value');
+  });
+
+  it('a later sub-workflow call starts from the channels an earlier callee raised', async () => {
+    const owner = await fresh();
+    const team = await teamProjectOf(server, owner.tenant.id);
+    const loud = await workflowIn(server, owner.tenant.id, team, called({ redactionPolicy: 'all' }));
+    const quiet = await workflowIn(server, owner.tenant.id, team, called({ redactionPolicy: 'none' }));
+    const parent = await workflowIn(
+      server,
+      owner.tenant.id,
+      team,
+      caller({ redactionPolicy: 'none' }, loud.id, quiet.id),
+    );
+    await runManually(owner, parent);
+    const detail = await childRunAs(owner, team, quiet.id);
+    expect(detail.redactionInfo).toMatchObject({
+      isRedacted: true,
+      reason: 'sub_workflow_redaction_policy',
+      canReveal: false,
+    });
+    expect(JSON.stringify(detail.state)).not.toContain('canary-sub-value');
+  });
+});
+
+describe('a retry', () => {
+  const failingChild = {
+    name: 'Failing child',
+    nodes: [
+      node('Called', 'core.executeWorkflowTrigger'),
+      setNode('Set', 'secret', 'canary-retry-value'),
+      node('Boom', 'core.stopAndError', { errorMessage: 'stopped here' }, [400, 0]),
+    ],
+    connections: chain('Called', 'Set', 'Boom'),
+    settings: {},
+  };
+
+  it('of a child redacted through its caller stays redacted for a project editor who retries it', async () => {
+    const owner = await fresh();
+    const team = await teamProjectOf(server, owner.tenant.id);
+    const editor = await realMember(owner);
+    await addToProject(server, owner.tenant.id, team, editor.user.id, 'project:editor');
+    const child = await workflowIn(server, owner.tenant.id, team, failingChild);
+    const parent = await workflowIn(server, owner.tenant.id, team, {
+      name: 'Redacting parent',
+      nodes: [
+        node('Start', 'core.manualTrigger'),
+        node('Call', 'test.callWorkflow', { workflowId: child.id }, [200, 0]),
+      ],
+      connections: chain('Start', 'Call'),
+      settings: { redactionPolicy: 'all' },
+    });
+    const started = await server.ctx.executions.start({
+      tenantId: owner.tenant.id,
+      workflow: definitionOf(parent),
+      workflowId: parent.id,
+      mode: 'manual',
+      startNode: 'Start',
+      userId: owner.user.id,
+      wait: true,
+    });
+    await started.finished;
+    const [original] = await executionsOf(server.ctx, owner.tenant.id, child.id);
+    const seen = await editor.client.data(editor.client.get(`/rest/executions/${original.id}`));
+    expect(seen.redactionInfo).toMatchObject({ isRedacted: true, canReveal: false });
+
+    const { executionId } = await editor.client.data<{ executionId: string }>(
+      editor.client.post(`/rest/executions/${original.id}/retry`, {}),
+    );
+    await waitForExecution(server.ctx, owner.tenant.id, executionId);
+    const retried = await editor.client.data(editor.client.get(`/rest/executions/${executionId}`));
+    expect(retried.redactionInfo).toMatchObject({ isRedacted: true, canReveal: false });
+    expect(JSON.stringify(retried.state)).not.toContain('canary-retry-value');
+  });
+
+  it('of a run that used a private connection is private to no one when another user retries it', async () => {
+    const owner = await fresh();
+    const team = await teamProjectOf(server, owner.tenant.id);
+    const editor = await realMember(owner);
+    await addToProject(server, owner.tenant.id, team, editor.user.id, 'project:editor');
+    const row = await workflowIn(server, owner.tenant.id, team, flow());
+    const id = randomUUID();
+    await server.ctx.repos.executions.create(
+      owner.tenant.id,
+      {
+        id,
+        workflowId: row.id,
+        workflowName: row.name,
+        mode: 'manual',
+        status: 'error',
+        usedPrivateCredentials: true,
+      },
+      {
+        workflowData: { ...definitionOf(row) } as unknown as Record<string, unknown>,
+        runOptions: { startNode: 'Start', userId: owner.user.id },
+      },
+    );
+    const { executionId } = await editor.client.data<{ executionId: string }>(
+      editor.client.post(`/rest/executions/${id}/retry`, {}),
+    );
+    await waitForExecution(server.ctx, owner.tenant.id, executionId);
+    for (const who of [editor, owner]) {
+      const read = await who.client.data(who.client.get(`/rest/executions/${executionId}`));
+      expect(read.redactionInfo).toMatchObject({
+        isRedacted: true,
+        reason: 'credential_access',
+        canReveal: false,
+      });
+    }
+  });
 });
 
 describe('the manual push', () => {
@@ -455,6 +653,35 @@ describe('the manual push', () => {
     expect(out.node).toBe('Boom');
     expect(JSON.stringify(out)).not.toContain('secret');
     expect(pushableError({ production: true, manual: false }, undefined, undefined)).toBeUndefined();
+  });
+
+  it("pushableError judges the channel of the run's own mode when it is given", () => {
+    const error = { name: 'Error', message: 'secret value', node: 'Boom' };
+    const production = { production: true, manual: false };
+    expect(pushableError(production, error, undefined, 'manual')).toBe(error);
+    expect(pushableError(production, error, undefined, 'trigger')?.message).not.toContain('secret');
+    expect(
+      pushableError({ production: false, manual: true }, error, undefined, 'manual')?.message,
+    ).not.toContain('secret');
+  });
+
+  it('clearTask keeps the engine metadata and drops what a node set', () => {
+    const cleared = clearTask({
+      ...task('x'),
+      metadata: {
+        subExecution: { executionId: 'e1' },
+        usedCredentialIds: ['c1'],
+        subWorkflowRedaction: { production: true, manual: true },
+        tracing: { userEmail: 'canary@example.com' },
+        resumeFormUrl: 'https://example.com/form-waiting/e1',
+      },
+    });
+    expect(cleared.metadata).toEqual({
+      subExecution: { executionId: 'e1' },
+      usedCredentialIds: ['c1'],
+      subWorkflowRedaction: { production: true, manual: true },
+    });
+    expect(clearTask({ ...task('x'), metadata: { tracing: { a: 1 } } }).metadata).toBeUndefined();
   });
 
   /** open GET /rest/push and collect the events */
@@ -534,6 +761,57 @@ describe('the manual push', () => {
       expect(finished.data.error.node).toBe('Boom');
     } finally {
       await push.close();
+    }
+  });
+
+  it("a manual run's node data reaches the user who ran it only; another reader gets the events cleared", async () => {
+    const owner = await fresh();
+    const team = await teamProjectOf(server, owner.tenant.id);
+    const reader = await realMember(owner);
+    await addToProject(server, owner.tenant.id, team, reader.user.id, 'project:viewer');
+    const wf = await workflowIn(server, owner.tenant.id, team, {
+      name: 'Shared run',
+      nodes: [
+        node('Start', 'core.manualTrigger'),
+        setNode('Set', 'greeting', 'canary-push-value'),
+        node(
+          'Code',
+          'core.code',
+          { mode: 'runOnceForAllItems', jsCode: 'console["log"]("canary-console"); return items;' },
+          [400, 0],
+        ),
+        node('Boom', 'core.stopAndError', { errorMessage: 'canary-error-text' }, [600, 0]),
+      ],
+      connections: chain('Start', 'Set', 'Code', 'Boom'),
+      settings: {},
+    });
+    const mine = await openPush(owner.client.cookie!);
+    const theirs = await openPush(reader.client.cookie!);
+    try {
+      await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/run`, {}));
+      for (const stream of [mine, theirs]) {
+        await waitFor(async () => stream.events.find((e) => e.event === 'executionFinished'), {
+          message: 'finish event',
+        });
+      }
+      // the control: the user who ran it sees it all
+      const own = JSON.stringify(mine.events);
+      for (const canary of ['canary-push-value', 'canary-console', 'canary-error-text']) {
+        expect(own).toContain(canary);
+      }
+      const seen = JSON.stringify(theirs.events);
+      for (const canary of ['canary-push-value', 'canary-console', 'canary-error-text']) {
+        expect(seen).not.toContain(canary);
+      }
+      expect(theirs.events.some((e) => e.event === 'consoleMessage')).toBe(false);
+      const after = theirs.events.filter((e) => e.event === 'nodeExecuteAfter');
+      expect(after.length).toBeGreaterThan(0);
+      for (const event of after) expect(event.data.taskData.data?.main?.[0] ?? []).toEqual([]);
+      const finished = theirs.events.find((e) => e.event === 'executionFinished')!;
+      expect(finished.data).toMatchObject({ status: 'error', error: { node: 'Boom' } });
+    } finally {
+      await mine.close();
+      await theirs.close();
     }
   });
 });

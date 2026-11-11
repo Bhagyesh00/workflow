@@ -8,9 +8,13 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { WorkflowSettings } from '@workflow/workflow';
 import { useState } from 'react';
-import { describe, expect, it } from 'vitest';
+import { act } from 'react';
+import { afterEach, describe, expect, it } from 'vitest';
+import { queryKeys } from '../src/api/queries';
 import { RedactionSettingsFields } from '../src/components/redaction/RedactionSettingsFields';
 import type { StoredExecution } from '../src/demo/mock-backend';
+import { useOpenWorkflowStore } from '../src/features/editor/open-resources';
+import { useWorkflowStore } from '../src/stores/workflow-store';
 import { addMembership, backend, signedIn } from './backend';
 import { renderApp, withProviders } from './utils';
 
@@ -118,6 +122,55 @@ describe('RedactionSettingsFields', () => {
     expect(seen.at(-1)?.redactCallerExecutions).toBe(false);
   });
 
+  describe('on a saved workflow, by its own scopes', () => {
+    afterEach(() => {
+      useOpenWorkflowStore.getState().clear();
+      useWorkflowStore.getState().reset();
+    });
+
+    /** a member of the workspace with `scopes` on the open workflow */
+    function openAsMember(scopes: string[]) {
+      const demo = signedIn();
+      signInAs(demo, 'member@example.com', 'member');
+      act(() => {
+        useWorkflowStore
+          .getState()
+          .load({ id: 'wf-open', name: 'Open flow', nodes: [], connections: {} } as never);
+        useOpenWorkflowStore
+          .getState()
+          .set({ id: 'wf-open', projectId: 'project-1', scopes: scopes as never });
+      });
+    }
+
+    it('turns every switch off for a project editor without the redaction scopes, and says why', async () => {
+      openAsMember(['workflow:read', 'workflow:update']);
+      withProviders(<Harness initial={{ redactionPolicy: 'non-manual' }} onChange={() => undefined} />);
+      const production = await screen.findByRole('switch', { name: 'Redact production runs' }, T);
+      await screen.findByText('You need permission to change data redaction.', undefined, T);
+      expect(production.hasAttribute('disabled')).toBe(true);
+      expect(screen.getByRole('switch', { name: 'Redact manual runs' }).hasAttribute('disabled')).toBe(true);
+      expect(screen.getByRole('switch', { name: "Redact callers' copies" }).hasAttribute('disabled')).toBe(
+        true,
+      );
+    });
+
+    it('lets a user who may only raise turn a switch on and back off, not lower what was saved', async () => {
+      openAsMember(['workflow:read', 'workflow:update', 'workflow:enableRedaction']);
+      const seen: WorkflowSettings[] = [];
+      withProviders(<Harness initial={{ redactionPolicy: 'non-manual' }} onChange={(s) => seen.push(s)} />);
+      const user = userEvent.setup();
+      const production = await screen.findByRole('switch', { name: 'Redact production runs' }, T);
+      await waitFor(() => expect(production.hasAttribute('disabled')).toBe(true));
+      const manual = screen.getByRole('switch', { name: 'Redact manual runs' });
+      expect(manual.hasAttribute('disabled')).toBe(false);
+      await user.click(manual);
+      expect(seen.at(-1)?.redactionPolicy).toBe('all');
+      // back to what was saved: no lowering
+      await user.click(screen.getByRole('switch', { name: 'Redact manual runs' }));
+      expect(seen.at(-1)?.redactionPolicy).toBe('non-manual');
+    });
+  });
+
   it('holds the switches on that the workspace floor requires', async () => {
     const demo = signedIn();
     const { tenant } = demo.auth();
@@ -202,6 +255,24 @@ describe('the execution page', () => {
     expect(within(dialog).getByText(/This action will be logged/)).toBeTruthy();
     await user.click(within(dialog).getByRole('button', { name: 'Reveal data' }));
     await waitFor(() => expect(screen.queryByText('The data of this execution is redacted')).toBeNull(), T);
+  });
+
+  it('keeps a revealed run on this page only: the shared cache and a later visit stay redacted', async () => {
+    const { run } = seedRun('manual', 'all');
+    const { queryClient, router } = renderApp(`/executions/${run.id}`);
+    const user = userEvent.setup();
+    await screen.findByText('The data of this execution is redacted', undefined, T);
+    await user.click(screen.getByRole('button', { name: 'Reveal data' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Reveal execution data' }, T);
+    await user.click(within(dialog).getByRole('button', { name: 'Reveal data' }));
+    await waitFor(() => expect(screen.queryByText('The data of this execution is redacted')).toBeNull(), T);
+    const cached = queryClient.getQueryData<{ redactionInfo?: { isRedacted: boolean } }>(
+      queryKeys.execution(run.id),
+    );
+    expect(cached?.redactionInfo?.isRedacted).toBe(true);
+    await act(() => router.navigate('/home/executions'));
+    await act(() => router.navigate(`/executions/${run.id}`));
+    await screen.findByText('The data of this execution is redacted', undefined, T);
   });
 
   it('shows a run that no channel redacts as it is', async () => {
