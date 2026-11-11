@@ -18,8 +18,11 @@ import type {
 import type { ExecutionRow } from '../../db/schema';
 import { computeTimeSavedMinutes } from './time-saved';
 
-/** the largest runtime stored (a Postgres int) */
+/** the largest runtime stored (a Postgres int); also the most one run adds as time saved */
 export const MAX_INSIGHT_RUNTIME_MS = 2_147_483_647;
+
+/** the most one buffered bucket holds: a sum past this loses digits in a double, and past 2^63 the bigint column refuses it */
+export const MAX_INSIGHT_BUCKET_VALUE = Number.MAX_SAFE_INTEGER;
 
 /** the stored event types (`insights_by_period.type`) */
 export const INSIGHT_TYPES = { time_saved_min: 0, runtime_ms: 1, success: 2, failure: 3 } as const;
@@ -37,6 +40,8 @@ export interface InsightRun {
   mode: ExecutionMode;
   status: ExecutionStatus;
   startedAt: Date;
+  /** when the run ended (n8n stamps an insight when it is recorded); the bucket hour. Absent: `startedAt`. */
+  endedAt?: Date;
   /** 0..MAX_INSIGHT_RUNTIME_MS */
   runtimeMs: number;
   settings: WorkflowSettings;
@@ -61,6 +66,7 @@ export function insightRunOf(
   definition: Pick<WorkflowDefinition, 'name' | 'settings'>,
   outcome: { status: ExecutionStatus; runData?: RunData | null },
   durationMs: number,
+  endedAt: Date = new Date(),
 ): InsightRun {
   return {
     tenantId: row.tenantId,
@@ -69,6 +75,7 @@ export function insightRunOf(
     mode: row.mode as ExecutionMode,
     status: outcome.status,
     startedAt: row.startedAt ?? row.createdAt,
+    endedAt,
     runtimeMs: clampRuntime(durationMs),
     settings: definition.settings ?? {},
     runData: outcome.runData ?? null,
@@ -103,6 +110,9 @@ export function countingFacts(run: InsightRun): InsightFacts {
     { type: 'runtime_ms', value: clampRuntime(run.runtimeMs) },
   ];
   const saved = computeTimeSavedMinutes(run.settings, run.runData, run.status, run.mode);
-  if (saved !== undefined && saved > 0) facts.push({ type: 'time_saved_min', value: Math.round(saved) });
+  if (saved !== undefined && saved > 0) {
+    // one run adds at most a runtime's worth: an expression or a setting cannot poison the shared flush
+    facts.push({ type: 'time_saved_min', value: Math.min(MAX_INSIGHT_RUNTIME_MS, Math.round(saved)) });
+  }
   return facts;
 }

@@ -8,7 +8,13 @@
  */
 import type { ServiceDeps } from '../../context';
 import type { InsightsPeriodInput } from '../../repositories/insights';
-import { countingFacts, INSIGHT_TYPES, type InsightRun, type InsightType } from './rules';
+import {
+  countingFacts,
+  INSIGHT_TYPES,
+  type InsightRun,
+  type InsightType,
+  MAX_INSIGHT_BUCKET_VALUE,
+} from './rules';
 
 const HOUR_MS = 3_600_000;
 /** the foreign key error of Postgres: a metadata row (or the workspace) is gone */
@@ -57,13 +63,13 @@ export class InsightsCollector {
     try {
       const facts = countingFacts(run);
       if (facts.length === 0 || !run.workflowId) return;
-      const hour = Math.floor(run.startedAt.getTime() / HOUR_MS) * HOUR_MS;
+      const hour = Math.floor((run.endedAt ?? run.startedAt).getTime() / HOUR_MS) * HOUR_MS;
       if (!Number.isFinite(hour)) return;
       for (const fact of facts) {
         const bucket = { tenantId: run.tenantId, workflowId: run.workflowId, type: fact.type, hour };
         const key = bucketKey(bucket);
         const held = this.buffer.get(key);
-        if (held) held.value += fact.value;
+        if (held) held.value = Math.min(MAX_INSIGHT_BUCKET_VALUE, held.value + fact.value);
         else this.buffer.set(key, { ...bucket, value: fact.value });
       }
       if (this.buffer.size >= this.deps.config.insights.flushBatchSize) this.scheduleFlush();
@@ -143,7 +149,7 @@ export class InsightsCollector {
   private putBack(batch: Map<string, Bucket>): void {
     for (const [key, bucket] of batch) {
       const held = this.buffer.get(key);
-      if (held) held.value += bucket.value;
+      if (held) held.value = Math.min(MAX_INSIGHT_BUCKET_VALUE, held.value + bucket.value);
       else this.buffer.set(key, bucket);
     }
   }

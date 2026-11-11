@@ -34,6 +34,9 @@ export interface InsightsWorkflowInfo {
 
 const UNIT_NAMES = { 1: 'day', 2: 'week' } as const;
 
+/** the largest bigint: a sum stops here, so one bucket never fails the statement that holds other tenants' rows */
+const BIGINT_MAX = '9223372036854775807';
+
 /** one advisory lock for the compaction, cluster wide */
 const COMPACTION_LOCK = 'insights:compaction';
 
@@ -105,14 +108,15 @@ export class InsightsRepository {
     );
     await this.db.execute(sql`
       insert into insights_by_period (tenant_id, meta_id, type, period_unit, period_start, value)
-      select x.tenant_id, x.meta_id, x.type, x.period_unit, x.period_start, sum(x.value)
+      select x.tenant_id, x.meta_id, x.type, x.period_unit, x.period_start,
+        least(sum(x.value), ${sql.raw(BIGINT_MAX)})
       from jsonb_to_recordset(${json}::jsonb) as x(
         tenant_id uuid, meta_id bigint, type smallint, period_unit smallint, period_start timestamptz, value bigint
       )
       group by x.tenant_id, x.meta_id, x.type, x.period_unit, x.period_start
       order by x.tenant_id, x.meta_id, x.type, x.period_unit, x.period_start
       on conflict (tenant_id, meta_id, type, period_unit, period_start)
-      do update set value = insights_by_period.value + excluded.value
+      do update set value = least(insights_by_period.value::numeric + excluded.value, ${sql.raw(BIGINT_MAX)})::bigint
     `);
   }
 
@@ -173,7 +177,7 @@ export class InsightsRepository {
           for update
         ),
         rolled as (
-          select tenant_id, meta_id, type, new_start, sum(value) as value
+          select tenant_id, meta_id, type, new_start, least(sum(value), ${sql.raw(BIGINT_MAX)}) as value
           from batch
           group by tenant_id, meta_id, type, new_start
         ),
@@ -183,7 +187,7 @@ export class InsightsRepository {
           from rolled
           order by tenant_id, meta_id, type, new_start
           on conflict (tenant_id, meta_id, type, period_unit, period_start)
-          do update set value = insights_by_period.value + excluded.value
+          do update set value = least(insights_by_period.value::numeric + excluded.value, ${sql.raw(BIGINT_MAX)})::bigint
           returning 1
         ),
         removed as (

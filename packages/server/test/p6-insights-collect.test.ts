@@ -6,7 +6,13 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { InsightsCollector } from '../src/services/insights/collector';
-import { countingFacts, type InsightRun, insightRunOf } from '../src/services/insights/rules';
+import {
+  countingFacts,
+  type InsightRun,
+  insightRunOf,
+  MAX_INSIGHT_BUCKET_VALUE,
+  MAX_INSIGHT_RUNTIME_MS,
+} from '../src/services/insights/rules';
 import {
   chain,
   createTestServer,
@@ -172,6 +178,55 @@ describe('counting rules', () => {
       B: [{ metadata: {} }],
     } as never;
     expect(run({ settings: dynamic, runData }).time_saved_min).toBe(7);
+  });
+});
+
+describe('time saved is capped', () => {
+  const savedOf = (over: Partial<InsightRun>) =>
+    countingFacts(runOf(randomUUID(), randomUUID(), over)).find((f) => f.type === 'time_saved_min')?.value;
+
+  it('one run adds at most 2^31-1 minutes, from a setting, an expression or an overflow', () => {
+    expect(savedOf({ settings: { timeSavedPerExecution: Number.MAX_SAFE_INTEGER } })).toBe(
+      MAX_INSIGHT_RUNTIME_MS,
+    );
+    const dynamic = { timeSavedMode: 'dynamic' as const };
+    const huge = (minutes: number) => ({ A: [{ metadata: { timeSaved: { minutes } } }] }) as never;
+    expect(savedOf({ settings: dynamic, runData: huge(1e300) })).toBe(MAX_INSIGHT_RUNTIME_MS);
+    expect(savedOf({ settings: dynamic, runData: huge(Number.MAX_VALUE) })).toBe(MAX_INSIGHT_RUNTIME_MS);
+    expect(savedOf({ settings: { timeSavedPerExecution: 7 } })).toBe(7);
+  });
+
+  it('one huge run never stops the flush of other tenants', async () => {
+    const a = await signup(server.app);
+    const b = await signup(server.app);
+    const wa = await workflowIn(server, a.tenant.id, await teamProjectOf(server, a.tenant.id));
+    const wb = await workflowIn(server, b.tenant.id, await teamProjectOf(server, b.tenant.id));
+    const at = new Date('2026-03-04T10:15:00Z');
+    const dynamic = { timeSavedMode: 'dynamic' as const };
+    // 1e300 minutes (an expression) and 1100 runs at the largest fixed setting, all in one hour
+    server.ctx.insights.record(
+      runOf(a.tenant.id, wa.id, {
+        startedAt: at,
+        settings: dynamic,
+        runData: { A: [{ metadata: { timeSaved: { minutes: 1e300 } } }] } as never,
+      }),
+    );
+    for (let i = 0; i < 1100; i++) {
+      server.ctx.insights.record(
+        runOf(a.tenant.id, wa.id, {
+          startedAt: at,
+          settings: { timeSavedPerExecution: Number.MAX_SAFE_INTEGER },
+        }),
+      );
+    }
+    server.ctx.insights.record(runOf(b.tenant.id, wb.id, { startedAt: at }));
+    await server.ctx.insights.flush();
+    const saved = await server.ctx.database.pool.query(
+      'select value::text as value from insights_by_period where tenant_id = $1 and type = 0',
+      [a.tenant.id],
+    );
+    expect(Number(saved.rows[0].value)).toBe(1101 * MAX_INSIGHT_RUNTIME_MS);
+    expect((await periodRows(b.tenant.id)).reduce((s, r) => s + r.value, 0)).toBeGreaterThan(0);
   });
 });
 
@@ -341,6 +396,67 @@ describe('the buffer', () => {
     // the buffer was emptied: another flush writes nothing
     await insights.flush();
     expect((await periodRows(owner.tenant.id)).reduce((s, r) => s + r.value, 0)).toBe(40 + 3 + 1 + 20 + 2);
+  });
+
+  it('buckets a run by the hour it ended, not the hour it started', async () => {
+    const owner = await signup(server.app);
+    const workflow = await workflowIn(server, owner.tenant.id, await teamProjectOf(server, owner.tenant.id));
+    // a run that waited two days: started Monday 10:15, ended Wednesday 12:40
+    server.ctx.insights.record(
+      runOf(owner.tenant.id, workflow.id, {
+        startedAt: new Date('2026-03-02T10:15:00Z'),
+        endedAt: new Date('2026-03-04T12:40:00Z'),
+      }),
+    );
+    await server.ctx.insights.flush();
+    const starts = (
+      await server.ctx.database.pool.query(
+        'select distinct period_start from insights_by_period where tenant_id = $1',
+        [owner.tenant.id],
+      )
+    ).rows.map((r) => new Date(r.period_start).toISOString());
+    expect(starts).toEqual(['2026-03-04T12:00:00.000Z']);
+  });
+
+  it('insightRunOf stamps the end of the run, now unless given', () => {
+    const row = { tenantId: randomUUID(), workflowId: randomUUID(), workflowName: 'x', mode: 'webhook' };
+    const before = Date.now();
+    const run = insightRunOf(
+      { ...row, startedAt: null, createdAt: new Date(0) } as never,
+      { name: 'x' },
+      { status: 'success' },
+      5,
+    );
+    expect(run.startedAt.getTime()).toBe(0);
+    expect(run.endedAt?.getTime()).toBeGreaterThanOrEqual(before);
+    const stopped = new Date('2026-01-01T00:00:00Z');
+    expect(
+      insightRunOf(
+        { ...row, startedAt: null, createdAt: new Date(0) } as never,
+        { name: 'x' },
+        { status: 'success' },
+        5,
+        stopped,
+      ).endedAt,
+    ).toBe(stopped);
+  });
+
+  it('a buffered bucket holds at most 2^53-1', async () => {
+    const owner = await signup(server.app);
+    const workflow = await workflowIn(server, owner.tenant.id, await teamProjectOf(server, owner.tenant.id));
+    const at = new Date('2026-03-04T10:15:00Z');
+    const held = (server.ctx.insights as unknown as { buffer: Map<string, { type: string; value: number }> })
+      .buffer;
+    for (let i = 0; i < 3; i++) {
+      server.ctx.insights.record(
+        runOf(owner.tenant.id, workflow.id, { startedAt: at, runtimeMs: MAX_INSIGHT_RUNTIME_MS }),
+      );
+    }
+    expect([...held.values()].find((b) => b.type === 'runtime_ms')?.value).toBe(3 * MAX_INSIGHT_RUNTIME_MS);
+    for (const b of held.values()) b.value = MAX_INSIGHT_BUCKET_VALUE - 1;
+    server.ctx.insights.record(runOf(owner.tenant.id, workflow.id, { startedAt: at, runtimeMs: 5 }));
+    expect([...held.values()].every((b) => b.value <= MAX_INSIGHT_BUCKET_VALUE)).toBe(true);
+    await server.ctx.insights.flush();
   });
 
   it('flushes by itself when the buffer holds flushBatchSize keys', async () => {

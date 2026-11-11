@@ -305,6 +305,7 @@ describe('insightRunOf', () => {
       mode: 'webhook',
       status: 'success',
       startedAt: row.startedAt,
+      endedAt: expect.any(Date),
       runtimeMs: 1234,
       settings: { timeSavedPerExecution: 3 },
       runData,

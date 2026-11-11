@@ -82,6 +82,51 @@ const totalsOf = async (s: TestServer, tenantId: string) => {
   return totals;
 };
 
+describe('sums past the bigint maximum', () => {
+  const BIGINT_MAX = '9223372036854775807';
+  const textOf = async (tenantId: string) =>
+    (
+      await server.ctx.database.pool.query(
+        'select period_unit as unit, value::text as value from insights_by_period where tenant_id = $1 order by period_unit, period_start',
+        [tenantId],
+      )
+    ).rows as Array<{ unit: number; value: string }>;
+
+  it('addPeriods stops at the maximum for one statement and for a row that exists', async () => {
+    const owner = await signup(server.app);
+    const old = dayOf(Date.now() - 100 * DAY);
+    const { metaId } = await seeded(server, owner, []);
+    const row = (value: number) => ({
+      tenantId: owner.tenant.id,
+      metaId,
+      type: 0 as const,
+      periodUnit: 0 as const,
+      periodStart: new Date(old + 2 * HOUR),
+      value,
+    });
+    // 1100 rows of 2^53-1 add up to more than 2^63-1
+    await server.ctx.repos.insights.addPeriods(
+      Array.from({ length: 1100 }, () => row(Number.MAX_SAFE_INTEGER)),
+    );
+    expect(await textOf(owner.tenant.id)).toEqual([{ unit: 0, value: BIGINT_MAX }]);
+    await server.ctx.repos.insights.addPeriods([row(5)]);
+    expect(await textOf(owner.tenant.id)).toEqual([{ unit: 0, value: BIGINT_MAX }]);
+  });
+
+  it('compaction stops at the maximum when the hours of a day are added up', async () => {
+    const owner = await signup(server.app);
+    const old = dayOf(Date.now() - 100 * DAY);
+    const { metaId } = await seeded(server, owner, []);
+    await server.ctx.database.pool.query(
+      `insert into insights_by_period (tenant_id, meta_id, type, period_unit, period_start, value)
+       values ($1, $2, 0, 0, $3, 6000000000000000000), ($1, $2, 0, 0, $4, 6000000000000000000)`,
+      [owner.tenant.id, metaId, new Date(old + 2 * HOUR), new Date(old + 5 * HOUR)],
+    );
+    expect(await server.ctx.insightsCompaction.runOnce(new Date())).toMatchObject({ hourToDay: 2 });
+    expect(await textOf(owner.tenant.id)).toEqual([{ unit: 1, value: BIGINT_MAX }]);
+  });
+});
+
 describe('compaction', () => {
   it('rolls hours older than 90 days into days and leaves newer hours', async () => {
     const owner = await signup(server.app);

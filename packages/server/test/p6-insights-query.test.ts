@@ -141,7 +141,9 @@ describe('summary', () => {
       ranges.map(([key, , granularity]) => [key, true, granularity]),
     );
     for (const [key, days, granularity] of ranges) {
-      const query = `?startDate=${new Date(Date.now() - days * DAY).toISOString()}&endDate=${new Date().toISOString()}`;
+      // one clock read: an end a millisecond after start + 1 day would make the 'day' range a two-day one
+      const now = Date.now();
+      const query = `?startDate=${new Date(now - days * DAY).toISOString()}&endDate=${new Date(now).toISOString()}`;
       expect((await get(owner.client, `/summary${query}`)).total.value, key).toBe(1);
       const [bucket, ...rest] = await get<Array<{ date: string; values: Record<string, number> }>>(
         owner.client,
