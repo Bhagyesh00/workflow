@@ -58,6 +58,7 @@ import {
 } from '../features/workflows/folder-dnd';
 import { downloadJson, formatRelative, safeFileName } from '../lib/format';
 import { usePermissions } from '../lib/permissions';
+import { useRestrictedTypes } from '../lib/policy-violations';
 import { parseClipboard, withFreshWebhookIds } from '../lib/workflow-ops';
 import { openProjectDialog } from '../stores/project-dialog-store';
 import { toast, useUiStore } from '../stores/ui-store';
@@ -372,10 +373,13 @@ function WorkflowRow({
   workflow,
   showProject,
   onMove,
+  blocked = false,
 }: {
   workflow: WorkflowSummary;
   showProject: boolean;
   onMove: () => void;
+  /** P6-50: a type policy blocks this workflow from running (it holds a restricted node type) */
+  blocked?: boolean;
 }) {
   const { can } = usePermissions();
   // every gate reads this workflow's own scopes (its project's role, a share), else the workspace role's
@@ -544,6 +548,11 @@ function WorkflowRow({
             {workflow.name}
           </Link>
           {workflow.isArchived && <Badge tone="warn">Archived</Badge>}
+          {blocked && (
+            <span title="A node type in this workflow is blocked by a policy, so it cannot run">
+              <Badge tone="err">Blocked by policy</Badge>
+            </span>
+          )}
           {workflow.usesPrivateCredentials && <PrivateCredentialsMark label="Uses private credentials" />}
           {/* P6-86 (L18): "used by" count, batched for the page */}
           <DependencyPill kind="workflow" id={workflow.id} />
@@ -678,6 +687,9 @@ export function WorkflowsPage() {
   const [tagId, setTagId] = useState('');
   const [status, setStatus] = useState<'all' | 'active' | 'inactive'>('all');
   const [showArchived, setShowArchived] = useState(false);
+  // P6-50: only workflows holding a node type a policy blocks
+  const [blockedOnly, setBlockedOnly] = useState(false);
+  const { restricted } = useRestrictedTypes();
   const [folderDialog, setFolderDialog] = useState<
     { mode: 'create' } | { mode: 'rename'; folder: Folder } | null
   >(null);
@@ -688,7 +700,7 @@ export function WorkflowsPage() {
   const setImportOpen = useUiStore((s) => s.setImportOpen);
   useEffect(() => () => setImportOpen(false), [setImportOpen]);
   const deferredSearch = useDeferredValue(search.trim());
-  const filtering = Boolean(deferredSearch || tagId || status !== 'all');
+  const filtering = Boolean(deferredSearch || tagId || status !== 'all' || blockedOnly);
   const folder = useFolder(folderId);
   // a search looks through every folder; browsing lists one folder
   const parentScope = filtering ? undefined : (folderId ?? 'root');
@@ -705,7 +717,15 @@ export function WorkflowsPage() {
   const query = useInfiniteQuery({
     queryKey: [
       'workflows',
-      { search: deferredSearch, tagId, status, scope: parentScope, showArchived, ...listFilter },
+      {
+        search: deferredSearch,
+        tagId,
+        status,
+        scope: parentScope,
+        showArchived,
+        blockedOnly,
+        ...listFilter,
+      },
     ],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
@@ -715,6 +735,7 @@ export function WorkflowsPage() {
         active: status === 'all' ? undefined : status === 'active',
         folderId: parentScope,
         archived: showArchived ? 'all' : undefined,
+        executionBlockedBy: blockedOnly ? 'restrictedNode' : undefined,
         limit: 50,
         cursor: pageParam,
         ...listFilter,
@@ -824,6 +845,11 @@ export function WorkflowsPage() {
           checked={showArchived}
           onChange={(e) => setShowArchived(e.target.checked)}
         />
+        <Checkbox
+          label="Blocked by a policy"
+          checked={blockedOnly}
+          onChange={(e) => setBlockedOnly(e.target.checked)}
+        />
       </div>
       <section
         className="overflow-hidden rounded-2xl border border-line bg-surface shadow-card"
@@ -905,6 +931,10 @@ export function WorkflowsPage() {
                 key={w.id}
                 workflow={w}
                 showProject={scope.kind !== 'project'}
+                blocked={
+                  blockedOnly ||
+                  (scope.kind === 'project' && w.nodeTypes.some((type) => restricted.has(type)))
+                }
                 onMove={() =>
                   setMoving({
                     kind: 'workflow',

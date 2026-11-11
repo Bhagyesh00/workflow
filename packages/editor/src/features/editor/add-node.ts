@@ -7,6 +7,7 @@
  */
 import type { NodeParameters, NodeTypeDescription } from '@workflow/workflow';
 import { createNodeFromDescription } from '../../lib/node-catalog';
+import { restrictedEntry, restrictedToast } from '../../lib/policy-violations';
 import { deriveNodePorts, isTriggerDescription } from '../../lib/ports';
 import { replaceNode } from '../../lib/replace-node';
 import { type ConnectionRef, getNode } from '../../lib/workflow-ops';
@@ -46,6 +47,12 @@ export function addNodeFromDescription(description: NodeTypeDescription, ctx: Ad
   const ui = useUiStore.getState();
   const s = useWorkflowStore.getState();
   if (s.readOnly) return null;
+  // P6-50: a type a policy blocks is never added (the server refuses it on save, publish and run anyway)
+  if (restrictedEntry(description.name)) {
+    const text = restrictedToast(description.displayName);
+    toast.error(text.title, text.description);
+    return null;
+  }
   const parameters = ctx.parameters;
 
   if (ui.replaceTarget) return replaceWith(description, ui.replaceTarget, ctx);

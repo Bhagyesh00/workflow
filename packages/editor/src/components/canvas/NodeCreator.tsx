@@ -3,9 +3,13 @@ import type { ConnectionType, NodeParameters, NodeTypeDescription } from '@workf
 import { ChevronLeft, ChevronRight, Search, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { buildCatalog, type CatalogEntry, filterCatalog } from '../../lib/node-catalog';
+import { restrictedToast, useRestrictedTypes } from '../../lib/policy-violations';
 import { AI_PORT_LABELS, isTriggerDescription } from '../../lib/ports';
+import { toast } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { NodeIcon } from '../NodeIcon';
+import { ContactAdminDialog } from '../policies/ContactAdminDialog';
+import { RestrictedNodePopover } from '../policies/RestrictedNodePopover';
 import { cx } from '../ui/cx';
 import { EmptyState } from '../ui/misc';
 
@@ -32,6 +36,8 @@ export function NodeCreator({
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<CatalogEntry | null>(null);
   const [active, setActive] = useState(0);
+  const [contact, setContact] = useState<CatalogEntry | null>(null);
+  const { restricted } = useRestrictedTypes();
   const inputRef = useRef<HTMLInputElement>(null);
   // replace mode (P3-11): a trigger is replaced by triggers only, any other node by non-triggers
   const replacedType = useWorkflowStore((s) =>
@@ -47,8 +53,8 @@ export function NodeCreator({
       : all;
   }, [nodeTypes, replaceFor, replaceTriggers]);
   const sections = useMemo(
-    () => filterCatalog(catalog, { query, needsMainInput, outputType, noTriggerYet }),
-    [catalog, query, needsMainInput, outputType, noTriggerYet],
+    () => filterCatalog(catalog, { query, needsMainInput, outputType, noTriggerYet, restricted }),
+    [catalog, query, needsMainInput, outputType, noTriggerYet, restricted],
   );
   const flat = useMemo(() => sections.flatMap((s) => s.entries), [sections]);
 
@@ -57,6 +63,12 @@ export function NodeCreator({
   }, []);
 
   const choose = (entry: CatalogEntry) => {
+    // P6-50: a blocked type is listed but never added
+    if (restricted.has(entry.description.name)) {
+      const text = restrictedToast(entry.description.displayName);
+      toast.error(text.title, text.description);
+      return;
+    }
     if (entry.actions.length > 1) {
       setExpanded(entry);
       return;
@@ -191,14 +203,17 @@ export function NodeCreator({
                 {section.entries.map((entry) => {
                   index += 1;
                   const isActive = index === active;
+                  const lock = restricted.get(entry.description.name);
                   return (
-                    <li key={entry.description.name}>
+                    <li key={entry.description.name} className={lock ? 'flex items-center' : undefined}>
                       <button
                         type="button"
                         className={cx(
                           'flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left',
                           isActive ? 'bg-brand-soft' : 'hover:bg-surface-3',
+                          lock && 'min-w-0 flex-1 opacity-50',
                         )}
+                        aria-disabled={lock ? true : undefined}
                         onClick={() => choose(entry)}
                         data-testid={`creator-item-${entry.description.name}`}
                       >
@@ -223,10 +238,17 @@ export function NodeCreator({
                             {entry.description.description}
                           </span>
                         </span>
-                        {entry.actions.length > 1 && (
+                        {!lock && entry.actions.length > 1 && (
                           <ChevronRight size={14} className="text-ink-3" aria-hidden="true" />
                         )}
                       </button>
+                      {lock && (
+                        <RestrictedNodePopover
+                          entry={lock}
+                          displayName={entry.description.displayName}
+                          onContactAdmin={() => setContact(entry)}
+                        />
+                      )}
                     </li>
                   );
                 })}
@@ -235,6 +257,12 @@ export function NodeCreator({
           ))
         )}
       </div>
+      <ContactAdminDialog
+        open={contact !== null}
+        onClose={() => setContact(null)}
+        type={contact?.description.name ?? ''}
+        displayName={contact?.description.displayName}
+      />
     </aside>
   );
 }

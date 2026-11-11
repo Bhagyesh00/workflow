@@ -20,6 +20,7 @@ import {
 import { memo } from 'react';
 import type { PortSpec } from '../../lib/ports';
 import { NodeIcon } from '../NodeIcon';
+import { CanvasLockBadge } from '../policies/CanvasLockBadge';
 import { cx } from '../ui/cx';
 import { Spinner } from '../ui/misc';
 import { useCanvasActions } from './actions';
@@ -258,6 +259,7 @@ export const CanvasNode = memo(function CanvasNode({ data, selected }: NodeProps
             />
           ))}
           <StatusBadge status={status} pinned={pinned} errors={errors} dirty={dirty} />
+          <CanvasLockBadge nodeType={node.type} />
         </div>
         <p
           className="wf-node-title mt-2 max-w-[140px] text-center text-xs leading-tight font-semibold text-ink"
@@ -378,6 +380,7 @@ export const CanvasNode = memo(function CanvasNode({ data, selected }: NodeProps
           />
         ))}
         <StatusBadge status={status} pinned={pinned} errors={errors} dirty={dirty} />
+        <CanvasLockBadge nodeType={node.type} />
       </div>
       {isRoot && (
         // AI inputs hang below the module: label, "+" to add a sub-node, then the port itself,

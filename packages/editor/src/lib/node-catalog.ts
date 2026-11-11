@@ -149,6 +149,8 @@ export interface CatalogFilter {
   outputType?: ConnectionType;
   /** the workflow has no trigger yet: list triggers first */
   noTriggerYet?: boolean;
+  /** P6-50: node types a policy blocks; their rows stay listed but sort last in their section */
+  restricted?: { has(type: string): boolean };
 }
 
 export interface CatalogSection {
@@ -171,7 +173,25 @@ function variantOf(entry: CatalogEntry): 'tool' | 'hitl' | undefined {
   return isToolVariant(entry.description) ? 'tool' : undefined;
 }
 
+/** P6-50: inside each section the blocked types go last (the order of the rest is kept) */
+function restrictedLast(sections: CatalogSection[], filter: CatalogFilter): CatalogSection[] {
+  const blocked = filter.restricted;
+  if (!blocked) return sections;
+  return sections.map((section) => {
+    const isBlocked = (e: CatalogEntry) => blocked.has(e.description.name);
+    if (!section.entries.some(isBlocked)) return section;
+    return {
+      ...section,
+      entries: [...section.entries.filter((e) => !isBlocked(e)), ...section.entries.filter(isBlocked)],
+    };
+  });
+}
+
 export function filterCatalog(catalog: CatalogEntry[], filter: CatalogFilter): CatalogSection[] {
+  return restrictedLast(filterCatalogEntries(catalog, filter), filter);
+}
+
+function filterCatalogEntries(catalog: CatalogEntry[], filter: CatalogFilter): CatalogSection[] {
   // the variants belong to the tool picker only: everywhere else the node itself is listed
   let entries = filter.outputType === 'ai_tool' ? catalog : catalog.filter((e) => !variantOf(e));
   if (filter.outputType) entries = entries.filter((e) => e.outputTypes.includes(filter.outputType!));
