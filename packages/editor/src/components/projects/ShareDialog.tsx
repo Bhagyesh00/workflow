@@ -10,6 +10,7 @@ import { credentialsApi, projectsApi, sharingApi, workflowsApi } from '../../api
 import { queryKeys } from '../../api/queries';
 import type { ProjectOwnedFields, ProjectRef } from '../../api/types';
 import { toast } from '../../stores/ui-store';
+import { DependencyDetails } from '../dependencies/DependencyDetails';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { Checkbox, Switch, TextInput } from '../ui/Field';
@@ -146,6 +147,15 @@ export function ShareDialog({ resource, id, onClose }: ShareDialogProps) {
                 </fieldset>
               </>
             )}
+          </div>
+        )}
+        {resource === 'credential' && (
+          <div className="flex flex-col gap-1">
+            <p className="font-semibold text-ink">Used by</p>
+            <p className="text-ink-3">
+              Workflows in a project you stop sharing with lose access to this credential.
+            </p>
+            <DependencyDetails kind="credential" id={id} onClose={onClose} />
           </div>
         )}
         <p className="text-ink-3">{MOVE_REMOVES_SHARING_TEXT}</p>

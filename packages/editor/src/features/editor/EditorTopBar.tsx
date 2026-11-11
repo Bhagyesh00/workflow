@@ -14,6 +14,7 @@ import {
   Keyboard,
   Link2,
   MoreHorizontal,
+  Network,
   Rocket,
   Settings2,
   Sparkles,
@@ -33,6 +34,7 @@ import { Badge, Kbd } from '../../components/ui/misc';
 import { TagsEditor } from '../../components/workflow/TagsEditor';
 import type { DoctorIssue } from '../../lib/doctor';
 import { useBuilderStore } from '../../stores/builder-store';
+import { openDependencyDetails } from '../../stores/dependency-dialog-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { AutosaveStatus } from './AutosaveStatus';
@@ -242,6 +244,13 @@ export function EditorTopBar({
             label: 'Version history',
             icon: <History size={14} />,
             onSelect: () => setSidePanel('versions'),
+          },
+          {
+            key: 'dependencies',
+            label: 'Dependencies',
+            icon: <Network size={14} />,
+            onSelect: () => meta.id && openDependencyDetails('workflow', meta.id, meta.name),
+            disabled: !meta.id,
           },
           {
             key: 'settings',

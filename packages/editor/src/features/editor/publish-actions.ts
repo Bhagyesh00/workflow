@@ -9,8 +9,9 @@
  */
 import { create } from 'zustand';
 import { errorMessage } from '../../api/client';
-import { workflowsApi } from '../../api/endpoints';
+import { dependenciesApi, workflowsApi } from '../../api/endpoints';
 import type { PublishBody } from '../../api/types';
+import { confirmUnpublish } from '../../stores/dependency-dialog-store';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { reviewGate } from '../reviews/review-publish';
@@ -92,10 +93,25 @@ export async function publishWorkflow(deps: EditorDeps, body: PublishBody = {}):
   }
 }
 
+/** the published workflows that depend on `workflowId`; none when the lookup fails, so it never blocks an unpublish */
+async function publishedDependents(workflowId: string) {
+  try {
+    const rows = (await dependenciesApi.details('workflow', [workflowId]))[workflowId] ?? [];
+    return rows.filter(
+      (row) => (row.key === 'workflowParent' || row.key === 'errorWorkflowParent') && row.active === true,
+    );
+  } catch {
+    return [];
+  }
+}
+
 /** Resolves true when the workflow is unpublished afterwards. */
 export async function unpublishWorkflow(_deps: EditorDeps): Promise<boolean> {
-  const id = useWorkflowStore.getState().meta.id;
+  const { id, name } = useWorkflowStore.getState().meta;
   if (!id) return false;
+  // P6-86: published workflows that call this one or name it as their error workflow are listed first
+  const dependents = await publishedDependents(id);
+  if (dependents.length > 0 && !(await confirmUnpublish(id, name, dependents))) return false;
   try {
     const dto = await workflowsApi.deactivate(id);
     useWorkflowStore.getState().setPublished(dto.publishedVersionId, dto.versionId);

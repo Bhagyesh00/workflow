@@ -74,7 +74,11 @@ describe('public API data tables', () => {
     expect(listed.nextCursor).toBeNull();
     const renamed = await api(key, 'PATCH', `/data-tables/${table.id}`, { name: 'staff' });
     expect(renamed.json().data.name).toBe('staff');
-    expect((await api(key, 'GET', `/data-tables/${table.id}/dependencies`)).json().data).toEqual([]);
+    // P6-86: the same paged shape as the workflow and credential dependency routes
+    expect((await api(key, 'GET', `/data-tables/${table.id}/dependencies`)).json()).toEqual({
+      data: [],
+      nextCursor: null,
+    });
     expect((await api(key, 'DELETE', `/data-tables/${table.id}`)).json().data).toBe(true);
     expect((await api(key, 'GET', `/data-tables/${table.id}`)).statusCode).toBe(404);
   });

@@ -138,10 +138,10 @@ export const publicDataTableHandlers: Record<PublicDataTableHandler, Handler> = 
     await ctx.dataTables.delete(input.auth.tenant.id, input.params.dataTableId, actorOf(input));
     return { data: true };
   },
-  dependencies: async (ctx, { auth, params }) => ({
-    // a workflow the key's user cannot list is left out
-    data: await ctx.dataTables.dependencies(auth.tenant.id, params.dataTableId, auth),
-  }),
+  // P6-86: the same paged shape as the workflow and credential dependency rows; a workflow the key's user
+  // cannot read is left out
+  dependencies: (ctx, { auth, params, query }) =>
+    ctx.dependencies.forDataTable(auth, params.dataTableId, { limit: query.limit, cursor: query.cursor }),
   listColumns: async (ctx, { auth, params }) => ({
     data: (await ctx.dataTables.columns.list(auth.tenant.id, params.dataTableId)).map(columnDTO),
   }),
@@ -252,6 +252,7 @@ const limit = z.coerce.number().int().min(1).max(250).default(100);
 const cursor = z.string().max(512).optional();
 
 const tableParams = z.object({ dataTableId: z.uuid() });
+const dependenciesQuery = z.object({ limit, cursor });
 const columnParams = tableParams.extend({ columnId: z.uuid() });
 const listQuery = z.object({
   limit,
@@ -290,7 +291,7 @@ export interface PublicDataTableRoute {
   query?: z.ZodObject;
   body?: z.ZodType;
   /** component schema name of `data` in the response */
-  response: 'DataTable' | 'DataTableColumn' | 'DataTableRow' | 'DataTableDependency' | 'DataTableResult';
+  response: 'DataTable' | 'DataTableColumn' | 'DataTableRow' | 'DependencyList' | 'DataTableResult';
   list?: boolean;
   handler: Handler;
 }
@@ -363,7 +364,9 @@ export const PUBLIC_DATA_TABLE_ROUTES: PublicDataTableRoute[] = [
     access: { scope: 'dataTable:read', target: onTable },
     scope: 'dataTable:read',
     params: tableParams,
-    response: 'DataTableDependency',
+    query: dependenciesQuery,
+    response: 'DependencyList',
+    list: true,
   }),
   route('listColumns', {
     method: 'GET',

@@ -4,16 +4,17 @@ import { FolderInput, KeyRound, MoreHorizontal, Pencil, Plus, Search, Share2, Tr
 import { useMemo, useState } from 'react';
 import { errorMessage } from '../api/client';
 import { credentialsApi } from '../api/endpoints';
-import { useCredentialTypes } from '../api/queries';
+import { queryKeys, useCredentialTypes } from '../api/queries';
 import type { CredentialSummary } from '../api/types';
 import { CredentialModal } from '../components/credentials/CredentialModal';
 import { CredentialTypePicker } from '../components/credentials/CredentialTypePicker';
 import { PrivateCredentialStatus } from '../components/credentials/PrivateCredentialSection';
+import { confirmWithDependents } from '../components/dependencies/DependencyDetails';
+import { DependencyPill } from '../components/dependencies/DependencyPill';
 import { NodeIcon } from '../components/NodeIcon';
 import { ProjectBadge } from '../components/projects/ProjectBadge';
 import { ProjectFilter, useProjectListScope } from '../components/projects/ProjectFilter';
 import { Button, IconButton } from '../components/ui/Button';
-import { confirmDialog } from '../components/ui/Dialog';
 import { Menu, type MenuItem } from '../components/ui/Menu';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
 import { formatRelative } from '../lib/format';
@@ -79,16 +80,22 @@ export function CredentialsPage() {
   }, [credentials.data, search, types]);
 
   const remove = async (id: string, name: string) => {
-    const ok = await confirmDialog({
-      title: `Delete “${name}”?`,
-      description: 'Workflows that use it will fail until you pick another credential.',
-      confirmLabel: 'Delete credential',
-      tone: 'danger',
-    });
+    // P6-86: the workflows that use it are listed in the warning
+    const ok = await confirmWithDependents(
+      {
+        title: `Delete “${name}”?`,
+        description: 'Workflows that use it will fail until you pick another credential.',
+        confirmLabel: 'Delete credential',
+        tone: 'danger',
+      },
+      'credential',
+      id,
+    );
     if (!ok) return;
     try {
       await credentialsApi.remove(id);
       await queryClient.invalidateQueries({ queryKey: ['credentials'] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.dependencies });
       toast.success('Credential deleted');
     } catch (error) {
       toast.error('Could not delete the credential', errorMessage(error));
@@ -187,6 +194,8 @@ export function CredentialsPage() {
                   </button>
                   {/* P6-15: a private credential's connection state and count */}
                   <PrivateCredentialStatus credential={c} />
+                  {/* P6-86: the workflows that use it */}
+                  <DependencyPill kind="credential" id={c.id} />
                   {scope.kind !== 'project' && (
                     <ProjectBadge
                       homeProject={c.homeProject}

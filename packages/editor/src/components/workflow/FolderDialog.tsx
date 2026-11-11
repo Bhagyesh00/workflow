@@ -9,6 +9,7 @@ import { foldersApi } from '../../api/endpoints';
 import { useFolder } from '../../api/queries';
 import type { Folder } from '../../api/types';
 import { toast } from '../../stores/ui-store';
+import { FolderDependencyNotice } from '../dependencies/DependencyDetails';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { FormField, TextInput } from '../ui/Field';
@@ -226,6 +227,14 @@ export function DeleteFolderDialog({
           </span>
         </label>
       </fieldset>
+      {/* P6-86: the workflows of the tree that other workflows use */}
+      {open && (
+        <FolderDependencyNotice
+          projectId={folder.projectId}
+          folderId={folder.id}
+          risky={choice === 'archive'}
+        />
+      )}
     </Dialog>
   );
 }

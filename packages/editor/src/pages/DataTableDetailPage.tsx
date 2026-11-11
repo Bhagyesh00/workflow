@@ -7,11 +7,12 @@ import { dataTablesApi } from '../api/endpoints';
 import { queryKeys } from '../api/queries';
 import type { DataTableInfo } from '../api/types';
 import { DataTableGrid } from '../components/data-tables/DataTableGrid';
+import { DependencyPill } from '../components/dependencies/DependencyPill';
 import { IconButton } from '../components/ui/Button';
 import { Menu } from '../components/ui/Menu';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
 import { usePermissions } from '../lib/permissions';
-import { DependencyPill, useTableActions } from './DataTablesPage';
+import { useTableActions } from './DataTablesPage';
 
 function TablePage({ table }: { table: DataTableInfo }) {
   const navigate = useNavigate();
@@ -32,7 +33,7 @@ function TablePage({ table }: { table: DataTableInfo }) {
           </span>
           <h1 className="truncate text-md font-semibold text-ink">{table.name}</h1>
         </nav>
-        <DependencyPill tableId={table.id} />
+        <DependencyPill kind="dataTable" id={table.id} />
         <span className="flex-1" />
         <IconButton
           size="sm"

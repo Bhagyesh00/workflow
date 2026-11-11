@@ -9,6 +9,7 @@ import { errorMessage } from '../../api/client';
 import { foldersApi, workflowsApi } from '../../api/endpoints';
 import { queryKeys, useFolder } from '../../api/queries';
 import { toast } from '../../stores/ui-store';
+import { FolderDependencyNotice, WorkflowUsedByNotice } from '../dependencies/DependencyDetails';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { Callout, PageLoader } from '../ui/misc';
@@ -143,6 +144,13 @@ export function MoveToFolderDialog({
             </li>
           ))}
         </ul>
+      )}
+      {/* P6-86: what uses the item being moved */}
+      {open && target?.kind === 'workflow' && target.ids.length === 1 && (
+        <WorkflowUsedByNotice workflowId={target.ids[0]} />
+      )}
+      {open && target?.kind === 'folder' && (
+        <FolderDependencyNotice projectId={target.projectId} folderId={target.id} risky={false} />
       )}
     </Dialog>
   );

@@ -19,7 +19,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { errorMessage } from '../api/client';
 import { dataTablesApi, favoritesApi } from '../api/endpoints';
 import { queryKeys, useFavorites } from '../api/queries';
@@ -29,6 +29,8 @@ import { useDebounced } from '../components/data-tables/DataTableGrid';
 import { DownloadCsvDialog } from '../components/data-tables/DownloadCsvDialog';
 import { ImportCsvDialog, plural } from '../components/data-tables/ImportCsvDialog';
 import { useDataTableLimits } from '../components/data-tables/StorageBanner';
+import { confirmWithDependents } from '../components/dependencies/DependencyDetails';
+import { DependencyPill } from '../components/dependencies/DependencyPill';
 import { ProjectBadge } from '../components/projects/ProjectBadge';
 import { ProjectFilter, useProjectListScope } from '../components/projects/ProjectFilter';
 import { Button, IconButton } from '../components/ui/Button';
@@ -72,39 +74,6 @@ function saveSort(value: string): void {
 const MEGABYTE = 1024 * 1024;
 
 const sizeText = (bytes: number) => `${(bytes / MEGABYTE).toFixed(bytes && bytes < MEGABYTE ? 2 : 1)} MB`;
-
-/** the workflows that use a table; nothing when none does */
-export function DependencyPill({ tableId }: { tableId: string }) {
-  const navigate = useNavigate();
-  const { data } = useQuery({
-    queryKey: queryKeys.dataTableDependencies(tableId),
-    queryFn: () => dataTablesApi.dependencies(tableId),
-    retry: false,
-    staleTime: 30_000,
-  });
-  if (!data?.length) return null;
-  return (
-    <Menu
-      align="start"
-      items={data.map((dependency) => ({
-        key: dependency.id,
-        label: dependency.name,
-        onSelect: () => navigate(`/workflow/${encodeURIComponent(dependency.id)}`),
-      }))}
-      trigger={(t) => (
-        <button
-          type="button"
-          onClick={t.toggle}
-          aria-expanded={t['aria-expanded']}
-          aria-haspopup="menu"
-          className="rounded-full bg-surface-3 px-2 py-0.5 text-2xs font-semibold text-ink-2 hover:text-ink"
-        >
-          Used by {plural(data.length, 'workflow')}
-        </button>
-      )}
-    />
-  );
-}
 
 export function useTableFavorite(tableId: string) {
   const queryClient = useQueryClient();
@@ -210,18 +179,24 @@ export function useTableActions(table: DataTableInfo, onDeleted?: () => void) {
   const [dialog, setDialog] = useState<TableDialog>();
 
   const remove = async () => {
-    const ok = await confirmDialog({
-      title: 'Delete data table',
-      description: `Are you sure you want to delete the data table "${table.name}"? This action cannot be undone.`,
-      confirmLabel: 'Delete',
-      tone: 'danger',
-    });
+    // P6-86: the workflows that use the table are listed in the warning
+    const ok = await confirmWithDependents(
+      {
+        title: 'Delete data table',
+        description: `Are you sure you want to delete the data table "${table.name}"? This action cannot be undone.`,
+        confirmLabel: 'Delete',
+        tone: 'danger',
+      },
+      'dataTable',
+      table.id,
+    );
     if (!ok) return;
     try {
       await dataTablesApi.remove(table.id);
       await queryClient.invalidateQueries({ queryKey: ['data-tables'] });
       await queryClient.invalidateQueries({ queryKey: queryKeys.dataTableLimits });
       await queryClient.invalidateQueries({ queryKey: queryKeys.favorites });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.dependencies });
       onDeleted?.();
     } catch (error) {
       toast.error('Error deleting data table', errorMessage(error));
@@ -343,7 +318,7 @@ function TableCard({
           resourceType="dataTable"
         />
       )}
-      <DependencyPill tableId={table.id} />
+      <DependencyPill kind="dataTable" id={table.id} />
       <IconButton
         size="sm"
         label={starred ? `Remove ${table.name} from favorites` : `Add ${table.name} to favorites`}
