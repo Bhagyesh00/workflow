@@ -11,6 +11,7 @@ import { currentPeriod, effectiveLimits, PLANS, type TenantSettings } from '../p
 import { CREDENTIAL_MISMATCH, credentialFitsModel, isBuilderModelNode } from '../services/ai-builder/model';
 import { assistantFeature } from '../services/assistant/settings';
 import { loadNodeOptions } from '../services/node-options';
+import { isProtected } from '../services/protected';
 
 const settingsPatch = z.object({
   brand: z
@@ -133,6 +134,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         },
         /** P6-53: the workspace's redaction floor (absent = off); every user reads it, no platform env is sent */
         redactionFloor: tenantSettings.redactionFloor ?? 'off',
+        /** P6-78: a protected workspace (Git environments); every signed-in role reads it for the editor locks */
+        sourceControl: { readOnly: isProtected(tenantSettings) },
         /** P5-11: read only, the editor caps the "run in parallel" slider with it; PATCH never takes it */
         evaluationConcurrencyLimit: config.evaluationConcurrencyLimit,
         /** P5-09: the builder's model setup, admins only (it names a credential) */
@@ -156,8 +159,8 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
         throw ApiError.badRequest(CREDENTIAL_MISMATCH);
       }
     }
-    const next: TenantSettings = {
-      ...current,
+    // P6-78: only the keys this body changes, merged in one update; `sourceControl` is never written here
+    const patch: Record<string, unknown> = {
       ...(body.brand ? { brand: { ...(current.brand ?? {}), ...body.brand } } : {}),
       ...(body.timezone ? { timezone: body.timezone } : {}),
       ...(body.workflowReviews
@@ -177,9 +180,11 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
             },
           }
         : {}),
+      // a top-level null removes the key
+      ...(body.ai === null ? { ai: null } : {}),
     };
-    if (body.ai === null) delete next.ai;
-    const tenant = await repos.tenants.updateSettings(auth.tenant.id, next as Record<string, unknown>);
+    const tenant = await repos.tenants.mergeSettings(auth.tenant.id, patch);
+    const next = (tenant?.settings ?? {}) as TenantSettings;
     await repos.audit.add(auth.tenant.id, {
       userId: auth.user.id,
       action: 'tenant.settings_updated',
@@ -189,7 +194,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
     });
     return {
       data: {
-        brand: (tenant?.settings as TenantSettings | undefined)?.brand ?? {},
+        brand: next.brand ?? {},
         timezone: next.timezone ?? null,
         autosaveEnabled: !config.autosaveDisabled,
         workflowReviews: { enabled: next.workflowReviews?.enabled === true },

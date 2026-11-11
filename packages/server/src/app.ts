@@ -50,6 +50,8 @@ import { registerSecretConnectionRoutes } from './routes/secret-connections';
 import { registerSecuritySettingsRoutes } from './routes/security-settings';
 import { registerSettingsRoutes } from './routes/settings';
 import { registerSharingRoutes } from './routes/sharing';
+import { registerSourceControlRoutes } from './routes/source-control';
+import { registerSourceControlSyncRoutes } from './routes/source-control-sync';
 import { registerOidcRestRoutes } from './routes/sso-oidc';
 import { registerProvisioningRoutes } from './routes/sso-provisioning';
 import { ssoPlugin } from './routes/sso-public';
@@ -231,6 +233,9 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       registerExecutionBulkRoutes(rest, ctx);
       registerDependencyRoutes(rest, ctx);
       registerRateLimitSettingsRoutes(rest, ctx);
+      // P6 S4: source control (L2 connection, L4 status, push and pull)
+      registerSourceControlRoutes(rest, ctx);
+      registerSourceControlSyncRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );

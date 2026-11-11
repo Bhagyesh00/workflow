@@ -361,6 +361,8 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'sync_id_map',
+  'source_control_settings',
   'type_policy_attachments',
   'type_policy_scopes',
   'type_policies',
@@ -777,6 +779,24 @@ export async function realMember(
   options: Parameters<typeof memberAs>[2] = {},
 ): Promise<TestMember> {
   return memberAs(owner, 'member', options);
+}
+
+/**
+ * P6 S4: turns the protected switch of a workspace on (or off): writes `settings.sourceControl.readOnly` through
+ * `repos.tenants.mergeSettings`, so every other settings key (and any other `sourceControl` key) stays. No route,
+ * no audit line: the tests of the locks (L7, L8) set it directly.
+ */
+export async function protectWorkspace(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  on = true,
+): Promise<void> {
+  const tenant = await server.ctx.repos.tenants.get(tenantId);
+  if (!tenant) throw new Error(`No workspace ${tenantId}`);
+  const current = (tenant.settings ?? {}) as { sourceControl?: Record<string, unknown> };
+  await server.ctx.repos.tenants.mergeSettings(tenantId, {
+    sourceControl: { ...(current.sourceControl ?? {}), readOnly: on },
+  });
 }
 
 /** the id of the workspace's oldest team project, where the old tests' work lives (`signup` makes it) */

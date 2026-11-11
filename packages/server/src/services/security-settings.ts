@@ -71,8 +71,8 @@ export class SecuritySettingsService {
         if (patch[flag] !== undefined) securityPolicy[flag] = patch[flag];
       }
       const redactionFloor = patch.redaction?.floor ?? floorOf(tenant);
-      await repos.tenants.updateSettings(tenantId, {
-        ...settings,
+      // P6-78: only its own keys, merged in this transaction
+      await repos.tenants.mergeSettings(tenantId, {
         securityPolicy,
         // the floor is stored only once set (an untouched workspace keeps no key)
         ...(patch.redaction?.floor !== undefined || settings.redactionFloor !== undefined

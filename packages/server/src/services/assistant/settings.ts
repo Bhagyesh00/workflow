@@ -242,10 +242,8 @@ export class AssistantSettingsService {
       changed.push('permissions');
     }
 
-    const saved = await repos.tenants.updateSettings(tenantId, {
-      ...settings,
-      assistant: next,
-    } as Record<string, unknown>);
+    // P6-78: only the `assistant` key, merged
+    const saved = await repos.tenants.mergeSettings(tenantId, { assistant: next });
     await repos.audit.add(tenantId, {
       userId: auth.user.id,
       action: 'tenant.settings_updated',

@@ -56,6 +56,7 @@ import type { ExecutionService } from './executions';
 import type { FavoriteService } from './favorites';
 import type { FormTokenService } from './form-tokens';
 import { isAvailableInMcp } from './mcp/workflow-gate';
+import { assertTenantWritable } from './protected';
 import type { PublishHistoryService } from './publish-history';
 import { assertRedactionChange, seedRedactionSettings } from './redaction/policy';
 import { TEST_WEBHOOK_TTL_MS, type TestWebhookStore } from './test-webhooks';
@@ -447,6 +448,7 @@ export class WorkflowService {
     input: CreateInput & { projectId: string },
     actor: Actor,
   ): Promise<WorkflowDTO> {
+    await assertTenantWritable(this.deps.context().serviceDeps, tenantId, 'workflowCreate');
     assertGraph(input as unknown as WorkflowDefinition, this.deps.nodeTypes);
     assertNodeGroups(input as unknown as WorkflowDefinition, this.deps.nodeTypes);
     await assertFolderInTenant(this.repos, tenantId, input.folderId);
@@ -570,6 +572,7 @@ export class WorkflowService {
     message?: string,
     options: { publishIfActive?: boolean; keepMcpAccess?: boolean; restoredNodes?: WorkflowNode[] } = {},
   ): Promise<WorkflowDTO & { activationError?: { message: string; details?: unknown } }> {
+    await assertTenantWritable(this.deps.context().serviceDeps, tenantId, 'workflowUpdate');
     const { versionId: expected, tagIds, versionMessage, autosaved, ...patch } = input;
     const existing = await this.get(tenantId, id);
     assertNotArchived(existing, 'update');
@@ -747,6 +750,7 @@ export class WorkflowService {
 
   /** the editor deletes archived workflows only; the public API passes `force` (P3-07) */
   async delete(tenantId: string, id: string, actor: Actor, options: { force?: boolean } = {}): Promise<void> {
+    await assertTenantWritable(this.deps.context().serviceDeps, tenantId, 'workflowDelete');
     const row = await this.get(tenantId, id);
     assertDeletable(row, { force: options.force });
     if (row.active) await this.deps.activeWorkflows.deactivate(tenantId, id);
@@ -946,6 +950,7 @@ export class WorkflowService {
    * `workflowSave` against the current stored workflow, deprecated nodes, the redaction change) before the write.
    */
   async restoreVersion(tenantId: string, id: string, versionId: string, actor: Actor) {
+    await assertTenantWritable(this.deps.context().serviceDeps, tenantId, 'workflowRestore');
     const snapshot = await this.getVersion(tenantId, id, versionId);
     return this.update(
       tenantId,
@@ -1017,6 +1022,7 @@ export class WorkflowService {
   }
 
   async run(tenant: TenantRow, id: string, input: RunInput, actor: Actor): Promise<{ executionId: string }> {
+    await assertTenantWritable(this.deps.context().serviceDeps, tenant.id, 'manualRun');
     const row = await this.get(tenant.id, id);
     const definition = this.definitionFor(row, input.workflowData);
     const workflow = assertGraph(definition, this.deps.nodeTypes);
@@ -1196,6 +1202,7 @@ export class WorkflowService {
     input: { nodeName: string; workflowData?: WorkflowData; destinationNode?: string },
     actor: Actor,
   ) {
+    await assertTenantWritable(this.deps.context().serviceDeps, tenant.id, 'manualRun');
     const row = await this.get(tenant.id, id);
     const definition = this.definitionFor(row, input.workflowData);
     const workflow = assertGraph(definition, this.deps.nodeTypes);
@@ -1282,6 +1289,7 @@ export class WorkflowService {
     nodeName: string,
     actor: Actor = {},
   ): Promise<{ expiresAt: string }> {
+    await assertTenantWritable(this.deps.context().serviceDeps, tenant.id, 'manualRun');
     const row = await this.get(tenant.id, id);
     const definition = toDefinition(row);
     const workflow = assertGraph(definition, this.deps.nodeTypes);

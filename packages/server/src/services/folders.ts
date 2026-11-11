@@ -16,6 +16,7 @@ import type { TagRef } from '../repositories';
 import { createRepositories, isUuid } from '../repositories';
 import type { AccessListOptions } from '../repositories/shares';
 import { MISSING_SCOPE_MESSAGE } from './access';
+import { assertTenantWritable } from './protected';
 import { assertFolderInTenant } from './workflow-rules';
 import type { Actor } from './workflows';
 
@@ -241,6 +242,7 @@ export class FolderService {
     input: FolderCreateInput & { projectId: string },
     actor: Actor,
   ): Promise<FolderDTO> {
+    await assertTenantWritable(this.deps, tenantId, 'folderCreate');
     const parentFolderId = input.parentFolderId ?? null;
     await assertFolderInTenant(this.repos, tenantId, parentFolderId);
     // P6 S1: the project the caller resolved; a parent folder must be in it
@@ -261,6 +263,7 @@ export class FolderService {
   }
 
   async update(tenantId: string, id: string, input: FolderUpdateInput, actor: Actor): Promise<FolderDTO> {
+    await assertTenantWritable(this.deps, tenantId, 'folderUpdate');
     const current = await this.require(tenantId, id);
     let tagIds: string[] | undefined;
     if (input.tagIds !== undefined) {
@@ -316,6 +319,7 @@ export class FolderService {
    * transaction and the folder is deleted.
    */
   async delete(tenantId: string, id: string, input: FolderDeleteInput, actor: Actor): Promise<void> {
+    await assertTenantWritable(this.deps, tenantId, 'folderDelete');
     const current = await this.require(tenantId, id);
     const subtree = await this.repos.folders.subtreeIds(tenantId, id);
     const transfer = input.transferToFolderId;

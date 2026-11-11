@@ -21,6 +21,7 @@ import {
   createWorkflow,
   memberAs,
   node,
+  protectWorkspace,
   resetDatabase,
   signup as signupFrom,
   TEST_REDIS,
@@ -358,6 +359,11 @@ describe('API key scopes', () => {
   it('every public route names a scope from API_KEY_SCOPES', () => {
     const known = new Set<string>(API_KEY_SCOPES);
     for (const route of PUBLIC_ROUTES) {
+      // P6 S4: an `anyKey` row (GET /discover) takes any valid key and names no key scope
+      if (route.anyKey) {
+        expect(route.scope, `${route.method} ${route.path}`).toBeUndefined();
+        continue;
+      }
       expect(known.has(String(route.scope)), `${route.method} ${route.path}`).toBe(true);
     }
   });
@@ -467,6 +473,16 @@ describe('API key scopes', () => {
       'GET /credentials/:id/dependencies': 'credential:read',
       'GET /settings/rate-limits': 'securitySettings:manage',
       'PUT /settings/rate-limits': 'securitySettings:manage',
+      // P6 S4: source control, discover (any valid key, no key scope) and the CLI's rows
+      'GET /source-control/status': 'sourceControl:read',
+      'POST /source-control/push': 'sourceControl:push',
+      'POST /source-control/pull': 'sourceControl:pull',
+      'GET /discover': undefined,
+      'GET /workflows/:id/tags': 'workflowTags:list',
+      'PUT /workflows/:id/tags': 'workflowTags:update',
+      'POST /executions/:id/stop': 'execution:stop',
+      'GET /credentials': 'credential:list',
+      'GET /credentials/:id': 'credential:read',
     });
   });
 
@@ -863,6 +879,28 @@ describe('credential test', () => {
 });
 
 describe('context and test helpers', () => {
+  it('protectWorkspace switches sourceControl.readOnly and keeps the other settings keys (P6 S4)', async () => {
+    const owner = await signup(server.app);
+    const tenantId = owner.tenant.id;
+    await server.ctx.repos.tenants.mergeSettings(tenantId, {
+      timezone: 'Europe/Berlin',
+      sourceControl: { readOnly: false, kept: 'yes' },
+    });
+    await protectWorkspace(server, tenantId);
+    const on = (await server.ctx.repos.tenants.get(tenantId))!.settings as Record<string, unknown>;
+    expect(on).toMatchObject({ timezone: 'Europe/Berlin', sourceControl: { readOnly: true, kept: 'yes' } });
+    const read = await owner.client.data<{ sourceControl: { readOnly: boolean } }>(
+      owner.client.get('/rest/settings'),
+    );
+    expect(read.sourceControl).toEqual({ readOnly: true });
+    await protectWorkspace(server, tenantId, false);
+    const off = (await server.ctx.repos.tenants.get(tenantId))!.settings as Record<string, unknown>;
+    expect(off).toMatchObject({ timezone: 'Europe/Berlin', sourceControl: { readOnly: false, kept: 'yes' } });
+    await expect(protectWorkspace(server, '00000000-0000-4000-8000-000000000000')).rejects.toThrow(
+      'No workspace',
+    );
+  });
+
   it('createTestServer adds a test node package and a test provider type', async () => {
     expect(server.ctx.registries.nodeTypes.get('test.emitter')).toBeDefined();
     expect(server.ctx.secrets.getType('p4Fake')).toBeDefined();

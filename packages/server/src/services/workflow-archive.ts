@@ -4,6 +4,7 @@
  */
 import type { ServiceDeps } from '../context';
 import { ApiError } from '../http/errors';
+import { assertTenantWritable } from './protected';
 import type { WorkflowDTO } from './workflow-model';
 import { assertFolderInTenant, assertNotArchived } from './workflow-rules';
 import type { Actor } from './workflows';
@@ -17,6 +18,7 @@ export class WorkflowArchiveService {
     actor: Actor,
     options: { publicApi?: boolean } = {},
   ): Promise<WorkflowDTO> {
+    await assertTenantWritable(this.deps, tenantId, 'workflowArchive');
     const { workflows, activeWorkflows, publishHistory, reviews, repos } = this.deps.context();
     const row = await workflows.get(tenantId, id);
     if (row.isArchived) {
@@ -49,6 +51,7 @@ export class WorkflowArchiveService {
 
   /** the workflow stays unpublished */
   async unarchive(tenantId: string, id: string, actor: Actor): Promise<WorkflowDTO> {
+    await assertTenantWritable(this.deps, tenantId, 'workflowRestore');
     const { workflows, repos } = this.deps.context();
     const row = await workflows.get(tenantId, id);
     if (!row.isArchived) throw ApiError.badRequest('The workflow is not archived.');
@@ -70,6 +73,7 @@ export class WorkflowArchiveService {
     folderId: string | null,
     actor: Actor,
   ): Promise<{ moved: string[] }> {
+    await assertTenantWritable(this.deps, tenantId, 'workflowUpdate');
     const { repos } = this.deps;
     await assertFolderInTenant(repos, tenantId, folderId);
     // P6-22: every workflow and the folder are in one project

@@ -43,6 +43,27 @@ export class TenantRepository {
     return row;
   }
 
+  /**
+   * P6-78: merges `patch` into the settings in one UPDATE (`coalesce(settings, '{}') || patch`), so a write
+   * replaces only its own top-level keys and never drops a key another writer set at the same time. A
+   * top-level `null` removes that key (`settings - key`); an `undefined` value leaves it as it is.
+   */
+  async mergeSettings(tenantId: string, patch: Record<string, unknown>): Promise<TenantRow | undefined> {
+    if (!isUuid(tenantId)) return undefined;
+    const kept: Record<string, unknown> = {};
+    let base = sql`coalesce(${tenants.settings}, '{}'::jsonb)`;
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) base = sql`(${base} - ${key}::text)`;
+      else if (value !== undefined) kept[key] = value;
+    }
+    const [row] = await this.db
+      .update(tenants)
+      .set({ settings: sql`${base} || ${JSON.stringify(kept)}::jsonb` })
+      .where(eq(tenants.id, tenantId))
+      .returning();
+    return row;
+  }
+
   async delete(tenantId: string): Promise<boolean> {
     const rows = await this.db.delete(tenants).where(eq(tenants.id, tenantId)).returning({ id: tenants.id });
     return rows.length > 0;

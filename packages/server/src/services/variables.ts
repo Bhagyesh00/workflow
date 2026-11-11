@@ -15,6 +15,7 @@ import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { isUniqueViolation } from '../repositories';
 import { MISSING_SCOPE_MESSAGE } from './access';
+import { assertTenantWritable } from './protected';
 
 export interface VariableListOptions {
   /** a project's variables; `null` = global only; absent = every variable the caller may read */
@@ -110,6 +111,7 @@ export class VariableService {
   }
 
   async create(auth: AuthContext, input: VariableCreateInput): Promise<VariableRow> {
+    await assertTenantWritable(this.deps, auth.tenant.id, 'variableCreate');
     const tenantId = auth.tenant.id;
     const projectId = input.projectId ?? null;
     if (!(await this.allowed(auth, projectId, 'create'))) {
@@ -132,6 +134,8 @@ export class VariableService {
     if (!(await this.allowed(auth, row.projectId, 'update'))) throw missingScope();
     const destination = patch.projectId === undefined ? row.projectId : patch.projectId;
     const key = patch.key ?? row.key;
+    // a value change stays allowed on a protected workspace; a key rename does not (decisions H)
+    if (key !== row.key) await assertTenantWritable(this.deps, tenantId, 'variableRename');
     if (destination !== row.projectId) {
       // moving needs the right to make a variable at the other place
       if (!(await this.allowed(auth, destination, 'create'))) {
@@ -172,6 +176,7 @@ export class VariableService {
   }
 
   async delete(auth: AuthContext, id: string): Promise<void> {
+    await assertTenantWritable(this.deps, auth.tenant.id, 'variableDelete');
     const row = await this.require(auth, id);
     if (!(await this.allowed(auth, row.projectId, 'delete'))) throw missingScope();
     if (!(await this.repos.variables.delete(auth.tenant.id, id))) throw ApiError.notFound('Variable');

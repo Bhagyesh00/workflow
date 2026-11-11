@@ -204,7 +204,8 @@ export class RateLimitSettingsService {
         changed.push(field);
       }
     }
-    await repos.tenants.updateSettings(tenantId, { ...settings, publicApiRateLimit: next });
+    // P6-78: only the `publicApiRateLimit` key, merged
+    await repos.tenants.mergeSettings(tenantId, { publicApiRateLimit: next });
     await repos.audit.add(tenantId, {
       userId: actor?.userId,
       action: 'public_api_rate_limit.updated',

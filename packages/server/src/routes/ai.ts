@@ -154,11 +154,10 @@ export function registerAiRoutes(rest: FastifyInstance, ctx: ServerContext): voi
     const tenant = await ctx.repos.tenants.get(auth.tenant.id);
     const settings = ((tenant ?? auth.tenant).settings ?? {}) as TenantSettings;
     if (!settings.ai) throw ApiError.badRequest(NO_MODEL_SET);
-    const next: TenantSettings = {
-      ...settings,
+    // P6-78: only the `ai` key, merged, so a write at the same time to another key is kept
+    await ctx.repos.tenants.mergeSettings(auth.tenant.id, {
       ai: { ...settings.ai, allowSendingParameterValues: body.allowSendingParameterValues },
-    };
-    await ctx.repos.tenants.updateSettings(auth.tenant.id, next as Record<string, unknown>);
+    });
     await ctx.repos.audit.add(auth.tenant.id, {
       userId: auth.user.id,
       action: 'tenant.settings_updated',

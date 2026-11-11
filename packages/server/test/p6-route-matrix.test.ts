@@ -275,7 +275,8 @@ function urlOf(row: RouteMatrixRow, f: Fixtures = fx): string {
     clientId: 'matrix-client',
     slug: 'project:viewer',
     providerKey: 'matrix-vault',
-    type: 'matrix-type',
+    // P6 S4: the remote content route takes only `workflow` as its type
+    type: row.path.startsWith('/rest/source-control/remote-content/') ? 'workflow' : 'matrix-type',
     token: 'c0e5'.repeat(8),
     tenantSlug,
     resourceType: 'workflow',

@@ -93,6 +93,7 @@ import { findCustomRole, registerRoleRoutes } from './mock-roles';
 import { registerScimRoutes } from './mock-scim';
 import { registerSecretRoutes } from './mock-secrets';
 import { demoShares, registerSharingRoutes } from './mock-sharing';
+import { registerSourceControlRoutes } from './mock-source-control';
 import { registerSsoRoutes, setDemoSsoOptions } from './mock-sso';
 import {
   DEMO_MCP_TRIGGER_TYPE,
@@ -331,6 +332,11 @@ export class MockBackend {
   /** P6-18 (C0): the workspaces that enforce two-factor sign-in; GET /settings answers `mfa.enforced`, mock-mfa.ts (L2) writes it */
   mfaEnforcedTenants = new Set<string>();
   /**
+   * P6-77 (C0): the protected workspaces (the server's `sourceControl.readOnly` tenant setting); GET /settings
+   * answers `sourceControl.readOnly` from it; `setDemoProtected` writes it.
+   */
+  private protectedTenants = new Set<string>();
+  /**
    * P6-18 (C0): whether a sign-in code or recovery code of `userId` is good. The C0 default takes any 6-digit code
    * or a non-empty recovery code; mock-mfa.ts (L2) replaces it with the demo's fixed secret.
    */
@@ -388,6 +394,8 @@ export class MockBackend {
     registerRateLimitRoutes(this);
     registerExecutionBulkRoutes(this);
     registerDependencyRoutes(this);
+    // Phase 6 S4 (C0): the Git environment routes, 501 until L6 fills them
+    registerSourceControlRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -766,6 +774,30 @@ export class MockBackend {
         role: projectRole,
       });
     }
+  }
+
+  /** the workspace the demo setters act on: the signed-in one, else the first membership's */
+  private demoTenantId(): string {
+    const tenantId = this.session?.tenantId ?? this.memberships[0]?.tenantId;
+    if (!tenantId) throw new Error('No workspace to set the protected flag on');
+    return tenantId;
+  }
+
+  /**
+   * P6-77 (C0), tests and demo: makes the signed-in workspace (the first membership's when signed out, as
+   * `setDemoRole`) protected (read only, as the server's `sourceControl.readOnly`) or writable again. GET
+   * /settings answers it as `sourceControl.readOnly`; L6's PATCH `/source-control/preferences` calls it.
+   */
+  setDemoProtected(on: boolean): void {
+    const tenantId = this.demoTenantId();
+    if (on) this.protectedTenants.add(tenantId);
+    else this.protectedTenants.delete(tenantId);
+  }
+
+  /** P6-77 (C0): whether the workspace `setDemoProtected` acts on is protected */
+  isDemoProtected(): boolean {
+    const tenantId = this.session?.tenantId ?? this.memberships[0]?.tenantId;
+    return tenantId !== undefined && this.protectedTenants.has(tenantId);
   }
 
   /**
@@ -1383,6 +1415,8 @@ export class MockBackend {
           : {}),
         // P6-18 (C0): whether the workspace enforces two-factor sign-in
         mfa: { enforced: this.session ? this.mfaEnforcedTenants.has(this.session.tenantId) : false },
+        // P6-77 (C0): whether the workspace is protected (read only); false when signed out, as the server
+        sourceControl: { readOnly: this.session ? this.protectedTenants.has(this.session.tenantId) : false },
         // P6-84 (usage, sent only when signed in, as the server) and P6-53 (the redaction floor)
         ...(this.session
           ? {

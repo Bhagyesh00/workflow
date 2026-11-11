@@ -93,7 +93,8 @@ export function registerMfaRoutes(app: FastifyInstance, ctx: ServerContext): voi
     if (isMfaEnforced(tenant) !== enforce) {
       const settings = (tenant.settings ?? {}) as Record<string, unknown>;
       const current = (settings.mfa ?? {}) as Record<string, unknown>;
-      await repos.tenants.updateSettings(tenant.id, { ...settings, mfa: { ...current, enforced: enforce } });
+      // P6-78: only the `mfa` key, so a write at the same time to another key is kept
+      await repos.tenants.mergeSettings(tenant.id, { mfa: { ...current, enforced: enforce } });
     }
     return { data: { enforced: enforce } };
   });

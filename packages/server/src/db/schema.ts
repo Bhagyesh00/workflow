@@ -1800,6 +1800,74 @@ export const publicApiIdempotency = pgTable(
   ],
 );
 
+/**
+ * Git source control connection of a workspace (P6-73), one row per tenant. The private key and the HTTPS
+ * password are CredentialCipher payloads (`private_key_enc`, `https_password_enc`), never returned. There is
+ * no read-only column: the protected flag is `tenants.settings.sourceControl.readOnly`.
+ */
+export const sourceControlSettings = pgTable(
+  'source_control_settings',
+  {
+    tenantId: uuid('tenant_id')
+      .primaryKey()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    repositoryUrl: text('repository_url'),
+    connectionType: text('connection_type').$type<'ssh' | 'https'>().notNull().default('ssh'),
+    branchName: varchar('branch_name', { length: 255 }).notNull().default('main'),
+    branchColor: varchar('branch_color', { length: 16 }).notNull().default('#5296D6'),
+    connected: boolean('connected').notNull().default(false),
+    keyType: text('key_type').$type<'ed25519' | 'rsa'>().notNull().default('ed25519'),
+    publicKey: text('public_key'),
+    privateKeyEnc: text('private_key_enc'),
+    httpsUsername: varchar('https_username', { length: 255 }),
+    httpsPasswordEnc: text('https_password_enc'),
+    hostKeyFingerprint: text('host_key_fingerprint'),
+    lockedUntil: timestamp('locked_until', { withTimezone: true }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    check('source_control_settings_connection_type_check', sql`${t.connectionType} in ('ssh', 'https')`),
+    check('source_control_settings_key_type_check', sql`${t.keyType} in ('ed25519', 'rsa')`),
+  ],
+);
+
+/** resource kinds a Git sync maps between the repository id and this workspace's id (P6-73, P6-74) */
+export type SyncResourceType =
+  | 'workflow'
+  | 'credential'
+  | 'variable'
+  | 'tag'
+  | 'folder'
+  | 'datatable'
+  | 'project';
+
+/**
+ * Per-workspace map from a repository id (`git_id`) to the local row id (P6-74). No foreign key to the
+ * resources (one map for seven tables): the push and pull services remove stale rows.
+ */
+export const syncIdMap = pgTable(
+  'sync_id_map',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    resourceType: text('resource_type').$type<SyncResourceType>().notNull(),
+    gitId: varchar('git_id', { length: 64 }).notNull(),
+    localId: uuid('local_id').notNull(),
+    gitVersionId: varchar('git_version_id', { length: 64 }),
+    localVersionId: varchar('local_version_id', { length: 64 }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.resourceType, t.gitId] }),
+    unique('sync_id_map_tenant_resource_local_unique').on(t.tenantId, t.resourceType, t.localId),
+    check(
+      'sync_id_map_resource_type_check',
+      sql`${t.resourceType} in ('workflow', 'credential', 'variable', 'tag', 'folder', 'datatable', 'project')`,
+    ),
+  ],
+);
+
 export type { LegacyRole, Role, SystemRole } from './role-types';
 
 export type TenantRow = typeof tenants.$inferSelect;
@@ -1848,3 +1916,5 @@ export type TypePolicyAttachmentRow = typeof typePolicyAttachments.$inferSelect;
 export type InsightsMetadataRow = typeof insightsMetadata.$inferSelect;
 export type InsightsByPeriodRow = typeof insightsByPeriod.$inferSelect;
 export type PublicApiIdempotencyRow = typeof publicApiIdempotency.$inferSelect;
+export type SourceControlSettingsRow = typeof sourceControlSettings.$inferSelect;
+export type SyncIdMapRow = typeof syncIdMap.$inferSelect;

@@ -322,6 +322,8 @@ const envSchema = z.object({
   PUBLIC_API_RATE_LIMIT_ENDPOINT_READ_WINDOW: int(60, 1),
   PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_LIMIT: int(500, 0),
   PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_WINDOW: int(60, 1),
+  /** P6-S4 (L2): n8n's N8N_SOURCECONTROL_DEFAULT_SSH_KEY_TYPE (name less `N8N_`); any other value is a ConfigError */
+  SOURCECONTROL_DEFAULT_SSH_KEY_TYPE: z.enum(['ed25519', 'rsa']).default('ed25519'),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -486,6 +488,8 @@ export interface Config {
   insights: InsightsConfig;
   /** P6-83 (L15): PUBLIC_API_RATE_LIMIT_*, the defaults under a workspace's `publicApiRateLimit` */
   publicApiRateLimit: PublicApiRateLimit;
+  /** P6-S4 (L2): SOURCECONTROL_DEFAULT_SSH_KEY_TYPE, the key type `generateKeyPair` uses when none is given */
+  sourceControl: { defaultKeyType: 'ed25519' | 'rsa' };
 }
 
 /** P6-05: the insights collector, compaction and prune bounds (n8n's insights.config.ts names) */
@@ -779,6 +783,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       endpointWriteLimit: e.PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_LIMIT,
       endpointWriteWindow: e.PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_WINDOW,
     },
+    sourceControl: { defaultKeyType: e.SOURCECONTROL_DEFAULT_SSH_KEY_TYPE },
   };
 }
 

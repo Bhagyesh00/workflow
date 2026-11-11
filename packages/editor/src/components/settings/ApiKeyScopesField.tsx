@@ -50,7 +50,7 @@ const GROUPS: Array<{ resource: string; label: string; scopes: string[] }> = [
   },
   // P5-12: evaluations of the public API
   { resource: 'testRun', label: 'Test runs', scopes: ['list', 'create', 'read', 'cancel'] },
-  { resource: 'sourceControl', label: 'Source control', scopes: ['pull'] },
+  { resource: 'sourceControl', label: 'Source control', scopes: ['pull', 'push', 'read'] },
   { resource: 'securityAudit', label: 'Security audit', scopes: ['generate'] },
   // P6-09, P6-10, P6-11, P6-12: sign-in methods and role mapping
   { resource: 'saml', label: 'SAML', scopes: ['manage'] },

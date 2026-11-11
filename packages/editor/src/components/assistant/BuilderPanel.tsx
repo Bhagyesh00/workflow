@@ -13,6 +13,7 @@ import { clearBuilderSession } from '../../features/builder/session-actions';
 import { useCanEditWorkflow } from '../../features/editor/open-resources';
 import { type BuilderProgress, useBuilderStore } from '../../stores/builder-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
+import { ProtectedNotice } from '../protected/ProtectedNotice';
 import { Button, IconButton } from '../ui/Button';
 import { TextArea } from '../ui/Field';
 import { Callout, Spinner } from '../ui/misc';
@@ -170,6 +171,8 @@ export function BuilderPanel({ onClose }: BuilderPanelProps) {
         )}
       </div>
 
+      {/* P6-79: on a protected workspace, why Accept is off (L8) */}
+      <ProtectedNotice area="builder" />
       <DraftReviewBar />
 
       <div className="border-t border-line px-4 py-3">

@@ -7,15 +7,54 @@
  *   mfa:disable  turn a user's two-factor sign-in off (`--email <address>`)
  *   ldap:reset   clear a workspace's LDAP setup (`--tenant <slug>` and one of `--userId`, `--projectId`,
  *                `--deleteWorkflowsAndCredentials`)
+ * P6-78 (S4 L11), each on one workspace (`--tenant <slug>`, except export:nodes); the exit code is the command's:
+ *   export:workflow     export workflows as JSON (`--all` or `--id`, `--output`, `--pretty`, `--separate`)
+ *   import:workflow     import workflows (`--input`, `--separate`, `--projectId`)
+ *   list:workflow       list workflows (`--active`, `--onlyId`)
+ *   publish:workflow    publish workflows (`--id` or `--all`)
+ *   unpublish:workflow  unpublish workflows (`--id` or `--all`)
+ *   export:credentials  export credentials (`--all` or `--id`, `--output`, `--separate`, `--decrypted`)
+ *   import:credentials  import credentials (`--input`, `--projectId`)
+ *   export:nodes        export the node types (`--output`)
+ *   execute             run a workflow in this process (`--id`, `--rawOutput`)
+ *   execute-batch       run several workflows (`--ids`, `--concurrency`, `--retries`, `--skipList`, `--output`)
+ *   audit               the security audit (`--categories`, `--days-abandoned-workflow`)
  */
 import { buildApp } from './app';
+import { auditCommand } from './commands/audit';
+import { type CommandIo, processIo } from './commands/command-io';
+import { exportCredentialsCommand } from './commands/credentials-export';
+import { importCredentialsCommand } from './commands/credentials-import';
+import { executeCommand } from './commands/execute';
+import { executeBatchCommand } from './commands/execute-batch';
 import { ldapResetCommand } from './commands/ldap-reset';
 import { mfaDisableCommand } from './commands/mfa-disable';
+import { exportNodesCommand } from './commands/nodes-export';
+import { exportWorkflowCommand } from './commands/workflow-export';
+import { importWorkflowCommand } from './commands/workflow-import';
+import { listWorkflowCommand } from './commands/workflow-list';
+import { publishWorkflowCommand, unpublishWorkflowCommand } from './commands/workflow-publish';
 import { ConfigError, loadConfig } from './config';
 import { createContext, type ServerContext } from './context';
 import { createDatabase, runMigrations } from './db/client';
 import { createLogger } from './logger';
 import { seed } from './seed';
+
+/** P6-78 (S4 L11): the data commands; each returns its exit code */
+const DATA_COMMANDS: Record<string, (ctx: ServerContext, argv: string[], io?: CommandIo) => Promise<number>> =
+  {
+    'export:workflow': exportWorkflowCommand,
+    'import:workflow': importWorkflowCommand,
+    'list:workflow': listWorkflowCommand,
+    'publish:workflow': publishWorkflowCommand,
+    'unpublish:workflow': unpublishWorkflowCommand,
+    'export:credentials': exportCredentialsCommand,
+    'import:credentials': importCredentialsCommand,
+    'export:nodes': exportNodesCommand,
+    execute: executeCommand,
+    'execute-batch': executeBatchCommand,
+    audit: auditCommand,
+  };
 
 function onShutdown(close: () => Promise<void>, logger: { info(msg: string): void }) {
   let closing = false;
@@ -84,6 +123,18 @@ async function main(command: string): Promise<void> {
     return;
   }
 
+  // P6-78: the data commands, on a context with no listener; the exit code is the command's
+  const dataCommand = Object.hasOwn(DATA_COMMANDS, command) ? DATA_COMMANDS[command] : undefined;
+  if (dataCommand) {
+    const ctx = await createContext({ config, logger });
+    try {
+      process.exitCode = await dataCommand(ctx, process.argv.slice(3), processIo());
+    } finally {
+      await ctx.close();
+    }
+    return;
+  }
+
   if (command === 'worker') {
     if (config.executionsMode !== 'queue') {
       throw new ConfigError('The worker command needs EXECUTIONS_MODE=queue (and REDIS_URL)');
@@ -113,7 +164,7 @@ async function main(command: string): Promise<void> {
   }
 
   throw new ConfigError(
-    `Unknown command "${command}". Use start, worker, migrate, seed, mfa:disable or ldap:reset.`,
+    `Unknown command "${command}". Use start, worker, migrate, seed, mfa:disable, ldap:reset, ${Object.keys(DATA_COMMANDS).join(', ')}.`,
   );
 }
 

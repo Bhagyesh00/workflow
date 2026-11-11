@@ -67,6 +67,7 @@ import {
   coerceCellValue,
 } from './data-table-filter';
 import { assertWithinQuota, DataTableSizeCache, quotaStatus, warningBytes } from './data-table-size';
+import { assertTenantWritable } from './protected';
 
 /** n8n's text; not in DATA_TABLE_ERRORS, which is the shared contract */
 const DATA_EMPTY = 'Data columns must not be empty';
@@ -608,6 +609,7 @@ export class DataTableService {
     input: DataTableCreateInput & ({ caller: AuthContext } | { projectId: string }),
     actor?: DataTableActor,
   ): Promise<DataTableForCaller> {
+    await assertTenantWritable(this.deps, tenantId, 'dataTableCreate');
     const { caller, ...rest } = input;
     if (!caller) return this.insertTable(tenantId, { ...rest, projectId: rest.projectId! }, actor);
     const { access } = this.deps.context();
@@ -681,6 +683,7 @@ export class DataTableService {
     actor?: DataTableActor,
     caller?: AuthContext,
   ): Promise<DataTableForCaller> {
+    await assertTenantWritable(this.deps, tenantId, 'dataTableStructure');
     const renamed = await this.rename(tenantId, id, input, actor);
     return this.forCaller(caller, await this.requireTable(tenantId, id), renamed);
   }
@@ -709,6 +712,7 @@ export class DataTableService {
 
   /** columns and rows go by foreign key, and every user's favorite of the table with them */
   async delete(tenantId: string, id: string, actor?: DataTableActor): Promise<void> {
+    await assertTenantWritable(this.deps, tenantId, 'dataTableStructure');
     await this.requireTable(tenantId, id);
     await this.deps.database.db.transaction((tx) =>
       this.deleteIn(createRepositories(tx), tenantId, id, actor),
@@ -747,6 +751,7 @@ export class DataTableService {
     input: DataTableColumnAddInput,
     actor?: DataTableActor,
   ): Promise<DataTableColumn> {
+    await assertTenantWritable(this.deps, tenantId, 'dataTableStructure');
     assertColumnName(input.name);
     return this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
@@ -779,6 +784,7 @@ export class DataTableService {
     input: DataTableColumnRenameInput,
     actor?: DataTableActor,
   ): Promise<DataTableColumn> {
+    await assertTenantWritable(this.deps, tenantId, 'dataTableStructure');
     assertColumnName(input.name);
     const column = await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
@@ -808,6 +814,7 @@ export class DataTableService {
     input: DataTableColumnMoveInput,
     actor?: DataTableActor,
   ): Promise<DataTableColumn> {
+    await assertTenantWritable(this.deps, tenantId, 'dataTableStructure');
     return this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
       if (!(await repos.dataTables.lock(tenantId, id))) throw tableNotFound(id);
@@ -830,6 +837,7 @@ export class DataTableService {
     columnId: string,
     actor?: DataTableActor,
   ): Promise<void> {
+    await assertTenantWritable(this.deps, tenantId, 'dataTableStructure');
     await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
       if (!(await repos.dataTables.lock(tenantId, id))) throw tableNotFound(id);

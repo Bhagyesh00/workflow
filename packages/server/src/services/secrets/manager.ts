@@ -287,8 +287,8 @@ export class SecretsManager {
     const { repos } = this.deps;
     const settings = ((await repos.tenants.get(tenantId))?.settings ?? {}) as Record<string, unknown>;
     const current = (settings.externalSecrets ?? {}) as Record<string, unknown>;
-    await repos.tenants.updateSettings(tenantId, {
-      ...settings,
+    // P6-78: only the `externalSecrets` key, merged
+    await repos.tenants.mergeSettings(tenantId, {
       externalSecrets: { ...current, systemRolesEnabled: enabled },
     });
     await repos.audit.add(tenantId, {

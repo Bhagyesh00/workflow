@@ -47,8 +47,10 @@ import { ScimRepository } from './scim';
 import { SecretConnectionRepository } from './secrets';
 import { SecurityAuditRepository } from './security-audit';
 import { ShareRepository } from './shares';
+import { SourceControlRepository } from './source-control';
 import { SsoRepository } from './sso';
 import { StaticDataRepository } from './static-data';
+import { SyncIdMapRepository } from './sync-id-map';
 import { TestRunRepository } from './test-runs';
 import { TypePolicyRepository } from './type-policies';
 import { UserMfaRepository } from './user-mfa';
@@ -133,6 +135,10 @@ export interface Repositories {
   securityAudit: SecurityAuditRepository;
   /** P6-86 (S3 L18): the dependency reads */
   dependencies: DependencyRepository;
+  /** P6-73 (S4 L2): the Git connection and its lease */
+  sourceControl: SourceControlRepository;
+  /** P6-74 (S4 L3): the source control id map */
+  syncIdMap: SyncIdMapRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -185,6 +191,8 @@ export function createRepositories(db: DbOrTx): Repositories {
     publicIdempotency: new PublicIdempotencyRepository(db),
     securityAudit: new SecurityAuditRepository(db),
     dependencies: new DependencyRepository(db),
+    sourceControl: new SourceControlRepository(db),
+    syncIdMap: new SyncIdMapRepository(db),
   };
 }
 

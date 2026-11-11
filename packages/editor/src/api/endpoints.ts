@@ -16,6 +16,7 @@ import type {
   ListSearchResult,
   NodePropertyOption,
   ResourceMapperFields,
+  WorkflowDefinition,
   WorkflowNode,
 } from '@workflow/workflow';
 import { ApiError, api, buildUrl, getCurrentTenant, type QueryValue, request, requestRaw } from './client';
@@ -140,6 +141,10 @@ import type {
   ProvisioningConfig,
   PublishBody,
   PublishTimelineEntry,
+  PullResult,
+  PullWorkFolderBody,
+  PushResult,
+  PushWorkFolderBody,
   RateLimitSettings,
   ResetPasswordBody,
   ResetTokenInfo,
@@ -175,6 +180,13 @@ import type {
   SecurityPolicyPatch,
   Settings,
   SettingsPatchBody,
+  SourceControlBranches,
+  SourceControlConnectBody,
+  SourceControlDirection,
+  SourceControlKeyType,
+  SourceControlledFile,
+  SourceControlPatchBody,
+  SourceControlPreferences,
   SsoMethod,
   SsoOptions,
   SsoTestResult,
@@ -1067,4 +1079,31 @@ export const rateLimitsApi = {
   get: () => api.get<RateLimitSettings>('/settings/policies/rate-limits'),
   update: (body: Partial<RateLimitSettings>) =>
     api.put<RateLimitSettings>('/settings/policies/rate-limits', body),
+};
+
+/**
+ * P6-73, P6-07: the Git connection (`sourceControl:manage`; GET preferences answers every signed-in user,
+ * narrowed by scope) and status, push, pull and remote content (the caller's pushable projects, pull needs
+ * `sourceControl:pull`). Push names only (id, type) of the picked files; the server builds the paths.
+ */
+export const sourceControlApi = {
+  preferences: () => api.get<SourceControlPreferences>('/source-control/preferences'),
+  connect: (body: SourceControlConnectBody) =>
+    api.post<SourceControlPreferences>('/source-control/preferences', body),
+  patch: (body: SourceControlPatchBody) =>
+    api.patch<SourceControlPreferences>('/source-control/preferences', body),
+  disconnect: (body?: { keepKeyPair?: boolean }) =>
+    api.post<SourceControlPreferences>('/source-control/disconnect', body ?? {}),
+  branches: () => api.get<SourceControlBranches>('/source-control/get-branches'),
+  generateKeyPair: (type?: SourceControlKeyType) =>
+    api.post<SourceControlPreferences>(
+      '/source-control/generate-key-pair',
+      type ? { keyGeneratorType: type } : {},
+    ),
+  status: (direction: SourceControlDirection, verbose?: boolean) =>
+    api.get<SourceControlledFile[]>('/source-control/get-status', { direction, verbose }),
+  push: (body: PushWorkFolderBody) => api.post<PushResult>('/source-control/push-workfolder', body),
+  pull: (body: PullWorkFolderBody) => api.post<PullResult>('/source-control/pull-workfolder', body),
+  remoteContent: (type: 'workflow', id: string) =>
+    api.get<WorkflowDefinition>(`/source-control/remote-content/${enc(type)}/${enc(id)}`),
 };

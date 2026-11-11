@@ -35,6 +35,8 @@ import { ssoNavigation } from '../../pages/auth/SsoSignIn';
 import { toast, useUiStore } from '../../stores/ui-store';
 import { DataTableStorageBanner } from '../data-tables/StorageBanner';
 import { ProjectNav } from '../projects/ProjectNav';
+import { EnvironmentSidebarBadge } from '../protected/EnvironmentSidebarBadge';
+import { SidebarSourceControl } from '../source-control/SidebarSourceControl';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
 import { Menu } from '../ui/Menu';
@@ -328,6 +330,9 @@ export function AppShell() {
             </button>
           )}
         </div>
+        {/* P6-76: branch, Pull and Push (L6); P6-80: the protected lock and branch colour (L9) */}
+        <SidebarSourceControl collapsed={collapsed} />
+        <EnvironmentSidebarBadge collapsed={collapsed} />
         <ProjectNav collapsed={collapsed} />
         <TenantSwitcher me={data} collapsed={collapsed} />
         <ul className="flex flex-col gap-0.5">

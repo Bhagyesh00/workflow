@@ -19,6 +19,7 @@ import { createRepositories, type Repositories } from '../repositories';
 import { PERSONAL_OWNER_ROLE } from '../repositories/projects';
 import { MISSING_SCOPE_MESSAGE } from './access';
 import { assertProjectWorkAllowed } from './member-removal';
+import { assertTenantWritable } from './protected';
 import { RELOAD_CHANNEL } from './secrets/manager';
 import { projectShared } from './share-mails';
 
@@ -274,6 +275,7 @@ export class ProjectService {
   }
 
   async create(auth: AuthContext, input: ProjectCreateInput): Promise<ProjectDetailDTO> {
+    await assertTenantWritable(this.deps, auth.tenant.id, 'projectCreate');
     const tenantId = auth.tenant.id;
     const limit = effectiveLimits(auth.tenant.plan, auth.tenant.settings as TenantSettings).maxTeamProjects;
     const project = await this.deps.database.db.transaction(async (tx) => {

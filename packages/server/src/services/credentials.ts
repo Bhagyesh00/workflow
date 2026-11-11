@@ -18,6 +18,7 @@ import type { CredentialRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import type { Repositories } from '../repositories';
 import { AccessService } from './access';
+import { assertTenantWritable } from './protected';
 import type { SecretsManager } from './secrets/manager';
 import { collectSecretKeys, hasCredentialExpressions, resolveCredentialData } from './secrets/resolver';
 import { assertCredentialType } from './type-policies/enforce';
@@ -249,6 +250,7 @@ export class CredentialService {
     this.resolvedType(input.type);
     // P6 S3: fails closed until `setPolicyDeps`, then the type policy refuses creating a blocked type (P6-04)
     const policyDeps = this.requirePolicyDeps('credentialSave');
+    await assertTenantWritable(policyDeps, tenantId, 'credentialCreate');
     // P6 S1: the project the caller resolved (`AccessService.targetProject`)
     const { projectId } = input;
     await assertCredentialType(policyDeps, 'credentialSave', {

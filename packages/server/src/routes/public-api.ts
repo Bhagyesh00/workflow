@@ -35,8 +35,10 @@ import {
 import { createCredential, deleteCredential } from './credentials';
 import { deleteExecution, executionListQuery, getExecution, listExecutions, viewerOf } from './executions';
 import { PUBLIC_AUDIT_ROUTES } from './public-audit';
+import { PUBLIC_CLI_ROUTES } from './public-cli-routes';
 import { PUBLIC_DATA_TABLE_ROUTES } from './public-data-tables';
 import { PUBLIC_DEPENDENCY_ROUTES } from './public-dependencies';
+import { PUBLIC_DISCOVER_ROUTES } from './public-discover';
 import { PUBLIC_EVALUATION_ROUTES } from './public-evaluations';
 import { PUBLIC_FOLDER_ROUTES } from './public-folders';
 import { PUBLIC_INSIGHTS_ROUTES } from './public-insights';
@@ -46,6 +48,7 @@ import { PUBLIC_RATE_LIMIT_ROUTES } from './public-rate-limits';
 import { PUBLIC_ROLE_MAPPING_ROUTES } from './public-role-mapping';
 import { PUBLIC_ROLE_ROUTES } from './public-roles';
 import { PUBLIC_SECURITY_POLICY_ROUTES } from './public-security-policy';
+import { PUBLIC_SOURCE_CONTROL_ROUTES } from './public-source-control';
 import { PUBLIC_SSO_ROUTES } from './public-sso';
 import { PUBLIC_TYPE_POLICY_ROUTES } from './public-type-policies';
 import { PUBLIC_USER_ROUTES } from './public-users';
@@ -97,6 +100,11 @@ export interface ApiRoute {
   access: RouteAccess;
   /** the API key scope of this route (n8n's); a key needs it as well as `access` */
   scope?: ApiKeyScope;
+  /**
+   * P6-75 (S4): any valid key may call it, whatever its scopes (GET `/discover`): the loop skips only
+   * `assertApiKeyScope` for this row; `access` is `{ open: true }` and the handler filters by the key's scopes
+   */
+  anyKey?: true;
   params?: z.ZodObject;
   query?: z.ZodObject;
   body?: z.ZodType;
@@ -605,6 +613,10 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
   ...PUBLIC_AUDIT_ROUTES,
   ...PUBLIC_DEPENDENCY_ROUTES,
   ...PUBLIC_RATE_LIMIT_ROUTES,
+  // P6 S4: source control (L5), discover (L5) and the rows the CLI needs (L10)
+  ...PUBLIC_SOURCE_CONTROL_ROUTES,
+  ...PUBLIC_DISCOVER_ROUTES,
+  ...PUBLIC_CLI_ROUTES,
 ];
 
 /** JSON schema of credential data from the type's properties */
@@ -1080,6 +1092,53 @@ const COMPONENTS: Record<string, unknown> = {
   DependencyList: { type: 'object', additionalProperties: true },
   /** P6-83 (L15): the workspace's public API limits and windows; 0 means no limit */
   RateLimitSettings: { type: 'object', additionalProperties: true },
+  /** P6-75 (S4 L5): one file of a source control status */
+  SourceControlledFile: {
+    type: 'object',
+    properties: {
+      file: { type: 'string' },
+      id: { type: 'string' },
+      name: { type: 'string' },
+      type: { enum: ['workflow', 'credential', 'variables', 'tags', 'folders', 'datatable', 'project'] },
+      status: { enum: ['new', 'modified', 'deleted', 'created', 'renamed', 'conflicted', 'unknown'] },
+      location: { enum: ['local', 'remote'] },
+      conflict: { type: 'boolean' },
+      updatedAt: { type: 'string' },
+      pushed: { type: 'boolean' },
+      isLocalPublished: { type: 'boolean' },
+      owner: { type: 'object', additionalProperties: true },
+      folderPath: { type: 'array', items: { type: 'string' } },
+    },
+  },
+  /** P6-75 (S4 L5): the files pushed and the commit */
+  PushResult: {
+    type: 'object',
+    properties: {
+      files: { type: 'array', items: ref('SourceControlledFile') },
+      commit: { type: 'string', description: 'the id of the commit pushed' },
+    },
+  },
+  /** P6-75 (S4 L5): the files pulled, the failed publishes and the files the content import policy skipped */
+  PullResult: {
+    type: 'object',
+    properties: {
+      files: { type: 'array', items: ref('SourceControlledFile') },
+      publishingErrors: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      contentImportPolicy: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    },
+  },
+  /** P6-75 (S4 L5): the routes the key may call, with their schemas on `include=schemas` */
+  DiscoverResponse: { type: 'object', additionalProperties: true },
+  /** P6-77 (S4 L10): a tag of a workflow */
+  WorkflowTag: {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      name: { type: 'string' },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
 };
 
 export function buildOpenApiDocument(ctx: ServerContext): Record<string, unknown> {
@@ -1347,7 +1406,8 @@ export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerC
         if (!limited.allowed) throw ApiError.tooMany('Too many requests, please try again later');
         // the key's own scope first (a key that lacks it learns nothing about any row), then the user's
         // scopes on the row (403 before any body check); an id that is no uuid is a 400 for every caller
-        assertApiKeyScope(auth, route.scope);
+        // P6-75: an `anyKey` row (GET /discover) takes any valid key; its handler filters by the key's scopes
+        if (!route.anyKey) assertApiKeyScope(auth, route.scope);
         const params = route.params ? parse(route.params, request.params) : {};
         const projectId = await checkAccess(ctx, request, route.access, params);
         const input: PublicApiInput = {

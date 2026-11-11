@@ -15,6 +15,7 @@ import {
   projectsApi,
   rolesApi,
   settingsApi,
+  sourceControlApi,
   tagsApi,
   typePoliciesApi,
   variablesApi,
@@ -30,6 +31,7 @@ import type {
   InsightsQuery,
   NodeTypeDescription,
   Settings,
+  SourceControlDirection,
 } from './types';
 
 export const queryKeys = {
@@ -108,6 +110,11 @@ export const queryKeys = {
   dataTableColumns: (id: string) => ['data-table', id, 'columns'] as const,
   dataTableRows: (id: string, query: object = {}) => ['data-table', id, 'rows', query] as const,
   dataTableDependencies: (id: string) => ['data-table', id, 'dependencies'] as const,
+  /** P6-73, P6-07: invalidating `sourceControl` refreshes the preferences and both statuses (prefix match) */
+  sourceControl: ['source-control'] as const,
+  sourceControlPreferences: ['source-control', 'preferences'] as const,
+  sourceControlStatus: (direction: SourceControlDirection) =>
+    ['source-control', 'status', direction] as const,
   dataTableLimits: ['data-tables-limits'] as const,
   secretProviderTypes: ['secret-providers', 'types'] as const,
   secretConnections: ['secret-providers', 'connections'] as const,
@@ -503,5 +510,28 @@ export function useDependencyCounts(kind: DependencyResourceKind, id: string | n
     enabled: Boolean(id),
     retry: false,
     staleTime: 30_000,
+  });
+}
+
+/** P6-73: the Git connection, narrowed by the caller's scopes (only `sourceControl:manage` sees the public key) */
+export function useSourceControlPreferences(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.sourceControlPreferences,
+    queryFn: sourceControlApi.preferences,
+    enabled,
+    retry: false,
+    staleTime: 60_000,
+  });
+}
+
+/** P6-07: the changed files for a push or a pull (each read fetches the remote, so no background refetch) */
+export function useSourceControlStatus(direction: SourceControlDirection, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.sourceControlStatus(direction),
+    queryFn: () => sourceControlApi.status(direction),
+    enabled,
+    retry: false,
+    staleTime: 0,
+    refetchOnWindowFocus: false,
   });
 }

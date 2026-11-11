@@ -113,6 +113,8 @@ export interface Settings {
   usage?: { period: string; executions: number; executionMs: number; activeWorkflows?: number };
   /** P6-53: the workspace's redaction floor (a workflow policy cannot be weaker; absent = 'off') */
   redactionFloor?: RedactionFloor;
+  /** P6-79, P6-80: the workspace is protected (n8n's `branchReadOnly`); absent = not protected */
+  sourceControl?: { readOnly: boolean };
 }
 
 /** body of PATCH /settings (admin) */
@@ -2024,3 +2026,49 @@ export interface CollaborationState {
 
 export type PresenceAction = 'open' | 'heartbeat' | 'close';
 export type WriteAccessAction = 'request' | 'force' | 'release' | 'heartbeat';
+
+// ---------------------------------------------------------------------------------------------
+// Phase 6 S4: Git and environments (P6-07, P6-73..P6-76). The file, preference, push and pull shapes are
+// workflow's (src/source-control.ts).
+
+export type {
+  PullResult,
+  PullWorkFolderBody,
+  PushResult,
+  PushWorkFolderBody,
+  SourceControlledFile,
+  SourceControlledFileStatus,
+  SourceControlledFileType,
+  SourceControlPreferences,
+} from '@workflow/workflow';
+
+export type SourceControlKeyType = 'ed25519' | 'rsa';
+export type SourceControlDirection = 'push' | 'pull';
+
+/**
+ * body of POST /source-control/preferences (connect, `sourceControl:manage`). While connected the server
+ * takes only `branchReadOnly`. `httpsPassword` (the token) is write-only: no answer carries it back.
+ */
+export interface SourceControlConnectBody {
+  connectionType?: 'ssh' | 'https';
+  repositoryUrl?: string;
+  branchName?: string;
+  branchReadOnly?: boolean;
+  branchColor?: string;
+  keyGeneratorType?: SourceControlKeyType;
+  httpsUsername?: string;
+  httpsPassword?: string;
+}
+
+/** body of PATCH /source-control/preferences (`sourceControl:manage`) */
+export interface SourceControlPatchBody {
+  branchName?: string;
+  branchReadOnly?: boolean;
+  branchColor?: string;
+}
+
+/** GET /source-control/get-branches */
+export interface SourceControlBranches {
+  branches: string[];
+  currentBranch: string;
+}

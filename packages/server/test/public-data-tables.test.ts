@@ -281,6 +281,8 @@ describe('API key scopes', () => {
   it('names a scope on every public route', async () => {
     const { PUBLIC_ROUTES } = await import('../src/routes/public-api');
     for (const route of PUBLIC_ROUTES) {
+      // P6 S4: an `anyKey` row (GET /discover) takes any valid key and names no key scope
+      if (route.anyKey) continue;
       expect(route.scope, `${route.method} ${route.path}`).toBeDefined();
       expect(API_KEY_SCOPES).toContain(route.scope);
     }

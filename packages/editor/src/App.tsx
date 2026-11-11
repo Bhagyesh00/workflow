@@ -49,6 +49,7 @@ import {
   SettingsLayout,
   VariablesSettingsPage,
 } from './pages/SettingsPages';
+import { SourceControlSettingsPage } from './pages/SourceControlSettingsPage';
 import { AuthenticationSettingsPage } from './pages/sso/AuthenticationSettingsPage';
 import { RoleProvisioningPanel } from './pages/sso/RoleProvisioningPanel';
 import { SamlOnboardingPage } from './pages/sso/SamlOnboardingPage';
@@ -301,6 +302,8 @@ export const routes: RouteObject[] = [
           { path: 'provisioning', element: <RoleProvisioningPanel /> },
           { path: 'scim', element: <ScimSettingsPage /> },
           { path: 'external-secrets', element: <SecretsSettingsPage /> },
+          // P6-76: the Git connection page (n8n's path; it gates itself on `sourceControl:manage`)
+          { path: 'environments', element: <SourceControlSettingsPage /> },
           {
             path: 'ai',
             element: (

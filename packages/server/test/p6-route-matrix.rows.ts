@@ -38,6 +38,13 @@
  * dependencies, and the list filter rows (bulk stop and delete of runs, dependency counts) in the form of
  * `GET /executions`. A stub that throws after its gate answers 500, which counts as "not 403". After C0 no lane
  * edits this file.
+ *
+ * P6 S4 (C0g): 20 rows (11 REST, 9 public) for the routes S4's C0 registers: the source control settings
+ * (`sourceControl:manage`; reading the preferences is open to every signed-in user, the answer narrows), the
+ * sync routes (pull needs `sourceControl:pull`; the push status, push and remote content are list filter rows in
+ * the form of `POST /rest/executions/stopMany`), the public source control rows, `GET /api/v1/discover` (any valid
+ * key, written as the open row `GET /api/v1/credentials/schema/:type`) and the CLI's public rows (workflow tags,
+ * stop a run, the credential list and one credential). After C0 no lane edits this file.
  */
 import type { Scope } from '@workflow/workflow';
 import type { Role } from '../src/db/schema';
@@ -1784,6 +1791,44 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'securityAudit:generate',
     target: 'none',
   },
+  // public-cli-routes.ts
+  {
+    file: 'public-cli-routes.ts',
+    method: 'GET',
+    path: '/api/v1/credentials',
+    scope: null,
+    target: 'credential',
+    access: 'auth',
+    change: 'The list has no gate: the access filter of `credential:list` narrows the rows (as n8n)',
+  },
+  {
+    file: 'public-cli-routes.ts',
+    method: 'GET',
+    path: '/api/v1/credentials/:id',
+    scope: 'credential:read',
+    target: 'credential',
+  },
+  {
+    file: 'public-cli-routes.ts',
+    method: 'POST',
+    path: '/api/v1/executions/:id/stop',
+    scope: 'workflow:execute',
+    target: 'execution',
+  },
+  {
+    file: 'public-cli-routes.ts',
+    method: 'GET',
+    path: '/api/v1/workflows/:id/tags',
+    scope: 'workflow:read',
+    target: 'workflow',
+  },
+  {
+    file: 'public-cli-routes.ts',
+    method: 'PUT',
+    path: '/api/v1/workflows/:id/tags',
+    scope: 'workflow:update',
+    target: 'workflow',
+  },
   // public-data-tables.ts
   {
     file: 'public-data-tables.ts',
@@ -1931,6 +1976,17 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     path: '/api/v1/credentials/:id/dependencies',
     scope: 'credential:read',
     target: 'credential',
+  },
+  // public-discover.ts
+  {
+    file: 'public-discover.ts',
+    method: 'GET',
+    path: '/api/v1/discover',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+    change:
+      'Any valid key calls it (`anyKey`, no key scope): the answer lists only what the key may call (as n8n)',
   },
   // public-evaluations.ts
   {
@@ -2232,6 +2288,31 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'tenant',
   },
 
+  // public-source-control.ts
+  {
+    file: 'public-source-control.ts',
+    method: 'POST',
+    path: '/api/v1/source-control/pull',
+    scope: 'sourceControl:pull',
+    target: 'none',
+  },
+  {
+    file: 'public-source-control.ts',
+    method: 'POST',
+    path: '/api/v1/source-control/push',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+    change:
+      'No gate on the route: the list filter of `sourceControl:push` refuses a file outside the pushable projects (as n8n)',
+  },
+  {
+    file: 'public-source-control.ts',
+    method: 'GET',
+    path: '/api/v1/source-control/status',
+    scope: 'sourceControl:read',
+    target: 'none',
+  },
   // public-sso.ts
   {
     file: 'public-sso.ts',
@@ -2951,6 +3032,99 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'workflow',
   },
 
+  // source-control-sync.ts
+  {
+    file: 'source-control-sync.ts',
+    method: 'GET',
+    path: '/rest/source-control/get-status',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+    change:
+      'No gate on a push status: the list filter of `sourceControl:push` narrows it to the pushable projects (as n8n); `direction=pull` needs `sourceControl:pull`',
+  },
+  {
+    file: 'source-control-sync.ts',
+    method: 'POST',
+    path: '/rest/source-control/pull-workfolder',
+    scope: 'sourceControl:pull',
+    target: 'none',
+  },
+  {
+    file: 'source-control-sync.ts',
+    method: 'POST',
+    path: '/rest/source-control/push-workfolder',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+    change:
+      'No gate on the route: the list filter of `sourceControl:push` refuses a file outside the pushable projects (as n8n)',
+  },
+  {
+    file: 'source-control-sync.ts',
+    method: 'GET',
+    path: '/rest/source-control/remote-content/:type/:id',
+    scope: null,
+    target: 'workflow',
+    access: 'auth',
+    change:
+      'No gate on the route: the list filter of `sourceControl:push` narrows it to the pushable projects (as n8n)',
+  },
+  {
+    file: 'source-control-sync.ts',
+    method: 'GET',
+    path: '/rest/source-control/status',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+    change:
+      'No gate on a push status: the list filter of `sourceControl:push` narrows it to the pushable projects (as n8n); `direction=pull` needs `sourceControl:pull`',
+  },
+  // source-control.ts
+  {
+    file: 'source-control.ts',
+    method: 'POST',
+    path: '/rest/source-control/disconnect',
+    scope: 'sourceControl:manage',
+    target: 'none',
+  },
+  {
+    file: 'source-control.ts',
+    method: 'POST',
+    path: '/rest/source-control/generate-key-pair',
+    scope: 'sourceControl:manage',
+    target: 'none',
+  },
+  {
+    file: 'source-control.ts',
+    method: 'GET',
+    path: '/rest/source-control/get-branches',
+    scope: 'sourceControl:manage',
+    target: 'none',
+  },
+  {
+    file: 'source-control.ts',
+    method: 'GET',
+    path: '/rest/source-control/preferences',
+    scope: null,
+    target: 'none',
+    access: 'auth',
+    change: 'Every signed-in user reads it: the answer narrows by scope (as n8n)',
+  },
+  {
+    file: 'source-control.ts',
+    method: 'POST',
+    path: '/rest/source-control/preferences',
+    scope: 'sourceControl:manage',
+    target: 'none',
+  },
+  {
+    file: 'source-control.ts',
+    method: 'PATCH',
+    path: '/rest/source-control/preferences',
+    scope: 'sourceControl:manage',
+    target: 'none',
+  },
   // sso-oidc.ts
   {
     file: 'sso-oidc.ts',

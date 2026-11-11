@@ -104,6 +104,12 @@ export interface TenantSettings {
   redactionFloor?: RedactionFloor;
   /** P6-83 (L15): the public API rate limits per API key; absent fields take `config.publicApiRateLimit` */
   publicApiRateLimit?: PublicApiRateLimit;
+  /**
+   * P6-78 (L7): Git environments. `readOnly` makes this a protected workspace (services/protected.ts
+   * `isProtected`); set only by the source control switch (`setReadOnly`, one `mergeSettings`), never by
+   * PATCH /settings; GET /settings returns it as `sourceControl.readOnly`
+   */
+  sourceControl?: { readOnly?: boolean };
 }
 
 /**

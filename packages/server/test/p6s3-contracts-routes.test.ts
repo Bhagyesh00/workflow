@@ -52,7 +52,8 @@ describe('P6 S3 API key scopes', () => {
       'credentialTypePolicy:manage',
       'insights:read',
     ]);
-    expect(API_KEY_SCOPES).toHaveLength(81);
+    // P6 S4 adds sourceControl:push and sourceControl:read after sourceControl:pull, so the last three hold
+    expect(API_KEY_SCOPES).toHaveLength(83);
     expect(new Set(API_KEY_SCOPES).size).toBe(API_KEY_SCOPES.length);
     // the scopes S3 gates on that were there before stay where they were
     expect(API_KEY_SCOPES).toContain('securitySettings:manage');

@@ -60,6 +60,8 @@ import { SecretsManager } from './services/secrets/manager';
 import type { SecretProviderType } from './services/secrets/types';
 import { SecuritySettingsService } from './services/security-settings';
 import { SharingService } from './services/sharing';
+import { SourceControlSettingsService } from './services/source-control/settings';
+import { SourceControlSyncService } from './services/source-control/sync';
 import { LdapService } from './services/sso/ldap';
 import { SsoLoginService } from './services/sso/login';
 import { OidcService } from './services/sso/oidc';
@@ -211,6 +213,10 @@ export interface ServerContext {
   dependencies: DependencyService;
   /** P6-83 (S3 L15): the public API rate limit setting */
   rateLimitSettings: RateLimitSettingsService;
+  /** P6-73 (S4 L2): the workspace's Git connection */
+  sourceControl: SourceControlSettingsService;
+  /** P6-07 (S4 L4): status, push and pull */
+  sourceControlSync: SourceControlSyncService;
   /**
    * P6-09, P6-10: plain http to an identity provider (`ContextOptions.allowInsecureIdp`, tests only; never
    * read from the environment). Services read `this.deps.context().allowInsecureIdp`.
@@ -432,6 +438,9 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const collaboration = new CollaborationService(serviceDeps);
   const dependencies = new DependencyService(serviceDeps);
   const rateLimitSettings = new RateLimitSettingsService(serviceDeps);
+  // P6 S4: source control (C0 stubs: constructors pass)
+  const sourceControl = new SourceControlSettingsService(serviceDeps);
+  const sourceControlSync = new SourceControlSyncService(serviceDeps);
   let assistantTimers: AssistantTimers | undefined;
   const stopAssistantTimers = async () => {
     const timers = assistantTimers;
@@ -603,6 +612,8 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     collaboration,
     dependencies,
     rateLimitSettings,
+    sourceControl,
+    sourceControlSync,
     allowInsecureIdp: options.allowInsecureIdp === true,
 
     async startMain() {

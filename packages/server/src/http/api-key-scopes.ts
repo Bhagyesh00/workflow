@@ -15,6 +15,9 @@ export const API_KEY_SCOPES = [
   'user:changeRole',
   'user:delete',
   'sourceControl:pull',
+  // P6 S4 (L5): the public push and status
+  'sourceControl:push',
+  'sourceControl:read',
   'securityAudit:generate',
   'project:create',
   'project:update',

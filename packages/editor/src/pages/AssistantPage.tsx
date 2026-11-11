@@ -18,6 +18,7 @@ import { AssistantComposer } from '../components/assistant/AssistantComposer';
 import { AssistantThreadList } from '../components/assistant/AssistantThreadList';
 import { ASSISTANT_EMPTY_TEXT, AssistantThreadView } from '../components/assistant/AssistantThreadView';
 import { AssistantWizard } from '../components/assistant/AssistantWizard';
+import { ProtectedNotice } from '../components/protected/ProtectedNotice';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
 import { canWith } from '../lib/permissions';
 import {
@@ -166,6 +167,8 @@ function AssistantWorkspace() {
         )}
         <div className="border-t border-line px-4 py-3">
           <div className="mx-auto max-w-3xl">
+            {/* P6-79: on a protected workspace, why write tools are off (L8) */}
+            <ProtectedNotice area="assistant" />
             <AssistantComposer
               running={status === 'running'}
               disabledReason={status === 'loading' ? 'Loading the chat' : disabledReason}
