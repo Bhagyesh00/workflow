@@ -3,7 +3,7 @@
  * - `insightRunOf` (FULL in C0): the run as the collector keeps it, built in `finish` and `afterCrash`
  *   (C0d1) with no read: tenant, workflow, mode, status, start, runtime clamped to 0..2^31-1, settings and a
  *   reference to the run data (not a copy). No project: the flush reads it with the metadata upsert.
- * - `countingFacts` (stub, L11): n8n's counting rules (counting-rules.ts:70-145): modes cli, retry,
+ * - `countingFacts` (L11): n8n's counting rules (counting-rules.ts:70-145): modes cli, retry,
  *   trigger, webhook, evaluation, error count; success counts as success; error, crashed and blocked as
  *   failure; canceled and waiting nothing; a run with no workflow id nothing; time saved through
  *   `computeTimeSavedMinutes`.
@@ -16,6 +16,7 @@ import type {
   WorkflowSettings,
 } from '@workflow/workflow';
 import type { ExecutionRow } from '../../db/schema';
+import { computeTimeSavedMinutes } from './time-saved';
 
 /** the largest runtime stored (a Postgres int) */
 export const MAX_INSIGHT_RUNTIME_MS = 2_147_483_647;
@@ -74,7 +75,34 @@ export function insightRunOf(
   };
 }
 
-export function countingFacts(_run: InsightRun): InsightFacts {
-  // stub (L11)
-  throw new Error('not implemented (L11)');
+/** the modes that count (n8n's counting rules): production runs, error workflows included */
+const COUNTED_MODES: ReadonlySet<ExecutionMode> = new Set([
+  'cli',
+  'retry',
+  'trigger',
+  'webhook',
+  'evaluation',
+  'error',
+]);
+
+/**
+ * What one finished run adds. A run with no workflow id, a mode that does not count (manual, chat, internal,
+ * integrated) or a status that is neither a success nor a failure (canceled, waiting) adds nothing. Success is
+ * a success; error, crashed and blocked (a run that failed before its first node) are failures. A counted run
+ * also adds its runtime, and the minutes it saved when that is above zero (zero adds nothing to a sum).
+ */
+export function countingFacts(run: InsightRun): InsightFacts {
+  if (!run.workflowId || !COUNTED_MODES.has(run.mode)) return [];
+  const status: string = run.status;
+  let outcome: 'success' | 'failure';
+  if (status === 'success') outcome = 'success';
+  else if (status === 'error' || status === 'crashed' || status === 'blocked') outcome = 'failure';
+  else return [];
+  const facts: InsightFacts = [
+    { type: outcome, value: 1 },
+    { type: 'runtime_ms', value: clampRuntime(run.runtimeMs) },
+  ];
+  const saved = computeTimeSavedMinutes(run.settings, run.runData, run.status, run.mode);
+  if (saved !== undefined && saved > 0) facts.push({ type: 'time_saved_min', value: Math.round(saved) });
+  return facts;
 }
