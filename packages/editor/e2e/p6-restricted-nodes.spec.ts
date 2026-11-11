@@ -92,7 +92,7 @@ test('the owner saves a workflow, then denies its node type through the public A
   const version = ((await scope.json()).data as { version: number }).version;
   const attached = await page.request.put('/api/v1/node-type-policies/instance', {
     headers,
-    data: { defaultAction: 'allow', attachments: [{ policyId, priority: 0, isFloor: false }], version },
+    data: { defaultAction: 'allow', attachments: [{ policyId, priority: 0, isFloor: false }], expectedVersion: version },
   });
   expect(attached.ok()).toBe(true);
 });
@@ -116,7 +116,8 @@ test('the node creator lists the type greyed and last, and adding it adds nothin
   });
   expect(lastInSection).toBe(true);
 
-  await row.click();
+  // force: Playwright will not click an aria-disabled button; the row still answers a click with the toast
+  await row.click({ force: true });
   await expect(page.getByText('is restricted').first()).toBeVisible();
   await expect(page.locator('.react-flow__node')).toHaveCount(2);
 
