@@ -149,55 +149,57 @@ export function InsightsChart({ type, data, granularity }: InsightsChartProps) {
           );
         })}
         {line}
-        {data.map((row, i) => (
-          // biome-ignore lint/a11y/noInteractiveElementToNoninteractiveRole: a focusable data point reads as an image that names its value
-          <g
-            key={row.date}
-            ref={(el) => {
-              refs.current[i] = el;
-            }}
-            role="img"
-            tabIndex={i === current ? 0 : -1}
-            aria-label={`${bucketName(row.date, granularity)}: ${text(values[i]!)}`}
-            data-testid="insights-bucket"
-            className="outline-none"
-            onFocus={() => {
-              setFocusIndex(i);
-              setShown(i);
-            }}
-            onBlur={() => setShown((now) => (now === i ? null : now))}
-            onMouseEnter={() => setShown(i)}
-            onMouseLeave={() => setShown((now) => (now === i ? null : now))}
-            onKeyDown={(event) => move(event, i)}
-          >
-            <rect
-              className={shown === i ? 'stroke-brand' : undefined}
-              x={x(i) - band / 2}
-              y={TOP}
-              width={band}
-              height={PLOT_H}
-              fill="transparent"
-              strokeWidth={2}
-              stroke="transparent"
-            />
-            {LINE_TYPES.has(type) ? (
-              <circle cx={x(i)} cy={y(values[i]!)} r={3.5} className="fill-brand" />
-            ) : (
+        <g role="listbox" aria-label={`${title} by ${granularity}`}>
+          {data.map((row, i) => (
+            <g
+              key={row.date}
+              ref={(el) => {
+                refs.current[i] = el;
+              }}
+              role="option"
+              aria-selected={shown === i}
+              tabIndex={i === current ? 0 : -1}
+              aria-label={`${bucketName(row.date, granularity)}: ${text(values[i]!)}`}
+              data-testid="insights-bucket"
+              className="outline-none"
+              onFocus={() => {
+                setFocusIndex(i);
+                setShown(i);
+              }}
+              onBlur={() => setShown((now) => (now === i ? null : now))}
+              onMouseEnter={() => setShown(i)}
+              onMouseLeave={() => setShown((now) => (now === i ? null : now))}
+              onKeyDown={(event) => move(event, i)}
+            >
               <rect
-                x={x(i) - Math.max(band * 0.35, 1)}
-                y={y(values[i]!)}
-                width={Math.max(band * 0.7, 2)}
-                height={TOP + PLOT_H - y(values[i]!)}
-                className="fill-brand"
+                className={shown === i ? 'stroke-brand' : undefined}
+                x={x(i) - band / 2}
+                y={TOP}
+                width={band}
+                height={PLOT_H}
+                fill="transparent"
+                strokeWidth={2}
+                stroke="transparent"
               />
-            )}
-            {i % labelStep === 0 && (
-              <text x={x(i)} y={HEIGHT - 10} textAnchor="middle" fontSize={11} className="fill-ink-3">
-                {bucketLabel(row.date, granularity)}
-              </text>
-            )}
-          </g>
-        ))}
+              {LINE_TYPES.has(type) ? (
+                <circle cx={x(i)} cy={y(values[i]!)} r={3.5} className="fill-brand" />
+              ) : (
+                <rect
+                  x={x(i) - Math.max(band * 0.35, 1)}
+                  y={y(values[i]!)}
+                  width={Math.max(band * 0.7, 2)}
+                  height={TOP + PLOT_H - y(values[i]!)}
+                  className="fill-brand"
+                />
+              )}
+              {i % labelStep === 0 && (
+                <text x={x(i)} y={HEIGHT - 10} textAnchor="middle" fontSize={11} className="fill-ink-3">
+                  {bucketLabel(row.date, granularity)}
+                </text>
+              )}
+            </g>
+          ))}
+        </g>
       </svg>
       <p className="m-0 min-h-5 text-xs text-ink-2" aria-live="polite" data-testid="insights-chart-caption">
         {caption}
