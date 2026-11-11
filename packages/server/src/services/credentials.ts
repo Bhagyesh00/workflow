@@ -80,7 +80,7 @@ export interface CredentialProviderOptions {
 export class CredentialService {
   private secrets?: Pick<SecretsManager, 'secretsFor'>;
   private accessService?: AccessService;
-  /** P6 S3 (C0): the type policy checks' deps; until `setPolicyDeps` runs, `create` fails closed */
+  /** P6 S3 (C0): the type policy checks' deps; until `setPolicyDeps` runs, `create` and a decrypt fail closed */
   private policyDeps?: ServiceDeps;
 
   constructor(
@@ -96,14 +96,15 @@ export class CredentialService {
 
   /**
    * P6 S3 (C0): where the type policy checks read from (context.ts calls it right after construction).
-   * Until it runs, `create` fails closed with `PolicyCheckFailedError` (503), never passes.
+   * Until it runs, `create` and a run's decrypt (`provider`) fail closed with `PolicyCheckFailedError` (503),
+   * never pass.
    */
   setPolicyDeps(deps: ServiceDeps): void {
     this.policyDeps = deps;
   }
 
   /** the policy deps, or the fail-closed refusal at `point` */
-  protected requirePolicyDeps(point: 'credentialSave'): ServiceDeps {
+  protected requirePolicyDeps(point: 'credentialSave' | 'credentialDecrypt'): ServiceDeps {
     if (!this.policyDeps) throw new PolicyCheckFailedError(point);
     return this.policyDeps;
   }
@@ -332,6 +333,10 @@ export class CredentialService {
    * (`{ ...shared, ...entry }`); with no user, or no connection of that user, the node fails (no fallback to
    * the shared data). A refreshed token goes to that user's entry, never to the shared row. The first use
    * marks the run (`executions.used_private_credentials`); the entry itself never enters run data.
+   *
+   * P6-04: the type policy judges the type of the row it decrypts (a child type found through its parent's
+   * slot included) before the decrypt, in `projectId`, as n8n's decrypt point does; the checks on the slot
+   * names (run start, a single node) stay as the early refusals. No deps fails closed.
    */
   provider(
     tenantId: string,
@@ -352,6 +357,11 @@ export class CredentialService {
       if (row.type !== type && !this.types.isA(row.type, type)) {
         throw new Error(`Credential "${row.name}" is of type "${row.type}", expected "${type}"`);
       }
+      await assertCredentialType(this.requirePolicyDeps('credentialDecrypt'), 'credentialDecrypt', {
+        tenantId,
+        projectId,
+        type: row.type,
+      });
       return row;
     };
     const { endUserId, executionId } = options;

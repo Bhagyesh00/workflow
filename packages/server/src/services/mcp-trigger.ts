@@ -58,6 +58,8 @@ import { mcpCorsHeaders } from '../http/mcp-http';
 import type { ExecutionOutcome, StartedExecution } from './executions';
 import { createMcpAuthHelper } from './mcp/oauth/tokens';
 import { McpSessionLimitError, type McpSessionRecord, type McpSessionStore } from './mcp-sessions';
+import { evaluateWorkflow } from './type-policies/enforce';
+import { PolicyCheckFailedError, PolicyViolationError } from './type-policies/errors';
 import type { NodeWebhook } from './webhook-paths';
 import {
   fromWebhookResponse,
@@ -173,7 +175,11 @@ export class McpTriggerService {
     try {
       reply = await this.route(input);
     } catch (error) {
-      reply = rpc(500, mcpError(null, MCP_ERRORS.INTERNAL, this.failure(input, error)));
+      // P6-04: the type policy refused the trigger's workflow (403), or its check failed (503)
+      reply =
+        error instanceof PolicyViolationError || error instanceof PolicyCheckFailedError
+          ? rpc(error.statusCode, mcpError(null, MCP_ERRORS.INTERNAL, error.message))
+          : rpc(500, mcpError(null, MCP_ERRORS.INTERNAL, this.failure(input, error)));
     }
     return { ...reply, headers: { ...cors, ...reply.headers } };
   }
@@ -244,11 +250,19 @@ export class McpTriggerService {
     const type = workflow.getNodeType(input.node);
     if (!type.webhook) throw new Error('The MCP Server Trigger cannot answer requests');
     this.mcpAuth ??= createMcpAuthHelper(this.deps.context);
+    // P6 S1: the trigger's workflow row's project
+    const projectId = await ctx.executions.projectFor(input.tenant.id, input.workflowId);
+    // P6-04: the type policy judges the workflow as a run start does, before the node and its tools run (or
+    // decrypt); a refusal reaches `handle` (403, a failed check 503)
+    await evaluateWorkflow(this.deps, 'workflowStart', {
+      tenantId: input.tenant.id,
+      projectId,
+      workflow: input.definition,
+    });
     const services = await ctx.executions.buildServices({
       tenant: input.tenant,
       executionId: randomUUID(),
-      // P6 S1: the trigger's workflow row's project
-      projectId: await ctx.executions.projectFor(input.tenant.id, input.workflowId),
+      projectId,
       mode: input.mode,
       workflowId: input.workflowId,
     });

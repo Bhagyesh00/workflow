@@ -1169,9 +1169,11 @@ export class ActiveWorkflowManager {
       await this.startWorkflowTriggers(tenantId, workflowId, mode);
       this.activationErrors.delete(workflowId);
     } catch (error) {
-      // P6-04 (S3): a start-up (or its retry) the type policy refuses logs and leaves the workflow unstarted,
-      // with no retry; a check that failed (503) goes the retry way below
-      if (mode === 'init' && error instanceof PolicyViolationError) {
+      const callerActs = typeof rethrow === 'function' ? rethrow() : rethrow;
+      // P6-04 (S3): a start the type policy refuses that no caller answers (a start-up or its retry, a restart
+      // after a failed publish) logs and leaves the workflow unstarted, with no retry; a caller that answers
+      // (a publish, a settings reload) gets the violation. A check that failed (503) goes the retry way below
+      if (error instanceof PolicyViolationError && (mode === 'init' || !callerActs)) {
         this.deps.logger.warn(
           { tenantId, workflowId, code: error.code },
           'The type policy blocks this published workflow, its triggers were not started',
@@ -1179,7 +1181,7 @@ export class ActiveWorkflowManager {
         this.activationErrors.set(workflowId, error.message);
         return;
       }
-      if (typeof rethrow === 'function' ? rethrow() : rethrow) throw error;
+      if (callerActs) throw error;
       this.triggerFailed(tenantId, workflowId, toError(error));
     }
   }
@@ -1254,15 +1256,14 @@ export class ActiveWorkflowManager {
     if (!tenant) return;
     const definition = await loadPublishedDefinition(repos, tenantId, row);
     if (!definition) return;
-    // P6-04 (S3): at start-up (`init`, also a retry) the type policy judges the published version as a publish
-    // does; a refusal leaves the workflow unstarted (startTriggersNow)
-    if (mode === 'init') {
-      await evaluateWorkflow(this.deps.serviceDeps, 'workflowPublish', {
-        tenantId,
-        projectId: row.projectId,
-        workflow: definition,
-      });
-    }
+    // P6-04 (S3): every start (start-up and its retry, a publish, a settings reload, a restart after a failed
+    // publish) judges the published version as a publish does, before a trigger decrypts or connects; a
+    // refusal leaves the workflow unstarted or goes to the caller (startTriggersNow)
+    await evaluateWorkflow(this.deps.serviceDeps, 'workflowPublish', {
+      tenantId,
+      projectId: row.projectId,
+      workflow: definition,
+    });
     const workflow = new Workflow(definition, nodeTypes);
     const entry: RunningTriggers = {
       tenantId,

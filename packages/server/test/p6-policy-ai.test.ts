@@ -457,7 +457,7 @@ describe('the Assistant tools', () => {
         data: { apiKey: 'sk-options-key-0000000000000000', baseUrl: 'http://127.0.0.1:9/v1' },
       }),
     );
-    await policyDeny(h.server, h.tenantId, 'node', 'ai.lmChatOpenAi');
+    await policyDeny(h.server, h.tenantId, 'node', 'ai.lmChatOpenAi', home);
     const build = vi.spyOn(h.ctx.executions, 'buildServices');
     const { result } = await h.callTool(h.editor, 'get_node_parameter_options', {
       nodeType: 'ai.lmChatOpenAi',
@@ -465,7 +465,7 @@ describe('the Assistant tools', () => {
       parameterPath: 'model',
       credentialId: credential.id,
     });
-    expect(result).toContain(BLOCKED('ai.lmChatOpenAi'));
+    expect(result).toContain(BLOCKED_PROJECT('ai.lmChatOpenAi'));
     // the credential was never loaded for a node
     expect(
       build.mock.calls.filter(([options]) => options.allowCredentials?.includes(credential.id)),

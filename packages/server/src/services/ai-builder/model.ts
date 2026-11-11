@@ -19,6 +19,7 @@ import {
 import type { ServerContext } from '../../context';
 import type { TenantRow } from '../../db/schema';
 import type { TenantSettings } from '../../plans';
+import { checkSingleNode } from '../type-policies/enforce';
 
 export interface BuilderModel {
   model: AiChatModel;
@@ -95,6 +96,9 @@ export interface SubNodeAccess {
 /**
  * Opens the sub-nodes of `parentName` in `definition` for `tenant` (services mode `internal`), with no
  * hand-built context. The builder's model and the Assistant's model and MCP tools (L9) use it.
+ * P6-04: the type policy judges each sub-node's type and its credential types in `access.projectId` before
+ * anything is opened (a refusal throws `PolicyViolationError`, its text the caller's answer); the decrypt
+ * itself judges the credential's own type too (`CredentialService.provider`).
  */
 export async function openSubNodes(
   ctx: ServerContext,
@@ -107,6 +111,15 @@ export async function openSubNodes(
   const workflow = new Workflow(definition, ctx.registries.nodeTypes);
   const node = workflow.nodes[parentName];
   if (!node) throw new Error(`The definition has no node "${parentName}"`);
+  for (const sub of definition.nodes) {
+    if (sub.name === parentName) continue;
+    await checkSingleNode(ctx.serviceDeps, {
+      tenantId: tenant.id,
+      projectId: access.projectId,
+      nodeType: sub.type,
+      credentialTypes: Object.keys(sub.credentials ?? {}),
+    });
+  }
   const services = await ctx.executions.buildServices({
     tenant,
     executionId: '',

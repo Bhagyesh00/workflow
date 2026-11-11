@@ -84,6 +84,8 @@ import type { McpTriggerService } from './mcp-trigger';
 import type { Metrics } from './metrics';
 import { loadPublishedDefinition } from './published-workflow';
 import { findTestWebhook, type TestWebhookStore } from './test-webhooks';
+import { evaluateWorkflow } from './type-policies/enforce';
+import { PolicyCheckFailedError, PolicyViolationError } from './type-policies/errors';
 import {
   evaluateDescriptionValue,
   matchDynamic,
@@ -777,11 +779,15 @@ export class WebhookService {
     // highlighted data the node saves with the reply (a chat reply's `input_<node>`)
     let customData: Record<string, string> | undefined;
     if (node && type?.webhook && hook) {
+      // P6 S1: the workflow row's project, else the one the run was started in
+      const projectId = await this.deps.executions.projectFor(tenant.id, row.workflowId, storedProjectId);
+      // P6-04: the type policy judges the run's workflow before the node's webhook runs (or decrypts)
+      const refused = await this.policyRefusal(tenant.id, projectId, definition);
+      if (refused) return cors(refused);
       const services = await this.contextServices({
         tenant,
         executionId,
-        // P6 S1: the workflow row's project, else the one the run was started in
-        projectId: await this.deps.executions.projectFor(tenant.id, row.workflowId, storedProjectId),
+        projectId,
         mode: row.mode as never,
         workflowId: row.workflowId ?? undefined,
       });
@@ -940,6 +946,32 @@ export class WebhookService {
   }
 
   /**
+   * P6-04: the type policy judges `definition` as a run start does, before the webhook phase (the node's
+   * webhook, its sub-nodes and their credentials), which runs before any run starts. A refusal is 403
+   * `policy_violation`, a check that failed or missed its deadline 503 `policy_check_failed`; null when the
+   * request may go on. The deps are the server's (the MCP Server Trigger's service holds them).
+   */
+  private async policyRefusal(
+    tenantId: string,
+    projectId: string,
+    definition: WorkflowDefinition,
+  ): Promise<WebhookReply | null> {
+    try {
+      await evaluateWorkflow(this.deps.mcpTrigger.deps, 'workflowStart', {
+        tenantId,
+        projectId,
+        workflow: definition,
+      });
+      return null;
+    } catch (error) {
+      if (error instanceof PolicyViolationError || error instanceof PolicyCheckFailedError) {
+        return json(error.statusCode, errorBody(error.code, error.message));
+      }
+      throw error;
+    }
+  }
+
+  /**
    * The credential gate of a run whose trigger identified a user (P6-87, n8n Form/utils/utils.ts): not ready is
    * 428 with the credentials to connect, a check that throws is 503 `credential_readiness_check_failed`. Null
    * when the run may start. No error text reaches the caller.
@@ -982,10 +1014,14 @@ export class WebhookService {
     let reply: WebhookReply;
     let executionStarted = false;
     try {
+      const projectId = await executions.projectFor(tenant.id, input.workflowId);
+      // P6-04: the type policy judges the workflow before the node's webhook runs (or decrypts)
+      const refused = await this.policyRefusal(tenant.id, projectId, definition);
+      if (refused) return this.decorate(refused, source, incoming.request.headers);
       const services = await this.contextServices({
         tenant,
         executionId,
-        projectId: await executions.projectFor(tenant.id, input.workflowId),
+        projectId,
         mode: input.mode,
         workflowId: input.workflowId,
         // P6-87 (C0): the credential gate walks from this trigger (`ctx.getCredentialGate()`, L16)

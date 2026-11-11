@@ -3,7 +3,8 @@
  * a move, plus the check itself (deadlines, fail closed, the audit row, another workspace's policy). Save
  * judges only the types the save adds (disabled nodes count, a copy adds nothing); publish judges the whole
  * workflow; a credential create of a blocked type is refused and an edit of an existing one is kept; a
- * single node is judged before any decrypt; a failed or late check blocks with 503.
+ * single node is judged before any decrypt; a failed or late check blocks with 503. Every allowed and refused
+ * action is a true member's (a `project:editor` of the team project); the owner only sets up and writes policies.
  * The run paths are in p6-policy-run.test.ts.
  */
 import { randomUUID } from 'node:crypto';
@@ -20,12 +21,14 @@ import {
 import { PolicyCheckFailedError, PolicyViolationError } from '../src/services/type-policies/errors';
 import type { PolicyKind, PolicyRule } from '../src/services/type-policies/types';
 import {
+  addToProject,
   chain,
   createTestServer,
   createWorkflow,
   credentialIn,
   node,
   policyDeny,
+  realMember,
   setNode,
   signup,
   type TestServer,
@@ -84,6 +87,15 @@ const newOwner = async () => {
   return { ...owner, projectId: await teamProjectOf(server, owner.tenant.id) };
 };
 
+/** a true member of a new workspace's team project (`project:editor`), whose creates land there */
+const newMember = async () => {
+  const owner = await newOwner();
+  const member = await realMember(owner);
+  await addToProject(server, owner.tenant.id, owner.projectId, member.user.id, 'project:editor');
+  member.client.defaultProjectId = owner.projectId;
+  return { ...owner, client: member.client, member };
+};
+
 /** a document with `rules` attached last to the workspace scope of `kind` */
 async function attach(tenantId: string, kind: PolicyKind, rules: PolicyRule[]) {
   const store = server.ctx.typePolicies;
@@ -134,7 +146,7 @@ afterEach(() => {
 
 describe('save', () => {
   it('a blocked node cannot be added: 403 policy_violation, one audit row with no workflow data', async () => {
-    const { client, tenant } = await newOwner();
+    const { client, tenant } = await newMember();
     await policyDeny(server, tenant.id, 'node', 'test.fail');
     const res = await client.post('/rest/workflows', {
       name: 'Secret plan',
@@ -162,7 +174,7 @@ describe('save', () => {
   });
 
   it('an old workflow with a blocked type saves; a save that adds a blocked type, disabled or not, is refused', async () => {
-    const { client, tenant, projectId } = await newOwner();
+    const { client, tenant, projectId } = await newMember();
     const old = await workflowIn(server, tenant.id, projectId, {
       nodes: [node('Start', 'core.manualTrigger'), node('Boom', 'test.fail', {}, [200, 0])],
       connections: chain('Start', 'Boom'),
@@ -193,7 +205,7 @@ describe('save', () => {
   });
 
   it('the store failing at a save is 503 policy_check_failed and nothing is written', async () => {
-    const { client, tenant } = await newOwner();
+    const { client, tenant } = await newMember();
     await server.ctx.policySnapshots.invalidate(tenant.id);
     vi.spyOn(server.ctx.repos.typePolicies, 'loadTenant').mockRejectedValue(new Error('database down'));
     const res = await client.post('/rest/workflows', {
@@ -214,7 +226,7 @@ describe('save', () => {
 
 describe('publish', () => {
   it('judges the whole workflow: an old workflow with a blocked type refuses to publish', async () => {
-    const { client, tenant } = await newOwner();
+    const { client, tenant } = await newMember();
     const wf = await createWorkflow(client, {
       nodes: [node('Interval', 'test.interval'), setNode('Set', 'a', 1)],
       connections: chain('Interval', 'Set'),
@@ -233,7 +245,7 @@ describe('publish', () => {
 
 describe('credentials', () => {
   it('a create of a blocked type is refused; an edit of an existing one is kept', async () => {
-    const { client, tenant, projectId } = await newOwner();
+    const { client, tenant, projectId } = await newMember();
     const existing = await credentialIn(server, tenant.id, projectId, { type: 'testApi' });
     await policyDeny(server, tenant.id, 'credential', 'testApi');
     const created = await client.post('/rest/credentials', {
@@ -310,7 +322,7 @@ describe('a single node (options loading)', () => {
   });
 
   it('is refused before any decrypt when its credential type or its node type is blocked', async () => {
-    const { client, tenant } = await newOwner();
+    const { client, tenant } = await newMember();
     const wf = await createWorkflow(client, { nodes: [] });
     // allowed: the method runs (and fails), which is what a refusal must prevent
     optionCalls = 0;
@@ -326,7 +338,7 @@ describe('a single node (options loading)', () => {
       'Credential type "p6EnforceApi" is blocked by a workspace policy',
     );
 
-    const other = await newOwner();
+    const other = await newMember();
     const otherWf = await createWorkflow(other.client, { nodes: [] });
     await policyDeny(server, other.tenant.id, 'node', 'p6enforce.options');
     const nodeType = await other.client.post('/rest/node-types/options', optionsBody(otherWf.id));
