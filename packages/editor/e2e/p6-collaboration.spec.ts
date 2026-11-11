@@ -65,7 +65,8 @@ test('the second editor sees the first and is read-only, takes over after the co
   await expect(adminPage.getByLabel('Collab Owner, editing')).toBeVisible();
   const banner = adminPage.getByTestId('write-lock-banner');
   await expect(banner).toContainText('Collab Owner is editing this workflow.');
-  await expect(page.getByLabel('Collab Admin')).toBeVisible();
+  // exact: the avatar list's own label names every collaborator too
+  await expect(page.getByLabel('Collab Admin', { exact: true })).toBeVisible();
   await expect(page.getByTestId('write-lock-banner')).toHaveCount(0);
 
   // 5. the admin takes over after the confirm
@@ -74,7 +75,8 @@ test('the second editor sees the first and is read-only, takes over after the co
   await expect(dialog).toContainText('Collab Owner is editing this workflow now');
   await dialog.getByRole('button', { name: 'Take over' }).click();
   await expect(adminPage.getByTestId('write-lock-banner')).toHaveCount(0);
-  await expect(adminPage.getByLabel('Collab Admin, editing')).toBeVisible();
+  // the admin's own avatar carries "(you)"
+  await expect(adminPage.getByLabel('Collab Admin (you), editing', { exact: true })).toBeVisible();
 
   // 6. the owner turns read-only
   await expect(page.getByTestId('write-lock-banner')).toContainText('Collab Admin is editing this workflow.');
