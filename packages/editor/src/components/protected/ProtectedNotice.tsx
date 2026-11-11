@@ -13,7 +13,7 @@ export interface ProtectedNoticeProps {
 export const PROTECTED_NOTICE_TEXTS = {
   title: 'This workspace is protected',
   builder:
-    'It is in read-only mode, so Accept is off and the draft cannot be saved. Run draft and Discard still work.',
+    'It is in read-only mode, so Accept and Run draft are off: the draft cannot be saved or run. Discard still works.',
   assistant:
     'It is in read-only mode, so the Assistant cannot create, change, move, archive or run workflows, create credentials, folders or tables, or change a table structure. Reading, publishing and table rows still work.',
 } as const;

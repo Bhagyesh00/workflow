@@ -877,6 +877,8 @@ const stopExecution: AssistantToolDefinition<{ executionId: string; approvalSumm
   access: 'workflow:execute',
   target: onExecution,
   permission: 'runWorkflow',
+  // stopping a run writes no workspace content, so a protected workspace still allows it (as n8n)
+  protectedAllowed: true,
   grantKey: (input) => `stop_execution:${input.executionId}`,
   async approval(ctx, caller, input): Promise<ApprovalCopy> {
     const row = await executionRow(ctx, caller, input.executionId);

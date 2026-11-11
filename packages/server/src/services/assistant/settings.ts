@@ -127,6 +127,38 @@ export function protectedActionFor(
   return isProtected(settings) ? (PROTECTED_PERMISSION_ACTIONS[key] ?? null) : null;
 }
 
+/** the part of a tool definition the protected workspace looks at */
+interface ProtectedToolShape {
+  permission?: AssistantPermissionKey;
+  /** the tool stays usable on a protected workspace (it writes no workspace content) */
+  protectedAllowed?: boolean;
+}
+
+/** the refusal for a tool on a protected workspace; null for a tool that stays allowed (`protectedAllowed`) */
+export function protectedActionForTool(
+  settings: TenantSettings | null | undefined,
+  def: ProtectedToolShape,
+): ProtectedAction | null {
+  if (def.permission === undefined || def.protectedAllowed) return null;
+  return protectedActionFor(settings, def.permission);
+}
+
+/**
+ * The permission mode a tool is held to. `effective` is `AssistantSettingsService.read`, which forces a
+ * key `blocked` on a protected workspace; a `protectedAllowed` tool reads the saved mode instead, so only an
+ * admin's own block takes it away.
+ */
+export function toolPermissionMode(
+  config: Config,
+  settings: TenantSettings | null | undefined,
+  effective: Pick<EffectiveAssistantSettings, 'permissions'>,
+  def: ProtectedToolShape,
+): AssistantPermissionMode | undefined {
+  if (def.permission === undefined) return undefined;
+  if (!def.protectedAllowed) return effective.permissions[def.permission];
+  return effectiveAssistantSettings(config, settings).permissions[def.permission];
+}
+
 export class AssistantSettingsService {
   constructor(readonly deps: ServiceDeps) {}
 

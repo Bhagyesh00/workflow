@@ -42,7 +42,7 @@ import type { AssistantConfirmationRow } from '../../repositories/assistant-conf
 import { PROTECTED_TEXT } from '../protected';
 import type { Actor } from '../workflows';
 import { redactDeep } from './events';
-import { protectedActionFor } from './settings';
+import { protectedActionForTool, toolPermissionMode } from './settings';
 import { ASSISTANT_STALE_RUN_MS } from './sweep';
 import { ASSISTANT_TOOL_NO_ACCESS, shapeToolError, shapeToolResult } from './tool-adapter';
 import { assistantTools, builtInAssistantTools, resolveDynamicTool } from './tools';
@@ -66,8 +66,11 @@ export const ASSISTANT_APPROVAL_TEXTS = {
 } as const;
 
 /** why a blocked key is blocked: the protected workspace's refusal, else the admin's block */
-function blockedText(settings: TenantSettings | null | undefined, key: AssistantPermissionKey): string {
-  const action = protectedActionFor(settings, key);
+function blockedText(
+  settings: TenantSettings | null | undefined,
+  def: { permission?: AssistantPermissionKey; protectedAllowed?: boolean },
+): string {
+  const action = protectedActionForTool(settings, def);
   return action ? PROTECTED_TEXT[action] : ASSISTANT_APPROVAL_TEXTS.blocked;
 }
 
@@ -229,9 +232,9 @@ export class AssistantApprovals {
     if (def.permission !== undefined) {
       const now = await this.permissionsNow(run);
       // a protected workspace refuses before any card is written or any grant is read
-      const action = protectedActionFor(now.settings, def.permission);
+      const action = protectedActionForTool(now.settings, def);
       if (action) return { decision: 'refuse', reason: PROTECTED_TEXT[action] };
-      const mode = now.permissions[def.permission];
+      const mode = toolPermissionMode(ctx.config, now.settings, { permissions: now.permissions }, def);
       if (mode === 'blocked') return { decision: 'refuse', reason: ASSISTANT_APPROVAL_TEXTS.blocked };
       if (mode === 'always_allow' && ASSISTANT_ALWAYS_ALLOW_KEYS.includes(def.permission)) {
         return { decision: 'proceed' };
@@ -438,18 +441,16 @@ export class AssistantApprovals {
           ? ASSISTANT_APPROVED_TOOL_GONE
           : (await toolDenial(ctx, caller, known))
             ? ASSISTANT_TOOL_NO_ACCESS
-            : known.permission !== undefined && settings.permissions[known.permission] === 'blocked'
-              ? blockedText(tenant.settings as TenantSettings, known.permission)
+            : known.permission !== undefined &&
+                toolPermissionMode(ctx.config, tenant.settings as TenantSettings, settings, known) ===
+                  'blocked'
+              ? blockedText(tenant.settings as TenantSettings, known)
               : ASSISTANT_APPROVED_TOOL_GONE;
         return await this.refuseApproved(run, current, text);
       }
       // the permission now, not the one the card was written under
-      if (def.permission !== undefined && settings.permissions[def.permission] === 'blocked') {
-        return await this.refuseApproved(
-          run,
-          current,
-          blockedText(tenant.settings as TenantSettings, def.permission),
-        );
+      if (toolPermissionMode(ctx.config, tenant.settings as TenantSettings, settings, def) === 'blocked') {
+        return await this.refuseApproved(run, current, blockedText(tenant.settings as TenantSettings, def));
       }
       const parsed = def.input.safeParse(current.args ?? {});
       if (!parsed.success) {

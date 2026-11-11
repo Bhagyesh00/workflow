@@ -246,6 +246,11 @@ export interface AssistantToolDefinition<I = any> {
   /** what the call acts on, from its input: a project (`projectId` given), a workflow, a data table...; absent or null: the home scopes decide */
   target?(input: I): AccessTarget | null;
   permission?: AssistantPermissionKey;
+  /**
+   * The tool stays offered and runs on a protected workspace although its `permission` key is forced
+   * `blocked` there (it writes no workspace content: `stop_execution`). Only an admin's own block applies.
+   */
+  protectedAllowed?: boolean;
   available?(run: AssistantRunScope): boolean;
   artifact?(input: I, result: unknown): AssistantArtifact | null;
   approval?(ctx: ServerContext, caller: AssistantCaller, input: I): Promise<ApprovalCopy>;

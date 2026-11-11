@@ -20,6 +20,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   ASSISTANT_STREAM,
+  type AssistantPermissionKey,
   BUILDER_MAX_ITERATIONS,
   BUILDER_PROMPT_LIMIT,
   type BuilderChunk,
@@ -34,16 +35,19 @@ import {
 import { z } from 'zod';
 import type { ServerContext } from '../../../context';
 import type { AssistantStoredDraft } from '../../../db/schema';
+import type { TenantSettings } from '../../../plans';
 import { buildWorkflowContext, sanitizeForModel, wrapUntrusted } from '../../ai-builder/context';
 import { BuilderDraft } from '../../ai-builder/draft';
 import { BuilderModelError, NO_AI_PACKAGE } from '../../ai-builder/model';
 import { builderSystemPrompt } from '../../ai-builder/prompt';
 import { type BuilderToolDeps, createBuilderTools, validateDefinition } from '../../ai-builder/tools';
+import { PROTECTED_TEXT } from '../../protected';
 import { cloneDefinition, toDefinition } from '../../workflow-model';
 import { draftStatus } from '../drafts';
 import { loadAssistantModel } from '../model';
 import { guardModel } from '../model-guard';
 import { RUN_PREVIEW, type RunOutcome, runAndCollect, triggerPinData } from '../run-helper';
+import { protectedActionFor } from '../settings';
 import {
   type AssistantRunScope,
   type AssistantToolDefinition,
@@ -59,6 +63,16 @@ export const BUILD_BLOCKED = 'An admin turned this off';
 export const VERIFY_TIMEOUT_MS = 5 * 60_000;
 /** the most fixture data one verify call takes */
 export const VERIFY_FIXTURE_BYTES = 256 * 1024;
+
+/**
+ * Refuses a build or verify call whose permission key is blocked: the protected workspace's own text when
+ * the workspace is protected (the key reads `blocked` only because of that), else the admin's.
+ */
+function assertBuildAllowed(run: AssistantRunScope, key: AssistantPermissionKey): void {
+  const action = protectedActionFor(run.tenant.settings as TenantSettings, key);
+  if (action) throw new Error(PROTECTED_TEXT[action]);
+  if (run.settings.permissions[key] === 'blocked') throw new Error(BUILD_BLOCKED);
+}
 
 export const BUILD_TEXTS = {
   noDraft: (id: string) => `There is no draft "${id}" in this chat`,
@@ -281,7 +295,7 @@ export const buildWorkflowTool: AssistantToolDefinition<BuildInput> = {
   async handler(ctx, run, input): Promise<BuildWorkflowResult> {
     const start = await buildStart(ctx, run, input);
     const key = start.workflowId ? 'updateWorkflow' : 'createWorkflow';
-    if (run.settings.permissions[key] === 'blocked') throw new Error(BUILD_BLOCKED);
+    assertBuildAllowed(run, key);
 
     const runtime = await ctx.assistant.runtime();
     if (!runtime) throw new BuilderModelError(NO_AI_PACKAGE);
@@ -541,7 +555,7 @@ export const verifyWorkflowTool: AssistantToolDefinition<VerifyInput> = {
   access: 'workflow:create',
   untrusted: 'execution-output',
   async handler(ctx, run, input): Promise<VerifyWorkflowResult> {
-    if (run.settings.permissions.runWorkflow === 'blocked') throw new Error(BUILD_BLOCKED);
+    assertBuildAllowed(run, 'runWorkflow');
     const stored = await threadDraft(ctx, run, input.draftId);
     if (!stored) throw new Error(BUILD_TEXTS.noDraft(input.draftId));
     if (draftStatus(stored) === 'discarded') throw new Error(VERIFY_TEXTS.discarded);

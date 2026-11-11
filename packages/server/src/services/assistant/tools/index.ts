@@ -6,7 +6,9 @@
  * finds its tool again through `resolveDynamicTool`.
  */
 import type { ServerContext } from '../../../context';
+import type { TenantSettings } from '../../../plans';
 import { resolveMcpTool } from '../mcp';
+import { toolPermissionMode } from '../settings';
 import {
   type AssistantCaller,
   type AssistantRunScope,
@@ -61,7 +63,8 @@ export async function assistantTools(
   const out: AssistantToolDefinition[] = [];
   for (const def of [...builtInAssistantTools(), ...extraTools]) {
     if (!held.has(toolAccess(def))) continue;
-    if (def.permission !== undefined && settings.permissions[def.permission] === 'blocked') continue;
+    const tenantSettings = caller.tenant.settings as TenantSettings;
+    if (toolPermissionMode(ctx.config, tenantSettings, settings, def) === 'blocked') continue;
     if (seen.has(def.name)) continue;
     seen.add(def.name);
     out.push(def);

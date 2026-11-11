@@ -1,7 +1,7 @@
 /**
  * P6-79 (L8): on a protected workspace (`setDemoProtected(true)`) the builder panel and the Assistant page show
- * why their writes are off, and the draft review's Accept is disabled and sends no save; Run draft and Discard
- * still work. With the switch off there is no notice and Accept works.
+ * why their writes are off, and the draft review's Accept and Run draft are disabled and send nothing; Discard
+ * still works. With the switch off there is no notice and Accept and Run draft work.
  */
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -88,10 +88,11 @@ describe('ProtectedNotice (P6-79)', () => {
     await user.click(accept);
     expect(patches()).toHaveLength(0);
     expect(useBuilderStore.getState().reviewing).toBe(true);
-    // Run draft and Discard are not locked
-    expect((within(bar).getByRole('button', { name: 'Run draft' }) as HTMLButtonElement).disabled).toBe(
-      false,
-    );
+    // the server refuses a manual run, so Run draft is off too; Discard is not locked
+    const runDraft = within(bar).getByRole('button', { name: 'Run draft' }) as HTMLButtonElement;
+    expect(runDraft.disabled).toBe(true);
+    await user.click(runDraft);
+    expect(backend().requests.filter((r) => r.path.endsWith('/run'))).toHaveLength(0);
     const discard = within(bar).getByRole('button', { name: 'Discard' }) as HTMLButtonElement;
     expect(discard.disabled).toBe(false);
     await user.click(discard);
@@ -114,6 +115,9 @@ describe('ProtectedNotice (P6-79)', () => {
     expect(within(panel).queryByTestId('protected-notice-builder')).toBeNull();
     const accept = within(bar).getByRole('button', { name: 'Accept' }) as HTMLButtonElement;
     expect(accept.disabled).toBe(false);
+    expect((within(bar).getByRole('button', { name: 'Run draft' }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
     await user.click(accept);
     await waitFor(() => expect(useBuilderStore.getState().reviewing).toBe(false));
     expect(patches()).toHaveLength(1);

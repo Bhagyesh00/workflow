@@ -123,7 +123,7 @@ export function DraftReviewBar() {
         <Button
           size="sm"
           icon={<Play size={13} />}
-          disabled={streaming || running}
+          disabled={streaming || running || protectedWorkspace}
           onClick={() => void useBuilderStore.getState().runDraft()}
         >
           Run draft

@@ -204,7 +204,9 @@ function isProductionRun(name: string, data: unknown): boolean {
 }
 
 function protectedRefusal(name: string): string {
-  return name === 'execute_workflow' ? PROTECTED_TEXT.manualRun : MCP_PROTECTED_TEXT;
+  return name === 'execute_workflow' || name === 'test_workflow'
+    ? PROTECTED_TEXT.manualRun
+    : MCP_PROTECTED_TEXT;
 }
 
 async function callTool(
