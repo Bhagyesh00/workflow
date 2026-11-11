@@ -45,14 +45,16 @@ const idList = (ids: string[]) =>
   );
 const uuidsOf = (ids: string[]) => [...new Set(ids.filter(isUuid))];
 
-interface RawRow {
+type RawRow = {
   workflow_id: string;
   workflow_name: string;
   project_id: string | null;
   active: boolean;
   resource_id: string;
   key: DependencyRow['key'];
-}
+};
+
+type FolderWorkflow = { id: string; name: string; projectId: string };
 
 const toRow = (row: RawRow): DependencyRow => ({
   workflowId: row.workflow_id,
@@ -74,7 +76,7 @@ export class DependencyRepository {
   async workflowsUsingCredentials(tenantId: string, credentialIds: string[]): Promise<DependencyRow[]> {
     const ids = uuidsOf(credentialIds);
     if (!isUuid(tenantId) || !ids.length) return [];
-    const result = await this.db.execute(sql`
+    const result = await this.db.execute<RawRow>(sql`
       SELECT DISTINCT w.id AS workflow_id, w.name AS workflow_name, w.project_id, w.active,
         c.value ->> 'id' AS resource_id, 'credentialId' AS key
       FROM workflows w
@@ -86,14 +88,14 @@ export class DependencyRepository {
         AND jsonb_typeof(c.value) = 'object'
         AND c.value ->> 'id' IN (${idList(ids)})
       ORDER BY w.name, w.id`);
-    return (result.rows as unknown as RawRow[]).map(toRow);
+    return result.rows.map(toRow);
   }
 
   /** workflows whose nodes name one of the data tables (by id, or by name inside the table's project) */
   async workflowsUsingDataTables(tenantId: string, dataTableIds: string[]): Promise<DependencyRow[]> {
     const ids = uuidsOf(dataTableIds);
     if (!isUuid(tenantId) || !ids.length) return [];
-    const result = await this.db.execute(sql`
+    const result = await this.db.execute<RawRow>(sql`
       SELECT DISTINCT w.id AS workflow_id, w.name AS workflow_name, w.project_id, w.active,
         t.id AS resource_id, 'dataTableId' AS key
       FROM data_tables t
@@ -111,14 +113,14 @@ export class DependencyRepository {
           ELSE coalesce(n #>> '{parameters,dataTableId,value}', n #>> '{parameters,dataTableId}') = t.id::text
         END
       ORDER BY w.name, w.id`);
-    return (result.rows as unknown as RawRow[]).map(toRow);
+    return result.rows.map(toRow);
   }
 
   /** workflows that call one of the workflows, or name one as their error workflow */
   async workflowsReferencing(tenantId: string, workflowIds: string[]): Promise<DependencyRow[]> {
     const ids = uuidsOf(workflowIds);
     if (!isUuid(tenantId) || !ids.length) return [];
-    const result = await this.db.execute(sql`
+    const result = await this.db.execute<RawRow>(sql`
       SELECT DISTINCT w.id AS workflow_id, w.name AS workflow_name, w.project_id, w.active,
         ${SUB_WORKFLOW_REF} AS resource_id, 'workflowCall' AS key
       FROM workflows w
@@ -133,7 +135,7 @@ export class DependencyRepository {
       WHERE w.tenant_id = ${tenantId}::uuid
         AND w.settings ->> 'errorWorkflow' IN (${idList(ids)})
       ORDER BY 2, 1`);
-    return (result.rows as unknown as RawRow[]).map(toRow);
+    return result.rows.map(toRow);
   }
 
   /** what the workflows themselves name (their credentials, tables, sub-workflows, error workflow) */
@@ -256,14 +258,14 @@ export class DependencyRepository {
     tenantId: string,
     projectId: string,
     folderId: string,
-  ): Promise<Array<{ id: string; name: string; projectId: string }>> {
+  ): Promise<FolderWorkflow[]> {
     if (!isUuid(tenantId) || !isUuid(projectId) || !isUuid(folderId)) return [];
     const [root] = await this.db
       .select({ id: folders.id })
       .from(folders)
       .where(and(eq(folders.tenantId, tenantId), eq(folders.projectId, projectId), eq(folders.id, folderId)));
     if (!root) return [];
-    const result = await this.db.execute(sql`
+    const result = await this.db.execute<FolderWorkflow>(sql`
       WITH RECURSIVE tree AS (
         SELECT id FROM folders
         WHERE tenant_id = ${tenantId}::uuid AND project_id = ${projectId}::uuid AND id = ${folderId}::uuid
@@ -275,7 +277,7 @@ export class DependencyRepository {
       FROM workflows w
       WHERE w.tenant_id = ${tenantId}::uuid AND w.folder_id IN (SELECT id FROM tree)
       ORDER BY w.name, w.id`);
-    return result.rows as unknown as Array<{ id: string; name: string; projectId: string }>;
+    return result.rows;
   }
 }
 

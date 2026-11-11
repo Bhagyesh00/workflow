@@ -497,7 +497,11 @@ describe('routes/public-data-tables.ts', () => {
 
   it('pages with limit (default 100, max 250) and cursor', () => {
     const listed = PUBLIC_DATA_TABLE_ROUTES.filter((r) => r.list);
-    expect(listed.map((r) => r.path)).toEqual(['/data-tables', '/data-tables/:dataTableId/rows']);
+    expect(listed.map((r) => r.path)).toEqual([
+      '/data-tables',
+      '/data-tables/:dataTableId/dependencies',
+      '/data-tables/:dataTableId/rows',
+    ]);
     for (const route of listed) {
       expect(route.query?.parse({})).toMatchObject({ limit: 100 });
       expect(route.query?.safeParse({ limit: '251' }).success).toBe(false);
