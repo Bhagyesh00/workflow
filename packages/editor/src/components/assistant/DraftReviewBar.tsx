@@ -13,6 +13,7 @@ import {
 } from '@workflow/workflow';
 import { Check, ChevronDown, ChevronRight, Play, Undo2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { useProtectedWorkspace } from '../../lib/protected';
 import { useBuilderStore } from '../../stores/builder-store';
 import { useRunStore } from '../../stores/run-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
@@ -52,6 +53,8 @@ export function DraftReviewBar() {
   const runStatus = useRunStore((s) => s.status);
   const [open, setOpen] = useState(true);
   const [accepting, setAccepting] = useState(false);
+  // the save is refused on a protected workspace, so Accept is off (the notice above says why)
+  const protectedWorkspace = useProtectedWorkspace();
 
   const diff = useMemo(
     () =>
@@ -139,7 +142,7 @@ export function DraftReviewBar() {
           size="sm"
           variant="primary"
           icon={<Check size={13} />}
-          disabled={streaming || accepting}
+          disabled={streaming || accepting || protectedWorkspace}
           onClick={() => void accept()}
         >
           Accept

@@ -34,6 +34,8 @@ import { z } from 'zod';
 import type { Config } from '../../config';
 import type { ServerContext } from '../../context';
 import { ApiError } from '../../http/errors';
+import type { TenantSettings } from '../../plans';
+import { isProtected, PROTECTED_TEXT } from '../protected';
 import { MCP_BUILDER_TOOLS } from './tools/builder';
 import { credentialsTools } from './tools/credentials';
 import { dataTablesTools } from './tools/data-tables';
@@ -193,6 +195,18 @@ function zodProblem(error: z.ZodError): string {
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+const MCP_PROTECTED_TEXT =
+  'Cannot change this on a protected workspace. This workspace is in read-only mode.';
+
+/** `execute_workflow` with `executionMode: "production"` (n8n mcp.service.ts lets it through) */
+function isProductionRun(name: string, data: unknown): boolean {
+  return name === 'execute_workflow' && isObject(data) && data.executionMode === 'production';
+}
+
+function protectedRefusal(name: string): string {
+  return name === 'execute_workflow' ? PROTECTED_TEXT.manualRun : MCP_PROTECTED_TEXT;
+}
+
 async function callTool(
   ctx: ServerContext,
   request: McpServerRequest,
@@ -228,6 +242,14 @@ async function callTool(
   const input = tool.input.safeParse(args);
   if (!input.success) {
     return { result: mcpErrorResult(tool.name, `Invalid arguments: ${zodProblem(input.error)}`) };
+  }
+  // a protected workspace refuses every tool that is not read-only, before the handler can write;
+  // `execute_workflow` in production mode is the one exception (it runs the published version)
+  if (tool.annotations?.readOnlyHint !== true && !isProductionRun(tool.name, input.data)) {
+    const tenant = await ctx.repos.tenants.get(caller.tenant.id);
+    if (isProtected(tenant?.settings as TenantSettings | null | undefined)) {
+      return { result: mcpErrorResult(tool.name, protectedRefusal(tool.name)) };
+    }
   }
   try {
     const value = await tool.handler(ctx, caller, input.data);

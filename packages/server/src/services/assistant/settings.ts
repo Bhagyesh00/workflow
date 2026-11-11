@@ -7,6 +7,7 @@ import type { NodeTypeRegistry } from '@workflow/core';
 import {
   ASSISTANT_ALWAYS_ALLOW_KEYS,
   ASSISTANT_PERMISSION_MODES,
+  type AssistantPermissionKey,
   type AssistantPermissionMode,
   type AssistantSettingsDTO,
   isAssistantPermissionKey,
@@ -20,6 +21,7 @@ import { ApiError } from '../../http/errors';
 import type { TenantSettings } from '../../plans';
 import { CREDENTIAL_MISMATCH, credentialFitsModel, isBuilderModelNode } from '../ai-builder/model';
 import { assertCredentialsUsable } from '../credential-usable';
+import { isProtected, type ProtectedAction } from '../protected';
 import type { Actor } from '../workflows';
 import type { EffectiveAssistantSettings } from './types';
 
@@ -94,12 +96,54 @@ export function assistantFeature(
   };
 }
 
+/**
+ * The permission keys whose action the server refuses on a protected workspace, with the refusal each one
+ * carries. Publish, credential delete, table row writes, test run cleanup, fetch, web search and MCP read
+ * stay allowed (as in n8n).
+ */
+export const PROTECTED_PERMISSION_ACTIONS: Partial<Record<AssistantPermissionKey, ProtectedAction>> = {
+  createWorkflow: 'workflowCreate',
+  updateWorkflow: 'workflowUpdate',
+  deleteWorkflow: 'workflowArchive',
+  moveWorkflowToFolder: 'workflowUpdate',
+  runWorkflow: 'manualRun',
+  executeNode: 'manualRun',
+  createCredential: 'credentialCreate',
+  createFolder: 'folderCreate',
+  deleteFolder: 'folderDelete',
+  tagWorkflow: 'workflowUpdate',
+  createDataTable: 'dataTableCreate',
+  deleteDataTable: 'dataTableStructure',
+  mutateDataTableSchema: 'dataTableStructure',
+  restoreWorkflowVersion: 'workflowRestore',
+  mcpWrite: 'workflowUpdate',
+};
+
+/** the refusal for a tool permission key on a protected workspace, or null when the key stays allowed */
+export function protectedActionFor(
+  settings: TenantSettings | null | undefined,
+  key: AssistantPermissionKey,
+): ProtectedAction | null {
+  return isProtected(settings) ? (PROTECTED_PERMISSION_ACTIONS[key] ?? null) : null;
+}
+
 export class AssistantSettingsService {
   constructor(readonly deps: ServiceDeps) {}
 
-  /** FULL: the effective settings of `tenant` (its saved settings as loaded with the row) */
+  /**
+   * The effective settings of `tenant` (its saved settings as loaded with the row). On a protected workspace
+   * every key whose action the server refuses reads `blocked`, so a turn does not offer the tool and `gate`
+   * refuses it before any approval card.
+   */
   async read(tenant: TenantRow): Promise<EffectiveAssistantSettings> {
-    return effectiveAssistantSettings(this.deps.config, tenant.settings as TenantSettings);
+    const settings = tenant.settings as TenantSettings;
+    const effective = effectiveAssistantSettings(this.deps.config, settings);
+    if (!isProtected(settings)) return effective;
+    const permissions = { ...effective.permissions };
+    for (const key of Object.keys(PROTECTED_PERMISSION_ACTIONS) as AssistantPermissionKey[]) {
+      permissions[key] = 'blocked';
+    }
+    return { ...effective, permissions };
   }
 
   /** the settings page's view (admins only; credential ids shown) */
@@ -115,6 +159,7 @@ export class AssistantSettingsService {
       searchCredentialId: effective.searchCredentialId,
       searchDisabled: effective.searchDisabled,
       mcpAccessEnabled: effective.mcpAccessEnabled,
+      // the saved modes: the protected block is shown by `read`, not here
       permissions: effective.permissions,
       allowSendingParameterValues: effective.allowSendingParameterValues,
       instanceAllowsSendingParameterValues: effective.instanceAllowsSendingParameterValues,

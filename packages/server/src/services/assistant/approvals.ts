@@ -28,6 +28,7 @@ import {
   type AssistantConfirmAnswer,
   type AssistantConfirmation,
   type AssistantConfirmationOutcome,
+  type AssistantPermissionKey,
   type AssistantPermissions,
   type AssistantPreviewTable,
   type DataObject,
@@ -36,9 +37,12 @@ import {
 import type { ServiceDeps } from '../../context';
 import type { AuthContext } from '../../http/auth';
 import { ApiError } from '../../http/errors';
+import type { TenantSettings } from '../../plans';
 import type { AssistantConfirmationRow } from '../../repositories/assistant-confirmations';
+import { PROTECTED_TEXT } from '../protected';
 import type { Actor } from '../workflows';
 import { redactDeep } from './events';
+import { protectedActionFor } from './settings';
 import { ASSISTANT_STALE_RUN_MS } from './sweep';
 import { ASSISTANT_TOOL_NO_ACCESS, shapeToolError, shapeToolResult } from './tool-adapter';
 import { assistantTools, builtInAssistantTools, resolveDynamicTool } from './tools';
@@ -60,6 +64,12 @@ export const ASSISTANT_APPROVAL_TEXTS = {
   runStopped: 'The run stopped before this ran',
   blocked: 'An admin turned this off',
 } as const;
+
+/** why a blocked key is blocked: the protected workspace's refusal, else the admin's block */
+function blockedText(settings: TenantSettings | null | undefined, key: AssistantPermissionKey): string {
+  const action = protectedActionFor(settings, key);
+  return action ? PROTECTED_TEXT[action] : ASSISTANT_APPROVAL_TEXTS.blocked;
+}
 
 /** an approved call whose tool is gone by the time it would run (a removed tool or MCP server) */
 export const ASSISTANT_APPROVED_TOOL_GONE = 'This tool is no longer available, so it did not run';
@@ -197,10 +207,13 @@ export class AssistantApprovals {
   }
 
   /** the workspace's permissions now (an admin may change them during a turn) */
-  private async permissionsNow(run: AssistantRunScope): Promise<AssistantPermissions> {
+  private async permissionsNow(
+    run: AssistantRunScope,
+  ): Promise<{ permissions: AssistantPermissions; settings: TenantSettings | null | undefined }> {
     const ctx = this.deps.context();
     const tenant = (await ctx.repos.tenants.get(run.tenant.id)) ?? run.tenant;
-    return (await ctx.assistantSettings.read(tenant)).permissions;
+    const permissions = (await ctx.assistantSettings.read(tenant)).permissions;
+    return { permissions, settings: tenant.settings as TenantSettings | null | undefined };
   }
 
   /** in order: blocked, always allow, thread grant, `suspendFor`, else an approval card */
@@ -214,7 +227,11 @@ export class AssistantApprovals {
     const ctx = this.deps.context();
 
     if (def.permission !== undefined) {
-      const mode = (await this.permissionsNow(run))[def.permission];
+      const now = await this.permissionsNow(run);
+      // a protected workspace refuses before any card is written or any grant is read
+      const action = protectedActionFor(now.settings, def.permission);
+      if (action) return { decision: 'refuse', reason: PROTECTED_TEXT[action] };
+      const mode = now.permissions[def.permission];
       if (mode === 'blocked') return { decision: 'refuse', reason: ASSISTANT_APPROVAL_TEXTS.blocked };
       if (mode === 'always_allow' && ASSISTANT_ALWAYS_ALLOW_KEYS.includes(def.permission)) {
         return { decision: 'proceed' };
@@ -422,13 +439,17 @@ export class AssistantApprovals {
           : (await toolDenial(ctx, caller, known))
             ? ASSISTANT_TOOL_NO_ACCESS
             : known.permission !== undefined && settings.permissions[known.permission] === 'blocked'
-              ? ASSISTANT_APPROVAL_TEXTS.blocked
+              ? blockedText(tenant.settings as TenantSettings, known.permission)
               : ASSISTANT_APPROVED_TOOL_GONE;
         return await this.refuseApproved(run, current, text);
       }
       // the permission now, not the one the card was written under
       if (def.permission !== undefined && settings.permissions[def.permission] === 'blocked') {
-        return await this.refuseApproved(run, current, ASSISTANT_APPROVAL_TEXTS.blocked);
+        return await this.refuseApproved(
+          run,
+          current,
+          blockedText(tenant.settings as TenantSettings, def.permission),
+        );
       }
       const parsed = def.input.safeParse(current.args ?? {});
       if (!parsed.success) {
