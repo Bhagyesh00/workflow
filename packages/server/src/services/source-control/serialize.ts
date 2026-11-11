@@ -7,6 +7,7 @@
  * table rows or run data is read.
  */
 import { createHash } from 'node:crypto';
+import { isCredentialExpression } from '@workflow/core';
 import {
   type DataObject,
   pathFor,
@@ -57,16 +58,14 @@ export class SourceControlFormatError extends ApiError {
 /** 'all', or the project ids a caller may sync */
 export type SyncScope = 'all' | Set<string>;
 
-/** a string that holds an expression (n8n marks one with a leading `=`) */
-const isExpression = (value: string) => value.startsWith('=');
-
 /**
- * A credential's data as a stub keeps it: a string is emptied unless it is an expression, `oauthTokenData` and
+ * A credential's data as a stub keeps it: a string is emptied unless it is an expression (`=` and a `{{ }}` code
+ * segment, as `isCredentialExpression` says: a password that starts with `=` is a literal), `oauthTokenData` and
  * nulls are dropped, numbers and booleans are kept. Nested objects and lists are cleaned the same way.
  */
 export function sanitizeCredentialData(data: DataObject): DataObject {
   const clean = (value: unknown): unknown => {
-    if (typeof value === 'string') return isExpression(value) ? value : '';
+    if (typeof value === 'string') return isCredentialExpression(value) ? value : '';
     if (typeof value === 'number' || typeof value === 'boolean') return value;
     if (Array.isArray(value)) return value.filter((item) => item !== null && item !== undefined).map(clean);
     if (value !== null && typeof value === 'object') return sanitizeCredentialData(value as DataObject);
@@ -81,6 +80,21 @@ export function sanitizeCredentialData(data: DataObject): DataObject {
     Object.defineProperty(out, key, { value: cleaned, enumerable: true, writable: true, configurable: true });
   }
   return out;
+}
+
+/**
+ * A folders file as it is hashed: a folder's home project counts only when it is a team project of this workspace
+ * (n8n compares team owners only). A personal project has no id in common with another workspace, so its id would
+ * keep `folders.json` modified after every sync.
+ */
+export function withTeamHomes(data: FoldersFile, teamProjectIds: ReadonlySet<string>): FoldersFile {
+  return {
+    ...data,
+    folders: data.folders.map((f) => ({
+      ...f,
+      homeProjectId: teamProjectIds.has(f.homeProjectId) ? f.homeProjectId : '',
+    })),
+  };
 }
 
 /** JSON with every object's keys sorted: the same content always gives the same text */

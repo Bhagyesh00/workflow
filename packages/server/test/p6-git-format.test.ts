@@ -136,7 +136,7 @@ describe('sanitizeCredentialData', () => {
       on: false,
       nothing: null,
       oauthTokenData: { access_token: TOKEN },
-      nested: { password: SECRET, keep: 7, expr: '=x', gone: null },
+      nested: { password: SECRET, keep: 7, expr: '={{ 1 }}', gone: null },
       list: [SECRET, 3, null],
     });
     expect(out).toEqual({
@@ -144,7 +144,7 @@ describe('sanitizeCredentialData', () => {
       expr: '={{ $secrets.vault.key }}',
       count: 4,
       on: false,
-      nested: { password: '', keep: 7, expr: '=x' },
+      nested: { password: '', keep: 7, expr: '={{ 1 }}' },
       list: ['', 3],
     });
     expect(JSON.stringify(out)).not.toContain(SECRET);
@@ -212,6 +212,39 @@ describe('exportFiles', () => {
     expect(subFile.parentFolderId).toBe(s.folder.id);
     const personal = json(files.get(pathFor('workflow', s.mine.id)) as Uint8Array);
     expect(personal.owner).toEqual({ type: 'personal', personalEmail: s.owner.user.email.toLowerCase() });
+  });
+
+  it('a string that starts with = but holds no {{ }} is a literal: emptied, never written (format-1)', async () => {
+    expect(
+      sanitizeCredentialData({
+        password: '=hunter2',
+        open: '={{ unclosed',
+        ok: '={{ $json.a }}',
+        list: ['=x'],
+      }),
+    ).toEqual({ password: '', open: '', ok: '={{ $json.a }}', list: [''] });
+    const s = await seed();
+    const literal = await server.ctx.credentials.create(
+      s.tenantId,
+      { name: 'Literal', type: 'testApi', projectId: s.teamId, data: { apiKey: '=hunter2-LITERAL' } },
+      s.owner.user.id,
+    );
+    const files = await exportFiles(
+      server.ctx.serviceDeps,
+      s.tenantId,
+      'all',
+      await SyncIdMap.load(server.ctx.repos, s.tenantId),
+    );
+    const stub = json(files.get(pathFor('credential', literal.id)) as Uint8Array);
+    expect(stub.data).toEqual({ apiKey: '' });
+    for (const bytes of files.values()) expect(text(bytes)).not.toContain('hunter2-LITERAL');
+    // a remote stub that carries it is emptied on parse as well
+    const remoteStub = text(files.get(pathFor('credential', literal.id)) as Uint8Array).replace(
+      '"apiKey": ""',
+      '"apiKey": "=hunter2-LITERAL"',
+    );
+    const parsed = parseFile(pathFor('credential', literal.id), new TextEncoder().encode(remoteStub));
+    expect(JSON.stringify(parsed)).not.toContain('hunter2-LITERAL');
   });
 
   it('writes credential stubs: sanitized data, isGlobal and isResolvable, owner', async () => {

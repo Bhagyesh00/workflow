@@ -283,6 +283,59 @@ describe('computeStatus', () => {
     }
   });
 
+  // one seed: the server allows 20 sign-ups per start and this file is at the limit
+  it('personal owners, personal folders and personal tables are not compared as teams (format-2, format-3)', async () => {
+    const s = await seed();
+    const mineFolder = await folderIn(server, s.tenantId, s.personal.id, 'Private');
+    const personalTable = await server.ctx.repos.dataTables.create(s.tenantId, s.personal.id, 'private');
+    const { map, remote, snapshot } = await synced(s);
+
+    // format-2: the file names a person of another workspace; pull put the workflow in the puller's personal project
+    const owned = new Map(remote);
+    changed(owned, pathFor('workflow', s.mine.id), (data) => {
+      data.owner = { type: 'personal', personalEmail: 'dev@elsewhere.test' };
+    });
+    expect(computeStatus({ local: snapshot, remote: owned, map, direction: 'pull' })).toEqual([]);
+    expect(computeStatus({ local: snapshot, remote: owned, map, direction: 'push' })).toEqual([]);
+
+    // format-3: a personal folder's home project is another workspace's id
+    expect(snapshot.teamProjectIds?.has(s.teamId)).toBe(true);
+    expect(snapshot.teamProjectIds?.has(s.personal.id)).toBe(false);
+    expect(computeStatus({ local: snapshot, remote, map, direction: 'pull' })).toEqual([]);
+    const other = new Map(remote);
+    changed(other, 'folders.json', (data) => {
+      for (const f of data.folders) if (f.id === mineFolder.id) f.homeProjectId = randomUUID();
+    });
+    expect(computeStatus({ local: snapshot, remote: other, map, direction: 'pull' })).toEqual([]);
+    expect(computeStatus({ local: snapshot, remote: other, map, direction: 'push' })).toEqual([]);
+    // a team folder that moved to a project this workspace does not know is a change in both directions
+    const moved = new Map(remote);
+    changed(moved, 'folders.json', (data) => {
+      for (const f of data.folders) if (f.id === s.folder.id) f.homeProjectId = randomUUID();
+    });
+    expect(computeStatus({ local: snapshot, remote: moved, map, direction: 'pull' })).toMatchObject([
+      { type: 'folders', status: 'modified', location: 'remote' },
+    ]);
+    expect(computeStatus({ local: snapshot, remote: moved, map, direction: 'push' })).toMatchObject([
+      { type: 'folders', status: 'modified', location: 'local' },
+    ]);
+
+    // owner type: a table in a personal project has no owner row, one in a team project reads team
+    const bare: LocalSnapshot = {
+      ...snapshot,
+      resources: snapshot.resources.filter((r) => r.type !== 'datatable'),
+    };
+    const rows = computeStatus({ local: bare, remote, map, direction: 'pull' });
+    expect(rowOf(rows, 'datatable', s.table.id)).toMatchObject({
+      status: 'created',
+      location: 'remote',
+      owner: { type: 'team' },
+    });
+    const personalRow = rowOf(rows, 'datatable', personalTable.id);
+    expect(personalRow).toMatchObject({ status: 'created', location: 'remote' });
+    expect(personalRow?.owner).toBeUndefined();
+  });
+
   it('a remote delete of a synced resource is a conflict on pull and created again on push', async () => {
     const s = await seed();
     const { map, remote, snapshot } = await synced(s);

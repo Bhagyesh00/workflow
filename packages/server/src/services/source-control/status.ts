@@ -18,11 +18,12 @@ import type {
   CredentialStubFile,
   DataTableFile,
   FileOwner,
+  FoldersFile,
   ParsedFile,
   ProjectFile,
   WorkflowFile,
 } from './import-schemas';
-import { contentVersion, type LocalFile, readLocalFiles } from './serialize';
+import { contentVersion, type LocalFile, readLocalFiles, withTeamHomes } from './serialize';
 
 /** one local resource as status compares it (local ids) */
 export interface LocalResource {
@@ -50,6 +51,8 @@ export interface LocalSnapshot {
   tenantId: string;
   scope: 'all' | Set<string>;
   resources: LocalResource[];
+  /** the team projects of the workspace: only these count in a folder's home project (see `withTeamHomes`) */
+  teamProjectIds?: ReadonlySet<string>;
 }
 
 const SINGLE_TYPES: Array<'variables' | 'tags' | 'folders'> = ['variables', 'tags', 'folders'];
@@ -83,6 +86,12 @@ export function fileVersionId(file: ParsedFile): string {
   return file.type === 'workflow' ? file.data.versionId : contentVersion(file.type, file.data);
 }
 
+function teamProjectIdsOf(snapshot: Awaited<ReturnType<typeof readLocalFiles>>): Set<string> {
+  const ids = new Set<string>();
+  for (const [id, project] of snapshot.projects) if (project.type === 'team') ids.add(id);
+  return ids;
+}
+
 function resourceOf(file: LocalFile, snapshot: Awaited<ReturnType<typeof readLocalFiles>>): LocalResource {
   const base = { updatedAt: file.updatedAt };
   if (file.type === 'variables' || file.type === 'tags' || file.type === 'folders') {
@@ -91,7 +100,10 @@ function resourceOf(file: LocalFile, snapshot: Awaited<ReturnType<typeof readLoc
       type: file.type,
       id: file.type,
       name: file.type,
-      versionId: contentVersion(file.type, file.data),
+      versionId:
+        file.type === 'folders'
+          ? contentVersion('folders', withTeamHomes(file.data, teamProjectIdsOf(snapshot)))
+          : contentVersion(file.type, file.data),
       projectId: null,
     };
   }
@@ -141,7 +153,12 @@ export async function localSnapshot(
   scope: 'all' | Set<string>,
 ): Promise<LocalSnapshot> {
   const local = await readLocalFiles(deps, tenantId, scope);
-  return { tenantId, scope, resources: local.files.map((file) => resourceOf(file, local)) };
+  return {
+    tenantId,
+    scope,
+    resources: local.files.map((file) => resourceOf(file, local)),
+    teamProjectIds: teamProjectIdsOf(local),
+  };
 }
 
 type Entry = ReturnType<SyncIdMap['entryForLocal']>;
@@ -169,7 +186,7 @@ function remoteOwnerRow(
   return { type: 'personal', projectId: '', projectName: owner.personalEmail };
 }
 
-/** the owner a workflow file names, compared with the local one (n8n compares it too) */
+/** the owner a workflow file names, compared with the local one (n8n compares it too when a side is a team) */
 function ownerDiffers(local: LocalResource, file: WorkflowFile, map: SyncIdMap): boolean {
   const owner = file.owner;
   // a file with no owner says nothing about it
@@ -181,10 +198,9 @@ function ownerDiffers(local: LocalResource, file: WorkflowFile, map: SyncIdMap):
       map.gitIdFor('project', local.projectId) === owner.teamId
     );
   }
-  return !(
-    local.projectType === 'personal' &&
-    (local.ownerEmail ?? '').toLowerCase() === owner.personalEmail.toLowerCase()
-  );
+  // a personal owner: a member of this workspace with that email, else the puller's personal project (pull falls
+  // back to it), so any personal project is the same owner here and the email is not compared
+  return local.projectType !== 'personal';
 }
 
 function metaDiffers(local: LocalResource, file: WorkflowFile, map: SyncIdMap): boolean {
@@ -219,7 +235,7 @@ function remoteName(file: ParsedFile): string {
   }
 }
 
-function remoteOwnerOf(file: ParsedFile): FileOwner | null {
+function remoteOwnerOf(file: ParsedFile, isTeamProject: (id: string) => boolean): FileOwner | null {
   switch (file.type) {
     case 'workflow':
       return (file.data as WorkflowFile).owner;
@@ -228,7 +244,11 @@ function remoteOwnerOf(file: ParsedFile): FileOwner | null {
     case 'project':
       return (file.data as ProjectFile).owner;
     case 'datatable':
-      return { type: 'team', teamId: (file.data as DataTableFile).projectId, teamName: '' };
+      // a data table file names its project by id only: it is a team's when that project is known as one here or
+      // in the folder, else it sits in a personal project and has no owner row (n8n gives none either)
+      return isTeamProject((file.data as DataTableFile).projectId)
+        ? { type: 'team', teamId: (file.data as DataTableFile).projectId, teamName: '' }
+        : null;
     default:
       return null;
   }
@@ -252,6 +272,27 @@ export function computeStatus(input: {
   const remoteByKey = new Map<string, ParsedFile>();
   for (const file of remote.values()) {
     if ('id' in file) remoteByKey.set(`${file.type}:${file.id.toLowerCase()}`, file);
+  }
+
+  const isTeamProject = (id: string) =>
+    map.localIdFor('project', id) !== undefined ||
+    remoteByKey.has(`project:${id.toLowerCase()}`) ||
+    local.resources.some((r) => r.type === 'project' && r.id.toLowerCase() === id.toLowerCase());
+
+  // the team projects (git ids) some remote file still names as its owner or home: a project the remote has no
+  // file for is not deleted there while a workflow, credential, table or folder of it is
+  const namedByRemote = new Set<string>();
+  for (const file of remote.values()) {
+    if (file.type === 'folders') {
+      for (const folder of (file.data as FoldersFile).folders) {
+        if (folder.homeProjectId) namedByRemote.add(folder.homeProjectId.toLowerCase());
+      }
+    } else if (file.type === 'datatable') {
+      namedByRemote.add((file.data as DataTableFile).projectId.toLowerCase());
+    } else if (file.type === 'workflow' || file.type === 'credential') {
+      const owner = remoteOwnerOf(file, isTeamProject);
+      if (owner?.type === 'team') namedByRemote.add(owner.teamId.toLowerCase());
+    }
   }
 
   const push = (row: SourceControlledFile) => rows.push(row);
@@ -288,8 +329,13 @@ export function computeStatus(input: {
     if (!file) {
       if (direction === 'push') {
         push({ ...common, status: 'created', location: 'local', conflict: false });
-      } else if (entry && !preferLocal) {
-        // synced once and gone from the folder: the remote deleted it
+      } else if (
+        entry &&
+        !preferLocal &&
+        !(resource.type === 'project' && namedByRemote.has(gitId.toLowerCase()))
+      ) {
+        // synced once and gone from the folder: the remote deleted it (a team project that a remote file still
+        // names is not deleted: the pull made it for that file)
         push({ ...common, status: 'deleted', location: 'remote', conflict: true });
       }
       continue;
@@ -331,9 +377,9 @@ export function computeStatus(input: {
     if (!('id' in file)) continue;
     const key = `${file.type}:${file.id.toLowerCase()}`;
     if (seen.has(key) || !RESOURCE_TYPES.includes(file.type)) continue;
-    if (!remoteInScope(local.scope, remoteOwnerOf(file), map)) continue;
+    if (!remoteInScope(local.scope, remoteOwnerOf(file, isTeamProject), map)) continue;
     const entry = map.entryForGit(mapType(file.type), file.id);
-    const owner = remoteOwnerOf(file);
+    const owner = remoteOwnerOf(file, isTeamProject);
     const common = {
       file: file.path,
       id: file.id,
@@ -373,7 +419,13 @@ export function computeStatus(input: {
         }
         continue;
       }
-      const remoteHash = contentVersion(type, map.rewriteDefinition(file.data, 'toLocal'));
+      const remoteData = map.rewriteDefinition(file.data, 'toLocal');
+      const remoteHash = contentVersion(
+        type,
+        type === 'folders' && local.teamProjectIds
+          ? withTeamHomes(remoteData as FoldersFile, local.teamProjectIds)
+          : remoteData,
+      );
       if (remoteHash === resource.versionId) continue;
       if (direction === 'push') {
         push({ ...common, status: 'modified', location: 'local', conflict: false });
