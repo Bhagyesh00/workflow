@@ -487,6 +487,8 @@ export class ProjectService {
       let vault: string[] = [];
       await this.deps.database.db.transaction(async (tx) => {
         await lockProject(tx, tenantId, projectId);
+        // P6-51: the final check, after the lock, through this transaction (the early call is the fast refusal)
+        await assertProjectWorkAllowed(this.deps, tenantId, projectId, target.id, tx);
         const repos = createRepositories(tx);
         const moved = await repos.projects.moveResources(tenantId, projectId, target.id);
         vault = await dropVaultConnections(repos, tenantId, projectId);

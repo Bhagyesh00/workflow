@@ -10,7 +10,15 @@
 import type { Scope, WorkflowDefinition } from '@workflow/workflow';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { ServiceDeps } from '../context';
-import { credentialShares, folders, type WorkflowRow, workflowShares, workflows } from '../db/schema';
+import type { DbOrTx } from '../db/client';
+import {
+  credentialShares,
+  folders,
+  type WorkflowRow,
+  workflowShares,
+  workflows,
+  workflowVersions,
+} from '../db/schema';
 import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { createRepositories } from '../repositories';
@@ -78,7 +86,7 @@ type Resource = 'workflow' | 'credential' | 'folder';
 type RestrictedRow = PolicyViolation & { matchedRuleId?: string; optInAvailable?: boolean };
 
 /** the nodes a policy check reads out of a stored `nodes` column (anything else is skipped) */
-function policyNodes(nodes: readonly unknown[]): PolicyWorkflow['nodes'] {
+export function policyNodes(nodes: readonly unknown[]): PolicyWorkflow['nodes'] {
   const out: Array<PolicyWorkflow['nodes'][number]> = [];
   for (const raw of nodes) {
     if (typeof raw !== 'object' || raw === null) continue;
@@ -92,6 +100,26 @@ function policyNodes(nodes: readonly unknown[]): PolicyWorkflow['nodes'] {
   }
   return out;
 }
+
+/**
+ * P6-51: the nodes of the published versions of the active workflows in `rows`. A move keeps a workflow
+ * published (member removal, project delete) or publishes the same version again (a transfer), so the
+ * target project's policy judges that version with the draft. A version that no longer exists is skipped.
+ */
+export async function publishedPolicyNodes(
+  db: DbOrTx,
+  tenantId: string,
+  rows: ReadonlyArray<{ active: boolean; publishedVersionId: string | null }>,
+): Promise<PolicyWorkflow['nodes']> {
+  const ids = rows.flatMap((row) => (row.active && row.publishedVersionId ? [row.publishedVersionId] : []));
+  if (ids.length === 0) return [];
+  const versions = await db
+    .select({ nodes: workflowVersions.nodes })
+    .from(workflowVersions)
+    .where(and(eq(workflowVersions.tenantId, tenantId), inArray(workflowVersions.id, ids)));
+  return versions.flatMap((version) => policyNodes(version.nodes));
+}
+
 type Tx = Parameters<typeof createRepositories>[0];
 
 export class TransferService {
@@ -110,7 +138,12 @@ export class TransferService {
     const policy = await this.previewTypes(
       auth,
       destinationProjectId,
-      { nodes: policyNodes(row.nodes) },
+      {
+        nodes: [
+          ...policyNodes(row.nodes),
+          ...(await publishedPolicyNodes(this.deps.database.db, auth.tenant.id, [row])),
+        ],
+      },
       row.id,
     );
     return { restricted: policy.restricted, checkFailed: policy.checkFailed, unpublishReasons };
@@ -159,7 +192,12 @@ export class TransferService {
     const policy = await this.previewTypes(
       auth,
       destinationProjectId,
-      { nodes: inTree.flatMap((w) => policyNodes(w.nodes)) },
+      {
+        nodes: [
+          ...inTree.flatMap((w) => policyNodes(w.nodes)),
+          ...(await publishedPolicyNodes(this.deps.database.db, auth.tenant.id, inTree)),
+        ],
+      },
       folderId,
     );
     const active = inTree.filter((w) => w.active);
@@ -182,10 +220,15 @@ export class TransferService {
     if (row.projectId === destination) throw ApiError.badRequest(SAME_WORKFLOW_DESTINATION);
     await this.requireFolder(tenantId, destination, input.destinationParentFolderId);
     const shareIds = await this.checkShareCredentials(auth, input.shareCredentials);
-    // P6-51: the destination project's type policies, before the first write
+    // P6-51: the destination project's type policies judge the draft and the published version, before the first write
     await assertTransferAllowed(this.deps, tenantId, destination, {
       kind: 'workflow',
-      workflow: { nodes: policyNodes(row.nodes) },
+      workflow: {
+        nodes: [
+          ...policyNodes(row.nodes),
+          ...(await publishedPolicyNodes(this.deps.database.db, tenantId, [row])),
+        ],
+      },
     });
 
     // the version that runs now is the one that runs again (never the draft)
@@ -274,7 +317,12 @@ export class TransferService {
     // P6-51: every workflow of the tree is judged as one, in the destination project, before the first write
     await assertTransferAllowed(this.deps, tenantId, destination, {
       kind: 'workflow',
-      workflow: { nodes: inTree.flatMap((w) => policyNodes(w.nodes)) },
+      workflow: {
+        nodes: [
+          ...inTree.flatMap((w) => policyNodes(w.nodes)),
+          ...(await publishedPolicyNodes(this.deps.database.db, tenantId, inTree)),
+        ],
+      },
     });
     const wasActive = inTree.flatMap((w) =>
       w.active && w.publishedVersionId ? [{ id: w.id, versionId: w.publishedVersionId }] : [],

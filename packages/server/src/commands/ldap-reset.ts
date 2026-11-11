@@ -6,7 +6,7 @@
  * Nothing changes when the arguments are wrong or the target is not found: all checks run first.
  */
 import type { ServerContext } from '../context';
-import { transferPersonalWork } from '../services/member-removal';
+import { assertProjectWorkAllowed, transferPersonalWork } from '../services/member-removal';
 
 export const LDAP_RESET_USAGE =
   'Usage: ldap:reset --tenant <slug> (--userId <id> | --projectId <id> | --deleteWorkflowsAndCredentials)';
@@ -72,14 +72,24 @@ export async function ldapResetCommand(ctx: ServerContext, argv: string[]): Prom
   }
 
   const identities = await ctx.repos.ldapHistory.identities(tenant.id);
+  // the users whose work moves (the --userId user and the target's own owner keep theirs)
+  const movers: string[] = [];
   for (const identity of identities) {
     if (args.userId === identity.userId) continue;
     if (targetProjectId !== null) {
       const own = await ctx.repos.projects.getPersonal(tenant.id, identity.userId);
       if (own?.id === targetProjectId) continue;
     }
-    await transferPersonalWork(ctx, tenant.id, identity.userId, targetProjectId);
+    movers.push(identity.userId);
   }
+  // P6-51: the project's type policies judge every user's work before the first move, so a refusal moves nothing
+  if (targetProjectId !== null) {
+    for (const userId of movers) {
+      const personal = await ctx.repos.projects.getPersonal(tenant.id, userId);
+      if (personal) await assertProjectWorkAllowed(ctx.serviceDeps, tenant.id, personal.id, targetProjectId);
+    }
+  }
+  for (const userId of movers) await transferPersonalWork(ctx, tenant.id, userId, targetProjectId);
   await ctx.ldap.reset(tenant.id);
   ctx.logger.info({ users: identities.length }, 'LDAP settings and identities cleared');
 }

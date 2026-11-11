@@ -9,11 +9,12 @@
 import { and, eq } from 'drizzle-orm';
 import type { ServerContext, ServiceDeps } from '../context';
 import type { DbOrTx } from '../db/client';
-import { credentials, type ProjectRow, workflows } from '../db/schema';
+import { credentials, type ProjectRow, projects, workflows } from '../db/schema';
 import type { AuthContext } from '../http/auth';
 import { ApiError } from '../http/errors';
 import { createRepositories } from '../repositories';
 import { MISSING_SCOPE_MESSAGE } from './access';
+import { policyNodes, publishedPolicyNodes } from './transfer';
 import { assertTransferAllowed } from './type-policies/enforce';
 
 /** the caller's choice for the removed member's personal work */
@@ -59,42 +60,45 @@ async function requireTarget(
  * with a transfer): its workflows (all their node types and credential types) and credentials may
  * enter the target project's type policies, else 403 `policy_violation` (or 503 when the check cannot
  * decide). Runs before the first write of `removeMember` and `transferPersonalWork`, so a refusal moves
- * nothing and removes no membership. Judged in the target project, as a move into it.
+ * nothing and removes no membership. Judged in the target project, as a move into it: the draft and the
+ * published version of each active workflow (the move keeps it published). Called once early as a fast
+ * refusal, and again with the move transaction as `tx`, after which the move reads what the check read.
  */
 export async function assertProjectWorkAllowed(
   deps: ServiceDeps,
   tenantId: string,
   fromProjectId: string,
   targetProjectId: string,
+  tx?: DbOrTx,
 ): Promise<void> {
-  const { db } = deps.database;
-  const [rows, credentialRows] = await Promise.all([
-    db
-      .select({ nodes: workflows.nodes })
-      .from(workflows)
-      .where(and(eq(workflows.tenantId, tenantId), eq(workflows.projectId, fromProjectId))),
-    db
-      .select({ type: credentials.type })
-      .from(credentials)
-      .where(and(eq(credentials.tenantId, tenantId), eq(credentials.projectId, fromProjectId))),
-  ]);
-  const nodes: Array<{ name: string; type: string; credentials?: Record<string, never> }> = [];
-  for (const row of rows) {
-    for (const raw of row.nodes) {
-      if (typeof raw !== 'object' || raw === null) continue;
-      const node = raw as { name?: unknown; type?: unknown; credentials?: unknown };
-      if (typeof node.type !== 'string') continue;
-      const held =
-        typeof node.credentials === 'object' && node.credentials !== null && !Array.isArray(node.credentials)
-          ? (node.credentials as Record<string, never>)
-          : undefined;
-      nodes.push({
-        name: typeof node.name === 'string' ? node.name : '',
-        type: node.type,
-        credentials: held,
-      });
-    }
+  const db = tx ?? deps.database.db;
+  if (tx) {
+    // inside the move transaction: the source project row is locked (a create into it waits), and the rows
+    // read below are locked too, so a save that is running now commits first and is judged
+    await tx
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.tenantId, tenantId), eq(projects.id, fromProjectId)))
+      .for('update');
   }
+  const workflowWhere = and(eq(workflows.tenantId, tenantId), eq(workflows.projectId, fromProjectId));
+  const credentialWhere = and(eq(credentials.tenantId, tenantId), eq(credentials.projectId, fromProjectId));
+  const workflowQuery = db
+    .select({
+      nodes: workflows.nodes,
+      active: workflows.active,
+      publishedVersionId: workflows.publishedVersionId,
+    })
+    .from(workflows)
+    .where(workflowWhere);
+  const credentialQuery = db.select({ type: credentials.type }).from(credentials).where(credentialWhere);
+  const rows = tx ? await workflowQuery.for('update') : await workflowQuery;
+  const credentialRows = tx ? await credentialQuery.for('update') : await credentialQuery;
+  // the draft and the published version: a move keeps an active workflow published (P6-51)
+  const nodes = [
+    ...rows.flatMap((row) => policyNodes(row.nodes)),
+    ...(await publishedPolicyNodes(db, tenantId, rows)),
+  ];
   if (nodes.length > 0) {
     await assertTransferAllowed(deps, tenantId, targetProjectId, {
       kind: 'workflow',
@@ -193,6 +197,8 @@ export async function removeMember(
       throw ApiError.conflict('A workspace needs at least one owner');
     }
     if (destination && personal) {
+      // P6-51: the final check, in this transaction (work saved since the early check is judged too)
+      await assertProjectWorkAllowed(ctx.serviceDeps, tenantId, personal.id, destination.id, tx);
       const moved = await txRepos.projects.moveResources(tenantId, personal.id, destination.id);
       await txRepos.audit.add(tenantId, {
         userId: auth.user.id,
@@ -268,6 +274,8 @@ export async function transferPersonalWork(
   }
   const target = await requireTarget(ctx, tenantId, personal, targetProjectId);
   await ctx.database.db.transaction(async (tx) => {
+    // P6-51: the final check, in the move transaction
+    await assertProjectWorkAllowed(ctx.serviceDeps, tenantId, personal.id, target.id, tx);
     await createRepositories(tx).projects.moveResources(tenantId, personal.id, target.id);
   });
 }

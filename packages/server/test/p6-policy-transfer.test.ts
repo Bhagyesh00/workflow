@@ -7,6 +7,8 @@
  */
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { ldapResetCommand } from '../src/commands/ldap-reset';
+import { createRepositories } from '../src/repositories';
 import { transferPersonalWork } from '../src/services/member-removal';
 import {
   addToProject,
@@ -362,5 +364,205 @@ describe('what is not judged', () => {
     const empty = await projectIn(server, world.tenantId, `Empty ${suffix()}`);
     const res = await world.owner.client.delete(`/rest/projects/${empty.id}?transferId=${world.away.id}`);
     expect(res.statusCode).toBe(200);
+  });
+});
+
+/** an active workflow whose draft is clean and whose published version holds `publishedNodes` */
+async function publishedOnly(
+  world: World,
+  projectId: string,
+  publishedNodes: ReturnType<typeof blockedNodes>,
+  folderId?: string,
+) {
+  const wf = await workflowIn(server, world.tenantId, projectId, { nodes: plainNodes(), folderId });
+  const versionId = randomUUID();
+  await repos().versions.create(world.tenantId, {
+    id: versionId,
+    workflowId: wf.id,
+    name: wf.name,
+    nodes: publishedNodes,
+    connections: {},
+    settings: {},
+  });
+  await repos().workflows.setPublished(world.tenantId, wf.id, versionId);
+  return wf;
+}
+
+describe('the published version moves with the workflow, so it is judged with the draft (scope-1)', () => {
+  it('PUT /workflows/:id/transfer and its preview', async () => {
+    const world = await setup();
+    await policyDeny(server, world.tenantId, 'node', BLOCKED, world.away.id);
+    const wf = await publishedOnly(world, world.home.id, blockedNodes());
+    const out = await world.owner.client.data(
+      world.owner.client.get(
+        `/rest/workflows/${wf.id}/transfer-preview?destinationProjectId=${world.away.id}`,
+      ),
+    );
+    expect(out.restricted).toEqual([
+      expect.objectContaining({ kind: 'node-type-unavailable', subject: wf.id, scope: 'project' }),
+    ]);
+    const res = await world.owner.client.put(`/rest/workflows/${wf.id}/transfer`, {
+      destinationProjectId: world.away.id,
+    });
+    await expectViolation(res, BLOCKED, 'project');
+    const kept = await repos().workflows.get(world.tenantId, wf.id);
+    expect(kept?.projectId).toBe(world.home.id);
+    expect(kept?.active).toBe(true);
+  });
+
+  it('PUT /folders/:id/transfer and its preview', async () => {
+    const world = await setup();
+    await policyDeny(server, world.tenantId, 'node', BLOCKED, world.away.id);
+    const folder = await folderIn(server, world.tenantId, world.home.id);
+    const wf = await publishedOnly(world, world.home.id, blockedNodes(), folder.id);
+    const out = await world.owner.client.data(
+      world.owner.client.get(
+        `/rest/folders/${folder.id}/transfer-preview?destinationProjectId=${world.away.id}`,
+      ),
+    );
+    expect(out.restricted).toEqual([expect.objectContaining({ kind: 'node-type-unavailable' })]);
+    const res = await world.owner.client.put(`/rest/folders/${folder.id}/transfer`, {
+      destinationProjectId: world.away.id,
+    });
+    await expectViolation(res, BLOCKED, 'project');
+    expect((await repos().workflows.get(world.tenantId, wf.id))?.projectId).toBe(world.home.id);
+    expect((await repos().folders.get(world.tenantId, folder.id))?.projectId).toBe(world.home.id);
+  });
+
+  it('DELETE /members/:userId with a transfer, and transferPersonalWork (SCIM, LDAP)', async () => {
+    const world = await setup();
+    await policyDeny(server, world.tenantId, 'node', BLOCKED, world.away.id);
+    const member = await realMember(world.owner);
+    const personal = (await repos().projects.getPersonal(world.tenantId, member.user.id))!;
+    const wf = await publishedOnly(world, personal.id, blockedNodes());
+    const res = await world.owner.client.request('DELETE', `/rest/members/${member.user.id}`, {
+      transferToProjectId: world.away.id,
+    });
+    await expectViolation(res, BLOCKED, 'project');
+    await expect(
+      transferPersonalWork(server.ctx, world.tenantId, member.user.id, world.away.id),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'policy_violation' });
+    expect((await repos().workflows.get(world.tenantId, wf.id))?.projectId).toBe(personal.id);
+    expect(await repos().memberships.get(world.tenantId, member.user.id)).toBeDefined();
+  });
+
+  it('DELETE /projects/:id?transferId=', async () => {
+    const world = await setup();
+    await policyDeny(server, world.tenantId, 'node', BLOCKED, world.away.id);
+    const wf = await publishedOnly(world, world.home.id, blockedNodes());
+    const res = await world.owner.client.delete(
+      `/rest/projects/${world.home.id}?transferId=${world.away.id}`,
+    );
+    await expectViolation(res, BLOCKED, 'project');
+    expect((await repos().projects.get(world.tenantId, world.home.id))?.id).toBe(world.home.id);
+    expect((await repos().workflows.get(world.tenantId, wf.id))?.projectId).toBe(world.home.id);
+  });
+
+  it('an unpublished workflow is judged by its draft only', async () => {
+    const world = await setup();
+    await policyDeny(server, world.tenantId, 'node', BLOCKED, world.away.id);
+    const wf = await publishedOnly(world, world.home.id, blockedNodes());
+    await server.ctx.database.pool.query('update workflows set active = false where id = $1', [wf.id]);
+    const res = await world.owner.client.delete(
+      `/rest/projects/${world.home.id}?transferId=${world.away.id}`,
+    );
+    expect(res.statusCode).toBe(200);
+  });
+});
+
+describe('the final check runs in the move transaction (scope-2)', () => {
+  /** commits a blocked workflow into `projectId` after the early check passed, while the move waits on the project lock */
+  async function saveDuringMove(
+    world: World,
+    projectId: string,
+    start: () => Promise<{ statusCode: number; json(): any }>,
+  ) {
+    let release!: () => void;
+    let inserted!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const insertedRow = new Promise<void>((resolve) => {
+      inserted = resolve;
+    });
+    // an open transaction that has inserted into the project holds a key share lock on its row
+    const holder = server.ctx.database.db.transaction(async (tx) => {
+      await createRepositories(tx).workflows.create(world.tenantId, {
+        name: `Late ${suffix()}`,
+        nodes: blockedNodes(),
+        connections: {},
+        settings: {},
+        pinData: {},
+        stickyNotes: [],
+        versionId: randomUUID(),
+        folderId: null,
+        projectId,
+      });
+      inserted();
+      await gate;
+    });
+    await insertedRow;
+    const response = start();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    release();
+    await holder;
+    return response;
+  }
+
+  it('DELETE /projects/:id?transferId= refuses a blocked workflow saved after the early check', async () => {
+    const world = await setup();
+    await policyDeny(server, world.tenantId, 'node', BLOCKED, world.away.id);
+    const res = await saveDuringMove(world, world.home.id, () =>
+      world.owner.client.delete(`/rest/projects/${world.home.id}?transferId=${world.away.id}`),
+    );
+    await expectViolation(res, BLOCKED, 'project');
+    expect((await repos().projects.get(world.tenantId, world.home.id))?.id).toBe(world.home.id);
+    expect((await repos().projects.contents(world.tenantId, world.home.id)).workflowIds).toHaveLength(1);
+  });
+
+  it('DELETE /members/:userId with a transfer refuses it and keeps the membership', async () => {
+    const world = await setup();
+    await policyDeny(server, world.tenantId, 'node', BLOCKED, world.away.id);
+    const member = await realMember(world.owner);
+    const personal = (await repos().projects.getPersonal(world.tenantId, member.user.id))!;
+    const res = await saveDuringMove(world, personal.id, () =>
+      world.owner.client.request('DELETE', `/rest/members/${member.user.id}`, {
+        transferToProjectId: world.away.id,
+      }),
+    );
+    await expectViolation(res, BLOCKED, 'project');
+    expect(await repos().memberships.get(world.tenantId, member.user.id)).toBeDefined();
+    expect((await repos().projects.contents(world.tenantId, personal.id)).workflowIds).toHaveLength(1);
+  });
+});
+
+describe('ldap:reset --projectId judges every user before the first move (scope-3)', () => {
+  it('moves nothing and keeps the identities when the third user is refused', async () => {
+    const world = await setup();
+    await policyDeny(server, world.tenantId, 'node', BLOCKED, world.away.id);
+    const works: Array<{ workflowId: string; personalId: string }> = [];
+    for (let i = 0; i < 3; i++) {
+      const member = await realMember(world.owner);
+      const personal = (await repos().projects.getPersonal(world.tenantId, member.user.id))!;
+      const workflow = await workflowIn(server, world.tenantId, personal.id, {
+        nodes: i === 2 ? blockedNodes() : plainNodes(),
+      });
+      works.push({ workflowId: workflow.id, personalId: personal.id });
+      await server.ctx.database.pool.query(
+        "insert into auth_identities (tenant_id, provider_type, provider_id, user_id) values ($1, 'ldap', $2, $3)",
+        [world.tenantId, `uid-${suffix()}`, member.user.id],
+      );
+    }
+    await expect(
+      ldapResetCommand(server.ctx, [`--tenant=${world.owner.tenant.slug}`, `--projectId=${world.away.id}`]),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'policy_violation' });
+    for (const work of works) {
+      expect((await repos().workflows.get(world.tenantId, work.workflowId))?.projectId).toBe(work.personalId);
+    }
+    const identities = await server.ctx.database.pool.query(
+      'select 1 from auth_identities where tenant_id = $1',
+      [world.tenantId],
+    );
+    expect(identities.rows).toHaveLength(3);
   });
 });
