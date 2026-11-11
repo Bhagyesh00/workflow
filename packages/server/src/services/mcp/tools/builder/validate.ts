@@ -16,6 +16,8 @@ import { z } from 'zod';
 import type { ServerContext } from '../../../../context';
 import { workflowDataSchema } from '../../../../http/schemas';
 import { type BuilderValidation, validateDefinition } from '../../../ai-builder/tools';
+import { PolicyCheckFailedError, violationMessage } from '../../../type-policies/errors';
+import { policyIssues } from '../../../type-policies/tool-filter';
 import { toDefinition } from '../../../workflow-model';
 import type { McpToolDefinition } from '../../types';
 import { assertWorkflowForMcp, McpToolError } from '../../workflow-gate';
@@ -179,7 +181,7 @@ export const validateNodeConfigTool: McpToolDefinition<z.output<typeof validateN
   access: 'workflow:read',
   input: validateNodeInput,
   annotations: READ,
-  async handler(ctx, _caller, input) {
+  async handler(ctx, caller, input) {
     const nodeType = ctx.registries.nodeTypes.get(input.type);
     if (!nodeType) {
       throw new McpToolError(
@@ -205,6 +207,30 @@ export const validateNodeConfigTool: McpToolDefinition<z.output<typeof validateN
       { nodes: [node], connections: {}, pinData: {} },
       { get: (type) => ctx.registries.nodeTypes.get(type)?.description },
     ).filter((issue) => !CONNECTION_CODES.has(issue.code ?? '') && (!issue.node || issue.node === node.name));
+    // a type a policy blocks is an error, so the model picks another before it builds with it (workspace scope)
+    try {
+      for (const violation of await policyIssues(ctx.serviceDeps, caller.tenant.id, null, {
+        nodes: [node],
+      })) {
+        issues.push({
+          id: `error:${node.name}:policy-blocked:${issues.length}`,
+          severity: 'error',
+          node: node.name,
+          code: 'policy-blocked',
+          message: violationMessage([violation]),
+          hint: 'Use another type; this one is not available here.',
+        });
+      }
+    } catch (error) {
+      if (!(error instanceof PolicyCheckFailedError)) throw error;
+      issues.push({
+        id: `error:-:policy-check-failed:${issues.length}`,
+        severity: 'error',
+        code: 'policy-check-failed',
+        message: error.message,
+        hint: 'Try again in a moment.',
+      });
+    }
     return {
       valid: !issues.some((i) => i.severity === 'error'),
       type: description.name,

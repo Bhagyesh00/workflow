@@ -40,6 +40,7 @@ import { assertCredentialsInTenant } from '../../mcp/tools/builder/credential-ch
 import { McpToolError } from '../../mcp/workflow-gate';
 import { loadNodeOptions } from '../../node-options';
 import { checkSingleNode } from '../../type-policies/enforce';
+import { restrictedNodeTypesView } from '../../type-policies/tool-filter';
 import { approvalPreview } from '../approvals';
 import { previewOutput, runAndCollect } from '../run-helper';
 import {
@@ -95,9 +96,16 @@ const searchNodesTool: AssistantToolDefinition<SearchNodesInput> = {
     'Search the node types of this instance by name, service or purpose. Use short service names ("Slack", "HTTP Request"), not whole sentences.',
   input: searchNodesInput,
   access: 'instanceAi:message',
-  async handler(ctx, _run, input) {
+  async handler(ctx, run, input) {
     const queries = [...(input.query ? [input.query] : []), ...(input.queries ?? [])].slice(0, 10);
-    return { results: searchNodes(ctx.registries.nodeTypes, queries) };
+    // the workspace scope: a type a policy blocks is never offered
+    const view = await restrictedNodeTypesView(
+      ctx.serviceDeps,
+      run.tenant.id,
+      null,
+      ctx.registries.nodeTypes,
+    );
+    return { results: searchNodes(view, queries) };
   },
 };
 
@@ -141,13 +149,19 @@ const getNodeTypesTool: AssistantToolDefinition<GetNodeTypesInput> = {
     'Get the exact parameters, credential slots, inputs and outputs of one to ten node types, by type name from search_nodes.',
   input: getNodeTypesInput,
   access: 'instanceAi:message',
-  async handler(ctx, _run, input) {
+  async handler(ctx, run, input) {
+    const view = await restrictedNodeTypesView(
+      ctx.serviceDeps,
+      run.tenant.id,
+      null,
+      ctx.registries.nodeTypes,
+    );
     const definitions = input.nodeTypes.map((request) => {
       const spec: Exclude<NodeTypeRequest, string> =
         typeof request === 'string' ? { nodeType: request } : request;
-      const details = nodeDetails(ctx.registries.nodeTypes, spec.nodeType);
+      const details = nodeDetails(view, spec.nodeType);
       if (!details) return { nodeType: spec.nodeType, error: `Unknown node type "${spec.nodeType}"` };
-      const nodeType = ctx.registries.nodeTypes.get(spec.nodeType);
+      const nodeType = view.get(spec.nodeType);
       const versions = nodeType ? versionsOf(nodeType) : [details.version];
       const properties = details.properties.filter(
         (p) =>

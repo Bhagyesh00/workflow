@@ -23,6 +23,8 @@ import {
 } from '@workflow/workflow';
 import type { ServerContext } from '../../context';
 import type { TenantRow } from '../../db/schema';
+import { PolicyCheckFailedError, violationMessage } from '../type-policies/errors';
+import { policyIssues, restrictedNodeTypesView, workflowProjectId } from '../type-policies/tool-filter';
 import { workflowWebhooks } from '../webhook-paths';
 import { executionContext, sanitizeForModel, wrapUntrusted } from './context';
 import {
@@ -211,7 +213,61 @@ export async function validateDefinition(
       add({ severity: 'error', code: 'webhook-invalid', message: (error as Error).message });
     }
   }
+  await addPolicyIssues(ctx, tenantId, definition, workflowId, add);
   return { valid: !issues.some((i) => i.severity === 'error'), issues };
+}
+
+/** the nodes a policy check reads out of a stored `nodes` column (anything else is skipped) */
+function storedPolicyNodes(nodes: readonly unknown[]): Array<{ name: string; type: string }> {
+  const out: Array<{ name: string; type: string }> = [];
+  for (const raw of nodes) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const node = raw as { name?: unknown; type?: unknown };
+    if (typeof node.type !== 'string') continue;
+    out.push({ name: typeof node.name === 'string' ? node.name : '', type: node.type });
+  }
+  return out;
+}
+
+/**
+ * The type policy violations of a definition as error issues (P6-55), so a model retries. In the workflow's
+ * project when `workflowId` names one, else the workspace scope; against the stored workflow only the added
+ * types are judged, as at a save. A check that cannot decide is an error issue too: it never passes.
+ */
+async function addPolicyIssues(
+  ctx: ServerContext,
+  tenantId: string,
+  definition: WorkflowDefinition,
+  workflowId: string | undefined,
+  add: (issue: Omit<DoctorIssue, 'id'>) => void,
+): Promise<void> {
+  try {
+    const stored = workflowId ? await ctx.repos.workflows.get(tenantId, workflowId) : undefined;
+    const violations = await policyIssues(
+      ctx.serviceDeps,
+      tenantId,
+      stored?.projectId ?? null,
+      definition,
+      stored ? { nodes: storedPolicyNodes(stored.nodes) } : undefined,
+    );
+    for (const violation of violations) {
+      add({
+        severity: 'error',
+        ...(violation.nodeName ? { node: violation.nodeName } : {}),
+        code: 'policy-blocked',
+        message: violationMessage([violation]),
+        hint: 'Use another type; this one is not available here.',
+      });
+    }
+  } catch (error) {
+    if (!(error instanceof PolicyCheckFailedError)) throw error;
+    add({
+      severity: 'error',
+      code: 'policy-check-failed',
+      message: error.message,
+      hint: 'Try again in a moment.',
+    });
+  }
 }
 
 /** the model's nodes without credentials: the user picks credentials, never the model */
@@ -295,7 +351,16 @@ function searchTool(draft: BuilderDraft, deps: BuilderToolDeps): AiTool {
         'queries',
       ]),
     },
-    (args) => searchNodes(draft.nodeTypes, (args.queries as string[]) ?? []),
+    async (args) =>
+      searchNodes(
+        await restrictedNodeTypesView(
+          deps.ctx.serviceDeps,
+          deps.tenant.id,
+          await workflowProjectId(deps.ctx.serviceDeps, deps.tenant.id, deps.workflowId),
+          draft.nodeTypes,
+        ),
+        (args.queries as string[]) ?? [],
+      ),
   );
 }
 
@@ -309,8 +374,14 @@ function detailsTool(draft: BuilderDraft, deps: BuilderToolDeps): AiTool {
         'The parameters, inputs, outputs and credential types of one node type. Read it before you add or configure a node.',
       parameters: OBJECT({ type: STRING }, ['type']),
     },
-    (args) => {
-      const details = nodeDetails(draft.nodeTypes, String(args.type ?? ''));
+    async (args) => {
+      const view = await restrictedNodeTypesView(
+        deps.ctx.serviceDeps,
+        deps.tenant.id,
+        await workflowProjectId(deps.ctx.serviceDeps, deps.tenant.id, deps.workflowId),
+        draft.nodeTypes,
+      );
+      const details = nodeDetails(view, String(args.type ?? ''));
       if (!details)
         throw new Error(`Unknown node type "${String(args.type ?? '')}". Use search_nodes first.`);
       return details;

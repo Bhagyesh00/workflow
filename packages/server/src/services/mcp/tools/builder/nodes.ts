@@ -5,6 +5,7 @@
  */
 import { z } from 'zod';
 import { nodeDetails, searchNodes } from '../../../ai-builder/tools';
+import { restrictedNodeTypesView } from '../../../type-policies/tool-filter';
 import type { McpToolDefinition } from '../../types';
 import { McpToolError } from '../../workflow-gate';
 
@@ -37,8 +38,15 @@ export const searchNodesTool: McpToolDefinition<z.output<typeof searchInput>> = 
   access: 'workflow:read',
   input: searchInput,
   annotations: READ,
-  async handler(ctx, _caller, input) {
-    return { results: searchNodes(ctx.registries.nodeTypes, input.queries) };
+  async handler(ctx, caller, input) {
+    // the workspace scope: a type a policy blocks is never offered
+    const view = await restrictedNodeTypesView(
+      ctx.serviceDeps,
+      caller.tenant.id,
+      null,
+      ctx.registries.nodeTypes,
+    );
+    return { results: searchNodes(view, input.queries) };
   },
 };
 
@@ -50,12 +58,18 @@ export const getNodeTypesTool: McpToolDefinition<z.output<typeof detailsInput>> 
   access: 'workflow:read',
   input: detailsInput,
   annotations: READ,
-  async handler(ctx, _caller, input) {
+  async handler(ctx, caller, input) {
     const types = [...new Set(input.types)];
+    const view = await restrictedNodeTypesView(
+      ctx.serviceDeps,
+      caller.tenant.id,
+      null,
+      ctx.registries.nodeTypes,
+    );
     const found = [];
     const unknown: string[] = [];
     for (const type of types) {
-      const details = nodeDetails(ctx.registries.nodeTypes, type);
+      const details = nodeDetails(view, type);
       if (details) found.push(details);
       else unknown.push(type);
     }
