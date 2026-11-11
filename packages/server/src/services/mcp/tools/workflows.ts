@@ -234,6 +234,7 @@ const publishWorkflow: McpToolDefinition<{
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   async handler(ctx, caller, input) {
     await assertWorkflowForMcp(ctx, caller, input.workflowId, 'publish');
+    await ctx.collaboration.assertNoLock(caller.tenant.id, input.workflowId);
     const dto = await ctx.workflows.setActive(caller.tenant.id, input.workflowId, true, mcpActor(caller), {
       versionId: input.versionId,
       versionName: input.name,
@@ -252,6 +253,7 @@ const unpublishWorkflow: McpToolDefinition<{ workflowId: string }> = {
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   async handler(ctx, caller, input) {
     await assertWorkflowForMcp(ctx, caller, input.workflowId, 'unpublish');
+    await ctx.collaboration.assertNoLock(caller.tenant.id, input.workflowId);
     const dto = await ctx.workflows.setActive(caller.tenant.id, input.workflowId, false, mcpActor(caller));
     return { id: dto.id, active: dto.active, publishedVersionId: dto.publishedVersionId };
   },

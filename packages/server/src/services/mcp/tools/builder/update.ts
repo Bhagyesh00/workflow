@@ -410,6 +410,7 @@ export const updateWorkflowTool: McpToolDefinition<z.output<typeof updateInput>>
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   async handler(ctx, caller, input) {
     const row = await assertWorkflowForMcp(ctx, caller, input.workflowId, 'write');
+    await ctx.collaboration.assertNoLock(caller.tenant.id, input.workflowId);
     if (row.versionId !== input.versionId) {
       throw new McpToolError(MCP_UPDATE_TEXTS.stale(input.versionId, row.versionId));
     }

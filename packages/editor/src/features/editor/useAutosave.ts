@@ -2,13 +2,15 @@
  * Autosave (P3-17, as n8n useWorkflowSaving): save the draft 1.5 s after a change and at most 5 s
  * after the first unsaved change, with saveWorkflow(deps, { autosaved: true }); never for
  * read-only, archived or unsaved-new workflows, never two saves at once, retry with backoff;
- * off when settings.autosaveEnabled is false. A save here only writes the draft: it never
+ * off when settings.autosaveEnabled is false; stops while another user or tab holds the write lock (P6-81)
+ * and goes on when it is free. A save here only writes the draft: it never
  * activates or publishes.
  */
 import { useEffect, useRef } from 'react';
 import { create } from 'zustand';
 import { useSettings } from '../../api/queries';
 import { useBuilderStore } from '../../stores/builder-store';
+import { useCollaborationStore } from '../../stores/collaboration-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 import { type EditorDeps, saveWorkflow } from './editor-actions';
@@ -39,6 +41,7 @@ function eligible(): boolean {
     !!s.meta.id &&
     s.dirty &&
     !s.readOnly &&
+    !useCollaborationStore.getState().lockedByOther &&
     !s.meta.isArchived &&
     !useUiStore.getState().saveConflict &&
     // P5-62: an AI draft under review is saved only by Accept
@@ -153,10 +156,23 @@ export function useAutosave(deps: EditorDeps): void {
         setIdle();
       }
     });
+    // P6-81: another user or tab took the write lock: nothing pending is saved; free again: go on
+    const unsubscribeLock = useCollaborationStore.subscribe((s, prev) => {
+      if (s.lockedByOther === prev.lockedByOther) return;
+      if (s.lockedByOther) {
+        clearPending();
+        clearRetry();
+        failures = 0;
+        setIdle();
+        return;
+      }
+      schedule();
+    });
     schedule();
 
     return () => {
       stopped = true;
+      unsubscribeLock();
       unsubscribe();
       unsubscribeLoad();
       clearPending();

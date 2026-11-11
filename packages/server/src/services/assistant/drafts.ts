@@ -307,6 +307,8 @@ export class AssistantDrafts {
         );
     if (shown.workflowId)
       await assertScope(this.ctx, auth, 'workflow:update', { workflowId: shown.workflowId });
+    // the write lock of an editor session: a draft that changes a workflow is not accepted while one holds it
+    if (shown.workflowId) await this.ctx.collaboration.assertNoLock(auth.tenant.id, shown.workflowId);
     // one conditional update: open to accepted, only the version the person saw; a second Accept finds none
     const stored = await this.moveStatus(auth, threadId, draftId, {
       from: 'open',

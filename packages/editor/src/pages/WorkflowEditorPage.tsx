@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { NodeParameters, NodeTypeDescription, WorkflowSettings } from '@workflow/workflow';
 import { ReactFlowProvider, useReactFlow } from '@xyflow/react';
 import { LayoutGrid, Plus, Sparkles, StickyNote } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useBlocker, useNavigate, useParams, useSearchParams } from 'react-router';
 import { errorMessage, isApiError } from '../api/client';
 import { executionsApi, workflowsApi } from '../api/endpoints';
@@ -14,6 +14,8 @@ import type { CanvasActions } from '../components/canvas/actions';
 import { FlowCanvas } from '../components/canvas/FlowCanvas';
 import { NodeCreator } from '../components/canvas/NodeCreator';
 import { SelectionToolbar } from '../components/canvas/SelectionToolbar';
+import { WorkflowUpdatedPrompt } from '../components/collaboration/WorkflowUpdatedPrompt';
+import { WriteLockBanner } from '../components/collaboration/WriteLockBanner';
 import { NodeDetailsView } from '../components/ndv/NodeDetailsView';
 import { Button, IconButton } from '../components/ui/Button';
 import { confirmDialog, Dialog } from '../components/ui/Dialog';
@@ -63,6 +65,11 @@ import { isTriggerDescription } from '../lib/ports';
 import { getMainParents, getNode } from '../lib/workflow-ops';
 import { useBuilderStore } from '../stores/builder-store';
 import { useChatStore } from '../stores/chat-store';
+import {
+  type CollaborationSession,
+  startCollaboration,
+  useCollaborationStore,
+} from '../stores/collaboration-store';
 import { useRunStore } from '../stores/run-store';
 import { toast, useUiStore } from '../stores/ui-store';
 import { useWorkflowStore } from '../stores/workflow-store';
@@ -78,7 +85,9 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
   const stickyNotes = useWorkflowStore((s) => s.stickyNotes);
   const nodeGroups = useWorkflowStore((s) => s.nodeGroups);
   const selection = useWorkflowStore((s) => s.selection);
-  const readOnly = useWorkflowStore((s) => s.readOnly);
+  // P6-81: another user's or tab's write lock makes the editor read-only, as a viewer's role does
+  const lockedByOther = useCollaborationStore((s) => s.lockedByOther);
+  const readOnly = useWorkflowStore((s) => s.readOnly) || lockedByOther;
   const meta = useWorkflowStore((s) => s.meta);
   const loadCount = useWorkflowStore((s) => s.loadCount);
   const runData = useRunStore((s) => s.runData);
@@ -234,6 +243,8 @@ function EditorSurface({ deps }: { deps: EditorDeps }) {
         }}
       />
       <ArchivedBanner />
+      {meta.id && <WriteLockBanner workflowId={meta.id} />}
+      {meta.id && <WorkflowUpdatedPrompt workflowId={meta.id} />}
       <ReviewStatusBanner />
       <div className="relative flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1" data-testid="canvas">
@@ -642,6 +653,26 @@ export function WorkflowEditorPage() {
     [navigate, nodeTypes, queryClient],
   );
   const guard = useUnsavedGuard(deps);
+
+  // P6-81: presence and the write lock of the open workflow (open on load, heartbeat, close on leave)
+  const selfUserId = me?.user.id;
+  const canWrite = useCanEditWorkflow();
+  const canWriteRef = useRef(canWrite);
+  canWriteRef.current = canWrite;
+  const loadedId = useWorkflowStore((s) => s.meta.id);
+  const collaboration = useRef<CollaborationSession | null>(null);
+  useEffect(() => {
+    if (isNew || !selfUserId || loadedId !== id) return;
+    const started = startCollaboration({ workflowId: id, selfUserId, canWrite: canWriteRef.current });
+    collaboration.current = started;
+    return () => {
+      started.stop();
+      collaboration.current = null;
+    };
+  }, [id, isNew, selfUserId, loadedId]);
+  useEffect(() => {
+    collaboration.current?.setCanWrite(canWrite);
+  }, [canWrite]);
 
   if (query.isLoading || nodeTypes.isLoading) return <PageLoader label="Opening workflow" />;
   if (query.error) {

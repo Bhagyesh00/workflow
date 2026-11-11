@@ -267,6 +267,7 @@ const archiveWorkflow: AssistantToolDefinition<WorkflowWrite> = {
   approval: (ctx, caller, input) =>
     workflowCard(ctx, caller, input.workflowId, 'Archive workflow', input.approvalSummary),
   async handler(ctx, run, input) {
+    await ctx.collaboration.assertNoLock(run.tenant.id, input.workflowId);
     const dto = await ctx.workflowArchive.archive(run.tenant.id, input.workflowId, run.actor);
     return workflowState(dto);
   },
@@ -320,6 +321,7 @@ const publishWorkflow: AssistantToolDefinition<WorkflowWrite & { versionId?: str
     ]),
   artifact: (_input, result) => workflowArtifact(result),
   async handler(ctx, run, input) {
+    await ctx.collaboration.assertNoLock(run.tenant.id, input.workflowId);
     return asReviewText(async () =>
       workflowState(
         await ctx.workflows.setActive(run.tenant.id, input.workflowId, true, run.actor, {
@@ -342,6 +344,7 @@ const unpublishWorkflow: AssistantToolDefinition<WorkflowWrite> = {
   approval: (ctx, caller, input) =>
     workflowCard(ctx, caller, input.workflowId, 'Unpublish workflow', input.approvalSummary),
   async handler(ctx, run, input) {
+    await ctx.collaboration.assertNoLock(run.tenant.id, input.workflowId);
     return workflowState(await ctx.workflows.setActive(run.tenant.id, input.workflowId, false, run.actor));
   },
 };
@@ -363,6 +366,7 @@ const restoreWorkflowVersion: AssistantToolDefinition<WorkflowWrite & { versionI
     ]);
   },
   async handler(ctx, run, input) {
+    await ctx.collaboration.assertNoLock(run.tenant.id, input.workflowId);
     const dto = await ctx.workflows.restoreVersion(
       run.tenant.id,
       input.workflowId,

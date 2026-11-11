@@ -27,6 +27,7 @@ export const archiveWorkflowTool: McpToolDefinition<z.output<typeof archiveInput
   annotations: { ...WRITE, destructiveHint: true, idempotentHint: true },
   async handler(ctx, caller, input) {
     const row = await assertWorkflowForMcp(ctx, caller, input.workflowId, 'delete');
+    await ctx.collaboration.assertNoLock(caller.tenant.id, row.id);
     const archived = await ctx.workflowArchive.archive(caller.tenant.id, row.id, mcpActor(caller));
     return {
       workflowId: archived.id,
@@ -47,6 +48,7 @@ export const restoreWorkflowVersionTool: McpToolDefinition<z.output<typeof resto
   annotations: WRITE,
   async handler(ctx, caller, input) {
     const row = await assertWorkflowForMcp(ctx, caller, input.workflowId, 'write');
+    await ctx.collaboration.assertNoLock(caller.tenant.id, row.id);
     const restored = await ctx.workflows.restoreVersion(
       caller.tenant.id,
       row.id,

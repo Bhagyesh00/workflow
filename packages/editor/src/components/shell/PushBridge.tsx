@@ -3,12 +3,15 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { connectPush } from '../../api/push';
 import type { PushEvent } from '../../api/types';
+import { receiveCollaborationEvent } from '../../stores/collaboration-store';
 import { useRunStore } from '../../stores/run-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
 
 export function handlePushEvent(event: PushEvent): void {
   const openWorkflowId = useWorkflowStore.getState().meta.id ?? null;
   useRunStore.getState().receive(event, openWorkflowId);
+  // P6-81: collaboratorsChanged, writeAccessAcquired, writeAccessReleased and workflowUpdated
+  receiveCollaborationEvent(event);
 }
 
 export function PushBridge({ tenantId }: { tenantId: string }) {
