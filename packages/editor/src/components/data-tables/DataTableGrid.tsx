@@ -61,7 +61,16 @@ const byRowId = (ids: number[]): DataTableFilter => ({
   filters: ids.map((value) => ({ columnName: 'id', condition: 'eq', value })),
 });
 
-export function DataTableGrid({ table, canWrite }: { table: DataTableInfo; canWrite: boolean }) {
+/** `canWrite` edits rows; `canChangeColumns` adds, renames, moves and deletes columns (off on a protected workspace) */
+export function DataTableGrid({
+  table,
+  canWrite,
+  canChangeColumns,
+}: {
+  table: DataTableInfo;
+  canWrite: boolean;
+  canChangeColumns: boolean;
+}) {
   const queryClient = useQueryClient();
   const [searchText, setSearchText] = useState('');
   const search = useDebounced(searchText.trim());
@@ -232,7 +241,7 @@ export function DataTableGrid({ table, canWrite }: { table: DataTableInfo; canWr
   };
 
   const dragProps = (column: DataTableColumn | undefined) =>
-    canWrite && column
+    canChangeColumns && column
       ? {
           draggable: true,
           onDragStart: (event: DragEvent) => {
@@ -293,9 +302,11 @@ export function DataTableGrid({ table, canWrite }: { table: DataTableInfo; canWr
       <>
         <EmptyState
           title="No columns yet"
-          description={canWrite ? 'Add a column to start adding rows.' : 'Nobody has added a column yet.'}
+          description={
+            canChangeColumns ? 'Add a column to start adding rows.' : 'Nobody has added a column yet.'
+          }
           action={
-            canWrite ? (
+            canChangeColumns ? (
               <Button variant="primary" icon={<Plus size={15} />} onClick={() => setAdding(true)}>
                 Add first column
               </Button>
@@ -425,7 +436,7 @@ export function DataTableGrid({ table, canWrite }: { table: DataTableInfo; canWr
                           name={name}
                           table={{ ...table, columns: userColumns }}
                           column={column}
-                          canWrite={canWrite}
+                          canWrite={canChangeColumns}
                           sort={direction}
                           onSort={(next) => changeSort(next ? { column: name, direction: next } : undefined)}
                           onFilter={() => setFilterColumn(name)}
@@ -436,7 +447,7 @@ export function DataTableGrid({ table, canWrite }: { table: DataTableInfo; canWr
                     </th>
                   );
                 })}
-                {canWrite && (
+                {canChangeColumns && (
                   <td className="w-9 border-b border-line px-1">
                     <IconButton size="sm" label="Add column" onClick={() => setAdding(true)}>
                       <Plus size={14} />
@@ -507,7 +518,7 @@ export function DataTableGrid({ table, canWrite }: { table: DataTableInfo; canWr
                       </td>
                     );
                   })}
-                  {canWrite && <td className="border-b border-line" />}
+                  {canChangeColumns && <td className="border-b border-line" />}
                 </tr>
               ))}
             </tbody>

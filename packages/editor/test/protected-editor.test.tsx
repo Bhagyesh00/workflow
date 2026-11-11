@@ -3,16 +3,22 @@
  * `setDemoProtected(true)`. `usePermissions().can` and the list create gate mask the create, update and delete
  * scopes the server refuses; `canWith` stays raw. The canvas lock is the fourth part of the workflow store's
  * `readOnly`; Publish and Unpublish still follow the role, the archive state, the write lock and the workflow's
- * own scopes; a variable's key is read-only on edit and its value still saves; the sidebar shows the lock.
+ * own scopes; a variable's key is read-only on edit and its value still saves; the sidebar shows the lock. The AI
+ * builder still streams its draft onto the canvas (Accept is off); a data table offers no column change, its rows
+ * stay editable.
  */
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Scope, WorkflowNode } from '@workflow/workflow';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { setBuildStreamConnector } from '../src/api/ai-stream';
 import { setCurrentTenant } from '../src/api/client';
+import { dataTablesApi } from '../src/api/endpoints';
 import { queryKeys } from '../src/api/queries';
 import type { MockBackend } from '../src/demo/mock-backend';
+import { addDemoRole } from '../src/demo/mock-roles';
 import { canWith, usePermissions } from '../src/lib/permissions';
+import { useBuilderStore } from '../src/stores/builder-store';
 import { useProjectDialogStore } from '../src/stores/project-dialog-store';
 import { useProjectStore } from '../src/stores/project-store';
 import { useWorkflowStore } from '../src/stores/workflow-store';
@@ -53,7 +59,11 @@ beforeEach(() => {
   useProjectDialogStore.getState().close();
   useWorkflowStore.getState().reset();
 });
-afterEach(() => setCurrentTenant(null));
+afterEach(() => {
+  setCurrentTenant(null);
+  setBuildStreamConnector(null);
+  useBuilderStore.getState().reset();
+});
 
 /** the signed-in owner becomes a true `member` holding `projectRole` in the default team project */
 function asMember(projectRole: string): { demo: MockBackend; teamId: string } {
@@ -165,13 +175,65 @@ describe('the editor on a protected workspace', () => {
     expect((await screen.findAllByRole('button', { name: 'Build with AI' }, LONG)).length).toBeGreaterThan(0);
   });
 
-  it('the Build with AI entry follows readOnly: hidden on a protected workspace', async () => {
+  it('the Build with AI entry and the prompt box stay on a protected workspace, with the notice', async () => {
+    // the protected part of readOnly alone never hides the builder (n8n); Accept is off and the notice says why
     const demo = signedIn();
     const wf = demo.seedWorkflow({ name: 'Flow', nodes: [trigger] });
     demo.setDemoProtected(true);
     await openEditor(wf.id);
     await screen.findByRole('button', { name: 'Publish' }, LONG);
+    const user = userEvent.setup();
+    const [entry] = await screen.findAllByRole('button', { name: 'Build with AI' }, LONG);
+    await user.click(entry);
+    const panel = await screen.findByRole('complementary', { name: 'AI builder' }, LONG);
+    expect(within(panel).getByRole('textbox', { name: 'Message the AI builder' })).toBeTruthy();
+    expect(within(panel).queryByText('This workflow is read only.')).toBeNull();
+    expect(within(panel).getByTestId('protected-notice-builder')).toBeTruthy();
+  });
+
+  it('a send on a protected workspace streams and the draft shows on the canvas, with Accept off', async () => {
+    const demo = signedIn();
+    const wf = demo.seedWorkflow({ name: 'Flow', nodes: [trigger] });
+    demo.setDemoProtected(true);
+    await openEditor(wf.id);
+    await screen.findByRole('button', { name: 'Publish' }, LONG);
+    const shape: WorkflowNode = { ...trigger, id: 's', name: 'Shape', type: 'core.set', position: [300, 0] };
+    setBuildStreamConnector(async (_body, onChunk) => {
+      onChunk({
+        type: 'workflow-updated',
+        workflow: { name: 'Flow', nodes: [trigger, shape], connections: {} },
+      });
+      onChunk({ type: 'message', id: 'a1', text: 'Added Shape.' });
+    });
+    const user = userEvent.setup();
+    const [entry] = await screen.findAllByRole('button', { name: 'Build with AI' }, LONG);
+    await user.click(entry);
+    const panel = await screen.findByRole('complementary', { name: 'AI builder' }, LONG);
+    await user.type(within(panel).getByRole('textbox', { name: 'Message the AI builder' }), 'Add a step');
+    await user.click(within(panel).getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(useBuilderStore.getState().streaming).toBe(false), LONG);
+    expect(within(panel).getByText('Added Shape.')).toBeTruthy();
+    expect(useWorkflowStore.getState().nodes.map((n) => n.name)).toEqual(['Start', 'Shape']);
+    expect(useWorkflowStore.getState().readOnly).toBe(true);
+    const bar = await within(panel).findByRole('region', { name: 'Draft review' }, LONG);
+    expect(within(bar).getByRole('button', { name: 'Accept' }).hasAttribute('disabled')).toBe(true);
+    expect(within(bar).getByRole('button', { name: 'Discard' }).hasAttribute('disabled')).toBe(false);
+    await user.click(within(bar).getByRole('button', { name: 'Discard' }));
+    expect(useWorkflowStore.getState().nodes.map((n) => n.name)).toEqual(['Start']);
+    expect(useWorkflowStore.getState().roleReadOnly).toBe(false);
+  }, 60_000);
+
+  it('an archived workflow on a protected workspace hides the entry and closes the prompt box', async () => {
+    const demo = signedIn();
+    const wf = demo.seedWorkflow({ name: 'Old', nodes: [trigger], isArchived: true });
+    demo.setDemoProtected(true);
+    await openEditor(wf.id);
+    await screen.findByRole('button', { name: 'Publish' }, LONG);
     expect(screen.queryByRole('button', { name: 'Build with AI' })).toBeNull();
+    act(() => useBuilderStore.getState().setOpen(true));
+    const panel = await screen.findByRole('complementary', { name: 'AI builder' }, LONG);
+    expect(within(panel).queryByRole('textbox', { name: 'Message the AI builder' })).toBeNull();
+    expect(within(panel).getByText('This workflow is read only.')).toBeTruthy();
   });
 
   it('Unpublish stays enabled in the menu', async () => {
@@ -241,6 +303,108 @@ describe('the editor on a protected workspace', () => {
   });
 });
 
+describe('archive, publish and the command bar on a protected workspace', () => {
+  const bannerRestore = () =>
+    within(
+      screen.getByText('This workflow is archived.').closest('[role="status"]') as HTMLElement,
+    ).queryByRole('button', { name: 'Restore' });
+  const openBar = async () => {
+    // the shortcut is registered once the shell is up: press until the bar opens
+    await waitFor(() => {
+      act(() => {
+        fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true });
+      });
+      expect(screen.queryByRole('dialog', { name: 'Command bar' })).toBeTruthy();
+    }, LONG);
+    const bar = screen.getByRole('dialog', { name: 'Command bar' });
+    await userEvent.setup().click(within(bar).getByRole('tab', { name: 'Actions' }));
+    return within(bar);
+  };
+
+  it('the archived banner has no Restore button, as the top bar menu', async () => {
+    const demo = signedIn();
+    const wf = demo.seedWorkflow({ name: 'Old', nodes: [trigger], isArchived: true });
+    demo.setDemoProtected(true);
+    await openEditor(wf.id);
+    await screen.findByText('This workflow is archived.', {}, LONG);
+    expect(bannerRestore()).toBeNull();
+  });
+
+  it('the archived banner keeps Restore on a writable workspace', async () => {
+    const demo = signedIn();
+    const wf = demo.seedWorkflow({ name: 'Old', nodes: [trigger], isArchived: true });
+    await openEditor(wf.id, false);
+    await screen.findByText('This workflow is archived.', {}, LONG);
+    expect(bannerRestore()).toBeTruthy();
+  });
+
+  it('the command bar lists no Unarchive and no Delete for an archived workflow', async () => {
+    const demo = signedIn();
+    const wf = demo.seedWorkflow({ name: 'Old', nodes: [trigger], isArchived: true });
+    demo.setDemoProtected(true);
+    await openEditor(wf.id);
+    await screen.findByRole('button', { name: 'Publish' }, LONG);
+    const bar = await openBar();
+    await bar.findByRole('option', { name: /Download workflow/ });
+    expect(bar.queryByRole('option', { name: /Unarchive workflow/ })).toBeNull();
+    expect(bar.queryByRole('option', { name: /Delete workflow/ })).toBeNull();
+  });
+
+  it('the command bar keeps Unarchive and Delete on a writable workspace', async () => {
+    const demo = signedIn();
+    const wf = demo.seedWorkflow({ name: 'Old', nodes: [trigger], isArchived: true });
+    await openEditor(wf.id, false);
+    await screen.findByText('This workflow is archived.', {}, LONG);
+    const bar = await openBar();
+    expect(await bar.findByRole('option', { name: /Unarchive workflow/ })).toBeTruthy();
+    expect(bar.getByRole('option', { name: /Delete workflow/ })).toBeTruthy();
+  });
+
+  it('the command bar keeps Publish, and no write command, on a protected workspace', async () => {
+    const demo = signedIn();
+    const wf = demo.seedWorkflow({ name: 'Flow', nodes: [trigger] });
+    demo.setDemoProtected(true);
+    await openEditor(wf.id);
+    await screen.findByRole('button', { name: 'Publish' }, LONG);
+    const bar = await openBar();
+    expect(await bar.findByRole('option', { name: /Publish workflow/ })).toBeTruthy();
+    expect(bar.queryByRole('option', { name: /Add sticky note/ })).toBeNull();
+    expect(bar.queryByRole('option', { name: /Archive workflow/ })).toBeNull();
+  });
+
+  it('the command bar keeps Unpublish for a published workflow on a protected workspace', async () => {
+    const demo = signedIn();
+    const wf = demo.seedWorkflow({ name: 'Live', nodes: [trigger], active: true });
+    demo.setDemoProtected(true);
+    await openEditor(wf.id);
+    const bar = await openBar();
+    expect(await bar.findByRole('option', { name: /Unpublish workflow/ })).toBeTruthy();
+  });
+
+  it('Publish is off for a workflow with no id yet, and the command bar has no Publish', async () => {
+    const demo = signedIn();
+    demo.setDemoProtected(true);
+    renderApp('/workflow/new');
+    await waitFor(() => expect(useWorkflowStore.getState().protectedReadOnly).toBe(true), LONG);
+    const publish = await screen.findByRole('button', { name: 'Publish' }, LONG);
+    expect(publish.hasAttribute('disabled')).toBe(true);
+    const bar = await openBar();
+    await bar.findByRole('option', { name: /Download workflow/ });
+    expect(bar.queryByRole('option', { name: /Publish workflow/ })).toBeNull();
+  });
+
+  it('Publish is off while the saved workflow has unsaved changes', async () => {
+    const demo = signedIn();
+    const wf = demo.seedWorkflow({ name: 'Flow', nodes: [trigger] });
+    demo.setDemoProtected(true);
+    await openEditor(wf.id);
+    const publish = await screen.findByRole('button', { name: 'Publish' }, LONG);
+    expect(publish.hasAttribute('disabled')).toBe(false);
+    act(() => useWorkflowStore.setState({ dirty: true }));
+    await waitFor(() => expect(publish.hasAttribute('disabled')).toBe(true));
+  });
+});
+
 describe('create buttons on a protected workspace', () => {
   it('shows no Create workflow or New folder button, and still lists the workflow', async () => {
     const demo = signedIn();
@@ -265,6 +429,21 @@ describe('create buttons on a protected workspace', () => {
     renderApp('/home/credentials');
     expect(await screen.findByRole('heading', { name: 'Credentials' }, LONG)).toBeTruthy();
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Add credential' })).toBeNull(), LONG);
+  });
+
+  it('shows no New data table button on a protected workspace', async () => {
+    const demo = signedIn();
+    demo.setDemoProtected(true);
+    renderApp('/home/data-tables');
+    expect(await screen.findByRole('heading', { name: 'Data tables' }, LONG)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'New data table' })).toBeNull(), LONG);
+    expect(screen.queryByRole('button', { name: 'Create a data table' })).toBeNull();
+  });
+
+  it('shows the New data table button on a writable workspace', async () => {
+    signedIn();
+    renderApp('/home/data-tables');
+    expect(await screen.findByRole('button', { name: 'New data table' }, LONG)).toBeTruthy();
   });
 
   it('hides the Add project button once the settings say protected', async () => {
@@ -306,6 +485,39 @@ describe('variables on a protected workspace', () => {
     expect((screen.getByLabelText('Key', { selector: 'li input' }) as HTMLInputElement).readOnly).toBe(false);
   });
 
+  describe.each([
+    ['a writable workspace', false],
+    ['a protected workspace', true],
+  ])('a role with variable:update and no variable:delete on %s', (_label, protectedOn) => {
+    // n8n: edit needs the update scope only; the key renames on a writable workspace, not on a protected one
+    it('edits the value', async () => {
+      const slug = 'global:varEditor';
+      const demo = signedIn();
+      addDemoRole(demo, {
+        tenantId: demo.auth().tenant.id,
+        slug,
+        displayName: 'Variable editor',
+        description: null,
+        systemRole: false,
+        roleType: 'global',
+        scopes: ['variable:list', 'variable:read', 'variable:update'],
+      });
+      demo.setDemoRole(slug);
+      demo.variables.push({ id: 'v1', key: 'region', value: 'eu', tenantId: demo.auth().tenant.id });
+      if (protectedOn) demo.setDemoProtected(true);
+      renderApp('/settings/variables');
+      const value = (await screen.findByLabelText('Value of region', {}, LONG)) as HTMLInputElement;
+      expect(value.readOnly).toBe(false);
+      expect((screen.getByLabelText('Key') as HTMLInputElement).readOnly).toBe(protectedOn);
+      expect(screen.queryByRole('button', { name: 'Delete region' })).toBeNull();
+      const user = userEvent.setup();
+      await user.clear(value);
+      await user.type(value, 'us');
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(backend().variables[0]?.value).toBe('us'));
+    });
+  });
+
   it('a project Variables tab has the same split', async () => {
     const demo = signedIn();
     const tenantId = demo.auth().tenant.id;
@@ -323,6 +535,39 @@ describe('variables on a protected workspace', () => {
     await user.type(value, 'us');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(backend().variables[0]?.value).toBe('us'));
+  });
+});
+
+describe('a data table on a protected workspace', () => {
+  async function openTable(protect: boolean) {
+    const demo = signedIn();
+    const table = await dataTablesApi.create({ name: 'Leads', columns: [{ name: 'name', type: 'string' }] });
+    await dataTablesApi.insertRows(table.id, [{ name: 'Ann' }], 'count');
+    demo.setDemoProtected(protect);
+    renderApp(`/data-tables/${table.id}`);
+    await screen.findByRole('grid', { name: 'Rows of Leads' }, LONG);
+    await screen.findByRole('gridcell', { name: 'Ann' }, LONG);
+  }
+
+  it('offers no column change (Add column, Rename column), and rows stay editable', async () => {
+    await openTable(true);
+    await screen.findByRole('status', { name: /Protected workspace/ }, LONG);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Add column' })).toBeNull(), LONG);
+    expect(screen.getByRole('button', { name: 'Add row' })).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: 'Select row 1' })).toBeTruthy();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Column menu for name' }));
+    await screen.findByRole('menuitem', { name: 'Sort ascending' });
+    expect(screen.queryByRole('menuitem', { name: 'Rename column' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Delete column' })).toBeNull();
+  });
+
+  it('keeps Add column and Rename column on a writable workspace', async () => {
+    await openTable(false);
+    expect(await screen.findByRole('button', { name: 'Add column' }, LONG)).toBeTruthy();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Column menu for name' }));
+    expect(await screen.findByRole('menuitem', { name: 'Rename column' })).toBeTruthy();
   });
 });
 

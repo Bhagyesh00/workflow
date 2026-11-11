@@ -12,12 +12,17 @@ import { IconButton } from '../components/ui/Button';
 import { Menu } from '../components/ui/Menu';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
 import { usePermissions } from '../lib/permissions';
+import { useProtectedWorkspace } from '../lib/protected';
 import { useTableActions } from './DataTablesPage';
 
 function TablePage({ table }: { table: DataTableInfo }) {
   const navigate = useNavigate();
-  // the grid edits rows and columns by this table's own `dataTable:writeRow`
-  const canWrite = usePermissions().can('dataTable:writeRow', table);
+  const { can } = usePermissions();
+  const protectedWorkspace = useProtectedWorkspace();
+  // the grid edits rows by this table's own `dataTable:writeRow`, and columns by `dataTable:writeColumn` on a
+  // workspace that is not protected (the server refuses a column change there; rows stay editable)
+  const canWrite = can('dataTable:writeRow', table);
+  const canChangeColumns = can('dataTable:writeColumn', table) && !protectedWorkspace;
   const { items, dialogs, starred, toggleFavorite } = useTableActions(table, () =>
     navigate('/home/data-tables'),
   );
@@ -58,7 +63,7 @@ function TablePage({ table }: { table: DataTableInfo }) {
           )}
         />
       </header>
-      <DataTableGrid table={table} canWrite={canWrite} />
+      <DataTableGrid table={table} canWrite={canWrite} canChangeColumns={canChangeColumns} />
       {dialogs}
     </div>
   );

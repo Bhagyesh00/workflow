@@ -283,7 +283,9 @@ export const useBuilderStore = create<BuilderState>()((set, get) => ({
       set({ error: { title: BUILDER_REQUEST_FAILED, message: BUILDER_PROMPT_TOO_LONG } });
       return;
     }
-    if (useWorkflowStore.getState().readOnly) return;
+    // a protected workspace keeps the builder (the server refuses the save, Accept is off): only role, archive and lock stop it
+    const w = useWorkflowStore.getState();
+    if (w.roleReadOnly || w.meta.isArchived || w.lockReadOnly) return;
 
     const controller = new AbortController();
     set({
@@ -357,7 +359,8 @@ export const useBuilderStore = create<BuilderState>()((set, get) => ({
         set((s) => ({ progress: withProgress(s.progress, chunk) }));
         return;
       case 'workflow-updated': {
-        if (useWorkflowStore.getState().readOnly) return;
+        const w = useWorkflowStore.getState();
+        if (w.roleReadOnly || w.meta.isArchived || w.lockReadOnly) return;
         if (!get().reviewing) {
           // the canvas before the builder's first change; the review starts before the canvas changes,
           // so autosave never schedules the draft
@@ -408,7 +411,8 @@ export const useBuilderStore = create<BuilderState>()((set, get) => ({
     get().clearReview();
     if (!snapshot) return;
     const wf = useWorkflowStore.getState();
-    wf.load({ ...wf.meta, ...snapshot.graph, versionId: snapshot.versionId }, { readOnly: wf.readOnly });
+    // the role part only: load keeps the archive, write lock and protected parts itself
+    wf.load({ ...wf.meta, ...snapshot.graph, versionId: snapshot.versionId }, { readOnly: wf.roleReadOnly });
     if (snapshot.dirty) useWorkflowStore.setState((s) => ({ dirty: true, revision: s.revision + 1 }));
   },
 

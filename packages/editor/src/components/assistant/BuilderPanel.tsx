@@ -50,7 +50,12 @@ function ProgressRow({ row }: { row: BuilderProgress }) {
 export function BuilderPanel({ onClose }: BuilderPanelProps) {
   const workflowId = useWorkflowStore((s) => s.meta.id);
   const hasNodes = useWorkflowStore((s) => s.nodes.length > 0);
-  const readOnly = useWorkflowStore((s) => s.readOnly);
+  // the protected part of `readOnly` alone keeps the composer: the notice says Accept is off, the server refuses
+  // the save; the role, the archive state and the write lock still close it
+  const roleReadOnly = useWorkflowStore((s) => s.roleReadOnly);
+  const lockReadOnly = useWorkflowStore((s) => s.lockReadOnly);
+  const archived = useWorkflowStore((s) => s.meta.isArchived);
+  const readOnly = roleReadOnly || lockReadOnly || archived;
   const me = useMe().data;
   const canEdit = useCanEditWorkflow();
   const messages = useBuilderStore((s) => s.messages);

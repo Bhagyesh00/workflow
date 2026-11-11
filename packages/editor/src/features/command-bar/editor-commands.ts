@@ -9,6 +9,7 @@
 import { useQueryClient } from '@tanstack/react-query';
 import type { ReactFlowInstance } from '@xyflow/react';
 import { useEffect, useMemo } from 'react';
+import { useProtectedWorkspace } from '../../lib/protected';
 import { useBuilderStore } from '../../stores/builder-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useWorkflowStore } from '../../stores/workflow-store';
@@ -20,6 +21,7 @@ import {
   openSubWorkflow,
   subWorkflowTargets,
   useCanEditWorkflow,
+  useOpenWorkflowCan,
 } from '../editor/open-resources';
 import { publishWorkflow, unpublishWorkflow } from '../editor/publish-actions';
 import { tidyUp } from '../editor/tidy-up';
@@ -46,6 +48,19 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
   const archived = useWorkflowStore((s) => s.meta.isArchived);
   const nodes = useWorkflowStore((s) => s.nodes);
   const viewer = !useCanEditWorkflow();
+  // P6-80: a protected workspace locks the canvas (`readOnly`) but not Publish and Unpublish, as in the top bar:
+  // those follow the role, the archive state, the write lock and the workflow's own scopes. A save is refused on
+  // a protected workspace, so an unsaved or changed draft cannot be published from here either.
+  const protectedWorkspace = useProtectedWorkspace();
+  const roleReadOnly = useWorkflowStore((s) => s.roleReadOnly);
+  const lockReadOnly = useWorkflowStore((s) => s.lockReadOnly);
+  const dirty = useWorkflowStore((s) => s.dirty);
+  const canPublish = useOpenWorkflowCan()('workflow:publish');
+  const publishable =
+    !(roleReadOnly || archived || lockReadOnly) &&
+    !streaming &&
+    canPublish &&
+    !(protectedWorkspace && (!workflowId || dirty));
   const queryClient = useQueryClient();
 
   // nodes can be added while the workflow is editable; the picked node is selected, not opened
@@ -198,6 +213,8 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
         keywords: ['download', 'json', 'link'],
         run: () => ui().setImportUrlOpen(true),
       });
+    }
+    if (publishable) {
       add(
         published
           ? {
@@ -221,22 +238,25 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
     // archiving follows the role, not the read-only state an archived workflow opens in
     if (workflowId && !viewer) {
       if (archived) {
-        add({
-          id: 'unarchive-workflow',
-          title: 'Unarchive workflow',
-          keywords: ['restore'],
-          run: async () => {
-            await unarchiveWorkflow(workflowId, actionDeps);
-          },
-        });
-        add({
-          id: 'delete-workflow',
-          title: 'Delete workflow',
-          keywords: ['remove'],
-          run: async () => {
-            await deleteArchivedWorkflow(workflowId, actionDeps);
-          },
-        });
+        // restore and delete are refused on a protected workspace, as in the top bar menu
+        if (!protectedWorkspace) {
+          add({
+            id: 'unarchive-workflow',
+            title: 'Unarchive workflow',
+            keywords: ['restore'],
+            run: async () => {
+              await unarchiveWorkflow(workflowId, actionDeps);
+            },
+          });
+          add({
+            id: 'delete-workflow',
+            title: 'Delete workflow',
+            keywords: ['remove'],
+            run: async () => {
+              await deleteArchivedWorkflow(workflowId, actionDeps);
+            },
+          });
+        }
       } else if (!locked) {
         add({
           id: 'archive-workflow',
@@ -248,7 +268,20 @@ export function useEditorCommands({ deps, flow, execute }: EditorCommandsInput):
       }
     }
     return list;
-  }, [deps, flow, execute, queryClient, locked, workflowId, published, archived, viewer, nodes]);
+  }, [
+    deps,
+    flow,
+    execute,
+    queryClient,
+    locked,
+    workflowId,
+    published,
+    archived,
+    viewer,
+    nodes,
+    publishable,
+    protectedWorkspace,
+  ]);
 
   useEffect(() => registerCommands('editor', commands), [commands]);
 }

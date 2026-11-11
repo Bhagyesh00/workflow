@@ -90,7 +90,10 @@ export function EditorTopBar({
   const lockReadOnly = useWorkflowStore((s) => s.lockReadOnly);
   const canOpen = useOpenWorkflowCan();
   const canvasLocked = roleReadOnly || meta.isArchived || lockReadOnly;
-  const publishLocked = canvasLocked || !canOpen('workflow:publish') || activating;
+  // Publish saves the draft first, and a save is refused on a protected workspace: with no id or unsaved changes
+  // there it would do nothing, so it is off then
+  const publishLocked =
+    canvasLocked || !canOpen('workflow:publish') || activating || (protectedWorkspace && (!meta.id || dirty));
   const aiBuilder = useAiBuilderFeature();
   const [name, setDraftName] = useState(meta.name);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -165,8 +168,9 @@ export function EditorTopBar({
             <span className="hidden lg:inline">Evaluations</span>
           </button>
         )}
-        {/* P5-09: the AI builder's panel; editors and above, when the builder is on */}
-        {aiBuilder.enabled && canWrite && !readOnly && (
+        {/* P5-09: the AI builder's panel; editors and above, when the builder is on. A protected workspace keeps it
+            (the panel's notice says Accept is off); the role, the archive state and the write lock hide it */}
+        {aiBuilder.enabled && canWrite && !canvasLocked && (
           <button
             type="button"
             onClick={() => useBuilderStore.getState().setOpen(sidePanel !== 'builder')}

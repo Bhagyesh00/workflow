@@ -8,13 +8,13 @@ import { Plus, Trash2, Variable as VariableIcon } from 'lucide-react';
 import { useState } from 'react';
 import { errorMessage } from '../../api/client';
 import { variablesApi } from '../../api/endpoints';
-import { queryKeys, useMe } from '../../api/queries';
+import { queryKeys } from '../../api/queries';
 import type { Variable } from '../../api/types';
 import { Button, IconButton } from '../../components/ui/Button';
 import { confirmDialog } from '../../components/ui/Dialog';
 import { FormField, TextInput } from '../../components/ui/Field';
 import { Callout, EmptyState, PageLoader } from '../../components/ui/misc';
-import { canWith, usePermissions } from '../../lib/permissions';
+import { usePermissions } from '../../lib/permissions';
 import { useProtectedWorkspace } from '../../lib/protected';
 import { toast } from '../../stores/ui-store';
 import { Panel } from './Panel';
@@ -106,10 +106,9 @@ export function VariablesSettingsPage() {
   const queryClient = useQueryClient();
   const { can } = usePermissions();
   const canCreate = can('variable:create');
-  // P6-80: `can` masks create and delete on a protected workspace; the row stays editable on the raw delete scope
-  // (the value still saves, the key does not change)
-  const me = useMe().data;
-  const canEdit = can('variable:update') && canWith(me, 'variable:delete');
+  // edit needs `variable:update` only (n8n); Delete stays on `variable:delete`, which `can` masks on a protected
+  // workspace. There the value still saves and the key does not change.
+  const canEdit = can('variable:update');
   const protectedWorkspace = useProtectedWorkspace();
   const variables = useQuery({ queryKey: queryKeys.variables, queryFn: variablesApi.list });
   const [key, setKey] = useState('');
@@ -190,7 +189,7 @@ export function VariablesSettingsPage() {
               onSaved={refresh}
               readOnly={!canEdit}
               keyLocked={protectedWorkspace}
-              canDelete={canEdit && can('variable:delete')}
+              canDelete={can('variable:delete')}
             />
           ))}
         </ul>

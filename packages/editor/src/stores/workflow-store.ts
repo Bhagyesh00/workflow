@@ -111,8 +111,12 @@ export interface WorkflowState extends WorkflowGraph {
   /** pin (items) or unpin (null) several nodes as one undo step */
   setPinDataMany(map: Record<string, Item[] | null>): void;
   toggleDisabled(names: string[]): void;
-  /** replace the whole graph as one undo step (tidy up, convert, replace, import); optional new selection */
-  applyGraph(next: WorkflowGraph, selection?: Partial<Selection>): void;
+  /**
+   * replace the whole graph as one undo step (tidy up, convert, replace, import); optional new selection.
+   * `draft`: the AI builder's draft, shown on a protected workspace too (Accept is off there); the role, archive
+   * and write lock still refuse it
+   */
+  applyGraph(next: WorkflowGraph, selection?: Partial<Selection>, options?: { draft?: boolean }): void;
 
   /** P3-04: group the selected nodes; returns the new group id, or null when the rules refused it */
   groupSelection(): string | null;
@@ -201,10 +205,13 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
   /** apply a graph change, recording history unless `history: false` */
   const commit = (
     next: WorkflowGraph,
-    options: { history?: boolean; selection?: Partial<Selection> } = {},
+    options: { history?: boolean; selection?: Partial<Selection>; draft?: boolean } = {},
   ) => {
     const state = get();
-    if (state.readOnly) return;
+    const locked = options.draft
+      ? state.roleReadOnly || state.meta.isArchived || state.lockReadOnly
+      : state.readOnly;
+    if (locked) return;
     const past =
       options.history === false ? state.past : [...state.past, graphOf(state)].slice(-HISTORY_LIMIT);
     set({
@@ -453,8 +460,8 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => {
       for (const [name, items] of Object.entries(map)) graph = ops.setPinData(graph, name, items);
       commit(graph);
     },
-    applyGraph(next, selection) {
-      commit(next, selection ? { selection } : {});
+    applyGraph(next, selection, options) {
+      commit(next, { ...(selection ? { selection } : {}), draft: options?.draft });
     },
 
     groupSelection() {

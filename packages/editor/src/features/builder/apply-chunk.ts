@@ -23,7 +23,8 @@ export function setBuilderCredentials(credentials: CredentialSummary[]): void {
 export function applyBuilderChunk(chunk: BuilderChunk, deps: BuilderDeps | null): void {
   if (chunk.type !== 'workflow-updated') return;
   const store = useWorkflowStore.getState();
-  if (store.readOnly) return;
+  // a protected workspace still shows the draft (Accept is off, the server refuses the save)
+  if (store.roleReadOnly || store.meta.isArchived || store.lockReadOnly) return;
   const current = graphOf(store);
   const incoming = chunk.workflow;
   const rawNodes = Array.isArray(incoming.nodes) ? incoming.nodes : [];
@@ -39,13 +40,17 @@ export function applyBuilderChunk(chunk: BuilderChunk, deps: BuilderDeps | null)
   const known = new Set(current.nodes.map((n) => n.id));
   const added = nodes.some((n) => !known.has(n.id));
 
-  store.applyGraph({
-    nodes,
-    connections: incoming.connections ?? {},
-    pinData,
-    stickyNotes: current.stickyNotes,
-    nodeGroups,
-  });
+  store.applyGraph(
+    {
+      nodes,
+      connections: incoming.connections ?? {},
+      pinData,
+      stickyNotes: current.stickyNotes,
+      nodeGroups,
+    },
+    undefined,
+    { draft: true },
+  );
 
   if (!added || !deps?.flow) return;
   const revision = useWorkflowStore.getState().revision;
