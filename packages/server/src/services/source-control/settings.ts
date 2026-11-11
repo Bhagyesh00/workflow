@@ -13,7 +13,7 @@ import {
   SOURCE_CONTROL_LIMITS,
   type SourceControlPreferences,
 } from '@workflow/workflow';
-import { utils as sshUtils } from 'ssh2';
+import ssh2 from 'ssh2';
 import type { ServiceDeps } from '../../context';
 import type { SourceControlSettingsRow } from '../../db/schema';
 import type { AuthContext } from '../../http/auth';
@@ -95,8 +95,8 @@ export class SourceControlSettingsService {
   private generateKeys(tenantId: string, type: KeyType): SourceControlSettingsValues {
     const pair =
       type === 'rsa'
-        ? sshUtils.generateKeyPairSync('rsa', { bits: RSA_BITS, comment: 'workflow deploy key' })
-        : sshUtils.generateKeyPairSync('ed25519', { comment: 'workflow deploy key' });
+        ? ssh2.utils.generateKeyPairSync('rsa', { bits: RSA_BITS, comment: 'workflow deploy key' })
+        : ssh2.utils.generateKeyPairSync('ed25519', { comment: 'workflow deploy key' });
     return {
       keyType: type,
       publicKey: pair.public.trim(),
