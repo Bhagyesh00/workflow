@@ -1,15 +1,10 @@
 /**
  * Public API rate limit settings (P6-83, L15): GET and PUT `/settings/rate-limits`, the workspace's public API
  * limits (the answer of REST `/settings/policies/rate-limits`), `securitySettings:manage` for the user and the
- * key. PUBLIC_RATE_LIMIT_ROUTES is final and shaped as PUBLIC_DATA_TABLE_ROUTES (public-api.ts spreads it). Each
- * handler is a stub until L15 fills it.
+ * key. PUBLIC_RATE_LIMIT_ROUTES is shaped as PUBLIC_DATA_TABLE_ROUTES (public-api.ts spreads it).
  */
 import type { ApiRoute } from './public-api';
-
-const notImplemented = async (): Promise<never> => {
-  // stub (L15)
-  throw new Error('not implemented (L15)');
-};
+import { rateLimitPatchSchema } from './rate-limit-settings';
 
 export const PUBLIC_RATE_LIMIT_ROUTES: ApiRoute[] = [
   {
@@ -20,7 +15,7 @@ export const PUBLIC_RATE_LIMIT_ROUTES: ApiRoute[] = [
     access: { scope: 'securitySettings:manage' },
     scope: 'securitySettings:manage',
     response: 'RateLimitSettings',
-    handler: notImplemented,
+    handler: async (ctx, { auth }) => ({ data: await ctx.rateLimitSettings.get(auth.tenant.id) }),
   },
   {
     method: 'PUT',
@@ -29,7 +24,13 @@ export const PUBLIC_RATE_LIMIT_ROUTES: ApiRoute[] = [
     tag: 'Security policy',
     access: { scope: 'securitySettings:manage' },
     scope: 'securitySettings:manage',
+    body: rateLimitPatchSchema,
     response: 'RateLimitSettings',
-    handler: notImplemented,
+    handler: async (ctx, { auth, body, request }) => ({
+      data: await ctx.rateLimitSettings.update(auth.tenant.id, body, {
+        userId: auth.user.id,
+        ip: request.ip,
+      }),
+    }),
   },
 ];

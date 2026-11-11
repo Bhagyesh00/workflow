@@ -4,7 +4,7 @@
  */
 import { createHash } from 'node:crypto';
 import type { NodeProperty, Scope } from '@workflow/workflow';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ServerContext } from '../context';
 import { type ApiKeyScope, assertApiKeyScope } from '../http/api-key-scopes';
@@ -20,6 +20,7 @@ import {
   workflowUpdateSchema,
 } from '../http/schemas';
 import type { AccessTarget } from '../services/access';
+import { checkBadKeyRate, checkRateLimit, type RateLimitResult } from '../services/public-api-rate-limit';
 import {
   beginIdempotent,
   finishIdempotent,
@@ -1286,6 +1287,15 @@ function idempotencyOf(
   return { ref: { tenantId: auth.tenant.id, userId: auth.user.id, key }, fingerprint };
 }
 
+/** `X-RateLimit-*` of the counter that speaks (nothing when the workspace has no limit set) */
+function setRateHeaders(reply: FastifyReply, result: RateLimitResult): void {
+  if (result.limit <= 0) return;
+  reply.header('X-RateLimit-Limit', result.limit);
+  reply.header('X-RateLimit-Remaining', result.remaining);
+  reply.header('X-RateLimit-Reset', result.resetSeconds);
+  if (!result.allowed) reply.header('Retry-After', result.resetSeconds);
+}
+
 export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerContext }): Promise<void> {
   const { ctx } = opts;
   let document: Record<string, unknown> | undefined;
@@ -1303,17 +1313,27 @@ export async function publicApiPlugin(app: FastifyInstance, opts: { ctx: ServerC
     app.route({
       method: route.method,
       url: route.path,
-      config: {
-        rateLimit: {
-          max: 600,
-          timeWindow: 60_000,
-          keyGenerator: (request: FastifyRequest) =>
-            `api:${String(request.headers['x-api-key'] ?? request.ip).slice(0, 20)}`,
-        },
-      },
       handler: async (request, reply) => {
-        await loadApiKey(request, ctx.auth);
+        try {
+          await loadApiKey(request, ctx.auth);
+        } catch (error) {
+          // a missing or bad key counts per IP: 600 per minute, then 429
+          const bad = await checkBadKeyRate(ctx.serviceDeps, request.ip);
+          if (!bad.allowed) {
+            setRateHeaders(reply, bad);
+            throw ApiError.tooMany('Too many requests, please try again later');
+          }
+          throw error;
+        }
         const auth = request.auth!;
+        const limited = await checkRateLimit(ctx.serviceDeps, {
+          tenantId: auth.tenant.id,
+          apiKeyId: auth.apiKeyId ?? '',
+          method: request.method,
+          route: route.path,
+        });
+        setRateHeaders(reply, limited);
+        if (!limited.allowed) throw ApiError.tooMany('Too many requests, please try again later');
         // the key's own scope first (a key that lacks it learns nothing about any row), then the user's
         // scopes on the row (403 before any body check); an id that is no uuid is a 400 for every caller
         assertApiKeyScope(auth, route.scope);
