@@ -4,6 +4,7 @@
  * embedding node imports no multi-node file.
  */
 import type { AiEmbeddings, HttpRequestOptions, SupplyDataContext } from '@workflow/workflow';
+import { logEmbeddingEvent } from './ai-events';
 import { withRetries } from './retry';
 
 export type EmbedPurpose = 'document' | 'query';
@@ -62,6 +63,7 @@ export class HttpEmbeddings implements AiEmbeddings {
       }
       this.dimensions ??= vectors[0].length;
       this.ctx.logSubNodeRun(input, { vectors: vectors.length, dimensions: vectors[0].length });
+      logEmbeddingEvent(this.ctx, purpose, texts);
       return vectors;
     } catch (error) {
       this.ctx.logSubNodeRun(input, {}, error as Error);

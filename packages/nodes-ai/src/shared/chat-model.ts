@@ -16,6 +16,7 @@ import {
   NodeOperationError,
   type SupplyDataContext,
 } from '@workflow/workflow';
+import { eventErrorText, logAiEvent } from './ai-events';
 import { createEventStreamDecoder } from './event-stream';
 import { withRetries } from './retry';
 import { parseSse, type SseEvent, sseJson } from './sse';
@@ -95,6 +96,7 @@ export function streamError(message: string, httpCode?: number): Error {
  */
 export type ChatModelHost = Pick<SupplyDataContext, 'helpers' | 'signal' | 'getNode'> & {
   logSubNodeRun?: SupplyDataContext['logSubNodeRun'];
+  logAiEvent?: SupplyDataContext['logAiEvent'];
 };
 
 export class HttpChatModel implements AiChatModel {
@@ -160,10 +162,20 @@ export class HttpChatModel implements AiChatModel {
         { maxRetries: this.options.maxRetries, signal },
       );
       this.ctx.logSubNodeRun?.(input, logOutput(response));
+      logAiEvent(this.ctx, 'ai.llm.generated', {
+        model: this.model,
+        messages: request.messages,
+        response: response.message,
+      });
       return response;
     } catch (caught) {
       const error = caught instanceof StreamInterruptedError ? caught.original : caught;
       this.ctx.logSubNodeRun?.(input, {}, error as Error);
+      logAiEvent(this.ctx, 'ai.llm.error', {
+        model: this.model,
+        messages: request.messages,
+        error: eventErrorText(error),
+      });
       if (error instanceof ModelRefusalError) {
         throw new NodeOperationError(this.ctx.getNode(), error.message, {
           code: 'AI_REFUSAL',

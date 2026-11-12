@@ -11,6 +11,7 @@ import {
   type NodeTypeDescription,
   type SupplyDataContext,
 } from '@workflow/workflow';
+import { eventErrorText, logAiEvent } from '../../shared/ai-events';
 import { getChatModel, getOutputParser } from '../../shared/ai-inputs';
 import { formatSchemaErrors, schemaFromParameters, validateJsonSchema } from '../../shared/json-schema';
 import { errorMessage, extractJson, fillTemplate, messageText } from '../../shared/utils';
@@ -109,6 +110,7 @@ function autofixing(
         });
         const fixed = messageText(response.message.content);
         ctx.logSubNodeRun({ text, error: errorMessage(error) }, { fixed });
+        logAiEvent(ctx, 'ai.output.parser.parsed', { text, response: fixed });
         return inner.parse(fixed);
       }
     },
@@ -207,9 +209,11 @@ export const OutputParserStructuredNode: NodeType = {
           try {
             const value = await parser.parse(text);
             ctx.logSubNodeRun({ text }, { output: value as DataObject[string] });
+            logAiEvent(ctx, 'ai.output.parser.parsed', { text, response: value });
             return value;
           } catch (error) {
             ctx.logSubNodeRun({ text }, {}, error as Error);
+            logAiEvent(ctx, 'ai.output.parser.parsed', { text, response: eventErrorText(error) });
             throw error;
           }
         },
@@ -279,6 +283,7 @@ export const OutputParserItemListNode: NodeType = {
       async parse(text) {
         const list = parseItemList(text, separator, limit);
         ctx.logSubNodeRun({ text }, { output: list });
+        logAiEvent(ctx, 'ai.output.parser.parsed', { text, response: list });
         return list;
       },
     };

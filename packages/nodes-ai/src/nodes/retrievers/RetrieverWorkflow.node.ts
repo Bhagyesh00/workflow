@@ -7,6 +7,7 @@ import {
   NodeOperationError,
   type NodeType,
 } from '@workflow/workflow';
+import { logAiEvent } from '../../shared/ai-events';
 import { parseJsonParameter } from '../../shared/json-schema';
 import { collectionList, errorMessage } from '../../shared/utils';
 import { searchWorkflows } from '../tools/workflow-inputs';
@@ -185,6 +186,7 @@ export const RetrieverWorkflowNode: NodeType = {
             },
           }));
           ctx.logSubNodeRun({ query }, { documents: documents.length });
+          logAiEvent(ctx, 'ai.retriever.get.relevant.documents', { query, documents: documents.length });
           return documents;
         } catch (error) {
           ctx.logSubNodeRun({ query }, {}, error instanceof Error ? error : new Error(errorMessage(error)));

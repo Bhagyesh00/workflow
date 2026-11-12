@@ -12,6 +12,7 @@ import {
   type NodeType,
   type SupplyDataContext,
 } from '@workflow/workflow';
+import { logAiEvent } from '../../shared/ai-events';
 import { getTextSplitter } from '../../shared/ai-inputs';
 import {
   type FileTextOptions,
@@ -211,6 +212,7 @@ export const DocumentDefaultDataLoaderNode: NodeType = {
           }
         }
         ctx.logSubNodeRun({ items: items.length }, { documents: documents.length });
+        logAiEvent(ctx, 'ai.document.processed', { items: items.length, documents: documents.length });
         return documents;
       },
     };

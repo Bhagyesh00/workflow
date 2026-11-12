@@ -6,6 +6,7 @@ import type {
   SupplyDataContext,
 } from '@workflow/workflow';
 import { NodeOperationError } from '@workflow/workflow';
+import { logAiEvent } from '../../shared/ai-events';
 import { CODE_LANGUAGES, type CodeLanguage, isCodeLanguage } from '../../shared/code-separators';
 import {
   type SplitOptions,
@@ -77,6 +78,7 @@ function supplySplitter(
         try {
           const chunks = await split(text);
           ctx.logSubNodeRun({ textLength: text.length }, { chunks: chunks.length });
+          logAiEvent(ctx, 'ai.text.splitter.split', { textLength: text.length, chunks: chunks.length });
           return chunks;
         } catch (error) {
           ctx.logSubNodeRun({ textLength: text.length }, {}, error as Error);

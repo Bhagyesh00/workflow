@@ -1,5 +1,6 @@
 /** MultiQuery Retriever: the model rewrites the query several ways, the results are merged. */
 import type { AiDocument, AiRetriever, NodeType } from '@workflow/workflow';
+import { logAiEvent } from '../../shared/ai-events';
 import { getChatModel, getRetriever } from '../../shared/ai-inputs';
 import { messageText } from '../../shared/utils';
 
@@ -66,6 +67,11 @@ export const RetrieverMultiQueryNode: NodeType = {
           }
         }
         ctx.logSubNodeRun({ query, queries }, { documents: documents.length });
+        logAiEvent(ctx, 'ai.retriever.get.relevant.documents', {
+          query,
+          queries,
+          documents: documents.length,
+        });
         return documents;
       },
     };

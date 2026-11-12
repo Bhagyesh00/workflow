@@ -9,6 +9,7 @@ import type {
   NodeTypeDescription,
   SupplyDataContext,
 } from '@workflow/workflow';
+import { logAiEvent } from '../../shared/ai-events';
 import type { SessionMemory } from '../../shared/ai-inputs';
 import { messageText, truncate } from '../../shared/utils';
 
@@ -92,12 +93,14 @@ export function logged(ctx: SupplyDataContext, memory: SessionMemory): SessionMe
         { action: 'loadMemoryVariables', sessionId },
         { chatHistory: messages.map(toStoredMessage) },
       );
+      logAiEvent(ctx, 'ai.memory.get.messages', { sessionId, messages: messages.map(toStoredMessage) });
       return messages;
     },
     loadAll: (sessionId) => memory.loadAll(sessionId),
     async append(sessionId, messages) {
       await memory.append(sessionId, messages);
       ctx.logSubNodeRun({ action: 'saveContext', sessionId }, { chatHistory: messages.map(toStoredMessage) });
+      logAiEvent(ctx, 'ai.memory.added.message', { sessionId, messages: messages.map(toStoredMessage) });
     },
     replace: (sessionId, messages) => memory.replace(sessionId, messages),
     clear: (sessionId) => memory.clear(sessionId),

@@ -1,5 +1,6 @@
 /** Vector Store Retriever: a connected vector store as a retriever for chains (moved from rag-chains.nodes.ts). */
 import type { AiRetriever, NodeType } from '@workflow/workflow';
+import { logAiEvent } from '../../shared/ai-events';
 import { getVectorStore } from '../../shared/ai-inputs';
 
 export const RetrieverVectorStoreNode: NodeType = {
@@ -35,6 +36,7 @@ export const RetrieverVectorStoreNode: NodeType = {
       async retrieve(query) {
         const documents = (await store.similaritySearch(query, topK)).map((r) => r.document);
         ctx.logSubNodeRun({ query }, { documents });
+        logAiEvent(ctx, 'ai.retriever.get.relevant.documents', { query });
         return documents;
       },
     };

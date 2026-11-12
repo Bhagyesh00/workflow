@@ -9,6 +9,7 @@ import type {
   NodeType,
   SupplyDataContext,
 } from '@workflow/workflow';
+import { logEmbeddingEvent } from '../../shared/ai-events';
 import {
   additionalFieldsOption,
   authenticationProperty,
@@ -82,6 +83,7 @@ class BedrockEmbeddings implements AiEmbeddings {
       const vectors = await this.embedAll(texts, purpose);
       this.dimensions ??= vectors[0].length;
       this.ctx.logSubNodeRun(input, { vectors: vectors.length, dimensions: vectors[0].length });
+      logEmbeddingEvent(this.ctx, purpose, texts);
       return vectors;
     } catch (error) {
       this.ctx.logSubNodeRun(input, {}, error as Error);

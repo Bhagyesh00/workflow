@@ -1,5 +1,6 @@
 /** Contextual Compression Retriever: keeps only the parts of each document that answer the query. */
 import type { AiDocument, AiRetriever, NodeType } from '@workflow/workflow';
+import { logAiEvent } from '../../shared/ai-events';
 import { getChatModel, getRetriever } from '../../shared/ai-inputs';
 import { errorMessage, mapLimit, messageText } from '../../shared/utils';
 
@@ -59,6 +60,7 @@ export const RetrieverContextualCompressionNode: NodeType = {
           });
           const documents = compressed.filter((d): d is AiDocument => d !== null);
           ctx.logSubNodeRun({ query, documents: found.length }, { documents: documents.length });
+          logAiEvent(ctx, 'ai.retriever.get.relevant.documents', { query, documents: documents.length });
           return documents;
         } catch (error) {
           ctx.logSubNodeRun({ query }, {}, error instanceof Error ? error : new Error(errorMessage(error)));

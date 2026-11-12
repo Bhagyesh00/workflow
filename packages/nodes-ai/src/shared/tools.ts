@@ -1,5 +1,6 @@
 /** Building blocks for tool sub-nodes. */
 import type { AiTool, DataObject, JsonSchema, NodeProperty, SupplyDataContext } from '@workflow/workflow';
+import { eventErrorText, logAiEvent } from './ai-events';
 import { schemaFromParameters } from './json-schema';
 import { toToolName } from './utils';
 
@@ -25,9 +26,15 @@ export function createTool(
       try {
         const result = await run(args ?? {}, options);
         ctx.logSubNodeRun(input, { response: result as DataObject[keyof DataObject] });
+        logAiEvent(ctx, 'ai.tool.called', { toolName: definition.name, input: args, response: result });
         return result;
       } catch (error) {
         ctx.logSubNodeRun(input, {}, error as Error);
+        logAiEvent(ctx, 'ai.tool.called', {
+          toolName: definition.name,
+          input: args,
+          error: eventErrorText(error),
+        });
         throw error;
       }
     },

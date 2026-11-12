@@ -24,6 +24,7 @@ import {
   type NodeTypeDescription,
   type SupplyDataContext,
 } from '@workflow/workflow';
+import { type AiEventSource, logAiEvent } from '../../shared/ai-events';
 import { getDocumentLoader, getEmbeddings, getReranker } from '../../shared/ai-inputs';
 import { createTool, toolDescriptionProperty, toolNameOf } from '../../shared/tools';
 import { collectionList, errorMessage } from '../../shared/utils';
@@ -266,12 +267,14 @@ export function toAiVectorStore(
   defaultFilter: DataObject | undefined,
   log?: SupplyDataContext['logSubNodeRun'],
   reranker?: AiReranker,
+  events?: AiEventSource,
 ): AiVectorStore {
   return {
     kind: 'vectorStore',
     async addDocuments(documents) {
       await addInBatches(backend, embeddings, documents, DEFAULT_EMBEDDING_BATCH_SIZE);
       log?.({ action: 'addDocuments', documents: documents.length }, { ok: true });
+      if (events) logAiEvent(events, 'ai.vector.store.populated', { documents: documents.length });
     },
     async similaritySearch(query, k, filter) {
       const vector = await embeddings.embedQuery(query);
@@ -292,6 +295,7 @@ export function toAiVectorStore(
         { action: 'similaritySearch', query, k },
         { documents: results.map((r) => ({ ...r.document, score: r.score })) },
       );
+      if (events) logAiEvent(events, 'ai.vector.store.searched', { query, k, documents: results.length });
       return results;
     },
   };
@@ -540,6 +544,7 @@ export function createVectorStoreNode(spec: VectorStoreSpec): NodeType {
             filter,
             (input, output, error) => ctx.logSubNodeRun(input, output, error),
             reranker,
+            ctx,
           ),
           closeFunction: close,
         };
@@ -600,6 +605,7 @@ async function insert(
     }
   }
   await addInBatches(backend, embeddings, documents, batchSizeOf(ctx, 0));
+  logAiEvent(ctx, 'ai.vector.store.populated', { documents: documents.length });
   return out;
 }
 
@@ -625,6 +631,7 @@ async function updateDocument(
     });
   }
   await addInBatches(backend, embeddings, [{ pageContent, metadata: {} }], 1, [id]);
+  logAiEvent(ctx, 'ai.vector.store.updated', { id, documents: 1 });
   return { json: { id, pageContent }, pairedItem: { item: itemIndex } };
 }
 
