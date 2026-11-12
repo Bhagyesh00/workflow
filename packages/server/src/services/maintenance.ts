@@ -8,6 +8,7 @@ import type { Config } from '../config';
 import type { PinoLogger } from '../logger';
 import { effectiveLimits, type TenantSettings } from '../plans';
 import type { Repositories } from '../repositories';
+import { LOG_STREAM_FAILED_RETENTION_DAYS } from '../repositories/log-stream-failed';
 import type { ExecutionService } from './executions';
 
 export class WaitTracker {
@@ -111,6 +112,9 @@ export class Pruner {
     await this.repos.sessions.deleteExpired();
     await this.repos.idempotency.prune(new Date(now.getTime() - DAY));
     await this.repos.publicIdempotency.prune(new Date(now.getTime() - DAY));
+    await this.repos.logStreamFailed.pruneBefore(
+      new Date(now.getTime() - LOG_STREAM_FAILED_RETENTION_DAYS * DAY),
+    );
     if (total) this.logger.info({ deleted: total }, 'Pruned old executions');
     return total;
   }
