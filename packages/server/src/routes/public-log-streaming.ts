@@ -4,7 +4,6 @@
  * PUT `/destinations/:id` (`:update`), DELETE `/destinations/:id` (`:delete`), POST `/destinations/:id/test`
  * (`:test`), through `ctx.logStreaming` as REST. Each row's user scope and key scope are the same name.
  * PUBLIC_LOG_STREAMING_ROUTES is shaped as PUBLIC_SOURCE_CONTROL_ROUTES (public-api.ts spreads it).
- * stub (L3): the rows and gates are final; the handlers throw until L3.
  */
 import { idParams } from '../http/schemas';
 import { logDestinationBodySchema } from './log-streaming';
@@ -21,10 +20,7 @@ export const PUBLIC_LOG_STREAMING_ROUTES: ApiRoute[] = [
     access: { scope: 'eventBusDestination:list' },
     scope: 'eventBusDestination:list',
     response: 'LogStreamingEventTypes',
-    handler: async () => {
-      // stub (L3)
-      throw new Error('not implemented (L3)');
-    },
+    handler: async (ctx) => ({ data: ctx.logStreaming.eventNames() }),
   },
   {
     method: 'GET',

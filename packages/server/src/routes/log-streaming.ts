@@ -3,8 +3,7 @@
  * `/eventbus/destination` (`:list`, or `:read` with `?id=`), POST `/eventbus/destination` (`:create`, or `:update`
  * when the body has an id), DELETE `/eventbus/destination?id=` (`:delete`) and POST `/eventbus/testmessage?id=`
  * (`:test`; n8n uses GET, ours POST because it sends). GET and POST `/eventbus/destination` pass `requireAnyScope`
- * first, then check the exact scope. Secrets are blank in every answer.
- * stub (L3): the gates are final; the handlers reach `ctx.logStreaming`, whose methods throw until L3.
+ * first, then check the exact scope. Secrets are blank in every answer. `GET ?id=` answers the one destination.
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -15,7 +14,7 @@ import { parse } from '../http/errors';
 const idQuery = z.object({ id: z.uuid() });
 const optionalIdQuery = z.object({ id: z.uuid().optional() });
 
-/** the destination body; the type's own settings are checked by its registered `validate` (L3 tightens the rest) */
+/** the destination body; the type's own settings are checked by its registered `validate` (the manager checks the rest) */
 export const logDestinationBodySchema = z
   .object({
     id: z.uuid().optional(),
@@ -38,8 +37,7 @@ export const logDestinationBodySchema = z
 export function registerLogStreamingRoutes(app: FastifyInstance, ctx: ServerContext): void {
   app.get('/eventbus/eventnames', async (request) => {
     await requireScope(request, 'eventBusDestination:list');
-    // stub (L3): the catalog names a destination may subscribe to
-    throw new Error('not implemented (L3)');
+    return { data: ctx.logStreaming.eventNames() };
   });
 
   app.get('/eventbus/destination', async (request) => {
@@ -47,7 +45,7 @@ export function registerLogStreamingRoutes(app: FastifyInstance, ctx: ServerCont
     const { id } = parse(optionalIdQuery, request.query ?? {});
     if (id) {
       await requireScope(request, 'eventBusDestination:read');
-      return { data: [await ctx.logStreaming.get(auth, id)] };
+      return { data: await ctx.logStreaming.get(auth, id) };
     }
     await requireScope(request, 'eventBusDestination:list');
     return { data: await ctx.logStreaming.list(auth) };

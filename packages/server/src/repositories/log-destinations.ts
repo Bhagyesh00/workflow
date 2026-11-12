@@ -3,12 +3,12 @@
  * type's fields without any secret; the secret fields are one `ctx.cipher.encrypt` payload in `secrets_enc`
  * (binding `logDestination:`), written by the service: this file never sees a plain secret and never returns
  * one to a caller that answers a request.
- * stub (L3): the constructor and `listEnabledAcrossTenants` (FULL, frozen: L1 calls it) pass, every other
- * method throws.
+ * `listEnabledAcrossTenants` is frozen (L1 calls it). Every other query filters tenant_id with bound values.
  */
-import { eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
 import { type LogDestinationRow, logDestinations } from '../db/schema';
+import { isUuid, now } from './util';
 
 /** the columns a write may set (id, tenant id and the timestamps are the repository's) */
 export type LogDestinationValues = Partial<
@@ -29,32 +29,74 @@ export class LogDestinationRepository {
       .where(eq(logDestinations.enabled, true));
   }
 
-  /** stub (L3): the tenant's destinations, oldest first */
-  list(_tenantId: string): Promise<LogDestinationRow[]> {
-    throw new Error('not implemented (L3)');
+  /** the tenant's destinations, oldest first */
+  async list(tenantId: string): Promise<LogDestinationRow[]> {
+    if (!isUuid(tenantId)) return [];
+    return this.db
+      .select()
+      .from(logDestinations)
+      .where(eq(logDestinations.tenantId, tenantId))
+      .orderBy(asc(logDestinations.createdAt), asc(logDestinations.id));
   }
 
-  /** stub (L3): one destination of the tenant; undefined for another tenant's id or no row */
-  get(_tenantId: string, _id: string): Promise<LogDestinationRow | undefined> {
-    throw new Error('not implemented (L3)');
+  /** one destination of the tenant; undefined for another tenant's id, a non-uuid id or no row */
+  async get(tenantId: string, id: string): Promise<LogDestinationRow | undefined> {
+    if (!isUuid(tenantId) || !isUuid(id)) return undefined;
+    const [row] = await this.db
+      .select()
+      .from(logDestinations)
+      .where(and(eq(logDestinations.tenantId, tenantId), eq(logDestinations.id, id)))
+      .limit(1);
+    return row;
   }
 
-  /** stub (L3): insert (no `id`) or update the tenant's destination `id` with `values` */
-  save(
-    _tenantId: string,
-    _id: string | undefined,
-    _values: LogDestinationValues,
+  /** inserts a destination with the given id (the service needs the id for the secrets binding first) */
+  async create(tenantId: string, id: string, values: LogDestinationValues): Promise<LogDestinationRow> {
+    const [row] = await this.db
+      .insert(logDestinations)
+      .values({ ...values, id, tenantId } as typeof logDestinations.$inferInsert)
+      .returning();
+    return row as LogDestinationRow;
+  }
+
+  /** insert (no `id`) or update the tenant's destination `id` with `values`; an absent row throws */
+  async save(
+    tenantId: string,
+    id: string | undefined,
+    values: LogDestinationValues,
   ): Promise<LogDestinationRow> {
-    throw new Error('not implemented (L3)');
+    if (id === undefined) {
+      const [row] = await this.db
+        .insert(logDestinations)
+        .values({ ...values, tenantId } as typeof logDestinations.$inferInsert)
+        .returning();
+      return row as LogDestinationRow;
+    }
+    const [row] = await this.db
+      .update(logDestinations)
+      .set({ ...values, updatedAt: now() })
+      .where(and(eq(logDestinations.tenantId, tenantId), eq(logDestinations.id, id)))
+      .returning();
+    if (!row) throw new Error('Log destination not found');
+    return row;
   }
 
-  /** stub (L3): removes the tenant's destination (its failed events go with it, fk cascade); false when absent */
-  delete(_tenantId: string, _id: string): Promise<boolean> {
-    throw new Error('not implemented (L3)');
+  /** removes the tenant's destination (its failed events go with it, fk cascade); false when absent */
+  async delete(tenantId: string, id: string): Promise<boolean> {
+    if (!isUuid(tenantId) || !isUuid(id)) return false;
+    const removed = await this.db
+      .delete(logDestinations)
+      .where(and(eq(logDestinations.tenantId, tenantId), eq(logDestinations.id, id)))
+      .returning({ id: logDestinations.id });
+    return removed.length > 0;
   }
 
-  /** stub (L3): records the last send error (already redacted and cut), or clears it with null */
-  setLastError(_tenantId: string, _id: string, _error: string | null): Promise<void> {
-    throw new Error('not implemented (L3)');
+  /** records the last send error (already redacted and cut), or clears it with null */
+  async setLastError(tenantId: string, id: string, error: string | null): Promise<void> {
+    if (!isUuid(tenantId) || !isUuid(id)) return;
+    await this.db
+      .update(logDestinations)
+      .set({ lastError: error })
+      .where(and(eq(logDestinations.tenantId, tenantId), eq(logDestinations.id, id)));
   }
 }
