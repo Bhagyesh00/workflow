@@ -4,6 +4,21 @@ import { Counter, collectDefaultMetrics, Gauge, Histogram, Registry } from 'prom
 import type { MetricsToggles } from '../config';
 import type { Database } from '../db/client';
 import type { EventSink } from './events/stream';
+import {
+  apiMetrics,
+  cachedRead,
+  DEFAULT_METRICS_TOGGLES,
+  eventMetrics,
+  guardMetrics,
+  instanceMetrics,
+  poolMetrics,
+  queueGauges,
+  statisticsMetrics,
+  type TriggerObservers,
+  triggerMetrics,
+  type WebhookFormObservers,
+  webhookFormMetrics,
+} from './metrics-collectors';
 import type { ExecutionQueue, Leadership } from './queue';
 
 /**
@@ -33,14 +48,21 @@ export class Metrics {
   readonly activeWorkflows: Gauge;
 
   /**
-   * P6-71 (S5 C0): the event counters' sink (`ctx.events`). stub (L15): PASSES: accepts nothing.
+   * P6-71: the event counters' sink (`ctx.events`): the per-event counters behind `includeMessageEventBusMetrics`
+   * and the queue job counters behind `includeQueueMetrics`; it accepts nothing when both are off.
    */
-  readonly eventsSink: EventSink = { accepts: () => false, deliver: () => {} };
+  readonly eventsSink: EventSink;
+
+  private readonly observeApiRequest?: ReturnType<typeof apiMetrics>;
+  private readonly webhookForm: WebhookFormObservers;
+  private readonly triggers: TriggerObservers;
+  private readonly guard?: ReturnType<typeof guardMetrics>;
 
   constructor(readonly options: MetricsOptions = {}) {
     const collectors = options;
-    // stays always on until L15 gates it with `toggles.includeDefaultMetrics`
-    collectDefaultMetrics({ register: this.registry, prefix: 'workflow_' });
+    const toggles = options.toggles ?? DEFAULT_METRICS_TOGGLES;
+    if (toggles.includeDefaultMetrics)
+      collectDefaultMetrics({ register: this.registry, prefix: 'workflow_' });
     this.executions = new Counter({
       name: 'workflow_executions_total',
       help: 'Finished executions by status and mode',
@@ -52,7 +74,8 @@ export class Metrics {
       help: 'Execution duration',
       labelNames: ['status', 'mode'],
       buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300, 1800],
-      registers: [this.registry],
+      // the histogram exists either way (recordExecution observes it); off, no scrape shows it
+      registers: toggles.includeWorkflowExecutionDuration ? [this.registry] : [],
     });
     this.webhookDuration = new Histogram({
       name: 'workflow_webhook_duration_seconds',
@@ -70,15 +93,31 @@ export class Metrics {
         if (queueDepth) this.set(await queueDepth().catch(() => 0));
       },
     });
+    // read at most every METRICS_ACTIVE_WORKFLOW_METRIC_INTERVAL seconds
     const activeWorkflows = collectors.activeWorkflows;
+    const readActive = cachedRead(
+      toggles.activeWorkflowCountInterval,
+      async () => activeWorkflows?.() ?? 0,
+      0,
+    );
     this.activeWorkflows = new Gauge({
       name: 'workflow_active_workflows',
       help: 'Active (published) workflows',
       registers: [this.registry],
       async collect() {
-        if (activeWorkflows) this.set(await activeWorkflows().catch(() => 0));
+        if (activeWorkflows) this.set(await readActive());
       },
     });
+
+    this.observeApiRequest = apiMetrics(this.registry, toggles);
+    this.webhookForm = webhookFormMetrics(this.registry, toggles);
+    this.triggers = triggerMetrics(this.registry, toggles);
+    this.guard = guardMetrics(this.registry, toggles);
+    poolMetrics(this.registry, toggles, options.database);
+    statisticsMetrics(this.registry, toggles, options.database);
+    queueGauges(this.registry, toggles, options.queue);
+    instanceMetrics(this.registry, options.version, options.leadership);
+    this.eventsSink = eventMetrics(this.registry, toggles);
   }
 
   recordExecution(status: string, mode: string, durationMs: number): void {
@@ -86,27 +125,39 @@ export class Metrics {
     this.executionDuration.observe({ status, mode }, durationMs / 1000);
   }
 
-  /** P6-71: one REST or public API request; `route` is the route pattern, never the raw URL. stub (L15): PASSES */
-  observeApi(_method: string, _route: string, _status: number, _ms: number): void {}
+  /** P6-71: one REST or public API request; `route` is the route pattern, never the raw URL. */
+  observeApi(method: string, route: string, status: number, ms: number): void {
+    this.observeApiRequest?.(method, route, status, ms);
+  }
 
-  /** P6-71: one production webhook request, with the hook's registered path. stub (L15): PASSES */
-  observeWebhook(_o: {
+  /** P6-71: one production webhook request, with the hook's registered path (behind `includeWebhookMetrics`). */
+  observeWebhook(o: {
     method: string;
     statusCode: number;
     webhookPath: string;
     workflowId: string;
     ms: number;
-  }): void {}
+  }): void {
+    this.webhookForm.webhook?.(o);
+  }
 
-  /** P6-71: one form submission, with the form's registered path. stub (L15): PASSES */
-  observeForm(_o: { statusCode: number; formPath: string; workflowId: string; ms: number }): void {}
+  /** P6-71: one form submission, with the form's registered path (behind `includeFormMetrics`). */
+  observeForm(o: { statusCode: number; formPath: string; workflowId: string; ms: number }): void {
+    this.webhookForm.form?.(o);
+  }
 
-  /** P6-71: one poll of a polling trigger. stub (L15): PASSES */
-  recordPoll(_nodeType: string, _ok: boolean, _ms: number): void {}
+  /** P6-71: one poll of a polling trigger (behind `includePollTriggerMetrics`). */
+  recordPoll(nodeType: string, ok: boolean, ms: number): void {
+    this.triggers.poll?.(nodeType, ok, ms);
+  }
 
-  /** P6-71: one schedule trigger fire. stub (L15): PASSES */
-  recordSchedule(_nodeType: string, _ms: number): void {}
+  /** P6-71: one schedule trigger fire (behind `includeSchedulerMetrics`). */
+  recordSchedule(nodeType: string, ms: number): void {
+    this.triggers.schedule?.(nodeType, ms);
+  }
 
-  /** P6-71: an SSRF guard check or DNS lookup (`HttpClient.setGuardListener`). stub (L15): PASSES */
-  onGuard(_event: GuardEvent): void {}
+  /** P6-71: an SSRF guard check or DNS lookup (`HttpClient.setGuardListener`). */
+  onGuard(event: GuardEvent): void {
+    this.guard?.(event);
+  }
 }
