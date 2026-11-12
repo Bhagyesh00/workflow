@@ -50,6 +50,7 @@ const projectDTO = (project: ProjectListRow | ProjectDetailDTO) => ({
   type: project.type,
   icon: project.icon,
   description: project.description,
+  ...('customTelemetryTags' in project ? { customTelemetryTags: project.customTelemetryTags } : {}),
   ...(project.role === undefined ? {} : { role: project.role }),
   scopes: project.scopes,
   createdAt: project.createdAt,
@@ -156,7 +157,7 @@ export const PUBLIC_PROJECT_ROUTES: ApiRoute[] = [
   row('update', {
     method: 'PUT',
     path: '/projects/:projectId',
-    summary: 'Update a project (name, icon, description)',
+    summary: 'Update a project (name, icon, description, custom telemetry tags)',
     tag: 'Projects',
     access: { scope: 'project:update', target: onProject },
     scope: 'project:update',

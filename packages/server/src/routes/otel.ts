@@ -2,8 +2,8 @@
  * /rest/otel (P6-67, L11): GET and PUT `/otel/settings` and POST `/otel/test-trace`, all `otel:manage`. Header values
  * are blank in every answer (`name=`); a blank value on PUT keeps the stored one only while the endpoint's scheme,
  * host and port are unchanged.
- * stub (L11): the gates are final; the handlers reach `ctx.otelSettings`, whose `read`, `replace` and `testTrace`
- * throw until L11.
+ * The gates are `requireScope('otel:manage')`; the handlers reach `ctx.otelSettings` (services/tracing/settings.ts), which
+ * checks the endpoint, the headers and the kept values, and answers header values blank.
  */
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -11,7 +11,7 @@ import type { ServerContext } from '../context';
 import { requireScope } from '../http/auth';
 import { parse } from '../http/errors';
 
-/** n8n's OpenTelemetry settings fields (a full replacement; L11 adds the endpoint and header rules) */
+/** n8n's OpenTelemetry settings fields (a full replacement; the endpoint and header rules are the service's) */
 export const otelSettingsBodySchema = z.object({
   enabled: z.boolean(),
   exporterProtocol: z.enum(['http/protobuf', 'grpc']),

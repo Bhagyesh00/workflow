@@ -3,8 +3,9 @@
  * `node.custom.<key>` on the node's span. Writes `onChange({ customTelemetryTags })`; read-only on a
  * protected workspace's canvas.
  */
-import type { WorkflowNode } from '@workflow/workflow';
+import { telemetryTagsOf, type WorkflowNode } from '@workflow/workflow';
 import type { ReactNode } from 'react';
+import { TelemetryTagsField } from './TelemetryTagsField';
 
 export interface NodeTelemetryTagsProps {
   node: WorkflowNode;
@@ -12,7 +13,14 @@ export interface NodeTelemetryTagsProps {
   readOnly: boolean;
 }
 
-// stub (L11)
-export function NodeTelemetryTags(_props: NodeTelemetryTagsProps): ReactNode {
-  return null;
+export function NodeTelemetryTags({ node, onChange, readOnly }: NodeTelemetryTagsProps): ReactNode {
+  return (
+    <TelemetryTagsField
+      value={telemetryTagsOf(node.customTelemetryTags)}
+      disabled={readOnly}
+      onChange={(next) => onChange({ customTelemetryTags: next.length > 0 ? { tag: next } : undefined })}
+      valuePlaceholder="Value or ={{ expression }}"
+      hint="Added to this node's span as node.custom.<key>. A value starting with = is an expression over the first item."
+    />
+  );
 }

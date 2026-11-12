@@ -10,6 +10,7 @@ import { z } from 'zod';
 import type { ServerContext } from '../context';
 import { requireAuth, requireScope } from '../http/auth';
 import { ApiError, parse } from '../http/errors';
+import { telemetryTagsSchema } from '../http/schemas';
 
 const projectParams = z.object({ projectId: z.string() });
 const userParams = z.object({ projectId: z.string(), userId: z.uuid() });
@@ -24,11 +25,12 @@ const createBody = z.object({
   icon: icon.nullable().optional(),
   description: z.string().max(512).nullable().optional(),
 });
-/** the PATCH body (L1 owns it; S3's P6-67 adds its field) */
+/** the PATCH body (`customTelemetryTags` is P6-67: at most 20 pairs, checked by `validateTelemetryTags`) */
 export const projectPatchBody = z.object({
   name: z.string().trim().min(1).max(255).optional(),
   icon: icon.nullable().optional(),
   description: z.string().max(512).nullable().optional(),
+  customTelemetryTags: telemetryTagsSchema.optional(),
 });
 const relation = z.object({ userId: z.uuid(), role: z.string().min(1).max(128) });
 const addUsersBody = z.object({ relations: z.array(relation).max(1000) });

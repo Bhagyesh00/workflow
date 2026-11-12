@@ -2,7 +2,7 @@
  * Public API OpenTelemetry settings (P6-67, L11): GET and PUT `/settings/otel` and POST `/settings/otel/test-trace`,
  * all `otel:manage` (user scope and key scope), through `ctx.otelSettings` as REST; header values blank on read.
  * PUBLIC_OTEL_ROUTES is shaped as PUBLIC_SOURCE_CONTROL_ROUTES (public-api.ts spreads it).
- * stub (L11): the rows and gates are final; the handlers throw until L11.
+ * The rows and gates are final; the handlers are the REST ones (same service, same rules).
  */
 import { otelSettingsBodySchema } from './otel';
 import type { ApiRoute } from './public-api';

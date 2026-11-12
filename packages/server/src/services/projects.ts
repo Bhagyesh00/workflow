@@ -7,6 +7,8 @@ import {
   ASSIGNABLE_PROJECT_ROLE_SLUGS,
   IMPLICIT_TEAM_PROJECT_MEMBER_ROLES,
   type Scope,
+  type TelemetryTag,
+  validateTelemetryTags,
 } from '@workflow/workflow';
 import { and, eq, sql } from 'drizzle-orm';
 import type { ServiceDeps } from '../context';
@@ -41,6 +43,8 @@ export interface ProjectUpdateInput {
   name?: string;
   icon?: ProjectIcon | null;
   description?: string | null;
+  /** P6-67: custom span attributes (`project.custom.<key>`), replaced as a whole */
+  customTelemetryTags?: TelemetryTag[];
 }
 
 /** one member of POST /projects/:projectId/users: a project role slug, system or custom */
@@ -341,6 +345,14 @@ export class ProjectService {
     if (patch.name !== undefined) changes.name = patch.name;
     if (patch.icon !== undefined) changes.icon = patch.icon;
     if (patch.description !== undefined) changes.description = patch.description;
+    if (patch.customTelemetryTags !== undefined) {
+      const problem = validateTelemetryTags(patch.customTelemetryTags);
+      if (problem) throw ApiError.badRequest(problem);
+      changes.customTelemetryTags = patch.customTelemetryTags.map((tag) => ({
+        key: tag.key.trim(),
+        value: tag.value,
+      }));
+    }
     const updated = (await this.repos.projects.update(tenantId, projectId, changes)) ?? project;
     await this.audit(auth, 'project.updated', projectId, { fields: Object.keys(changes) });
     return this.detail(auth, updated);
