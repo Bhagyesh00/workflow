@@ -4,6 +4,7 @@
  * expression evaluator.
  */
 import {
+  type AiEventName,
   assertCredentialUrlAllowed,
   type BaseContext,
   type BinaryData,
@@ -302,6 +303,54 @@ export function resolveCredentialRef(deps: ContextDeps, type: string, itemIndex 
   return ref;
 }
 
+/**
+ * P6 S5 (C0): adds `services.traceHeaders(node)` to a node's outbound request. A header the node set itself
+ * (any case) is kept; a failing trace header source adds nothing and never fails the request.
+ */
+function withTraceHeaders(
+  services: ExecutionServices,
+  node: WorkflowNode,
+  options: HttpRequestOptions,
+): HttpRequestOptions {
+  if (!services.traceHeaders) return options;
+  let trace: Record<string, string> | undefined;
+  try {
+    trace = services.traceHeaders(node.name);
+  } catch (error) {
+    services.logger.warn('Trace headers failed', { node: node.name, error: (error as Error)?.message ?? '' });
+    return options;
+  }
+  if (!trace) return options;
+  const own = new Set(Object.keys(options.headers ?? {}).map((name) => name.toLowerCase()));
+  const added: Record<string, string> = {};
+  for (const [name, value] of Object.entries(trace)) {
+    if (!own.has(name.toLowerCase())) added[name] = value;
+  }
+  if (Object.keys(added).length === 0) return options;
+  return { ...options, headers: { ...options.headers, ...added } };
+}
+
+/**
+ * P6 S5 (C0): a node's `logAiEvent`: hands the event to `hooks.aiEvent` with the node's name and type.
+ * Never throws into the node: a failing hook is logged (without the message) and the node goes on.
+ */
+export function createAiEventLogger(
+  services: ExecutionServices,
+  node: WorkflowNode,
+): (name: AiEventName, msg?: string) => void {
+  return (name, msg) => {
+    try {
+      services.hooks?.aiEvent?.({ name, nodeName: node.name, nodeType: node.type, msg: msg ?? '' });
+    } catch (error) {
+      services.logger.warn('AI event hook failed', {
+        event: name,
+        node: node.name,
+        error: (error as Error)?.message ?? '',
+      });
+    }
+  };
+}
+
 function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCredentials']): NodeHelpers {
   const { services, node } = deps;
   const assertBinaryData = (itemIndex: number, propertyName: string, inputIndex = 0): BinaryData => {
@@ -317,7 +366,8 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
     }
     return binary;
   };
-  const httpRequest = async (options: HttpRequestOptions) => {
+  const httpRequest = async (nodeOptions: HttpRequestOptions) => {
+    const options = withTraceHeaders(services, node, nodeOptions);
     try {
       return mapStreamErrors(node, options, await services.http.request(options, deps.signal));
     } catch (error) {
@@ -326,9 +376,10 @@ function createHelpers(deps: ContextDeps, getCredentials: BaseContext['getCreden
   };
   const httpRequestWithAuthentication = async (
     credentialType: string,
-    options: HttpRequestOptions,
+    nodeOptions: HttpRequestOptions,
     itemIndex = 0,
   ) => {
+    const options = withTraceHeaders(services, node, nodeOptions);
     const ref = resolveCredentialRef(deps, credentialType, itemIndex);
     const data = await getCredentials(credentialType, itemIndex);
     try {
@@ -652,6 +703,7 @@ export function createExecuteContext(deps: ContextDeps, callbacks: ExecuteContex
     getInputConnectionData: (type, itemIndex) => callbacks.getInputConnectionData(type, itemIndex),
     continueOnFail: () => callbacks.continueOnFail(),
     getRunIndex: () => deps.runIndex ?? 0,
+    logAiEvent: createAiEventLogger(services, node),
     executeWorkflow: createSubWorkflowCaller(deps, (report) => callbacks.reportSubWorkflow?.(report)),
     async putExecutionToWait(waitTill: Date) {
       callbacks.putExecutionToWait(waitTill);

@@ -66,9 +66,11 @@ import { assertCredentialsUsable } from './credential-usable';
 import type { CredentialService } from './credentials';
 import type { DataTableService } from './data-tables';
 import { assertNoDeprecatedNodes } from './deprecated-nodes';
+import { observeRunner } from './events/runner-events';
 import { maybeSendFirstFailure } from './first-failure-mail';
 import { insightRunOf } from './insights/rules';
 import type { Metrics } from './metrics';
+import type { LifecycleObservers, LifecycleRow, RunScope } from './observability/lifecycle';
 import { runtimeDefinition } from './published-workflow';
 import type { ExecutionJob, ExecutionQueue } from './queue';
 import {
@@ -146,6 +148,60 @@ export interface StoredRunOptions {
    * included); the read side judges them with the run's own.
    */
   usedCredentialIds?: string[];
+  /**
+   * P6 S5 (C0): the W3C trace context of the request that started the run (a production webhook, form or MCP
+   * Server Trigger call), stored as given; tracing (L10) continues the caller's trace from it
+   */
+  traceContext?: TraceContext;
+}
+
+/** P6 S5 (C0): the inbound W3C trace headers a run keeps (`traceparent`, `tracestate`, `baggage`) */
+export interface TraceContext {
+  traceparent?: string;
+  tracestate?: string;
+  baggage?: string;
+}
+
+/** P6 S5 (C0): the longest value of each trace header a run keeps; a longer one is dropped */
+export const TRACE_HEADER_LIMITS = { traceparent: 55, tracestate: 512, baggage: 8192 } as const;
+
+/**
+ * P6 S5 (C0): the trace context of an inbound request's headers (production webhook, form and MCP Server
+ * Trigger entries). A value over its limit, or not a string, is dropped; undefined when none is left.
+ */
+export function traceContextOf(
+  headers: Record<string, string | string[] | undefined> | undefined,
+): TraceContext | undefined {
+  if (!headers) return undefined;
+  const out: TraceContext = {};
+  for (const name of Object.keys(TRACE_HEADER_LIMITS) as Array<keyof TraceContext>) {
+    const raw = headers[name];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (typeof value === 'string' && value.length > 0 && value.length <= TRACE_HEADER_LIMITS[name])
+      out[name] = value;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** P6 S5 (C0): the row fields the lifecycle observers read */
+function lifecycleRowOf(row: ExecutionRow, patch: Partial<LifecycleRow> = {}): LifecycleRow {
+  return {
+    mode: row.mode,
+    workflowId: row.workflowId,
+    parentExecutionId: row.parentExecutionId,
+    retryOf: row.retryOf,
+    startedAt: row.startedAt,
+    stoppedAt: row.stoppedAt,
+    ...patch,
+  };
+}
+
+/**
+ * P6 S5 (C0): whether run text stays out of events, spans and attributes: the channel of the run's mode
+ * (`manual` for a manual run, `production` for every other mode), the rule of `pushableError`
+ */
+function redactedFor(mode: string, channels: RedactionChannels): boolean {
+  return mode === 'manual' ? channels.manual : channels.production;
 }
 
 /**
@@ -221,6 +277,8 @@ export interface StartExecutionInput {
   parentRedaction?: RedactionChannels;
   /** P6-53: a retry: the credential ids its original used (`StoredRunOptions.usedCredentialIds`) */
   usedCredentialIds?: string[];
+  /** P6 S5 (C0): the inbound W3C trace headers (`StoredRunOptions.traceContext`), stored as given */
+  traceContext?: TraceContext;
   /** P6-53: a retry of a run that used a private connection starts with the run flagged */
   usedPrivateCredentials?: boolean;
   executionId?: string;
@@ -391,6 +449,19 @@ export class ExecutionService {
     return this.running.size;
   }
 
+  /**
+   * P6 S5 (C0): calls the run lifecycle observers (`ctx.observers`: execution events L1, AI events L2,
+   * tracing L10). Never throws and never rejects: an observer never fails, stops or changes a run.
+   */
+  private async observe(call: (observers: LifecycleObservers) => Promise<void>): Promise<void> {
+    try {
+      const observers = this.deps.serviceDeps?.context().observers;
+      if (observers) await call(observers);
+    } catch (error) {
+      this.deps.logger.warn({ err: error }, 'A run lifecycle observer could not be called');
+    }
+  }
+
   // -------------------------------------------------------------------------------------------
   // starting executions
 
@@ -428,6 +499,7 @@ export class ExecutionService {
       projectId: input.projectId,
       inlineSource: input.inlineSource ? true : undefined,
       usedCredentialIds: input.usedCredentialIds?.length ? input.usedCredentialIds : undefined,
+      traceContext: input.traceContext,
     };
     // P6 S3 (C0): the redaction channels are fixed at start (L8); stored with the run, so a resume and a
     // worker read the same snapshot
@@ -631,7 +703,11 @@ export class ExecutionService {
         }));
       if (row && closed) {
         const durationMs = row.startedAt ? stoppedAt.getTime() - row.startedAt.getTime() : 0;
-        await this.afterCrash(job.tenantId, row, message, { durationMs }).catch((e) =>
+        await this.afterCrash(job.tenantId, row, message, {
+          durationMs,
+          detector: 'worker',
+          stoppedAt,
+        }).catch((e) =>
           this.deps.logger.warn(
             { err: e, tenantId: job.tenantId, executionId: job.executionId },
             'Crashed execution could not be closed',
@@ -660,11 +736,12 @@ export class ExecutionService {
     if (!row || !data) return;
     const emit = (outcome: ExecutionOutcome) => this.emitFinished(outcome, delivery);
     // claim atomically: a stop request may have canceled the execution in the meantime
+    const claimedAt = new Date();
     const claimed =
       kind === 'run'
         ? await repos.executions.transition(tenantId, executionId, ['new'], {
             status: 'running',
-            startedAt: new Date(),
+            startedAt: claimedAt,
           })
         : row.status === 'running';
     const tenant = await repos.tenants.get(tenantId);
@@ -676,6 +753,16 @@ export class ExecutionService {
 
     const definition = data.workflowData as unknown as WorkflowDefinition;
     const options = (data.runOptions ?? {}) as StoredRunOptions;
+    // P6 S5 (C0): the run is claimed: the lifecycle observers see it start (a resume included)
+    const scope: RunScope = {
+      tenantId: tenant.id,
+      executionId,
+      row: lifecycleRowOf(row, kind === 'run' ? { startedAt: claimedAt, stoppedAt: null } : {}),
+      definition,
+      options,
+      kind,
+    };
+    await this.observe((o) => o.runStart(scope));
     const staticBefore = JSON.stringify(definition.staticData ?? {});
     const limits = effectiveLimits(tenant.plan, tenant.settings as TenantSettings);
     const timeoutMs = executionTimeoutMs(this.deps.config, limits, definition.settings?.executionTimeout);
@@ -712,7 +799,7 @@ export class ExecutionService {
         workflow: definition,
         redaction: options.redaction,
         redactionHolder: redaction,
-        hooks: this.hooks(tenant.id, row, definition, delivery, redaction, options.userId),
+        hooks: this.hooks(tenant.id, row, definition, delivery, redaction, options.userId, scope),
         signal,
       });
       engine = new WorkflowExecute(
@@ -725,7 +812,17 @@ export class ExecutionService {
     } catch (error) {
       const state = createInitialState();
       state.resultData.error = serializeError(error);
-      await this.finish(tenant, row, definition, staticBefore, failedResult(state), delivery, options);
+      await this.finish(
+        tenant,
+        row,
+        definition,
+        staticBefore,
+        failedResult(state),
+        delivery,
+        options,
+        undefined,
+        scope,
+      );
       return;
     }
 
@@ -778,7 +875,7 @@ export class ExecutionService {
         engine.state.resultData.error = serializeError(error);
         result = failedResult(engine.state);
       }
-      await this.finish(tenant, row, definition, staticBefore, result, delivery, options, tally);
+      await this.finish(tenant, row, definition, staticBefore, result, delivery, options, tally, scope);
     } catch (error) {
       logger.error({ err: error, tenantId, executionId }, 'Could not persist execution result');
       // the row must not stay 'running': it would hold a concurrency slot and never alert anyone
@@ -797,6 +894,8 @@ export class ExecutionService {
           durationMs: tally.counted ? undefined : durationMs,
           state: engine.state,
           counted: tally.counted,
+          detector: 'persist',
+          stoppedAt,
         }).catch((e) =>
           logger.warn({ err: e, tenantId, executionId }, 'Crashed execution could not be closed'),
         );
@@ -818,8 +917,18 @@ export class ExecutionService {
     tenantId: string,
     row: ExecutionRow,
     message: string,
-    /** `counted`: finish() already recorded the run (usage, metrics, insights): the crash adds no failure */
-    opts: { durationMs?: number; state?: ExecutionState; counted?: boolean } = {},
+    /**
+     * `counted`: finish() already recorded the run (usage, metrics, insights): the crash adds no failure.
+     * P6 S5 (C0): `detector` names who closed it (`startup`: markCrashed, `persist`: the run's own catch,
+     * `worker`: a redelivered queue job) for the lifecycle observers' `crash`; `stoppedAt` is the time written
+     */
+    opts: {
+      durationMs?: number;
+      state?: ExecutionState;
+      counted?: boolean;
+      detector: 'startup' | 'persist' | 'worker';
+      stoppedAt?: Date;
+    },
   ): Promise<void> {
     const { repos, push, metrics, logger } = this.deps;
     push.send(
@@ -834,13 +943,33 @@ export class ExecutionService {
       metrics.recordExecution('crashed', row.mode, durationMs);
     }
     const data = await repos.executions.getData(tenantId, row.id);
-    if (!data) return;
+    // P6 S5 (C0): the lifecycle observers see the crash (with the run's data when it is stored), before its
+    // error workflow starts
+    const crashRow = lifecycleRowOf(row, opts.stoppedAt ? { stoppedAt: opts.stoppedAt } : {});
+    if (!data) {
+      await this.observe((o) =>
+        o.crash({ tenantId, executionId: row.id, row: crashRow, detector: opts.detector, error: message }),
+      );
+      return;
+    }
     const definition = data.workflowData as unknown as WorkflowDefinition;
     // P6 S3 (C0): a crash finish() did not count is one failure in insights (L11)
     if (!opts.counted) this.recordInsight(row, definition, 'crashed', undefined, opts.durationMs ?? 0);
     const options = (data.runOptions ?? {}) as StoredRunOptions;
     const state = opts.state ?? (data.state as unknown as ExecutionState | null) ?? createInitialState();
     state.resultData.error = serializeError(new Error(message));
+    await this.observe((o) =>
+      o.crash({
+        tenantId,
+        executionId: row.id,
+        row: crashRow,
+        detector: opts.detector,
+        error: message,
+        definition,
+        options,
+        state,
+      }),
+    );
     await this.startErrorWorkflow(tenantId, row, definition, state, options).catch((e) =>
       logger.warn({ err: e, tenantId, executionId: row.id }, 'Error workflow could not start'),
     );
@@ -873,7 +1002,9 @@ export class ExecutionService {
   async markCrashed(): Promise<number> {
     const rows = await this.deps.repos.executions.markCrashed();
     for (const row of rows) {
-      await this.afterCrash(row.tenantId, row, row.errorMessage ?? 'The process stopped').catch((e) =>
+      await this.afterCrash(row.tenantId, row, row.errorMessage ?? 'The process stopped', {
+        detector: 'startup',
+      }).catch((e) =>
         this.deps.logger.warn(
           { err: e, tenantId: row.tenantId, executionId: row.id },
           'Crashed execution could not be closed',
@@ -901,6 +1032,8 @@ export class ExecutionService {
     redaction: RedactionHolder,
     /** P6-53: the user who started the run: only their stream gets its node data */
     runUserId?: string,
+    /** P6 S5 (C0): what the lifecycle observers get with every node and AI event */
+    scope?: RunScope,
   ): ExecutionHooks {
     const { push, repos } = this.deps;
     const manual = row.mode === 'manual';
@@ -916,9 +1049,22 @@ export class ExecutionService {
     // P6-53: the node data of a manual run goes to the user who started it (n8n: that session only); every
     // other reader of the workflow gets the event without items, and with no user every reader does
     const toRunUser = { ...about, userId: runUserId };
+    // P6 S5 (C0): the node's type, and the live channels for node and AI events (undefined = both false)
+    const typeOf = (nodeName: string) => definition.nodes.find((n) => n.name === nodeName)?.type ?? '';
+    const liveRedaction = () => {
+      const channels: RedactionChannels = {
+        production: redaction.current?.production === true,
+        manual: redaction.current?.manual === true,
+      };
+      return { redaction: channels, redacted: redactedFor(row.mode, channels) };
+    };
     return {
-      nodeExecuteBefore: (nodeName) => {
+      nodeExecuteBefore: async (nodeName, runIndex) => {
         if (manual) push.send(tenantId, 'nodeExecuteBefore', { executionId, nodeName }, about);
+        if (scope)
+          await this.observe((o) =>
+            o.nodeStart({ ...scope, nodeName, nodeType: typeOf(nodeName), runIndex }),
+          );
       },
       nodeExecuteAfter: async (nodeName, runIndex, taskData, state) => {
         if (!seeded) {
@@ -954,6 +1100,18 @@ export class ExecutionService {
             this.deps.logger.warn({ err: e, tenantId, executionId, nodeName }, 'Progress could not be saved');
           });
         }
+        // P6 S5 (C0): after the push and the progress write
+        if (scope)
+          await this.observe((o) =>
+            o.nodeEnd({
+              ...scope,
+              nodeName,
+              nodeType: typeOf(nodeName),
+              runIndex,
+              taskData,
+              ...liveRedaction(),
+            }),
+          );
       },
       sendResponse: (response) => {
         if (delivery === 'local') this.deliverResponse(executionId, response);
@@ -978,6 +1136,11 @@ export class ExecutionService {
         if (redaction.current?.manual || !runUserId) return;
         push.send(tenantId, 'consoleMessage', { executionId, nodeName, args }, toRunUser);
       },
+      // P6 S5 (C0): a node's `logAiEvent`; never awaited by the engine, and `observe` never rejects
+      aiEvent: (event) => {
+        if (!scope) return;
+        void this.observe((o) => o.aiEvent({ ...scope, ...event, ...liveRedaction() }));
+      },
     };
   }
 
@@ -992,6 +1155,8 @@ export class ExecutionService {
     /** the stored run options: error chain, inline source, stored project, redaction snapshot */
     run: Pick<StoredRunOptions, 'errorChain' | 'inlineSource' | 'projectId' | 'redaction' | 'userId'>,
     tally?: { counted: boolean },
+    /** P6 S5 (C0): the run's lifecycle scope (`run`); with it the observers get `runEnd` */
+    scope?: RunScope,
   ): Promise<void> {
     const { repos, push, metrics, logger } = this.deps;
     const { status, state } = result;
@@ -1074,6 +1239,32 @@ export class ExecutionService {
       await this.removeBinaryData(tenant.id, row.id);
     }
 
+    // P6 S5 (C0): every status, `waiting` included, once the row is final (written or deleted) and before the
+    // push and the error workflow, so a failed run's span closes before its error workflow starts. The
+    // channels are the outcome's: the snapshot merged with what the sub-workflows reported
+    const ownChannels: RedactionChannels = {
+      production: run.redaction?.production === true,
+      manual: run.redaction?.manual === true,
+    };
+    const fromSubWorkflows = reportedChannels(state.resultData.runData);
+    if (scope) {
+      const channels = mergeChannels(ownChannels, fromSubWorkflows);
+      await this.observe((o) =>
+        o.runEnd({
+          ...scope,
+          row: lifecycleRowOf(row, {
+            startedAt: scope.row.startedAt,
+            stoppedAt: status === 'waiting' ? null : new Date(result.stoppedAt),
+          }),
+          status,
+          error,
+          state,
+          redaction: channels,
+          redacted: redactedFor(row.mode, channels),
+        }),
+      );
+    }
+
     // P6 S3 (C0): the pushed error of a redacted run carries no node data (L8); its text goes to the run's
     // user only, every other reader gets it without text (P6-53)
     const finishedOf = (shown: ExecutionErrorShape | undefined) => ({
@@ -1126,10 +1317,7 @@ export class ExecutionService {
         error,
         lastNodeExecuted: state.resultData.lastNodeExecuted,
         lastNodeOutput,
-        redaction: {
-          own: { production: run.redaction?.production === true, manual: run.redaction?.manual === true },
-          fromSubWorkflows: reportedChannels(runData),
-        },
+        redaction: { own: ownChannels, fromSubWorkflows },
         usedCredentialIds,
       },
       delivery,
@@ -1345,6 +1533,26 @@ export class ExecutionService {
     const depth = input.depth ?? 0;
     // P6 S2 (C0): the gate (L16) and the OAuth JWE hook (L15); both stubs PASS (ready, token unchanged)
     const shared = this.deps.serviceDeps?.context();
+    // P6 S5 (C0): the runners of a run report to the event stream (L1, PASSES: the runner as is), and a node's
+    // outbound requests carry the run's trace headers (L10, PASSES: none)
+    const observed = (runner: CodeRunner): CodeRunner => {
+      if (!shared?.events || !executionId) return runner;
+      try {
+        return observeRunner(runner, {
+          tenantId: tenant.id,
+          executionId,
+          workflowId: input.workflowId,
+          events: shared.events,
+        });
+      } catch (error) {
+        logger.warn(
+          { err: error, tenantId: tenant.id, executionId },
+          'The code runner could not be observed',
+        );
+        return runner;
+      }
+    };
+    const tracing = shared?.tracingObserver;
     return {
       tenantId: tenant.id,
       projectId: input.projectId,
@@ -1380,8 +1588,10 @@ export class ExecutionService {
           workflowId: input.workflowId,
         }),
       ),
-      codeRunner,
-      pythonRunner,
+      codeRunner: observed(codeRunner),
+      pythonRunner: pythonRunner ? observed(pythonRunner) : undefined,
+      traceHeaders:
+        tracing && executionId ? (nodeName) => tracing.headersFor(executionId, nodeName) : undefined,
       dataTables: dataTables.forProject(tenant.id, input.projectId, { workflowId: input.workflowId }),
       formTokens,
       formAuth,
@@ -1741,9 +1951,10 @@ export class ExecutionService {
     const row = await repos.executions.get(tenantId, executionId);
     if (!row) throw ApiError.notFound('Execution');
     if (['new', 'waiting'].includes(row.status)) {
+      const stoppedAt = new Date();
       const done = await repos.executions.transition(tenantId, executionId, ['new', 'waiting'], {
         status: 'canceled',
-        stoppedAt: new Date(),
+        stoppedAt,
         waitTill: null,
       });
       if (done) {
@@ -1752,6 +1963,17 @@ export class ExecutionService {
           'executionFinished',
           { executionId, workflowId: row.workflowId, status: 'canceled' },
           { workflowId: row.workflowId ?? undefined },
+        );
+        // P6 S5 (C0): a `new` or `waiting` run canceled here never reaches finish(): the observers see it
+        const data = await repos.executions.getData(tenantId, executionId).catch(() => undefined);
+        await this.observe((o) =>
+          o.runCancelled({
+            tenantId,
+            executionId,
+            row: lifecycleRowOf(row, { stoppedAt }),
+            definition: (data?.workflowData as unknown as WorkflowDefinition | undefined) ?? undefined,
+            options: (data?.runOptions as StoredRunOptions | null | undefined) ?? undefined,
+          }),
         );
         return 'canceled';
       }

@@ -30,6 +30,7 @@ import { registerFormAuthRoutes } from './routes/form-auth';
 import { registerInsightsRoutes } from './routes/insights';
 import { registerJwksRoutes } from './routes/jwks';
 import { registerLdapRoutes } from './routes/ldap';
+import { registerLogStreamingRoutes } from './routes/log-streaming';
 import { registerMcpConsentRoutes } from './routes/mcp-consent';
 import { mcpOAuthPlugin } from './routes/mcp-oauth';
 import { registerMcpOAuthClientRoutes } from './routes/mcp-oauth-clients';
@@ -37,6 +38,7 @@ import { registerMcpServerRoutes } from './routes/mcp-server';
 import { registerMcpSettingsRoutes } from './routes/mcp-settings';
 import { registerMemberRoutes } from './routes/members';
 import { registerMfaRoutes } from './routes/mfa';
+import { registerOtelRoutes } from './routes/otel';
 import { registerPasswordRoutes } from './routes/password';
 import { registerProjectRoutes } from './routes/projects';
 import { publicApiPlugin } from './routes/public-api';
@@ -91,6 +93,20 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
   });
 
   app.setErrorHandler(handleError);
+  // P6-71 (S5 C0): every answered request reaches the API metrics with its route pattern (never the raw URL);
+  // a metrics failure never touches the answer
+  app.addHook('onResponse', async (request, reply) => {
+    try {
+      ctx.metrics.observeApi(
+        request.method,
+        request.routeOptions.url ?? 'unknown',
+        reply.statusCode,
+        reply.elapsedTime,
+      );
+    } catch {
+      // ignored: the answer is already sent
+    }
+  });
   app.decorateRequest('auth', null);
   // P6-03: `requireScope` reads `request.server.access`; decorated on the root, so every plugin sees it
   app.decorate('access', ctx.access);
@@ -236,6 +252,9 @@ export async function buildApp(ctx: ServerContext): Promise<FastifyInstance> {
       // P6 S4: source control (L2 connection, L4 status, push and pull)
       registerSourceControlRoutes(rest, ctx);
       registerSourceControlSyncRoutes(rest, ctx);
+      // P6 S5: log streaming destinations (L3) and OpenTelemetry settings (L11)
+      registerLogStreamingRoutes(rest, ctx);
+      registerOtelRoutes(rest, ctx);
     },
     { prefix: '/rest' },
   );

@@ -30,6 +30,8 @@ import { NotFoundPage, RouteErrorPage } from './pages/ErrorPages';
 import { InboxPage } from './pages/InboxPage';
 import { InsightsPage } from './pages/InsightsPage';
 import { LdapSettingsPage } from './pages/LdapSettingsPage';
+import { LogStreamingSettingsPage } from './pages/LogStreamingSettingsPage';
+import { OtelSettingsPage } from './pages/OtelSettingsPage';
 import {
   ProjectLayout,
   type ProjectPageKind,
@@ -304,6 +306,9 @@ export const routes: RouteObject[] = [
           { path: 'external-secrets', element: <SecretsSettingsPage /> },
           // P6-76: the Git connection page (n8n's path; it gates itself on `sourceControl:manage`)
           { path: 'environments', element: <SourceControlSettingsPage /> },
+          // P6-64, P6-68: log streaming and OpenTelemetry (n8n's paths; each page gates itself on its scope)
+          { path: 'log-streaming', element: <LogStreamingSettingsPage /> },
+          { path: 'opentelemetry', element: <OtelSettingsPage /> },
           {
             path: 'ai',
             element: (

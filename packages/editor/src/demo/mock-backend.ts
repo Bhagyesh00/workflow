@@ -22,6 +22,7 @@ import {
   type StickyNote,
   splitTemplate,
   type TaskData,
+  type TelemetryTag,
   type WorkflowNode,
   type WorkflowNodeGroup,
   type WorkflowSettings,
@@ -78,9 +79,11 @@ import { registerFormAuthRoutes } from './mock-form-auth';
 import { copy, HttpError, now, page } from './mock-http';
 import { registerInsightsRoutes } from './mock-insights';
 import { registerLdapRoutes } from './mock-ldap';
+import { registerLogStreamingRoutes } from './mock-log-streaming';
 import { registerMcpRoutes } from './mock-mcp';
 import { registerMemberRoutes } from './mock-members';
 import { registerMfaRoutes } from './mock-mfa';
+import { registerOtelRoutes } from './mock-otel';
 import { registerPasswordRoutes } from './mock-password';
 import { registerPrivateCredentialRoutes } from './mock-private-credentials';
 import { registerProjectRoutes, visibleProjects } from './mock-projects';
@@ -216,6 +219,8 @@ export interface StoredProject {
   /** the member a personal project belongs to (null for a team project) */
   ownerUserId: string | null;
   creatorId: string | null;
+  /** P6-67: the project's custom telemetry tags (key and value pairs a span carries; [] when none) */
+  customTelemetryTags: TelemetryTag[];
   createdAt: string;
   updatedAt: string;
 }
@@ -396,6 +401,9 @@ export class MockBackend {
     registerDependencyRoutes(this);
     // Phase 6 S4 (C0): the Git environment routes, 501 until L6 fills them
     registerSourceControlRoutes(this);
+    // Phase 6 S5 (C0): log streaming (L8) and OpenTelemetry (L12), 501 until each lane fills it
+    registerLogStreamingRoutes(this);
+    registerOtelRoutes(this);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -461,6 +469,7 @@ export class MockBackend {
       description: input.description ?? null,
       ownerUserId: input.type === 'personal' ? (input.ownerUserId ?? null) : null,
       creatorId: input.creatorId ?? input.ownerUserId ?? null,
+      customTelemetryTags: [],
       createdAt: now(),
       updatedAt: now(),
     };

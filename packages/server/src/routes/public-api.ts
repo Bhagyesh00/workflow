@@ -43,6 +43,8 @@ import { PUBLIC_EVALUATION_ROUTES } from './public-evaluations';
 import { PUBLIC_FOLDER_ROUTES } from './public-folders';
 import { PUBLIC_INSIGHTS_ROUTES } from './public-insights';
 import { PUBLIC_LDAP_ROUTES } from './public-ldap';
+import { PUBLIC_LOG_STREAMING_ROUTES } from './public-log-streaming';
+import { PUBLIC_OTEL_ROUTES } from './public-otel';
 import { PUBLIC_PROJECT_ROUTES } from './public-projects';
 import { PUBLIC_RATE_LIMIT_ROUTES } from './public-rate-limits';
 import { PUBLIC_ROLE_MAPPING_ROUTES } from './public-role-mapping';
@@ -376,7 +378,7 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
     params: idParams,
     response: 'Ok',
     handler: async (ctx, { auth, params }) => {
-      await deleteExecution(ctx, auth.tenant.id, params.id);
+      await deleteExecution(ctx, auth.tenant.id, params.id, { userId: auth.user.id });
       return { data: { ok: true } };
     },
   },
@@ -617,6 +619,9 @@ export const PUBLIC_ROUTES: ApiRoute[] = [
   ...PUBLIC_SOURCE_CONTROL_ROUTES,
   ...PUBLIC_DISCOVER_ROUTES,
   ...PUBLIC_CLI_ROUTES,
+  // P6 S5: log streaming destinations (L3) and OpenTelemetry settings (L11)
+  ...PUBLIC_LOG_STREAMING_ROUTES,
+  ...PUBLIC_OTEL_ROUTES,
 ];
 
 /** JSON schema of credential data from the type's properties */
@@ -1138,6 +1143,62 @@ const COMPONENTS: Record<string, unknown> = {
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
     },
+  },
+  /** P6-06 (S5 L3): a log streaming destination; secret values are blank */
+  LogStreamingDestination: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      type: { enum: ['webhook', 'syslog', 'sentry'] },
+      label: { type: 'string' },
+      enabled: { type: 'boolean' },
+      subscribedEvents: { type: 'array', items: { type: 'string' } },
+      anonymizeAuditMessages: { type: 'boolean' },
+      credentialId: { type: ['string', 'null'] },
+      circuitBreaker: {
+        type: 'object',
+        properties: { maxFailures: { type: 'integer' }, failureWindowMs: { type: 'integer' } },
+      },
+      settings: { type: 'object', additionalProperties: true },
+      lastError: { type: ['string', 'null'] },
+      droppedEvents: { type: 'integer' },
+    },
+  },
+  /** P6-06 (S5 L3): the event names and groups a destination can subscribe to */
+  LogStreamingEventTypes: { type: 'array', items: { type: 'string' } },
+  /** P6-06 (S5 L3): the outcome of a destination's test message; the error text is redacted */
+  LogStreamingTestResult: {
+    type: 'object',
+    required: ['success'],
+    properties: { success: { type: 'boolean' }, error: { type: 'string' } },
+  },
+  /** P6-67 (S5 L11): the OpenTelemetry settings; header values are blank (`name=`) */
+  OtelSettings: {
+    type: 'object',
+    properties: {
+      enabled: { type: 'boolean' },
+      exporterProtocol: { enum: ['http/protobuf', 'grpc'] },
+      exporterEndpoint: { type: 'string' },
+      exporterTracingPath: { type: 'string' },
+      exporterServiceName: { type: 'string' },
+      exporterHeaders: {
+        type: 'string',
+        description: 'name=value pairs, comma separated; values blank on read',
+      },
+      tracesSampleRate: { type: 'number', minimum: 0, maximum: 1 },
+      startupConnectivityTimeoutMs: { type: 'integer' },
+      includeNodeSpans: { type: 'boolean' },
+      emitWorkflowStartSpan: { type: 'boolean' },
+      emitNodeStartSpan: { type: 'boolean' },
+      injectOutbound: { type: 'boolean' },
+      productionExecutionsOnly: { type: 'boolean' },
+    },
+  },
+  /** P6-67 (S5 L11): the outcome of a test trace; the error text is redacted */
+  OtelTestTraceResult: {
+    type: 'object',
+    required: ['success'],
+    properties: { success: { type: 'boolean' }, error: { type: 'string' } },
   },
 };
 

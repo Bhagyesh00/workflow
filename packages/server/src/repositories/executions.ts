@@ -3,7 +3,14 @@
 import type { RedactionChannels } from '@workflow/workflow';
 import { and, count, desc, eq, gte, inArray, lt, lte, ne, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DbOrTx } from '../db/client';
-import { type ExecutionDataRow, type ExecutionRow, executionData, executions, workflows } from '../db/schema';
+import {
+  type ExecutionDataRow,
+  type ExecutionRow,
+  executionData,
+  executions,
+  type TracingContextRow,
+  workflows,
+} from '../db/schema';
 import type { Cursor } from '../http/pagination';
 import { type AnnotationVote, annotationConditions } from './annotations';
 import { type AccessListOptions, sharedRowConditions } from './shares';
@@ -15,6 +22,9 @@ export function escapeLike(value: string): string {
 }
 
 export type ExecutionInsert = Omit<typeof executions.$inferInsert, 'tenantId'>;
+
+/** P6-67 (S5): the trace context a waiting run keeps (`executions.tracing_context`) */
+export type { TracingContextRow };
 
 /** a JSON-escaped U+0000, unless its backslash is itself escaped (the text "\u0000" in the data) */
 const ESCAPED_NUL = /(?<!\\)((?:\\\\)*)\\u0000/g;
@@ -299,6 +309,28 @@ export class ExecutionRepository {
       .update(executionData)
       .set({ runOptions: withoutNul(runOptions) })
       .where(and(eq(executionData.tenantId, tenantId), eq(executionData.executionId, id)));
+  }
+
+  /**
+   * P6-67 (S5): stores the run's trace context (a run that waits), or clears it with null. A no-op for another
+   * tenant's id or no row.
+   */
+  async setTracingContext(tenantId: string, id: string, value: TracingContextRow | null): Promise<void> {
+    if (!isUuid(id)) return;
+    await this.db
+      .update(executions)
+      .set({ tracingContext: value })
+      .where(and(eq(executions.tenantId, tenantId), eq(executions.id, id)));
+  }
+
+  /** P6-67 (S5): the run's stored trace context; null when none, for another tenant's id or no row */
+  async tracingContextOf(tenantId: string, id: string): Promise<TracingContextRow | null> {
+    if (!isUuid(id)) return null;
+    const [row] = await this.db
+      .select({ tracingContext: executions.tracingContext })
+      .from(executions)
+      .where(and(eq(executions.tenantId, tenantId), eq(executions.id, id)));
+    return row?.tracingContext ?? null;
   }
 
   async delete(tenantId: string, id: string): Promise<boolean> {

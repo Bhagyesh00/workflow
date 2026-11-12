@@ -192,7 +192,7 @@ const cleanupTestExecutions: AssistantToolDefinition<z.output<typeof cleanupInpu
     let deleted = 0;
     for (const id of found.ids) {
       if (run.signal.aborted) break;
-      await deleteExecution(ctx, tenantId, id);
+      await deleteExecution(ctx, tenantId, id, actorOf(run));
       deleted++;
     }
     return { deleted, skippedActive: found.skippedActive, more: found.more };

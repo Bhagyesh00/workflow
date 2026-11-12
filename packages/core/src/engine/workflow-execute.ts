@@ -56,8 +56,10 @@ import { createHitlGate } from './hitl-gate';
 import { createNodeAsTool, type ToolRunHost, toolCanWait } from './node-as-tool';
 import {
   assertValidOutput,
+  buildExpressionContext,
   type ContextDeps,
   connectedNodes,
+  createAiEventLogger,
   createBaseContext,
   createCodeRunnerCall,
   createExecuteContext,
@@ -69,6 +71,7 @@ import {
   subWorkflowReportOf,
 } from './node-context';
 import type { ExecutionServices } from './services';
+import { resolveTelemetryTags } from './telemetry-tags';
 import { runToolExecutor, toolRootOf } from './tool-executor';
 
 export interface RunOptions {
@@ -744,7 +747,7 @@ export class WorkflowExecute {
           executionStatus: 'error',
           error: serialized,
           source,
-          metadata: this.taskMetadata(attempts),
+          metadata: this.taskMetadata(attempts, node, exec, runIndex, signal),
         };
         runs.push(task);
         this.state.resultData.lastNodeExecuted = node.name;
@@ -791,7 +794,7 @@ export class WorkflowExecute {
       executionStatus: this.waitTill ? 'waiting' : 'success',
       data: finalOutput ? { main: finalOutput } : undefined,
       source,
-      metadata: this.taskMetadata(attempts),
+      metadata: this.taskMetadata(attempts, node, exec, runIndex, signal),
     };
     const hints = [...this.nodeHints];
     if (errorOutputUsed) {
@@ -983,11 +986,45 @@ export class WorkflowExecute {
     };
   }
 
-  /** the metadata of a finished task: what the node set, plus the retry attempt that produced it */
-  private taskMetadata(attempts: number): TaskData['metadata'] {
+  /**
+   * the metadata of a finished task: what the node set, plus the retry attempt that produced it, plus
+   * (P6 S5) the node's custom telemetry tags as `tracing`, each value resolved against item 0 of this run
+   */
+  private taskMetadata(
+    attempts: number,
+    node: WorkflowNode,
+    exec: ExecuteData,
+    runIndex: number,
+    signal: AbortSignal,
+  ): TaskData['metadata'] {
     const metadata: NonNullable<TaskData['metadata']> = { ...this.nodeMetadata };
     if (attempts > 1) metadata.attempt = attempts;
+    const tracing = this.telemetryTagsOf(node, exec, runIndex, signal);
+    if (tracing) metadata.tracing = tracing;
     return Object.keys(metadata).length ? metadata : undefined;
+  }
+
+  /** P6 S5 (C0): the node's resolved custom telemetry tags; a failure is logged and never fails the node */
+  private telemetryTagsOf(
+    node: WorkflowNode,
+    exec: ExecuteData,
+    runIndex: number,
+    signal: AbortSignal,
+  ): Record<string, string | number | boolean> | undefined {
+    try {
+      let deps: ContextDeps | undefined;
+      const evaluate = (value: string): unknown => {
+        deps ??= this.contextDeps(node, exec, runIndex, signal);
+        return this.evaluator.resolve(value, buildExpressionContext(deps, 0));
+      };
+      return resolveTelemetryTags(node, evaluate);
+    } catch (error) {
+      this.services.logger.warn('Telemetry tags failed', {
+        node: node.name,
+        error: (error as Error)?.message ?? '',
+      });
+      return undefined;
+    }
   }
 
   /** resolve AI sub-nodes attached to `parent` via `type` */
@@ -1120,6 +1157,8 @@ export class WorkflowExecute {
       getToolParameter: createToolParameterReader(deps),
       logSubNodeRun: (input: DataObject, output: DataObject, error?: Error) =>
         this.logSubNodeRun(sub, parent, type, input, output, error),
+      // P6 S5 (C0): the sub-node's AI events, with its own name and type (webhook sub-nodes get it too)
+      logAiEvent: createAiEventLogger(this.services, sub),
       // the root a chain of sub-nodes feeds, so a memory under an Agent Tool under an Agent still finds the trigger
       getParentNodes: () =>
         connectedNodes(

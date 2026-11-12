@@ -98,6 +98,9 @@ import type {
   ListenTestTriggerResult,
   ListenTestWebhookOptions,
   ListenTestWebhookResult,
+  LogDestination,
+  LogDestinationSaveBody,
+  LogDestinationTestResult,
   LoginBody,
   McpApiKey,
   McpConsentDecisionBody,
@@ -126,6 +129,8 @@ import type {
   NodeTypeDescription,
   OidcConfig,
   OidcConfigBody,
+  OtelSettings,
+  OtelTestResult,
   PresenceAction,
   Project,
   ProjectAddUsersResult,
@@ -1106,4 +1111,31 @@ export const sourceControlApi = {
   pull: (body: PullWorkFolderBody) => api.post<PullResult>('/source-control/pull-workfolder', body),
   remoteContent: (type: 'workflow', id: string) =>
     api.get<WorkflowDefinition>(`/source-control/remote-content/${enc(type)}/${enc(id)}`),
+};
+
+/**
+ * P6-64: log streaming destinations at n8n's REST paths. GET `/eventbus/destination` needs
+ * `eventBusDestination:list`, or `:read` with `?id=` (one destination); POST creates (`:create`) or, with an
+ * id in the body, updates (`:update`); DELETE `:delete`; POST `/eventbus/testmessage` `:test` (n8n uses GET;
+ * ours sends, so POST). Saved secrets come back blank.
+ */
+export const logStreamingApi = {
+  eventNames: () => api.get<string[]>('/eventbus/eventnames'),
+  list: () => api.get<LogDestination[]>('/eventbus/destination'),
+  get: (id: string) => api.get<LogDestination>('/eventbus/destination', { id }),
+  save: (body: LogDestinationSaveBody) => api.post<LogDestination>('/eventbus/destination', body),
+  remove: (id: string) => request<void>({ method: 'DELETE', path: '/eventbus/destination', query: { id } }),
+  test: (id: string) =>
+    request<LogDestinationTestResult>({ method: 'POST', path: '/eventbus/testmessage', query: { id } }),
+};
+
+/**
+ * P6-67, P6-68: the workspace's OpenTelemetry collector (`otel:manage`). Saved header values come back blank;
+ * a blank value keeps the stored one only while the endpoint is unchanged. `testTrace` sends with the given
+ * fields and saves nothing.
+ */
+export const otelApi = {
+  get: () => api.get<OtelSettings>('/otel/settings'),
+  replace: (body: OtelSettings) => api.put<OtelSettings>('/otel/settings', body),
+  testTrace: (body: OtelSettings) => api.post<OtelTestResult>('/otel/test-trace', body),
 };

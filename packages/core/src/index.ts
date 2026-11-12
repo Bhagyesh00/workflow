@@ -9,6 +9,7 @@ export * from './engine/hitl-gate';
 export * from './engine/node-as-tool';
 export * from './engine/node-context';
 export * from './engine/services';
+export * from './engine/telemetry-tags';
 export * from './engine/tool-executor';
 export * from './engine/webhook-sub-nodes';
 export * from './engine/workflow-execute';

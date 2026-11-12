@@ -16,6 +16,7 @@ import {
   type Item,
   type NodePackage,
   type NodeType,
+  type OtelSettings,
   sleep,
   type WorkflowNode,
 } from '@workflow/workflow';
@@ -28,6 +29,7 @@ import type {
   CredentialRow,
   DataTableRow,
   FolderRow,
+  OtelSettingsRow,
   ProjectRow,
   Role,
   TenantAuthSettingsRow,
@@ -38,7 +40,9 @@ import type { SsoMethod, SsoSettingsPatch } from '../src/repositories/sso';
 import type { AiRuntime } from '../src/services/ai-builder/runtime';
 import type { AssistantToolDefinition } from '../src/services/assistant/types';
 import { type SessionAuthMethod, sha256 } from '../src/services/auth';
+import type { StreamEvent } from '../src/services/events/stream';
 import type { SecretProviderType } from '../src/services/secrets/types';
+import { otelHeadersBinding } from '../src/services/tracing/settings';
 import type { PolicyDocument, PolicyKind } from '../src/services/type-policies/types';
 
 export const BASE_URL = 'http://localhost:5678';
@@ -361,6 +365,9 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 const TABLES = [
+  'log_stream_failed',
+  'log_destinations',
+  'otel_settings',
   'sync_id_map',
   'source_control_settings',
   'type_policy_attachments',
@@ -1024,4 +1031,56 @@ export function outputOf(state: any, nodeName: string, run = -1): DataObject[] {
   const runs = state.resultData.runData[nodeName];
   const task = runs[run < 0 ? runs.length - 1 : run];
   return ((task.data?.main?.[0] ?? []) as Item[]).map((i) => i.json);
+}
+
+/**
+ * P6 S5 (C0g, FULL): collects every event the context's `EventStream` emits, for every tenant and name (a sink
+ * that accepts all), in emit order. An event whose payload is a function is built and delivered after it
+ * resolves: `await ctx.events.flush()` before reading `events` in that case. `stop()` removes the sink (call it
+ * in `afterEach`, so a later test's events do not pile up here and the stream builds no payload for it).
+ */
+export function captureEvents(ctx: ServerContext): { events: StreamEvent[]; stop(): void } {
+  const events: StreamEvent[] = [];
+  const remove = ctx.events.addSink({
+    accepts: () => true,
+    deliver: (event) => {
+      events.push(event);
+    },
+  });
+  return { events, stop: remove };
+}
+
+/**
+ * P6 S5 (C0g, FULL): turns OpenTelemetry tracing on for a workspace by writing its `otel_settings` row directly
+ * (`repos.otelSettings.upsert`), so a lane traces without L11's routes. Every column is written: the schema's
+ * defaults (n8n's, endpoint '' and `productionExecutionsOnly` true among them) under `settings`, and `enabled`
+ * true unless `settings` says otherwise. `exporterHeaders` (n8n's `name=value,...` text) is stored only as a
+ * `ctx.cipher` payload with the binding `otel:<tenantId>`, the form `OtelSettingsService.forTenant` decrypts;
+ * blank or absent clears it. Returns the stored row.
+ */
+export async function enableTracing(
+  server: { ctx: ServerContext },
+  tenantId: string,
+  settings: Partial<OtelSettings>,
+): Promise<OtelSettingsRow> {
+  const { exporterHeaders, ...rest } = settings;
+  const exporterHeadersEnc = exporterHeaders?.trim()
+    ? server.ctx.cipher.encrypt(exporterHeaders, otelHeadersBinding(tenantId))
+    : null;
+  return server.ctx.repos.otelSettings.upsert(tenantId, {
+    exporterProtocol: 'http/protobuf',
+    exporterEndpoint: '',
+    exporterTracingPath: '/v1/traces',
+    exporterServiceName: 'workflow',
+    tracesSampleRate: 1,
+    startupConnectivityTimeoutMs: 2000,
+    includeNodeSpans: true,
+    emitWorkflowStartSpan: false,
+    emitNodeStartSpan: false,
+    injectOutbound: true,
+    productionExecutionsOnly: true,
+    ...rest,
+    enabled: rest.enabled ?? true,
+    exporterHeadersEnc,
+  });
 }

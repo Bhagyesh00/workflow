@@ -118,6 +118,7 @@ function executionRow(over: Partial<ExecutionRow> = {}): ExecutionRow {
     workflowVersionId: null,
     createdAt: new Date('2026-11-01T09:59:59Z'),
     usedPrivateCredentials: false,
+    tracingContext: null,
     ...over,
   };
 }

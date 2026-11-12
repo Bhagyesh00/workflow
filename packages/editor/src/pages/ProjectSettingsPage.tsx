@@ -8,11 +8,12 @@ import { useNavigate } from 'react-router';
 import { errorMessage, isApiError } from '../api/client';
 import { membersApi, projectsApi } from '../api/endpoints';
 import { queryKeys, useProject, useRoles } from '../api/queries';
-import type { ProjectIcon } from '../api/types';
+import type { ProjectIcon, TelemetryTag } from '../api/types';
 import { DeleteProjectDialog } from '../components/projects/DeleteProjectDialog';
 import { IconPicker } from '../components/projects/IconPicker';
 import { ProjectMembersTable } from '../components/projects/ProjectMembersTable';
 import { ProjectVaultSection } from '../components/projects/ProjectVaultSection';
+import { ProjectTelemetryTags } from '../components/telemetry/ProjectTelemetryTags';
 import { Button } from '../components/ui/Button';
 import { FormField, Select, TextArea, TextInput } from '../components/ui/Field';
 import { Callout, EmptyState, PageLoader } from '../components/ui/misc';
@@ -34,6 +35,8 @@ export function ProjectSettingsPage({ projectId }: ProjectSettingsPageProps) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [icon, setIcon] = useState<ProjectIcon | null>(null);
+  // P6-67: custom OpenTelemetry attributes of this project's spans
+  const [tags, setTags] = useState<TelemetryTag[]>([]);
   const [deleting, setDeleting] = useState(false);
   const [candidate, setCandidate] = useState('');
   const [newRole, setNewRole] = useState('project:viewer');
@@ -42,12 +45,14 @@ export function ProjectSettingsPage({ projectId }: ProjectSettingsPageProps) {
   const detailName = detail?.name;
   const detailDescription = detail?.description;
   const detailIcon = detail?.icon;
+  const detailTags = detail?.customTelemetryTags;
   useEffect(() => {
     if (!detailId) return;
     setName(detailName ?? '');
     setDescription(detailDescription ?? '');
     setIcon(detailIcon ?? null);
-  }, [detailId, detailName, detailDescription, detailIcon]);
+    setTags(detailTags ?? []);
+  }, [detailId, detailName, detailDescription, detailIcon, detailTags]);
 
   const canUpdate = can('project:update', detail);
   const canMembers = can('project:manageMembers', detail);
@@ -61,7 +66,12 @@ export function ProjectSettingsPage({ projectId }: ProjectSettingsPageProps) {
 
   const save = useMutation({
     mutationFn: () =>
-      projectsApi.update(projectId, { name: name.trim(), description, ...(icon ? { icon } : {}) }),
+      projectsApi.update(projectId, {
+        name: name.trim(),
+        description,
+        ...(icon ? { icon } : {}),
+        customTelemetryTags: tags,
+      }),
     onSuccess: async () => {
       await refresh();
       toast.success('Project saved');
@@ -122,7 +132,8 @@ export function ProjectSettingsPage({ projectId }: ProjectSettingsPageProps) {
   const dirty =
     trimmed !== detail.name ||
     description !== (detail.description ?? '') ||
-    JSON.stringify(icon) !== JSON.stringify(detail.icon);
+    JSON.stringify(icon) !== JSON.stringify(detail.icon) ||
+    JSON.stringify(tags) !== JSON.stringify(detail.customTelemetryTags ?? []);
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 p-6">
@@ -157,6 +168,8 @@ export function ProjectSettingsPage({ projectId }: ProjectSettingsPageProps) {
             />
           )}
         </FormField>
+        {/* P6-67 (L11): custom OpenTelemetry attributes, `project.custom.<key>` on this project's spans */}
+        <ProjectTelemetryTags value={tags} onChange={setTags} disabled={!canUpdate} />
         {canUpdate && (
           <div>
             <Button

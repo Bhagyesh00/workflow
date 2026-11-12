@@ -1,0 +1,21 @@
+# Test-only OpenTelemetry collector (P6-65, P6-69): the otel-collector service of docker-compose.dev.yml (profile
+# brokers). OTLP over gRPC (4317) and HTTP (4318) in, every trace batch out as one JSON line in
+# /otel-out/traces.json, which is docker/otel-out/traces.json on the host (ignored by git). The wire tests read it.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  file:
+    path: /otel-out/traces.json
+    format: json
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file]

@@ -55,7 +55,7 @@ import type { ServiceDeps } from '../context';
 import type { TenantRow } from '../db/schema';
 import { ApiError } from '../http/errors';
 import { mcpCorsHeaders } from '../http/mcp-http';
-import type { ExecutionOutcome, StartedExecution } from './executions';
+import type { ExecutionOutcome, StartedExecution, TraceContext } from './executions';
 import { createMcpAuthHelper } from './mcp/oauth/tokens';
 import { McpSessionLimitError, type McpSessionRecord, type McpSessionStore } from './mcp-sessions';
 import { evaluateWorkflow } from './type-policies/enforce';
@@ -90,6 +90,8 @@ export interface McpTriggerRequest {
   /** a test URL: takes the registration on the first tool call; a reply means another request took it */
   claim?: () => Promise<WebhookReply | undefined>;
   onStarted?(executionId: string): void;
+  /** P6 S5 (C0): the production request's W3C trace headers (`StoredRunOptions.traceContext`) */
+  traceContext?: TraceContext;
 }
 
 /** legacy SSE streams one workspace may hold open across all mains */
@@ -516,6 +518,7 @@ export class McpTriggerService {
           userId: input.userId,
           endUserId,
           wait: true,
+          traceContext: input.traceContext,
         });
       } catch (error) {
         // limits and quotas: their texts are fixed and safe to show

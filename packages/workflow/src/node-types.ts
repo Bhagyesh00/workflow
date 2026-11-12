@@ -3,6 +3,7 @@
  * Implementations of these contexts live in `@workflow/core`.
  */
 import type { DataTableAccess } from './data-tables';
+import type { AiEventName } from './event-catalog';
 import type {
   BinaryData,
   ConnectionType,
@@ -189,6 +190,8 @@ export interface ExecuteContext extends BaseContext {
   /** true when node.onError is a "continue" mode */
   continueOnFail(): boolean;
   getRunIndex(): number;
+  /** report an AI event (`ai.llm.generated`, ...) for log streaming; `msg` goes only to the workspace's own destinations */
+  logAiEvent?(name: AiEventName, msg?: string): void;
   executeWorkflow(
     source: ExecuteWorkflowSource,
     items: Item[],
@@ -424,6 +427,8 @@ export interface SupplyDataContext extends BaseContext {
   ): Promise<{ executionId: string; data: Item[][] | null }>;
   /** record what the sub-node received/returned so the editor can show AI logs */
   logSubNodeRun(input: DataObject, output: DataObject, error?: Error): void;
+  /** report an AI event (`ai.memory.get.messages`, ...) for log streaming; `msg` goes only to the workspace's own destinations */
+  logAiEvent?(name: AiEventName, msg?: string): void;
   /** a parameter of this node, with `$fromAI` bound to `args` */
   getToolParameter(name: string, itemIndex: number, args: DataObject): unknown;
   /** the main-input ancestors of the root node this sub-node feeds, nearest first (Chat Trigger session lookup) */

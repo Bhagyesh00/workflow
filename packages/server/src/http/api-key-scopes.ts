@@ -97,6 +97,14 @@ export const API_KEY_SCOPES = [
   'nodeTypePolicy:manage',
   'credentialTypePolicy:manage',
   'insights:read',
+  // P6-06, P6-67 (S5 C0): log streaming destinations and OpenTelemetry settings on the public API (appended last)
+  'eventBusDestination:list',
+  'eventBusDestination:read',
+  'eventBusDestination:create',
+  'eventBusDestination:update',
+  'eventBusDestination:test',
+  'eventBusDestination:delete',
+  'otel:manage',
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

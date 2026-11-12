@@ -3,6 +3,7 @@
  * Production fails fast on missing secrets; development gets safe local defaults.
  */
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MasterKey } from '@workflow/core';
@@ -324,6 +325,37 @@ const envSchema = z.object({
   PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_WINDOW: int(60, 1),
   /** P6-S4 (L2): n8n's N8N_SOURCECONTROL_DEFAULT_SSH_KEY_TYPE (name less `N8N_`); any other value is a ConfigError */
   SOURCECONTROL_DEFAULT_SSH_KEY_TYPE: z.enum(['ed25519', 'rsa']).default('ed25519'),
+  /**
+   * P6-71 (S5 C0): n8n's N8N_METRICS_* toggles and intervals (names less `N8N_`, n8n's defaults). `METRICS` is not
+   * read (our /metrics is always on) and `METRICS_PREFIX` is not read (the prefix is fixed `workflow_`).
+   */
+  METRICS_INCLUDE_DEFAULT_METRICS: bool(true),
+  METRICS_INCLUDE_WORKFLOW_ID_LABEL: bool(false),
+  METRICS_INCLUDE_WORKFLOW_NAME_LABEL: bool(false),
+  METRICS_INCLUDE_NODE_TYPE_LABEL: bool(false),
+  METRICS_INCLUDE_CREDENTIAL_TYPE_LABEL: bool(false),
+  METRICS_INCLUDE_API_ENDPOINTS: bool(false),
+  METRICS_INCLUDE_API_PATH_LABEL: bool(false),
+  METRICS_INCLUDE_API_METHOD_LABEL: bool(false),
+  METRICS_INCLUDE_API_STATUS_CODE_LABEL: bool(false),
+  METRICS_INCLUDE_MESSAGE_EVENT_BUS_METRICS: bool(false),
+  METRICS_INCLUDE_QUEUE_METRICS: bool(false),
+  METRICS_INCLUDE_SCHEDULER_METRICS: bool(false),
+  METRICS_INCLUDE_POLL_TRIGGER_METRICS: bool(false),
+  METRICS_INCLUDE_WORKFLOW_STATISTICS: bool(false),
+  METRICS_INCLUDE_SSRF_METRICS: bool(false),
+  METRICS_INCLUDE_DNS_CACHE_METRICS: bool(false),
+  METRICS_INCLUDE_WEBHOOK_METRICS: bool(false),
+  METRICS_INCLUDE_FORM_METRICS: bool(false),
+  METRICS_INCLUDE_DB_POOL_METRICS: bool(false),
+  METRICS_INCLUDE_WORKFLOW_EXECUTION_DURATION: bool(true),
+  /** seconds */
+  METRICS_QUEUE_METRICS_INTERVAL: int(20, 1),
+  METRICS_SCHEDULER_INTERVAL: int(20, 1),
+  METRICS_ACTIVE_WORKFLOW_METRIC_INTERVAL: int(60, 1),
+  METRICS_WORKFLOW_STATISTICS_INTERVAL: int(300, 1),
+  /** P6-62 (S5 C0): the deployment environment a Sentry destination reports (n8n's ENVIRONMENT); unset = none */
+  ENVIRONMENT: z.string().trim().min(1).max(64).optional(),
 });
 
 export type Env = z.input<typeof envSchema>;
@@ -490,6 +522,47 @@ export interface Config {
   publicApiRateLimit: PublicApiRateLimit;
   /** P6-S4 (L2): SOURCECONTROL_DEFAULT_SSH_KEY_TYPE, the key type `generateKeyPair` uses when none is given */
   sourceControl: { defaultKeyType: 'ed25519' | 'rsa' };
+  /** P6-71 (S5 C0): the METRICS_* toggles and intervals (L15 gates the metric families with them) */
+  metrics: MetricsToggles;
+  /** P6-62 (S5 C0): ENVIRONMENT (Sentry's `environment`); undefined when unset */
+  environment?: string;
+  /** P6-62, P6-66, P6-71 (S5 C0): the server package version (Sentry's release, `service.version`, `workflow_version_info`) */
+  version: string;
+}
+
+/**
+ * P6-71 (S5 C0): n8n's metrics toggles (N8N_METRICS_INCLUDE_*, less `N8N_`) and intervals in seconds, n8n's
+ * defaults: default metrics and the execution duration on, every other family off.
+ */
+export interface MetricsToggles {
+  includeDefaultMetrics: boolean;
+  includeWorkflowIdLabel: boolean;
+  includeWorkflowNameLabel: boolean;
+  includeNodeTypeLabel: boolean;
+  includeCredentialTypeLabel: boolean;
+  includeApiEndpoints: boolean;
+  includeApiPathLabel: boolean;
+  includeApiMethodLabel: boolean;
+  includeApiStatusCodeLabel: boolean;
+  includeMessageEventBusMetrics: boolean;
+  includeQueueMetrics: boolean;
+  includeSchedulerMetrics: boolean;
+  includePollTriggerMetrics: boolean;
+  includeWorkflowStatistics: boolean;
+  includeSsrfMetrics: boolean;
+  includeDnsCacheMetrics: boolean;
+  includeWebhookMetrics: boolean;
+  includeFormMetrics: boolean;
+  includeDbPoolMetrics: boolean;
+  includeWorkflowExecutionDuration: boolean;
+  /** METRICS_QUEUE_METRICS_INTERVAL, seconds (20) */
+  queueMetricsInterval: number;
+  /** METRICS_SCHEDULER_INTERVAL, seconds (20) */
+  schedulerInterval: number;
+  /** METRICS_ACTIVE_WORKFLOW_METRIC_INTERVAL, seconds (60) */
+  activeWorkflowCountInterval: number;
+  /** METRICS_WORKFLOW_STATISTICS_INTERVAL, seconds (300) */
+  workflowStatisticsInterval: number;
 }
 
 /** P6-05: the insights collector, compaction and prune bounds (n8n's insights.config.ts names) */
@@ -784,7 +857,51 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       endpointWriteWindow: e.PUBLIC_API_RATE_LIMIT_ENDPOINT_WRITE_WINDOW,
     },
     sourceControl: { defaultKeyType: e.SOURCECONTROL_DEFAULT_SSH_KEY_TYPE },
+    metrics: {
+      includeDefaultMetrics: e.METRICS_INCLUDE_DEFAULT_METRICS,
+      includeWorkflowIdLabel: e.METRICS_INCLUDE_WORKFLOW_ID_LABEL,
+      includeWorkflowNameLabel: e.METRICS_INCLUDE_WORKFLOW_NAME_LABEL,
+      includeNodeTypeLabel: e.METRICS_INCLUDE_NODE_TYPE_LABEL,
+      includeCredentialTypeLabel: e.METRICS_INCLUDE_CREDENTIAL_TYPE_LABEL,
+      includeApiEndpoints: e.METRICS_INCLUDE_API_ENDPOINTS,
+      includeApiPathLabel: e.METRICS_INCLUDE_API_PATH_LABEL,
+      includeApiMethodLabel: e.METRICS_INCLUDE_API_METHOD_LABEL,
+      includeApiStatusCodeLabel: e.METRICS_INCLUDE_API_STATUS_CODE_LABEL,
+      includeMessageEventBusMetrics: e.METRICS_INCLUDE_MESSAGE_EVENT_BUS_METRICS,
+      includeQueueMetrics: e.METRICS_INCLUDE_QUEUE_METRICS,
+      includeSchedulerMetrics: e.METRICS_INCLUDE_SCHEDULER_METRICS,
+      includePollTriggerMetrics: e.METRICS_INCLUDE_POLL_TRIGGER_METRICS,
+      includeWorkflowStatistics: e.METRICS_INCLUDE_WORKFLOW_STATISTICS,
+      includeSsrfMetrics: e.METRICS_INCLUDE_SSRF_METRICS,
+      includeDnsCacheMetrics: e.METRICS_INCLUDE_DNS_CACHE_METRICS,
+      includeWebhookMetrics: e.METRICS_INCLUDE_WEBHOOK_METRICS,
+      includeFormMetrics: e.METRICS_INCLUDE_FORM_METRICS,
+      includeDbPoolMetrics: e.METRICS_INCLUDE_DB_POOL_METRICS,
+      includeWorkflowExecutionDuration: e.METRICS_INCLUDE_WORKFLOW_EXECUTION_DURATION,
+      queueMetricsInterval: e.METRICS_QUEUE_METRICS_INTERVAL,
+      schedulerInterval: e.METRICS_SCHEDULER_INTERVAL,
+      activeWorkflowCountInterval: e.METRICS_ACTIVE_WORKFLOW_METRIC_INTERVAL,
+      workflowStatisticsInterval: e.METRICS_WORKFLOW_STATISTICS_INTERVAL,
+    },
+    environment: e.ENVIRONMENT,
+    version: serverVersion(),
   };
+}
+
+let cachedVersion: string | undefined;
+
+/** P6-71 (S5 C0): the server package.json `version`, read once per process ('0.0.0' when it cannot be read) */
+function serverVersion(): string {
+  if (cachedVersion !== undefined) return cachedVersion;
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(PACKAGE_DIR, 'package.json'), 'utf8')) as {
+      version?: unknown;
+    };
+    cachedVersion = typeof pkg.version === 'string' && pkg.version ? pkg.version : '0.0.0';
+  } catch {
+    cachedVersion = '0.0.0';
+  }
+  return cachedVersion;
 }
 
 /** the set template files, resolved; an empty value keeps the built-in template */

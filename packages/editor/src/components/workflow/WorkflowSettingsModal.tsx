@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { workflowsApi } from '../../api/endpoints';
 import { useSettings } from '../../api/queries';
 import { RedactionSettingsFields } from '../redaction/RedactionSettingsFields';
+import { WorkflowTelemetryTags } from '../telemetry/WorkflowTelemetryTags';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { FormField, Select, Switch, TextInput } from '../ui/Field';
@@ -233,6 +234,8 @@ export function WorkflowSettingsModal({
         )}
         {/* P6-56 (L12): time saved per run, fixed or from Track Time Saved nodes */}
         <TimeSavedFields draft={draft} set={set} />
+        {/* P6-67 (L11): custom OpenTelemetry attributes of this workflow's spans */}
+        <WorkflowTelemetryTags draft={draft} set={set} />
       </div>
     </Dialog>
   );

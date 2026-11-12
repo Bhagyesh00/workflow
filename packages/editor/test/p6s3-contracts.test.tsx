@@ -139,7 +139,7 @@ describe('Security shell sections', () => {
 });
 
 describe('API key scopes', () => {
-  it('shows the three new groups, appended last', () => {
+  it('shows the three new groups', () => {
     render(<ApiKeyScopesField value={['insights:read']} onChange={vi.fn()} />);
     for (const scope of ['nodeTypePolicy:manage', 'credentialTypePolicy:manage', 'insights:read'])
       expect(screen.getByRole('checkbox', { name: scope })).toBeTruthy();
@@ -148,7 +148,10 @@ describe('API key scopes', () => {
       .getAllByRole('group')
       .map((g) => g.getAttribute('aria-label'))
       .filter((label): label is string => label !== null);
-    expect(groups.slice(-3)).toEqual(['Node type policies', 'Credential type policies', 'Insights']);
+    // S3's and S5's groups appended last (S5 adds Log streaming and OpenTelemetry after S3's three)
+    for (const label of ['Node type policies', 'Credential type policies', 'Insights']) {
+      expect(groups).toContain(label);
+    }
   });
 });
 

@@ -1,5 +1,5 @@
 /** Zod schemas shared by the REST and public APIs (also used for the OpenAPI document). */
-import { GROUP_DESCRIPTION_MAX_LENGTH } from '@workflow/workflow';
+import { GROUP_DESCRIPTION_MAX_LENGTH, validateTelemetryTags } from '@workflow/workflow';
 import { z } from 'zod';
 
 export const uuid = z.uuid();
@@ -33,6 +33,17 @@ export const itemSchema = z
   })
   .loose();
 
+/**
+ * P6-67 (S5 C0): custom telemetry tags `[{ key, value }]`, checked by `validateTelemetryTags` (at most 20, keys
+ * trimmed, not blank, unique, up to 64 characters, values up to 256)
+ */
+export const telemetryTagsSchema = z
+  .array(z.object({ key: z.string(), value: z.string() }))
+  .superRefine((tags, ctx) => {
+    const problem = validateTelemetryTags(tags);
+    if (problem) ctx.addIssue({ code: 'custom', message: problem });
+  });
+
 export const nodeSchema = z
   .object({
     id: z.string().min(1).max(128),
@@ -53,6 +64,8 @@ export const nodeSchema = z
     onError: z.enum(['stopWorkflow', 'continueRegularOutput', 'continueErrorOutput']).optional(),
     webhookId: z.string().max(256).optional(),
     color: z.string().max(64).optional(),
+    /** P6-67 (S5 C0): n8n's node shape `{ tag: [{ key, value }] }`; the values may be expressions */
+    customTelemetryTags: z.object({ tag: telemetryTagsSchema.optional() }).optional(),
   })
   .loose();
 
@@ -82,6 +95,8 @@ export const settingsSchema = z
     /** P6-53: which runs' data is hidden, and whether a caller's copy of this sub-workflow's output is too */
     redactionPolicy: z.enum(['none', 'manual-only', 'non-manual', 'all']).optional(),
     redactCallerExecutions: z.boolean().optional(),
+    /** P6-67 (S5 C0): the workflow's custom telemetry tags (span attributes `workflow.custom.<key>`) */
+    customTelemetryTags: telemetryTagsSchema.optional(),
   })
   .loose();
 

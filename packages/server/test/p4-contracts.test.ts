@@ -483,6 +483,17 @@ describe('API key scopes', () => {
       'POST /executions/:id/stop': 'execution:stop',
       'GET /credentials': 'credential:list',
       'GET /credentials/:id': 'credential:read',
+      // P6 S5: log streaming (n8n's 7 rows) and the OpenTelemetry settings
+      'GET /settings/log-streaming/event-types': 'eventBusDestination:list',
+      'GET /settings/log-streaming/destinations': 'eventBusDestination:list',
+      'GET /settings/log-streaming/destinations/:id': 'eventBusDestination:read',
+      'POST /settings/log-streaming/destinations': 'eventBusDestination:create',
+      'PUT /settings/log-streaming/destinations/:id': 'eventBusDestination:update',
+      'DELETE /settings/log-streaming/destinations/:id': 'eventBusDestination:delete',
+      'POST /settings/log-streaming/destinations/:id/test': 'eventBusDestination:test',
+      'GET /settings/otel': 'otel:manage',
+      'PUT /settings/otel': 'otel:manage',
+      'POST /settings/otel/test-trace': 'otel:manage',
     });
   });
 

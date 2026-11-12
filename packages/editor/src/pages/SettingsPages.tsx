@@ -38,6 +38,9 @@ export function SettingsLayout() {
       : []),
     // P6-76: the Git connection and the protected workspace switch (n8n's Environments)
     ...(can('sourceControl:manage') ? [{ to: '/settings/environments', label: 'Environments' }] : []),
+    // P6-64, P6-68: workspace log streaming and the OpenTelemetry collector (owner and admin)
+    ...(can('logStreaming:manage') ? [{ to: '/settings/log-streaming', label: 'Log streaming' }] : []),
+    ...(can('otel:manage') ? [{ to: '/settings/opentelemetry', label: 'OpenTelemetry' }] : []),
     // P5-09: the builder's model
     ...(can('aiAssistant:manage') ? [{ to: '/settings/ai', label: 'AI' }] : []),
     // P5-71: the Assistant's model, search, permissions and MCP connections

@@ -94,7 +94,8 @@ describe('P6 S4 API key scopes', () => {
       'sourceControl:push',
       'sourceControl:read',
     ]);
-    expect(API_KEY_SCOPES).toHaveLength(83);
+    // P6 S5 appends seven (90); later stages add more, so the count is a floor
+    expect(API_KEY_SCOPES.length).toBeGreaterThanOrEqual(83);
     expect(new Set(API_KEY_SCOPES).size).toBe(API_KEY_SCOPES.length);
     for (const scope of ['sourceControl:push', 'sourceControl:read']) {
       expect(SCOPES as readonly string[]).toContain(scope);

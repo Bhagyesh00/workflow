@@ -119,6 +119,20 @@ services:
     ports:
       - "127.0.0.1:3389:389"
 
+  # OpenTelemetry collector for the tracing wire tests (P6-65, P6-69), test only: OTLP gRPC 127.0.0.1:4317 and
+  # HTTP 127.0.0.1:4318; every trace batch is one JSON line in docker/otel-out/traces.json (ignored by git).
+  otel-collector:
+    image: otel/opentelemetry-collector:0.164.0
+    profiles: [brokers]
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+      - ./otel-out:/otel-out
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+
 configs:
   kafka-jaas:
     content: |

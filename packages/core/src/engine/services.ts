@@ -4,6 +4,7 @@
  * are injected here.
  */
 import type {
+  AiEventName,
   BinaryData,
   ChatChunkMeta,
   CredentialGateHelper,
@@ -87,6 +88,14 @@ export interface CodeRunner {
   run(input: CodeRunnerInput): Promise<Item[]>;
 }
 
+/** P6 S5 (C0): an AI event a node reported through `logAiEvent`; `msg` goes only to the workspace's own destinations */
+export interface AiEventRecord {
+  name: AiEventName;
+  nodeName: string;
+  nodeType: string;
+  msg: string;
+}
+
 export interface ExecutionHooks {
   workflowExecuteBefore?(state: ExecutionState): Promise<void> | void;
   nodeExecuteBefore?(nodeName: string, runIndex: number): Promise<void> | void;
@@ -101,6 +110,8 @@ export interface ExecutionHooks {
   /** a streamed chunk; `meta` names the node run and item that sent it (chat frames read it) */
   sendChunk?(chunk: unknown, meta?: ChatChunkMeta): void;
   sendMessageToUI?(nodeName: string, args: unknown[]): void;
+  /** P6 S5 (C0): a node's `logAiEvent` call; never awaited, so it must not throw */
+  aiEvent?(event: AiEventRecord): void;
 }
 
 export interface SubWorkflowRequest {
@@ -201,4 +212,9 @@ export interface ExecutionServices {
   };
   /** `DISABLE_PUBLIC_CHAT_TRIGGER`: the Chat Trigger answers no public (production) chat */
   disablePublicChatTrigger?: boolean;
+  /**
+   * P6 S5 (C0): headers (W3C `traceparent`) the HTTP helpers add to a node's outbound requests;
+   * a header the node set itself wins. Unset or undefined adds none.
+   */
+  traceHeaders?(nodeName: string): Record<string, string> | undefined;
 }

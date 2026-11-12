@@ -14,8 +14,10 @@ import type {
   AssistantTask,
   BinaryData,
   BuilderMessage,
+  CircuitBreakerSettings,
   DataObject,
   EvaluationMetrics,
+  LogDestinationType,
   Scope,
   TestCaseErrorCode,
   TestCaseStatus,
@@ -36,6 +38,7 @@ import {
   jsonb,
   pgTable,
   primaryKey,
+  real,
   smallint,
   text,
   timestamp,
@@ -504,6 +507,8 @@ export const executions = pgTable(
     createdAt: createdAt(),
     /** P6-15: the run used a user's own connection of a private credential (its data stays hidden) */
     usedPrivateCredentials: boolean('used_private_credentials').notNull().default(false),
+    /** P6-67 (S5): the W3C trace context of a run that waits, so its resume continues the same trace */
+    tracingContext: jsonb('tracing_context').$type<TracingContextRow>(),
   },
   (t) => [
     index('executions_tenant_created_idx').on(t.tenantId, t.createdAt, t.id),
@@ -1868,6 +1873,109 @@ export const syncIdMap = pgTable(
   ],
 );
 
+/**
+ * P6-67 (S5): the trace context a waiting run keeps (`executions.tracing_context`): W3C `traceparent`,
+ * optional `tracestate` and `baggage`, and the run's identity attributes. No secret, no node data.
+ */
+export interface TracingContextRow {
+  traceparent: string;
+  tracestate?: string;
+  baggage?: string;
+  identity: Record<string, string>;
+}
+
+/**
+ * Log streaming destination of a workspace (P6-62..66). `settings` holds the type's fields without any
+ * secret; the secret fields are one CredentialCipher payload in `secrets_enc` (binding `logDestination:`),
+ * never returned.
+ */
+export const logDestinations = pgTable(
+  'log_destinations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    type: text('type').$type<LogDestinationType>().notNull(),
+    label: varchar('label', { length: 255 }).notNull().default('Log Destination'),
+    enabled: boolean('enabled').notNull().default(false),
+    subscribedEvents: text('subscribed_events').array().notNull().default(sql`'{}'`),
+    anonymizeAuditMessages: boolean('anonymize_audit_messages').notNull().default(false),
+    circuitBreaker: jsonb('circuit_breaker').$type<CircuitBreakerSettings>(),
+    credentialId: uuid('credential_id').references(() => credentials.id, { onDelete: 'set null' }),
+    settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
+    secretsEnc: text('secrets_enc'),
+    lastError: text('last_error'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index('log_destinations_tenant_idx').on(t.tenantId),
+    check('log_destinations_type_check', sql`${t.type} in ('webhook', 'syslog', 'sentry')`),
+  ],
+);
+
+/** an event a destination could not take (P6-66), kept for a later replay; pruned by age */
+export const logStreamFailed = pgTable(
+  'log_stream_failed',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    destinationId: uuid('destination_id')
+      .notNull()
+      .references(() => logDestinations.id, { onDelete: 'cascade' }),
+    eventId: uuid('event_id').notNull(),
+    event: jsonb('event').$type<Record<string, unknown>>().notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('log_stream_failed_destination_idx').on(t.destinationId, t.id),
+    index('log_stream_failed_created_idx').on(t.createdAt),
+  ],
+);
+
+/**
+ * OpenTelemetry tracing settings of a workspace (P6-67..70), one row per tenant, n8n's fields. The OTLP
+ * headers are a CredentialCipher payload (`exporter_headers_enc`, binding `otel:<tenantId>`), never
+ * returned. The default endpoint is empty, not n8n's `http://localhost:4318`: a workspace's localhost is
+ * the platform's, and the egress guard refuses it.
+ */
+export const otelSettings = pgTable(
+  'otel_settings',
+  {
+    tenantId: uuid('tenant_id')
+      .primaryKey()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    enabled: boolean('enabled').notNull().default(false),
+    exporterProtocol: text('exporter_protocol')
+      .$type<'http/protobuf' | 'grpc'>()
+      .notNull()
+      .default('http/protobuf'),
+    exporterEndpoint: text('exporter_endpoint').notNull().default(''),
+    exporterTracingPath: text('exporter_tracing_path').notNull().default('/v1/traces'),
+    exporterServiceName: varchar('exporter_service_name', { length: 255 }).notNull().default('workflow'),
+    exporterHeadersEnc: text('exporter_headers_enc'),
+    tracesSampleRate: real('traces_sample_rate').notNull().default(1),
+    startupConnectivityTimeoutMs: integer('startup_connectivity_timeout_ms').notNull().default(2000),
+    includeNodeSpans: boolean('include_node_spans').notNull().default(true),
+    emitWorkflowStartSpan: boolean('emit_workflow_start_span').notNull().default(false),
+    emitNodeStartSpan: boolean('emit_node_start_span').notNull().default(false),
+    injectOutbound: boolean('inject_outbound').notNull().default(true),
+    productionExecutionsOnly: boolean('production_executions_only').notNull().default(true),
+    updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    check('otel_settings_exporter_protocol_check', sql`${t.exporterProtocol} in ('http/protobuf', 'grpc')`),
+    check('otel_settings_traces_sample_rate_check', sql`${t.tracesSampleRate} between 0 and 1`),
+  ],
+);
+
 export type { LegacyRole, Role, SystemRole } from './role-types';
 
 export type TenantRow = typeof tenants.$inferSelect;
@@ -1918,3 +2026,6 @@ export type InsightsByPeriodRow = typeof insightsByPeriod.$inferSelect;
 export type PublicApiIdempotencyRow = typeof publicApiIdempotency.$inferSelect;
 export type SourceControlSettingsRow = typeof sourceControlSettings.$inferSelect;
 export type SyncIdMapRow = typeof syncIdMap.$inferSelect;
+export type LogDestinationRow = typeof logDestinations.$inferSelect;
+export type LogStreamFailedRow = typeof logStreamFailed.$inferSelect;
+export type OtelSettingsRow = typeof otelSettings.$inferSelect;

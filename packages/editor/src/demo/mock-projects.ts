@@ -4,6 +4,7 @@
  * change, members (add with conflicts, role, remove) and delete with a transfer or a wipe. L19 needs no demo
  * file of its own.
  */
+import { type TelemetryTag, telemetryTagsOf, validateTelemetryTags } from '@workflow/workflow';
 import type {
   Project,
   ProjectAddUsersResult,
@@ -88,7 +89,14 @@ export function projectDetail(backend: MockBackend, p: StoredProject): ProjectDe
           })
       : [];
   const row = projectRow(backend, p);
-  return { ...row, scopes: row.scopes ?? [], relations, implicitMembers, creatorId: p.creatorId };
+  return {
+    ...row,
+    scopes: row.scopes ?? [],
+    relations,
+    implicitMembers,
+    customTelemetryTags: copy(p.customTelemetryTags),
+    creatorId: p.creatorId,
+  };
 }
 
 export function registerProjectRoutes(backend: MockBackend): void {
@@ -156,9 +164,11 @@ export function registerProjectRoutes(backend: MockBackend): void {
     const name = readName(body.name, false);
     const icon = readIcon(body.icon);
     const description = readDescription(body.description);
+    const customTelemetryTags = readTelemetryTags(body.customTelemetryTags);
     if (name !== undefined) p.name = name;
     if (icon !== undefined) p.icon = icon;
     if (description !== undefined) p.description = description;
+    if (customTelemetryTags !== undefined) p.customTelemetryTags = customTelemetryTags;
     p.updatedAt = now();
     return projectDetail(backend, p);
   });
@@ -296,6 +306,14 @@ function readDescription(value: unknown): string | null | undefined {
   if (typeof value !== 'string' || value.length > 512)
     throw invalid('Description must be at most 512 characters');
   return value;
+}
+
+/** P6-67: the project's telemetry tags as the workflow package checks them; null clears them, absent keeps them */
+function readTelemetryTags(value: unknown): TelemetryTag[] | undefined {
+  if (value === undefined) return undefined;
+  const error = validateTelemetryTags(value);
+  if (error) throw invalid(error);
+  return telemetryTagsOf(value ?? []);
 }
 
 function readIcon(value: unknown): ProjectIcon | null | undefined {

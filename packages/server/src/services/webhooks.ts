@@ -73,12 +73,14 @@ import { mcpCorsHeaders } from '../http/mcp-http';
 import type { PinoLogger } from '../logger';
 import type { Repositories } from '../repositories';
 import type { PushService } from './bus';
-import type {
-  ExecutionObserver,
-  ExecutionOutcome,
-  ExecutionService,
-  StartedExecution,
-  StoredRunOptions,
+import {
+  type ExecutionObserver,
+  type ExecutionOutcome,
+  type ExecutionService,
+  type StartedExecution,
+  type StoredRunOptions,
+  type TraceContext,
+  traceContextOf,
 } from './executions';
 import type { McpTriggerService } from './mcp-trigger';
 import type { Metrics } from './metrics';
@@ -345,6 +347,10 @@ interface RunInput {
   onStarted?: (executionId: string) => void;
   /** takes the test registration once the node accepted the request; a reply means another request took it */
   claim?: () => Promise<WebhookReply | undefined>;
+  /** P6 S5 (C0): a production webhook or form request's W3C trace headers (`StoredRunOptions.traceContext`) */
+  traceContext?: TraceContext;
+  /** P6 S5 (C0): the path the hook is registered at (the metrics label; never the raw URL) */
+  registeredPath?: string;
 }
 
 /** the node whose `allowedOrigins` option grants CORS, and the run settings its expressions resolve with */
@@ -391,6 +397,8 @@ export class WebhookService {
     // /form serves only form hooks, /webhook none
     if (!hook || webhookUrlBase(hook.description) !== kind) return missing();
     // P5-03: the MCP Server Trigger owns its transports, sessions and runs; its body is read there
+    // P6 S5 (C0): the caller's W3C trace context (over-long values dropped); production entries only
+    const traceContext = traceContextOf(incoming.headers);
     if (kind === 'mcp') {
       return this.deps.mcpTrigger.handle({
         tenant,
@@ -401,6 +409,7 @@ export class WebhookService {
         mode: 'webhook',
         incoming,
         params: found.params,
+        traceContext,
       });
     }
     const workflow = new Workflow(definition, this.deps.nodeTypes);
@@ -439,6 +448,8 @@ export class WebhookService {
           mode: 'webhook',
           incoming: received,
           params: found.params,
+          traceContext,
+          registeredPath: found.path,
           onStarted: (id) => {
             executionId = id;
           },
@@ -461,6 +472,8 @@ export class WebhookService {
       mode: 'webhook',
       incoming: received,
       params: found.params,
+      traceContext,
+      registeredPath: found.path,
     });
   }
 
@@ -1108,6 +1121,7 @@ export class WebhookService {
             pinData: input.mode === 'manual' ? manualPinData(definition, node.name) : undefined,
             wait: responseMode !== 'onReceived',
             observer: streaming?.observer ?? (responseMode === 'onReceived' ? undefined : handle.observer),
+            traceContext: input.traceContext,
           });
         } catch (error) {
           if (error instanceof ApiError) {
@@ -1154,6 +1168,30 @@ export class WebhookService {
       if (!executionStarted) await executions.removeBinaryData(tenant.id, executionId);
     }
     metrics.webhookDuration.observe({ status: String(reply.statusCode) }, (Date.now() - started) / 1000);
+    // P6 S5 (C0): the webhook and form metrics (L15), labelled with the registered path, never the raw URL
+    try {
+      const ms = Date.now() - started;
+      const registered = input.registeredPath ?? hook.path;
+      const base = webhookUrlBase(hook.description);
+      if (base === 'form') {
+        if (incoming.request.method === 'POST')
+          metrics.observeForm({
+            statusCode: reply.statusCode,
+            formPath: registered,
+            workflowId: input.workflowId,
+            ms,
+          });
+      } else
+        metrics.observeWebhook({
+          method: incoming.request.method,
+          statusCode: reply.statusCode,
+          webhookPath: registered,
+          workflowId: input.workflowId,
+          ms,
+        });
+    } catch (error) {
+      logger.warn({ err: error }, 'Webhook metrics could not be recorded');
+    }
     return this.decorate(reply, source, incoming.request.headers);
   }
 

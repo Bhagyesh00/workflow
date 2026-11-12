@@ -17,6 +17,21 @@ export interface ExecutionJob {
 
 export const QUEUE_NAME = 'executions';
 
+/**
+ * P6-58 (S5 C0): the queue's job events (L1 turns them into `queue.job.*` events). Each call sits in a try/catch:
+ * a throwing listener is swallowed, so it never fails an enqueue or a job.
+ */
+export interface QueueEventListener {
+  /** a main added the job */
+  enqueued(job: ExecutionJob): void;
+  /** a worker took the job (start of the processor) */
+  dequeued(job: ExecutionJob): void;
+  completed(job: ExecutionJob): void;
+  failed(job: ExecutionJob, error: unknown): void;
+  /** BullMQ found the job's worker gone and hands it out again */
+  stalled(jobId: string): void;
+}
+
 export class ExecutionQueue {
   private readonly connection: Redis;
   private readonly queue: Queue<ExecutionJob>;
@@ -25,6 +40,8 @@ export class ExecutionQueue {
   constructor(
     redisUrl: string,
     private readonly prefix: string,
+    /** P6-58 (S5 C0): the job event listener (a new third argument; absent = no events) */
+    private readonly events?: QueueEventListener,
   ) {
     this.connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
     this.connection.on('error', () => {});
@@ -40,6 +57,17 @@ export class ExecutionQueue {
       removeOnFail: 1000,
       attempts: 1,
     });
+    this.notify((events) => events.enqueued(job));
+  }
+
+  /** calls the listener, swallowing what it throws */
+  private notify(call: (events: QueueEventListener) => void): void {
+    if (!this.events) return;
+    try {
+      call(this.events);
+    } catch {
+      // a listener never fails an enqueue or a job
+    }
   }
 
   startWorker(
@@ -50,8 +78,10 @@ export class ExecutionQueue {
     this.worker = new Worker<ExecutionJob>(
       QUEUE_NAME,
       // a stalled job (its worker died) is handed out again: the processor marks it crashed
-      async (job: Job<ExecutionJob>) =>
-        processor(job.data, { redelivered: job.stalledCounter > 0 || job.attemptsStarted > 1 }),
+      async (job: Job<ExecutionJob>) => {
+        this.notify((events) => events.dequeued(job.data));
+        return processor(job.data, { redelivered: job.stalledCounter > 0 || job.attemptsStarted > 1 });
+      },
       {
         connection: this.connection.duplicate(),
         prefix: `${this.prefix}:bull`,
@@ -59,11 +89,25 @@ export class ExecutionQueue {
       },
     );
     this.worker.on('error', () => {});
+    this.worker.on('completed', (job) => this.notify((events) => events.completed(job.data)));
+    this.worker.on('failed', (job, error) => {
+      if (job) this.notify((events) => events.failed(job.data, error));
+    });
+    this.worker.on('stalled', (jobId) => this.notify((events) => events.stalled(String(jobId))));
   }
 
   async depth(): Promise<number> {
     const counts = await this.queue.getJobCounts('waiting', 'active', 'delayed', 'prioritized');
     return Object.values(counts).reduce((a, b) => a + b, 0);
+  }
+
+  /**
+   * P6-71 (S5 C0, FULL): the waiting and active job counts (BullMQ `getJobCounts`), read by the queue gauges (L15).
+   * Completed jobs are removed at once (`enqueue`), so completed and failed are counted from the job events instead.
+   */
+  async jobCounts(): Promise<{ waiting: number; active: number }> {
+    const counts = await this.queue.getJobCounts('waiting', 'active');
+    return { waiting: counts.waiting ?? 0, active: counts.active ?? 0 };
   }
 
   async close(): Promise<void> {

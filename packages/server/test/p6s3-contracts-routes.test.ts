@@ -46,19 +46,20 @@ const S3_PUBLIC_ROWS: Record<string, ApiRoute[]> = {
 const rowKeys = (rows: ApiRoute[]) => rows.map((r) => `${r.method} ${r.path}`);
 
 describe('P6 S3 API key scopes', () => {
-  it('API_KEY_SCOPES ends with the three S3 scopes, each once, after the S2 scopes', () => {
-    expect(API_KEY_SCOPES.slice(-3)).toEqual([
-      'nodeTypePolicy:manage',
-      'credentialTypePolicy:manage',
-      'insights:read',
-    ]);
-    // P6 S4 adds sourceControl:push and sourceControl:read after sourceControl:pull, so the last three hold
-    expect(API_KEY_SCOPES).toHaveLength(83);
+  it('API_KEY_SCOPES holds the three S3 scopes in a row, each once, after the S2 scopes', () => {
+    // P6 S5 appends its seven scopes after insights:read: the S3 three are read where they sit (bounded)
+    const end = API_KEY_SCOPES.indexOf('insights:read') + 1;
+    expect(end).toBeGreaterThanOrEqual(3);
+    const s3 = API_KEY_SCOPES.slice(end - 3, end);
+    expect(s3).toEqual(['nodeTypePolicy:manage', 'credentialTypePolicy:manage', 'insights:read']);
+    // P6 S4 adds sourceControl:push and sourceControl:read after sourceControl:pull (the three above hold)
+    // P6 S5 adds seven (90); later stages add more, so the count is a floor
+    expect(API_KEY_SCOPES.length).toBeGreaterThanOrEqual(83);
     expect(new Set(API_KEY_SCOPES).size).toBe(API_KEY_SCOPES.length);
     // the scopes S3 gates on that were there before stay where they were
     expect(API_KEY_SCOPES).toContain('securitySettings:manage');
     expect(API_KEY_SCOPES).toContain('securityAudit:generate');
-    for (const scope of API_KEY_SCOPES.slice(-3)) expect(SCOPES as readonly string[]).toContain(scope);
+    for (const scope of s3) expect(SCOPES as readonly string[]).toContain(scope);
   });
 });
 

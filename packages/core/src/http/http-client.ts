@@ -75,6 +75,30 @@ export interface HttpClientOptions {
   userAgent?: string;
 }
 
+/**
+ * P6 S5 (C0): what the SSRF guard did, for metrics. `check`: one host or address checked against the policy
+ * (allowed or blocked); `lookup`: one DNS resolution the guard made and how long it took. No host or address.
+ */
+export type GuardEvent =
+  | { kind: 'check'; allowed: boolean }
+  | { kind: 'lookup'; ok: boolean; durationMs: number };
+
+/** the listener slot shared by a client and its agents, so a listener set later reaches existing agents */
+interface GuardListenerSlot {
+  listener: ((event: GuardEvent) => void) | undefined;
+}
+
+/** calls the listener; a throwing listener never reaches the request */
+function notifyGuard(slot: GuardListenerSlot, event: GuardEvent): void {
+  const listener = slot.listener;
+  if (!listener) return;
+  try {
+    listener(event);
+  } catch {
+    /* a metrics listener must not change what the guard decides */
+  }
+}
+
 const DEFAULT_DENY_HOSTS = ['metadata.google.internal', 'metadata.goog', 'metadata', 'instance-data'];
 
 function matchesList(host: string, address: string, list: string[]): boolean {
@@ -111,16 +135,20 @@ export function isAddressAllowed(host: string, address: string, policy: SsrfPoli
   return parsed.range() === 'unicast';
 }
 
-function guardedLookup(policy: SsrfPolicy): net.LookupFunction {
+function guardedLookup(policy: SsrfPolicy, slot: GuardListenerSlot): net.LookupFunction {
   return (hostname, options, callback) => {
+    const started = performance.now();
     dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
+      notifyGuard(slot, { kind: 'lookup', ok: !err, durationMs: performance.now() - started });
       if (err) return callback(err, '', 4);
       const list = Array.isArray(addresses) ? addresses : [{ address: addresses as string, family: 4 }];
       for (const a of list) {
         if (!isAddressAllowed(hostname, a.address, policy)) {
+          notifyGuard(slot, { kind: 'check', allowed: false });
           return callback(new SsrfBlockedError(hostname, a.address), '', 4);
         }
       }
+      notifyGuard(slot, { kind: 'check', allowed: true });
       if ((options as { all?: boolean }).all) return (callback as any)(null, list);
       return callback(null, list[0].address, list[0].family);
     });
@@ -144,17 +172,26 @@ function pinnedLookup(host: string, addresses: ResolvedAddress[]): AllowedHost['
   };
 }
 
-function createGuardedAgent(policy: SsrfPolicy, rejectUnauthorized = true, bodyTimeout?: number): Agent {
-  const connector = buildConnector({ rejectUnauthorized, lookup: guardedLookup(policy) });
+function createGuardedAgent(
+  policy: SsrfPolicy,
+  slot: GuardListenerSlot,
+  rejectUnauthorized = true,
+  bodyTimeout?: number,
+): Agent {
+  const connector = buildConnector({ rejectUnauthorized, lookup: guardedLookup(policy, slot) });
   return new Agent({
     // undici's own limit on a silent body (5 minutes) stays, except where a caller lifts it
     ...(bodyTimeout === undefined ? {} : { bodyTimeout }),
     // runs for every new connection, redirect hops included; IP literals never reach `lookup`, so check them here
     connect(options, callback) {
       const host = options.hostname.replace(/^\[|\]$/g, '');
-      if (net.isIP(host) && !isAddressAllowed(host, host, policy)) {
-        callback(new SsrfBlockedError(host, host), null);
-        return;
+      if (net.isIP(host)) {
+        const allowed = isAddressAllowed(host, host, policy);
+        notifyGuard(slot, { kind: 'check', allowed });
+        if (!allowed) {
+          callback(new SsrfBlockedError(host, host), null);
+          return;
+        }
       }
       connector(options, callback);
     },
@@ -248,24 +285,41 @@ export class HttpClient {
   private readonly maxResponseBytes: number;
   private readonly defaultTimeoutMs: number;
   private readonly userAgent: string;
+  private readonly guardSlot: GuardListenerSlot = { listener: undefined };
 
   constructor(options: HttpClientOptions = {}) {
     this.policy = { enabled: true, allow: [], deny: [], ...options.ssrf };
-    this.agent = createGuardedAgent(this.policy);
-    this.insecureAgent = createGuardedAgent(this.policy, false);
-    this.streamAgent = createGuardedAgent(this.policy, true, 0);
-    this.insecureStreamAgent = createGuardedAgent(this.policy, false, 0);
+    this.agent = createGuardedAgent(this.policy, this.guardSlot);
+    this.insecureAgent = createGuardedAgent(this.policy, this.guardSlot, false);
+    this.streamAgent = createGuardedAgent(this.policy, this.guardSlot, true, 0);
+    this.insecureStreamAgent = createGuardedAgent(this.policy, this.guardSlot, false, 0);
     this.maxResponseBytes = options.maxResponseBytes ?? 100 * 1024 * 1024;
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 300_000;
     this.userAgent = options.userAgent ?? 'workflow-platform/0.1';
   }
 
-  /** synchronous pre-check for literal IPs/hosts (connect-time check is authoritative) */
+  /**
+   * P6 S5 (C0): one listener for what the SSRF guard does (checks and its DNS lookups), for metrics;
+   * `undefined` removes it. It runs synchronously inside the guard and never changes its decision.
+   */
+  setGuardListener(fn: ((event: GuardEvent) => void) | undefined): void {
+    this.guardSlot.listener = fn;
+  }
+
+  /**
+   * synchronous pre-check for literal IPs/hosts (connect-time check is authoritative). Reports only a
+   * block to the guard listener: an allowed literal is reported once, by the connect-time check.
+   */
   assertUrlAllowed(url: string): void {
     const u = new URL(url);
     const host = u.hostname.replace(/^\[|\]$/g, '');
-    if (net.isIP(host) && !isAddressAllowed(host, host, this.policy)) throw new SsrfBlockedError(host, host);
-    if (DEFAULT_DENY_HOSTS.includes(host.toLowerCase())) throw new SsrfBlockedError(host, host);
+    if (
+      (net.isIP(host) && !isAddressAllowed(host, host, this.policy)) ||
+      DEFAULT_DENY_HOSTS.includes(host.toLowerCase())
+    ) {
+      notifyGuard(this.guardSlot, { kind: 'check', allowed: false });
+      throw new SsrfBlockedError(host, host);
+    }
   }
 
   /** resolve and check a hostname for non-HTTP connections (databases, SMTP) */
@@ -281,16 +335,31 @@ export class HttpClient {
   async resolveAllowedHost(host: string): Promise<AllowedHost> {
     const bare = host.trim().replace(/^\[|\]$/g, '');
     if (!bare) throw new Error('A host is required');
+    const blocked = (address: string): SsrfBlockedError => {
+      notifyGuard(this.guardSlot, { kind: 'check', allowed: false });
+      return new SsrfBlockedError(bare, address);
+    };
     // drivers such as pg treat a leading '/' as a Unix socket path on this machine
-    if (this.policy.enabled && bare.startsWith('/')) throw new SsrfBlockedError(bare, 'unix socket');
-    if (DEFAULT_DENY_HOSTS.includes(bare.toLowerCase())) throw new SsrfBlockedError(bare, bare);
-    const resolved = net.isIP(bare)
-      ? [{ address: bare, family: net.isIP(bare) }]
-      : await dns.promises.lookup(bare, { all: true, verbatim: true });
+    if (this.policy.enabled && bare.startsWith('/')) throw blocked('unix socket');
+    if (DEFAULT_DENY_HOSTS.includes(bare.toLowerCase())) throw blocked(bare);
+    let resolved: Array<{ address: string; family: number }>;
+    if (net.isIP(bare)) {
+      resolved = [{ address: bare, family: net.isIP(bare) }];
+    } else {
+      const started = performance.now();
+      try {
+        resolved = await dns.promises.lookup(bare, { all: true, verbatim: true });
+      } catch (error) {
+        notifyGuard(this.guardSlot, { kind: 'lookup', ok: false, durationMs: performance.now() - started });
+        throw error;
+      }
+      notifyGuard(this.guardSlot, { kind: 'lookup', ok: true, durationMs: performance.now() - started });
+    }
     if (!resolved.length) throw new Error(`Host "${bare}" did not resolve`);
     for (const a of resolved) {
-      if (!isAddressAllowed(bare, a.address, this.policy)) throw new SsrfBlockedError(bare, a.address);
+      if (!isAddressAllowed(bare, a.address, this.policy)) throw blocked(a.address);
     }
+    notifyGuard(this.guardSlot, { kind: 'check', allowed: true });
     const addresses = resolved.map(({ address, family }) => ({ address, family }));
     return { addresses, lookup: pinnedLookup(bare, addresses) };
   }

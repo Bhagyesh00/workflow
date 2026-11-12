@@ -45,6 +45,13 @@
  * the form of `POST /rest/executions/stopMany`), the public source control rows, `GET /api/v1/discover` (any valid
  * key, written as the open row `GET /api/v1/credentials/schema/:type`) and the CLI's public rows (workflow tags,
  * stop a run, the credential list and one credential). After C0 no lane edits this file.
+ *
+ * P6 S5 (C0g): 18 rows (8 REST, 10 public) for the routes S5's C0 registers: log streaming at n8n's paths
+ * (`/rest/eventbus/*`; GET and POST `/eventbus/destination` take either of two scopes through `requireAnyScope`,
+ * one row per method and path with the any-of named in `change`), the OpenTelemetry settings (`otel:manage`) and
+ * their public rows under `/api/v1/settings/log-streaming` and `/api/v1/settings/otel`. Every row is workspace
+ * wide (`target: 'none'`); custom roles cannot hold these scopes. L3 tests the `?id=` read and the update cases.
+ * After C0 no lane edits this file.
  */
 import type { Scope } from '@workflow/workflow';
 import type { Role } from '../src/db/schema';
@@ -1101,6 +1108,47 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     scope: 'ldap:sync',
     target: 'tenant',
   },
+  // log-streaming.ts
+  {
+    file: 'log-streaming.ts',
+    method: 'GET',
+    path: '/rest/eventbus/eventnames',
+    scope: 'eventBusDestination:list',
+    target: 'none',
+  },
+  {
+    file: 'log-streaming.ts',
+    method: 'GET',
+    path: '/rest/eventbus/destination',
+    scope: 'eventBusDestination:list',
+    target: 'none',
+    change:
+      'any of eventBusDestination:list, eventBusDestination:read (`requireAnyScope`), then `:read` with `?id=` or `:list` without (`requireScope`, in the handler); every allowed role holds both',
+  },
+  {
+    file: 'log-streaming.ts',
+    method: 'POST',
+    path: '/rest/eventbus/destination',
+    scope: 'eventBusDestination:create',
+    target: 'none',
+    change:
+      'any of eventBusDestination:create, eventBusDestination:update (`requireAnyScope`), then `:update` when the body has an id or `:create` without (`requireScope`, in the handler); every allowed role holds both',
+  },
+  {
+    file: 'log-streaming.ts',
+    method: 'DELETE',
+    path: '/rest/eventbus/destination',
+    scope: 'eventBusDestination:delete',
+    target: 'none',
+  },
+  {
+    file: 'log-streaming.ts',
+    method: 'POST',
+    path: '/rest/eventbus/testmessage',
+    scope: 'eventBusDestination:test',
+    target: 'none',
+    change: 'n8n answers GET; ours is POST because it sends a test event',
+  },
   // mcp-consent.ts
   {
     file: 'mcp-consent.ts',
@@ -1408,6 +1456,28 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     target: 'tenant',
   },
 
+  // otel.ts
+  {
+    file: 'otel.ts',
+    method: 'GET',
+    path: '/rest/otel/settings',
+    scope: 'otel:manage',
+    target: 'none',
+  },
+  {
+    file: 'otel.ts',
+    method: 'PUT',
+    path: '/rest/otel/settings',
+    scope: 'otel:manage',
+    target: 'none',
+  },
+  {
+    file: 'otel.ts',
+    method: 'POST',
+    path: '/rest/otel/test-trace',
+    scope: 'otel:manage',
+    target: 'none',
+  },
   // password.ts
   {
     file: 'password.ts',
@@ -2109,6 +2179,78 @@ export const ROUTE_MATRIX_ROWS: readonly RouteMatrixRow[] = [
     path: '/api/v1/settings/ldap/sync',
     scope: 'ldap:sync',
     target: 'tenant',
+  },
+  // public-log-streaming.ts
+  {
+    file: 'public-log-streaming.ts',
+    method: 'GET',
+    path: '/api/v1/settings/log-streaming/event-types',
+    scope: 'eventBusDestination:list',
+    target: 'none',
+  },
+  {
+    file: 'public-log-streaming.ts',
+    method: 'GET',
+    path: '/api/v1/settings/log-streaming/destinations',
+    scope: 'eventBusDestination:list',
+    target: 'none',
+  },
+  {
+    file: 'public-log-streaming.ts',
+    method: 'GET',
+    path: '/api/v1/settings/log-streaming/destinations/:id',
+    scope: 'eventBusDestination:read',
+    target: 'none',
+  },
+  {
+    file: 'public-log-streaming.ts',
+    method: 'POST',
+    path: '/api/v1/settings/log-streaming/destinations',
+    scope: 'eventBusDestination:create',
+    target: 'none',
+  },
+  {
+    file: 'public-log-streaming.ts',
+    method: 'PUT',
+    path: '/api/v1/settings/log-streaming/destinations/:id',
+    scope: 'eventBusDestination:update',
+    target: 'none',
+  },
+  {
+    file: 'public-log-streaming.ts',
+    method: 'DELETE',
+    path: '/api/v1/settings/log-streaming/destinations/:id',
+    scope: 'eventBusDestination:delete',
+    target: 'none',
+  },
+  {
+    file: 'public-log-streaming.ts',
+    method: 'POST',
+    path: '/api/v1/settings/log-streaming/destinations/:id/test',
+    scope: 'eventBusDestination:test',
+    target: 'none',
+  },
+  // public-otel.ts
+  {
+    file: 'public-otel.ts',
+    method: 'GET',
+    path: '/api/v1/settings/otel',
+    scope: 'otel:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-otel.ts',
+    method: 'PUT',
+    path: '/api/v1/settings/otel',
+    scope: 'otel:manage',
+    target: 'none',
+  },
+  {
+    file: 'public-otel.ts',
+    method: 'POST',
+    path: '/api/v1/settings/otel/test-trace',
+    scope: 'otel:manage',
+    target: 'none',
   },
   // public-projects.ts
   {

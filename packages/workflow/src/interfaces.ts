@@ -5,6 +5,7 @@
  * The workflow JSON shape (nodes keyed by name in `connections`) is intentionally close to the
  * de-facto format used by node-graph automation tools so that imported workflows map cleanly.
  */
+import type { TelemetryTag } from './observability';
 import type { RedactionPolicy } from './redaction';
 import type { ToolSuspensionState } from './tool-suspension';
 
@@ -135,6 +136,8 @@ export interface WorkflowNode {
   /** stable id used to build default webhook paths */
   webhookId?: string;
   color?: string;
+  /** custom span attributes for this node's span, values may be expressions (n8n's node setting shape) (P6-67) */
+  customTelemetryTags?: { tag?: TelemetryTag[] };
 }
 
 export interface StickyNote {
@@ -173,6 +176,8 @@ export interface WorkflowSettings {
   redactionPolicy?: RedactionPolicy;
   /** false: a caller does not inherit this workflow's own redaction (deeper sub-workflows still pass up) */
   redactCallerExecutions?: boolean;
+  /** custom span attributes for this workflow's spans (P6-67) */
+  customTelemetryTags?: TelemetryTag[];
 }
 
 export interface WorkflowDefinition {
@@ -749,6 +754,8 @@ export interface TaskData {
     subExecution?: { executionId: string; workflowId?: string };
     /** retry attempt that produced this result (1-based) */
     attempt?: number;
+    /** the node's resolved custom telemetry tags, read by the tracing observer (P6-67) */
+    tracing?: Record<string, string | number | boolean>;
     [key: string]: unknown;
   };
 }

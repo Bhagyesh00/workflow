@@ -44,6 +44,7 @@ import { createRepositories, isUniqueViolation, type Repositories } from '../rep
 import type { MessageBus } from './bus';
 import { assertCredentialsUsable } from './credential-usable';
 import { binaryDirOf, type ExecutionObserver, type ExecutionService } from './executions';
+import type { Metrics } from './metrics';
 import type { PrivateCredentialService } from './private-credentials';
 import { loadPublishedDefinition, publishedDefinition } from './published-workflow';
 import type { Leadership } from './queue';
@@ -53,6 +54,9 @@ import { evaluateWorkflow } from './type-policies/enforce';
 import { PolicyViolationError } from './type-policies/errors';
 import { hookUrl, type NodeWebhook, nodeWebhooks, workflowWebhooks } from './webhook-paths';
 import { assertNotArchived } from './workflow-rules';
+
+/** P6 S5 (C0): the trigger whose fires count as schedule fires in the metrics (`recordSchedule`, L15) */
+const SCHEDULE_TRIGGER = 'core.scheduleTrigger';
 
 export interface ValidationIssue {
   node: string | null;
@@ -1326,6 +1330,18 @@ export class ActiveWorkflowManager {
     }
   }
 
+  /**
+   * P6 S5 (C0): records a poll or a schedule fire in the metrics (L15, PASSES); never throws, so a metric
+   * never fails a poll or a run
+   */
+  private recordTriggerMetric(record: (metrics: Metrics) => void): void {
+    try {
+      record(this.deps.serviceDeps.context().metrics);
+    } catch (error) {
+      this.deps.logger.warn({ err: error }, 'Trigger metrics could not be recorded');
+    }
+  }
+
   private async startTriggerNode(
     tenant: TenantRow,
     entry: RunningTriggers,
@@ -1347,6 +1363,7 @@ export class ActiveWorkflowManager {
           )
         : undefined,
       emit: (data, responsePromise, responseHook) => {
+        const fired = Date.now();
         void this.startFromTrigger(
           tenant,
           entry,
@@ -1355,7 +1372,11 @@ export class ActiveWorkflowManager {
           responsePromise,
           undefined,
           responseHook,
-        );
+        ).finally(() => {
+          // P6 S5 (C0): one schedule fire, timed until its run is started
+          if (node.type === SCHEDULE_TRIGGER)
+            this.recordTriggerMetric((m) => m.recordSchedule(node.type, Date.now() - fired));
+        });
       },
       emitError: (error) => {
         void this.onTriggerError(entry, node, error);
@@ -1399,6 +1420,9 @@ export class ActiveWorkflowManager {
       // the poll stores its binary data under the id of the execution it starts
       const executionId = randomUUID();
       let started = false;
+      // P6 S5 (C0): each poll is timed and counted (L15), failed or not
+      const polled = Date.now();
+      let ok = false;
       try {
         const own = await this.storedStaticData(tenant.id, entry.workflow);
         const before = structuredClone(own);
@@ -1415,12 +1439,14 @@ export class ActiveWorkflowManager {
         if (items.length) {
           started = await this.startFromTrigger(tenant, entry, node, items, undefined, executionId);
         }
+        ok = true;
       } catch (error) {
         this.deps.logger.warn(
           { err: error, tenantId: tenant.id, workflowId: entry.workflow.id, node: node.name },
           'Poll failed',
         );
       } finally {
+        this.recordTriggerMetric((m) => m.recordPoll(node.type, ok, Date.now() - polled));
         if (!started) await this.deps.executions.removeBinaryData(tenant.id, executionId);
         busy = false;
       }

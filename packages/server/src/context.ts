@@ -2,6 +2,7 @@
  * Wires configuration, database, Redis, registries and services for one process
  * (a main serving HTTP, or a queue worker).
  */
+import { randomUUID } from 'node:crypto';
 import { CredentialCipher, HttpClient, IsolatedVmCodeRunner, PyodideCodeRunner } from '@workflow/core';
 import type { NodePackage } from '@workflow/workflow';
 import { Redis } from 'ioredis';
@@ -10,6 +11,7 @@ import { createDatabase, type Database, runMigrations } from './db/client';
 import { createLogger, type PinoLogger } from './logger';
 import { buildRegistries, loadNodePackages, type Registries } from './node-packages';
 import { createRepositories, type Repositories } from './repositories';
+import { addAuditListener } from './repositories/resources';
 import { AccessService } from './services/access';
 import { ActiveWorkflowManager } from './services/active-workflows';
 import { AiBuilderService } from './services/ai-builder/builder';
@@ -29,6 +31,11 @@ import { CredentialService } from './services/credentials';
 import { DataTableService } from './services/data-tables';
 import { DependencyService } from './services/dependencies';
 import { EvaluationService } from './services/evaluations';
+import { createAiEventsObserver } from './services/events/ai-events';
+import { handleAuditEntry } from './services/events/audit-events';
+import { createExecutionEventsObserver } from './services/events/execution-events';
+import { createQueueEventListener, workerStarted, workerStopped } from './services/events/queue-events';
+import { EventStream } from './services/events/stream';
 import { ExecutionService } from './services/executions';
 import { FavoriteService } from './services/favorites';
 import { FolderService } from './services/folders';
@@ -37,6 +44,7 @@ import { FormTokenService } from './services/form-tokens';
 import { HistoryCompactionService } from './services/history-compaction';
 import { InsightsCollector } from './services/insights/collector';
 import { InsightsCompaction } from './services/insights/compaction';
+import { LogStreamingManager } from './services/log-streaming/manager';
 import { Mailer } from './services/mailer';
 import { Pruner, WaitTracker } from './services/maintenance';
 import { createMcpAuthHelper } from './services/mcp/oauth/tokens';
@@ -48,6 +56,7 @@ import { MfaService } from './services/mfa';
 import { OAuthJweService } from './services/oauth-jwe';
 import { OAuth1Service } from './services/oauth1';
 import { OAuth2Service } from './services/oauth2';
+import { LifecycleObservers } from './services/observability/lifecycle';
 import { PasswordService } from './services/password';
 import { PrivateCredentialService } from './services/private-credentials';
 import { ProjectService } from './services/projects';
@@ -73,6 +82,9 @@ import {
   RedisTestWebhookStore,
   type TestWebhookStore,
 } from './services/test-webhooks';
+import { OtelSettingsService } from './services/tracing/settings';
+import { createTracingObserver, type TracingObserver } from './services/tracing/subscriber';
+import { TracingService } from './services/tracing/tracer';
 import { TransferService } from './services/transfer';
 import { buildPackageIndex } from './services/type-policies/package-index';
 import { PolicySnapshots } from './services/type-policies/snapshot';
@@ -217,6 +229,20 @@ export interface ServerContext {
   sourceControl: SourceControlSettingsService;
   /** P6-07 (S4 L4): status, push and pull */
   sourceControlSync: SourceControlSyncService;
+  /** P6-06, P6-58 (S5 C0): the in-process event stream (sinks: log streaming, metrics event counters) */
+  events: EventStream;
+  /** P6-58, P6-59, P6-66 (S5 C0): the run lifecycle observers: execution events (L1), AI events (L2), tracing (L10) */
+  observers: LifecycleObservers;
+  /** P6-06 (S5 L3): log streaming destinations; closed in close */
+  logStreaming: LogStreamingManager;
+  /** P6-67 (S5 L11): a workspace's OpenTelemetry settings (`forTenant` FULL) */
+  otelSettings: OtelSettingsService;
+  /** P6-65 (S5 L9): spans and exporters; flushed in close */
+  tracing: TracingService;
+  /** P6-66 (S5 L10): the tracing observer (also in `observers`); `headersFor` gives a node's outbound trace headers */
+  tracingObserver: TracingObserver;
+  /** P6-58, P6-65 (S5 C0): this process: a random id, and `worker` once `startWorker` ran */
+  instance: { id: string; role: 'main' | 'worker' };
   /**
    * P6-09, P6-10: plain http to an identity provider (`ContextOptions.allowInsecureIdp`, tests only; never
    * read from the environment). Services read `this.deps.context().allowInsecureIdp`.
@@ -363,14 +389,6 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const bus: MessageBus =
     queueMode && redisUrl ? new RedisBus(redisUrl, config.queue.prefix) : new MemoryBus();
   const push = new PushService(bus);
-  const queue = queueMode && redisUrl ? new ExecutionQueue(redisUrl, config.queue.prefix) : undefined;
-  const leadership: Leadership =
-    queueMode && redisUrl ? new RedisLeader(redisUrl, `${config.queue.prefix}:leader`) : new SingleLeader();
-  const testWebhooks: TestWebhookStore =
-    queueMode && redisUrl
-      ? new RedisTestWebhookStore(redisUrl, config.queue.prefix)
-      : new MemoryTestWebhookStore();
-
   const contextRef: { current?: ServerContext } = {};
   const serviceDeps: ServiceDeps = {
     config,
@@ -382,6 +400,18 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       return contextRef.current;
     },
   };
+  // P6-58 (S5 C0): the queue's job events reach the event stream (L1)
+  const queue =
+    queueMode && redisUrl
+      ? new ExecutionQueue(redisUrl, config.queue.prefix, createQueueEventListener(serviceDeps))
+      : undefined;
+  const leadership: Leadership =
+    queueMode && redisUrl ? new RedisLeader(redisUrl, `${config.queue.prefix}:leader`) : new SingleLeader();
+  const testWebhooks: TestWebhookStore =
+    queueMode && redisUrl
+      ? new RedisTestWebhookStore(redisUrl, config.queue.prefix)
+      : new MemoryTestWebhookStore();
+
   const folders = new FolderService(serviceDeps);
   const favorites = new FavoriteService(serviceDeps);
   const annotations = new AnnotationService(serviceDeps);
@@ -451,7 +481,32 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
   const metrics = new Metrics({
     queueDepth: queue ? () => queue.depth() : undefined,
     activeWorkflows: async () => (await repos.workflows.listActiveAcrossTenants()).length,
+    toggles: config.metrics,
+    version: config.version,
+    database,
+    queue,
+    leadership,
   });
+  // P6-71 (S5 C0): SSRF checks and DNS lookups of this context's client (the test server's included) reach the metrics
+  http.setGuardListener((event) => metrics.onGuard(event));
+  // P6 S5 (C0): the event stream, the lifecycle observers (in this order: execution events, AI events, tracing),
+  // log streaming, OpenTelemetry settings and the tracer (C0 stubs: constructors, sinks and observers pass)
+  const events = new EventStream(logger);
+  const observers = new LifecycleObservers(logger);
+  const logStreaming = new LogStreamingManager(serviceDeps);
+  const otelSettings = new OtelSettingsService(serviceDeps);
+  const tracing = new TracingService(serviceDeps);
+  const tracingObserver = createTracingObserver(serviceDeps);
+  observers.add(createExecutionEventsObserver(serviceDeps));
+  observers.add(createAiEventsObserver(serviceDeps));
+  observers.add(tracingObserver);
+  events.addSink(logStreaming.sink);
+  events.addSink(metrics.eventsSink);
+  // module level (services write audit rows through fresh repositories per transaction); removed in close
+  const removeAuditListener = addAuditListener((tenantId, entry) =>
+    handleAuditEntry(serviceDeps, tenantId, entry),
+  );
+  const instance: ServerContext['instance'] = { id: randomUUID(), role: 'main' };
   const credentials = new CredentialService(repos, cipher, registries.credentialTypes);
   // P6 S3: until this runs, a credential create fails closed
   credentials.setPolicyDeps(serviceDeps);
@@ -614,6 +669,13 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
     rateLimitSettings,
     sourceControl,
     sourceControlSync,
+    events,
+    observers,
+    logStreaming,
+    otelSettings,
+    tracing,
+    tracingObserver,
+    instance,
     allowInsecureIdp: options.allowInsecureIdp === true,
 
     async startMain() {
@@ -680,6 +742,13 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       }
       queue.startWorker((job, meta) => executions.runQueued(job, meta), config.queue.concurrency);
       logger.info({ concurrency: config.queue.concurrency }, 'Worker is consuming the execution queue');
+      // P6-58 (S5 C0): `worker.started` (L1)
+      instance.role = 'worker';
+      try {
+        workerStarted(serviceDeps);
+      } catch (error) {
+        logger.warn({ err: error }, 'The worker start event failed');
+      }
     },
 
     async close() {
@@ -704,6 +773,20 @@ export async function createContext(options: ContextOptions): Promise<ServerCont
       await insights.flush().catch(() => {});
       await insights.stop().catch(() => {});
       await policySnapshots.stop().catch(() => {});
+      // P6 S5 (C0): `worker.stopped`, then the audit listener goes, the pending events reach their sinks, spans and
+      // destinations flush, all before the database closes
+      if (instance.role === 'worker') {
+        try {
+          workerStopped(serviceDeps);
+        } catch (error) {
+          logger.warn({ err: error }, 'The worker stop event failed');
+        }
+      }
+      removeAuditListener();
+      await events.flush().catch(() => {});
+      await tracing.flush().catch(() => {});
+      await logStreaming.close().catch(() => {});
+      await tracing.close().catch(() => {});
       await testWebhooks.close().catch(() => {});
       await secrets.stop().catch(() => {});
       await bus.close().catch(() => {});

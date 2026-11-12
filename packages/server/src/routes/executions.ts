@@ -205,12 +205,28 @@ export async function getExecution(
   };
 }
 
-export async function deleteExecution(ctx: ServerContext, tenantId: string, id: string) {
+/**
+ * Deletes one execution (a running one is stopped first). P6 S5 (C0): writes the audit row
+ * `execution.deleted` (the execution's id, no run data) for `actor`: the user and address of the request.
+ */
+export async function deleteExecution(
+  ctx: ServerContext,
+  tenantId: string,
+  id: string,
+  actor?: { userId?: string; ip?: string },
+) {
   const row = await ctx.repos.executions.get(tenantId, id);
   if (!row) throw ApiError.notFound('Execution');
   if (['new', 'running', 'waiting'].includes(row.status)) await ctx.executions.stop(tenantId, id);
   await ctx.repos.executions.delete(tenantId, id);
   await ctx.executions.removeBinaryData(tenantId, id);
+  await ctx.repos.audit.add(tenantId, {
+    userId: actor?.userId,
+    action: 'execution.deleted',
+    resourceType: 'execution',
+    resourceId: id,
+    ip: actor?.ip,
+  });
 }
 
 /** inline display is limited to types that cannot run script on this origin */
@@ -362,7 +378,7 @@ export function registerExecutionRoutes(app: FastifyInstance, ctx: ServerContext
 
   app.delete('/executions/:id', async (request) => {
     const { auth, id } = await onExecution(request, 'execution:delete');
-    await deleteExecution(ctx, auth.tenant.id, id);
+    await deleteExecution(ctx, auth.tenant.id, id, { userId: auth.user.id, ip: request.ip });
     return { data: { ok: true } };
   });
 }

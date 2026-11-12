@@ -350,6 +350,26 @@ export interface AuditEntry {
   ip?: string;
 }
 
+export type AuditListener = (tenantId: string, entry: AuditEntry) => void;
+
+/**
+ * P6-58 (S5 C0): module level, not per repository: services build a fresh `AuditRepository` per transaction through
+ * `createRepositories(tx)`, so an instance listener would miss those rows. One context per process in production;
+ * a test process with two live contexts gets each row in both streams.
+ */
+const auditListeners = new Set<AuditListener>();
+
+/**
+ * P6-58 (S5 C0, FULL): `fn` gets every audit row after its insert (L1 turns them into `audit.*` events); the
+ * returned function removes it. A row of a transaction that later rolls back still reaches the listener (decisions F).
+ */
+export function addAuditListener(fn: AuditListener): () => void {
+  auditListeners.add(fn);
+  return () => {
+    auditListeners.delete(fn);
+  };
+}
+
 export class AuditRepository {
   constructor(private readonly db: DbOrTx) {}
 
@@ -364,6 +384,14 @@ export class AuditRepository {
       ip: entry.ip,
       createdAt: now(),
     });
+    // P6-58: each listener in its own try/catch, so a listener never fails the write
+    for (const listener of [...auditListeners]) {
+      try {
+        listener(tenantId, entry);
+      } catch {
+        // swallowed: the audit row is written
+      }
+    }
   }
 
   async list(tenantId: string, limit: number, cursor?: Cursor) {

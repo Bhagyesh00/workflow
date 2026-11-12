@@ -6,6 +6,8 @@
  * - `push:<tenantId>`  editor push events of one tenant
  * - `exec-events`      webhook responses and completion of executions someone waits for
  * - `control`          cancellation and trigger (re)activation requests
+ * - `log-destinations:reload`  `{ tenantId }`: a workspace's log streaming destinations changed (P6-06, L3)
+ * - `otel:reload`      `{ tenantId }`: a workspace's OpenTelemetry settings changed (P6-67, L11)
  */
 import { EventEmitter } from 'node:events';
 import { Redis } from 'ioredis';

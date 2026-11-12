@@ -22,6 +22,9 @@ import type {
   ExecutionState,
   ExecutionStatus,
   Item,
+  LogDestinationBase,
+  LogDestinationSettingsByType,
+  LogDestinationType,
   NodeProperty,
   NodeTypeDescription,
   RedactionFloor,
@@ -2072,3 +2075,39 @@ export interface SourceControlBranches {
   branches: string[];
   currentBranch: string;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phase 6 S5: observability (P6-64..P6-68). The destination, OpenTelemetry and telemetry tag shapes are
+// workflow's (src/observability.ts, src/event-catalog.ts). `ProjectDetail` and `ProjectPatchBody` keep their
+// own `customTelemetryTags` (the same shape as `TelemetryTag`).
+
+export type {
+  AiEventName,
+  CircuitBreakerSettings,
+  EventGroup,
+  EventName,
+  LogDestination,
+  LogDestinationBase,
+  LogDestinationSettings,
+  LogDestinationSettingsByType,
+  LogDestinationTestResult,
+  LogDestinationType,
+  OtelSettings,
+  OtelTestResult,
+  SentryDestinationSettings,
+  SyslogDestinationSettings,
+  TelemetryTag,
+  WebhookDestinationSettings,
+} from '@workflow/workflow';
+
+/**
+ * body of POST /eventbus/destination: without `id` a new destination (`eventBusDestination:create`), with one
+ * an update (`:update`). A blank secret field keeps the saved value while the URL or DSN host is unchanged.
+ */
+export type LogDestinationSaveBody = {
+  [T in LogDestinationType]: Omit<LogDestinationBase, 'id' | 'type'> & {
+    id?: string;
+    type: T;
+    settings: LogDestinationSettingsByType[T];
+  };
+}[LogDestinationType];

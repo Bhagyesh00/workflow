@@ -26,8 +26,11 @@ import { FolderRepository } from './folders';
 import { InsightsRepository } from './insights';
 import { JweKeyRepository } from './jwe-keys';
 import { LdapHistoryRepository } from './ldap-history';
+import { LogDestinationRepository } from './log-destinations';
+import { LogStreamFailedRepository } from './log-stream-failed';
 import { McpOAuthRepository } from './mcp-oauth';
 import { MembersListRepository } from './members-list';
+import { OtelSettingsRepository } from './otel-settings';
 import { ProjectRepository } from './projects';
 import { PublicIdempotencyRepository } from './public-idempotency';
 import { PublishHistoryRepository } from './publish-history';
@@ -139,6 +142,12 @@ export interface Repositories {
   sourceControl: SourceControlRepository;
   /** P6-74 (S4 L3): the source control id map */
   syncIdMap: SyncIdMapRepository;
+  /** P6-06 (S5 C0, L3): log streaming destinations */
+  logDestinations: LogDestinationRepository;
+  /** P6-63 (S5 C0, L7): events a destination could not take, kept for replay */
+  logStreamFailed: LogStreamFailedRepository;
+  /** P6-66, P6-67 (S5 C0): a workspace's OpenTelemetry settings */
+  otelSettings: OtelSettingsRepository;
 }
 
 export function createRepositories(db: DbOrTx): Repositories {
@@ -193,6 +202,9 @@ export function createRepositories(db: DbOrTx): Repositories {
     dependencies: new DependencyRepository(db),
     sourceControl: new SourceControlRepository(db),
     syncIdMap: new SyncIdMapRepository(db),
+    logDestinations: new LogDestinationRepository(db),
+    logStreamFailed: new LogStreamFailedRepository(db),
+    otelSettings: new OtelSettingsRepository(db),
   };
 }
 
@@ -239,6 +251,7 @@ export type {
   MemberListSort,
   MemberListStatus,
 } from './members-list';
+export type { OtelSettingsValues } from './otel-settings';
 export type {
   MovedResources,
   ProjectCreateInput,
@@ -248,7 +261,8 @@ export type {
 } from './projects';
 export { PERSONAL_OWNER_ROLE, ProjectRelationRepository, ProjectRepository } from './projects';
 export type { PublishEvent, PublishTimelineEntry } from './publish-history';
-export type { AuditEntry, CredentialListOptions, VariableListOptions } from './resources';
+export type { AuditEntry, AuditListener, CredentialListOptions, VariableListOptions } from './resources';
+export { addAuditListener } from './resources';
 export type { RoleMappingRuleInput, RoleMappingRuleRecord, RoleMappingRuleType } from './role-mapping';
 export type { RoleCreateInput, RolePatch, RoleType } from './roles';
 export { RoleRepository } from './roles';

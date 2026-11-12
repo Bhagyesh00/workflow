@@ -11,7 +11,9 @@ import {
   foldersApi,
   inboxApi,
   insightsApi,
+  logStreamingApi,
   nodeTypesApi,
+  otelApi,
   projectsApi,
   rolesApi,
   settingsApi,
@@ -165,6 +167,12 @@ export const queryKeys = {
     ['dependencies', 'counts', kind, id] as const,
   /** P6-83 */
   rateLimits: ['rate-limits'] as const,
+  /** P6-64: invalidating `logStreaming` refreshes the destinations and the event names (prefix match) */
+  logStreaming: ['log-streaming'] as const,
+  logDestinations: ['log-streaming', 'destinations'] as const,
+  eventNames: ['log-streaming', 'event-names'] as const,
+  /** P6-67, P6-68 */
+  otelSettings: ['otel', 'settings'] as const,
 };
 
 export function createQueryClient(): QueryClient {
@@ -533,5 +541,38 @@ export function useSourceControlStatus(direction: SourceControlDirection, enable
     retry: false,
     staleTime: 0,
     refetchOnWindowFocus: false,
+  });
+}
+
+/** P6-64: the workspace's log streaming destinations (`eventBusDestination:list`); off for a member's visit */
+export function useLogDestinations(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.logDestinations,
+    queryFn: logStreamingApi.list,
+    enabled,
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
+/** P6-64: the event names a destination may subscribe to (`eventBusDestination:list`) */
+export function useEventNames(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.eventNames,
+    queryFn: logStreamingApi.eventNames,
+    enabled,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** P6-67, P6-68: the workspace's OpenTelemetry settings (`otel:manage`), header values blank */
+export function useOtelSettings(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.otelSettings,
+    queryFn: otelApi.get,
+    enabled,
+    retry: false,
+    staleTime: 60_000,
   });
 }

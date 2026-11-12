@@ -2,6 +2,7 @@
 import type { NodeTypeDescription, OnErrorBehavior, WorkflowNode } from '@workflow/workflow';
 import { useId } from 'react';
 import { ParameterList } from '../parameters/ParameterForm';
+import { NodeTelemetryTags } from '../telemetry/NodeTelemetryTags';
 import { cx } from '../ui/cx';
 import { Select, Switch } from '../ui/Field';
 
@@ -182,6 +183,8 @@ export function NodeSettingsForm({
       {settingProps.length > 0 && (
         <ParameterList properties={settingProps} values={node.parameters} path={[]} />
       )}
+      {/* P6-67 (L11): custom OpenTelemetry attributes of this node's spans (expressions over item 0) */}
+      <NodeTelemetryTags node={node} onChange={onChange} readOnly={readOnly} />
       <Row label="Notes">
         {(id) => (
           <textarea

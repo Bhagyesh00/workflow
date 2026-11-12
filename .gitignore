@@ -13,3 +13,6 @@ coverage/
 # agent worktrees
 .claude/worktrees/
 dump.rdb
+
+# the test OpenTelemetry collector's file exporter output (docker-compose.dev.yml otel-collector)
+docker/otel-out/
