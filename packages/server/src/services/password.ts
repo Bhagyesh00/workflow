@@ -126,7 +126,7 @@ export class PasswordService {
    * reply (the caller runs the returned function once the reply has been sent). Refused only when mail is
    * not set up, or when the user can sign in by password in no workspace.
    */
-  async forgotPassword(email: string, _meta: SessionMeta): Promise<AfterReply> {
+  async forgotPassword(email: string, meta: SessionMeta): Promise<AfterReply> {
     if (!this.ctx.mailer.isConfigured()) {
       throw new ApiError(500, 'mail_not_configured', MAIL_NOT_SET_UP_MESSAGE);
     }
@@ -143,6 +143,8 @@ export class PasswordService {
       if (user) {
         await this.assertPasswordSignIn(user.id);
         const token = await this.issue(user.id, 'password_reset');
+        // P6-58: one audit row for a known user (an unknown address writes none; the timing is held below)
+        await this.audit(user.id, 'auth.password_reset_requested', meta);
         const resetUrl = this.link('/reset-password', token);
         deliver = async () => {
           try {

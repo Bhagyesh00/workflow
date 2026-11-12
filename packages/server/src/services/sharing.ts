@@ -38,6 +38,16 @@ export class SharingService {
     const credential = await this.deps.repos.credentials.get(auth.tenant.id, credentialId);
     if (!credential) throw ApiError.notFound('Credential');
     const change = await this.apply(auth, 'credential', credential.id, credential.projectId, shareWithIds);
+    // P6-58: one audit row per share write that changed something (project ids only)
+    if (change.added.length || change.removed.length) {
+      await this.deps.repos.audit.add(auth.tenant.id, {
+        userId: auth.user.id,
+        action: 'credential.shared',
+        resourceType: 'credential',
+        resourceId: credential.id,
+        metadata: { added: change.added, removed: change.removed },
+      });
+    }
     // P6-17: mails the users the credential was shared with
     if (change.added.length) {
       await credentialShared(this.deps, auth.tenant.id, auth.user.id, credential.id, change.added);

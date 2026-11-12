@@ -95,6 +95,15 @@ export function registerMfaRoutes(app: FastifyInstance, ctx: ServerContext): voi
       const current = (settings.mfa ?? {}) as Record<string, unknown>;
       // P6-78: only the `mfa` key, so a write at the same time to another key is kept
       await repos.tenants.mergeSettings(tenant.id, { mfa: { ...current, enforced: enforce } });
+      // P6-58: the change is audited (the new value only), so the event stream can tell enforce from release
+      await repos.audit.add(tenant.id, {
+        userId: auth.user.id,
+        action: 'tenant.settings_updated',
+        resourceType: 'tenant',
+        resourceId: tenant.id,
+        metadata: { mfa: { enforced: enforce } },
+        ip: clientIp(request),
+      });
     }
     return { data: { enforced: enforce } };
   });

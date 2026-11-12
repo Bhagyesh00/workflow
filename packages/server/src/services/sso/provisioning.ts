@@ -38,6 +38,32 @@ export interface ProvisioningDecision {
   projectRoles?: Record<string, string>;
 }
 
+/** P6-58: what produced a decision, kept beside it for the `provisioning.roles_resolved` audit row (ids only) */
+interface DecisionTrace {
+  instance?: { kind: 'claim' | 'rule' | 'default'; ruleId?: string };
+  /** project id to the id of the rule that gave its role (rule mode) */
+  projectRules: Record<string, string>;
+}
+const decisionTraces = new WeakMap<ProvisioningDecision, DecisionTrace>();
+
+/** P6-58: the metadata of a `provisioning.roles_resolved` audit row */
+interface RolesResolved {
+  instanceRole?: {
+    role: string;
+    previousRole: string;
+    changed: boolean;
+    matchedRule?: string;
+    fallback: boolean;
+  };
+  projectRoles?: Array<{
+    projectId: string;
+    role: string;
+    previousRole: string | null;
+    matchedRule?: string;
+  }>;
+  removedProjectIds?: string[];
+}
+
 /** what blocks deleting a custom role: the rules that assign it */
 export interface RuleBlocker {
   id: string;
@@ -180,10 +206,12 @@ export class ProvisioningService {
     tenantId: string,
     config: ProvisioningConfigDTO,
     claims: DataObject,
+    trace: DecisionTrace,
   ): Promise<string | undefined> {
     if (config.scopesUseExpressionMapping) {
       for (const rule of await this.repos.roleMapping.list(tenantId, 'instance')) {
         if (ruleMatches(rule.expression, claims) && (await this.instanceRoleValid(tenantId, rule.role))) {
+          trace.instance = { kind: 'rule', ruleId: rule.id };
           return rule.role;
         }
       }
@@ -192,7 +220,10 @@ export class ProvisioningService {
     const claim = claims[config.scopesInstanceRoleClaimName];
     const slug =
       typeof claim === 'string' ? claim.trim() : Array.isArray(claim) ? String(claim[0] ?? '').trim() : '';
-    if (slug && (await this.instanceRoleValid(tenantId, slug))) return slug;
+    if (slug && (await this.instanceRoleValid(tenantId, slug))) {
+      trace.instance = { kind: 'claim' };
+      return slug;
+    }
     // an unknown role, an owner claim or no claim: the default condition decides (the value stays out of the log)
     this.deps.logger.warn({ tenantId }, 'The identity provider gave no usable workspace role');
     return undefined;
@@ -203,13 +234,19 @@ export class ProvisioningService {
     tenantId: string,
     config: ProvisioningConfigDTO,
     claims: DataObject,
+    trace: DecisionTrace,
   ): Promise<Record<string, string>> {
     const wanted = new Map<string, string>();
+    const matched = new Map<string, string>();
     if (config.scopesUseExpressionMapping) {
       for (const rule of await this.repos.roleMapping.list(tenantId, 'project')) {
         if (!ruleMatches(rule.expression, claims)) continue;
         if (!(await this.projectRoleValid(tenantId, rule.role))) continue;
-        for (const projectId of rule.projectIds) if (!wanted.has(projectId)) wanted.set(projectId, rule.role);
+        for (const projectId of rule.projectIds) {
+          if (wanted.has(projectId)) continue;
+          wanted.set(projectId, rule.role);
+          matched.set(projectId, rule.id);
+        }
       }
     } else {
       for (const entry of stringList(claims[config.scopesProjectsRolesClaimName]).slice(
@@ -228,7 +265,10 @@ export class ProvisioningService {
     }
     const out: Record<string, string> = {};
     for (const [projectId, role] of wanted) {
-      if (await this.teamProject(tenantId, projectId)) out[projectId] = role;
+      if (!(await this.teamProject(tenantId, projectId))) continue;
+      out[projectId] = role;
+      const ruleId = matched.get(projectId);
+      if (ruleId) trace.projectRules[projectId] = ruleId;
     }
     return out;
   }
@@ -246,8 +286,10 @@ export class ProvisioningService {
     if (membership?.role === 'owner') return { blocked: false };
 
     const decision: ProvisioningDecision = { blocked: false };
+    const trace: DecisionTrace = { projectRules: {} };
+    decisionTraces.set(decision, trace);
     if (config.scopesProvisionInstanceRole) {
-      const role = await this.instanceRoleFor(tenant.id, config, claims);
+      const role = await this.instanceRoleFor(tenant.id, config, claims, trace);
       if (role) {
         decision.instanceRole = role;
       } else if (config.defaultInstanceRole === BLOCK_ACCESS) {
@@ -257,10 +299,11 @@ export class ProvisioningService {
         (await this.instanceRoleValid(tenant.id, config.defaultInstanceRole))
       ) {
         decision.instanceRole = config.defaultInstanceRole;
+        trace.instance = { kind: 'default' };
       }
     }
     if (config.scopesProvisionProjectRoles) {
-      decision.projectRoles = await this.projectRolesFor(tenant.id, config, claims);
+      decision.projectRoles = await this.projectRolesFor(tenant.id, config, claims, trace);
     }
     return decision;
   }
@@ -273,19 +316,39 @@ export class ProvisioningService {
     // the owner never changes
     if (!membership || membership.role === 'owner') return;
 
+    // P6-58: what this sign-in resolved, written as one audit row at the end (ids, slugs and rule ids only)
+    const previousRole = membership.role;
+    const trace = decisionTraces.get(decision);
+    const resolved: RolesResolved = {};
+    if (decision.instanceRole !== undefined) {
+      resolved.instanceRole = {
+        role: decision.instanceRole,
+        previousRole,
+        changed: false,
+        ...(trace?.instance?.kind === 'rule' && trace.instance.ruleId
+          ? { matchedRule: trace.instance.ruleId }
+          : {}),
+        fallback: trace?.instance?.kind === 'default',
+      };
+    }
     if (decision.instanceRole !== undefined && decision.instanceRole !== membership.role) {
       if (!(await this.instanceRoleValid(tenantId, decision.instanceRole))) return;
       await changeMemberRole(ctx, tenantId, userId, decision.instanceRole as Role, {
         source: 'provisioning',
       });
       membership = (await this.repos.memberships.getIncludingDisabled(tenantId, userId)) ?? membership;
+      if (resolved.instanceRole) resolved.instanceRole.changed = true;
     }
 
     const wanted = decision.projectRoles;
     // owners and admins already reach every team project
-    if (!wanted || (IMPLICIT_TEAM_PROJECT_MEMBER_ROLES as readonly string[]).includes(membership.role))
+    if (!wanted || (IMPLICIT_TEAM_PROJECT_MEMBER_ROLES as readonly string[]).includes(membership.role)) {
+      await this.auditRolesResolved(tenantId, userId, resolved);
       return;
+    }
     const changed = new Set<string>();
+    const projectReport: NonNullable<RolesResolved['projectRoles']> = [];
+    const removedProjectIds: string[] = [];
     await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
       const current = (await repos.projects.relations.listForUser(tenantId, userId)).filter(
@@ -299,6 +362,12 @@ export class ProvisioningService {
         if (before === undefined) await repos.projects.relations.add(tenantId, projectId, userId, role);
         else await repos.projects.relations.updateRole(tenantId, projectId, userId, role);
         changed.add(projectId);
+        projectReport.push({
+          projectId,
+          role,
+          previousRole: before ?? null,
+          ...(trace?.projectRules[projectId] ? { matchedRule: trace.projectRules[projectId] } : {}),
+        });
         await repos.audit.add(tenantId, {
           userId: null,
           action: before === undefined ? 'project.member.added' : 'project.member.role_changed',
@@ -311,6 +380,7 @@ export class ProvisioningService {
         if (projectId in wanted) continue;
         await repos.projects.relations.remove(tenantId, projectId, userId);
         changed.add(projectId);
+        removedProjectIds.push(projectId);
         await repos.audit.add(tenantId, {
           userId: null,
           action: 'project.member.removed',
@@ -323,6 +393,23 @@ export class ProvisioningService {
     // a lowered or removed project role takes the person's private credential entries with it
     for (const projectId of changed)
       await ctx.privateCredentials.afterAccessChange(tenantId, { userId, projectId });
+    await this.auditRolesResolved(tenantId, userId, {
+      ...resolved,
+      projectRoles: projectReport,
+      removedProjectIds,
+    });
+  }
+
+  /** P6-58: the `provisioning.roles_resolved` row (the sign-in's provider is the workspace's active method) */
+  private async auditRolesResolved(tenantId: string, userId: string, resolved: RolesResolved): Promise<void> {
+    const provider = (await this.repos.sso.get(tenantId))?.method ?? null;
+    await this.repos.audit.add(tenantId, {
+      userId,
+      action: 'provisioning.roles_resolved',
+      resourceType: 'user',
+      resourceId: userId,
+      metadata: { provider, ...resolved },
+    });
   }
 
   /** refused while workspace roles come from the provider */

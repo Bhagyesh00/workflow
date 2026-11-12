@@ -70,7 +70,15 @@ export class SecuritySettingsService {
       for (const flag of FLAGS) {
         if (patch[flag] !== undefined) securityPolicy[flag] = patch[flag];
       }
-      const redactionFloor = patch.redaction?.floor ?? floorOf(tenant);
+      const previousFloor = floorOf(tenant);
+      const redactionFloor = patch.redaction?.floor ?? previousFloor;
+      // P6-58: the settings this save changed (a flag is on until set off), so the events can tell them apart
+      const changed: string[] = [
+        ...FLAGS.filter(
+          (flag) => (settings.securityPolicy?.[flag] !== false) !== (securityPolicy[flag] !== false),
+        ),
+        ...(redactionFloor !== previousFloor ? ['redactionFloor'] : []),
+      ];
       // P6-78: only its own keys, merged in this transaction
       await repos.tenants.mergeSettings(tenantId, {
         securityPolicy,
@@ -88,6 +96,7 @@ export class SecuritySettingsService {
           personalSpacePublishing: securityPolicy.personalSpacePublishing !== false,
           personalSpaceSharing: securityPolicy.personalSpaceSharing !== false,
           redactionFloor,
+          changed,
         },
       });
     });

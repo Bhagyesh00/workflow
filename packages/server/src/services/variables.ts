@@ -120,12 +120,19 @@ export class VariableService {
         : ApiError.forbidden('You are not allowed to create a variable in this project');
     }
     await this.assertKeyFree(tenantId, input.key, projectId);
+    let created: VariableRow;
     try {
-      return await this.repos.variables.create(tenantId, { key: input.key, value: input.value, projectId });
+      created = await this.repos.variables.create(tenantId, {
+        key: input.key,
+        value: input.value,
+        projectId,
+      });
     } catch (error) {
       if (isUniqueViolation(error)) throw this.duplicate(input.key, projectId);
       throw error;
     }
+    await this.audit(auth, 'variable.created', created);
+    return created;
   }
 
   async update(auth: AuthContext, id: string, patch: VariableUpdateInput): Promise<VariableRow> {
@@ -170,6 +177,7 @@ export class VariableService {
               ...(patch.value !== undefined ? { value: patch.value } : {}),
             });
       if (!updated) throw ApiError.notFound('Variable');
+      await this.audit(auth, 'variable.updated', updated);
       return updated;
     } catch (error) {
       if (isUniqueViolation(error)) throw this.duplicate(key, destination);
@@ -182,5 +190,17 @@ export class VariableService {
     const row = await this.require(auth, id);
     if (!(await this.allowed(auth, row.projectId, 'delete'))) throw missingScope();
     if (!(await this.repos.variables.delete(auth.tenant.id, id))) throw ApiError.notFound('Variable');
+    await this.audit(auth, 'variable.deleted', row);
+  }
+
+  /** P6-58: the audit row of a variable write; the key and the place, never the value */
+  private async audit(auth: AuthContext, action: string, row: VariableRow): Promise<void> {
+    await this.repos.audit.add(auth.tenant.id, {
+      userId: auth.user.id,
+      action,
+      resourceType: 'variable',
+      resourceId: row.id,
+      metadata: { key: row.key, ...(row.projectId ? { projectId: row.projectId } : {}) },
+    });
   }
 }

@@ -116,6 +116,9 @@ export async function stopMany(
   return { stopped };
 }
 
+/** the most execution ids one bulk delete audit row names */
+const AUDIT_ID_LIMIT = 1000;
+
 export async function deleteMany(
   deps: ServiceDeps,
   auth: AuthContext,
@@ -127,6 +130,7 @@ export async function deleteMany(
   const filter: ExecutionBulkFilter = { ...input.filters };
   if (input.ids) filter.ids = input.ids;
   let deleted = 0;
+  const deletedIds: string[] = [];
   await eachBatch(deps, tenantId, access, filter, { startedBefore: input.deleteBefore }, async (rows) => {
     for (const row of rows) {
       if (ACTIVE.includes(row.status as ExecutionStatus)) {
@@ -138,11 +142,25 @@ export async function deleteMany(
       }
       if (await deps.repos.executions.delete(tenantId, row.id)) {
         deleted++;
+        if (deletedIds.length < AUDIT_ID_LIMIT) deletedIds.push(row.id);
         await ctx.executions.removeBinaryData(tenantId, row.id);
       }
     }
   });
   // a selection no run of which the caller may delete: n8n answers not found
   if (input.ids?.length && deleted === 0) throw ApiError.notFound('Execution');
+  // P6-58: one audit row for the whole bulk delete (ids up to a bound, `deleted` is the real count)
+  if (deleted > 0) {
+    await deps.repos.audit.add(tenantId, {
+      userId: auth.user.id,
+      action: 'execution.deleted',
+      resourceType: 'execution',
+      metadata: {
+        executionIds: deletedIds,
+        deleted,
+        ...(input.deleteBefore ? { deleteBefore: input.deleteBefore.toISOString() } : {}),
+      },
+    });
+  }
   return { deleted };
 }

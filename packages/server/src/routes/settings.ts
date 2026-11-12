@@ -185,11 +185,18 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: ServerContext)
     };
     const tenant = await repos.tenants.mergeSettings(auth.tenant.id, patch);
     const next = (tenant?.settings ?? {}) as TenantSettings;
+    const workflowReviewsChanged =
+      body.workflowReviews !== undefined &&
+      (current.workflowReviews?.enabled === true) !== (next.workflowReviews?.enabled === true);
     await repos.audit.add(auth.tenant.id, {
       userId: auth.user.id,
       action: 'tenant.settings_updated',
       resourceType: 'tenant',
       resourceId: auth.tenant.id,
+      // P6-58: the new workflow reviews switch, only when this save changed it
+      ...(workflowReviewsChanged
+        ? { metadata: { workflowReviews: { enabled: next.workflowReviews?.enabled === true } } }
+        : {}),
       ip: request.ip,
     });
     return {

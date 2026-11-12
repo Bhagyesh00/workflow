@@ -601,8 +601,16 @@ export class WorkflowReviewService {
     const row = await this.deps.database.db.transaction(async (tx) => {
       const repos = createRepositories(tx);
       const closed = await repos.reviews.closeOpenForWorkflow(tenantId, workflowId);
-      if (closed)
+      if (closed) {
         await repos.reviews.addActivity(tenantId, closed.id, { type: 'closed', data, createdBy: null });
+        // P6-58: a system close has no user (the workflow was archived or deleted)
+        await repos.audit.add(tenantId, {
+          action: 'workflow_review.closed',
+          resourceType: 'workflow_review',
+          resourceId: closed.id,
+          metadata: { workflowId, ...data },
+        });
+      }
       return closed;
     });
     if (row) this.emit(tenantId);
