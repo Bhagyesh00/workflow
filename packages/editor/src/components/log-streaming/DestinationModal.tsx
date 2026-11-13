@@ -48,7 +48,7 @@ const AUTH_CREDENTIAL_TYPES = new Set([
   'httpDigestAuth',
   'httpHeaderAuth',
   'httpQueryAuth',
-  'httpTemplatedCustomAuth',
+  'httpCustomAuth',
 ]);
 
 const DEFAULTS: Record<LogDestinationType, LogDestinationSettings> = {
@@ -147,6 +147,11 @@ function problemsOf(type: LogDestinationType, draft: Draft): string[] {
     problems.push('Enter the URL to send to.');
   if (type === 'syslog' && !(draft.settings as SyslogDestinationSettings).host.trim())
     problems.push('Enter the syslog host.');
+  if (type === 'syslog') {
+    const syslog = draft.settings as SyslogDestinationSettings;
+    if (syslog.protocol === 'tls' && !(syslog.tlsCa ?? '').trim())
+      problems.push('Paste the CA certificate for TLS.');
+  }
   if (type === 'sentry' && !(draft.settings as SentryDestinationSettings).dsn.trim())
     problems.push('Enter the Sentry DSN.');
   if (!Number.isInteger(draft.maxFailures) || draft.maxFailures < 1)

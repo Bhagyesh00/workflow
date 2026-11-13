@@ -28,8 +28,8 @@ const FACILITIES: Array<[number, string]> = [
 ];
 
 const EOLS: Array<[string, string]> = [
-  ['\n', 'LF (\n)'],
-  ['\r\n', 'CRLF (\r\n)'],
+  ['\n', 'LF'],
+  ['\r\n', 'CRLF'],
 ];
 
 export function SyslogFields({ value, onChange, disabled }: SyslogFieldsProps): ReactNode {
@@ -84,7 +84,7 @@ export function SyslogFields({ value, onChange, disabled }: SyslogFieldsProps): 
       {value.protocol === 'tls' && (
         <FormField
           label="CA certificate"
-          hint="A PEM bundle for a private certificate authority. Leave it empty to use the system roots."
+          hint="Required for TLS. Paste the PEM certificate of the authority that signed the server's certificate."
         >
           {(id) => (
             <TextArea

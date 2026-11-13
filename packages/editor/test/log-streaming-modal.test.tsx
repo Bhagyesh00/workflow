@@ -125,6 +125,81 @@ describe('DestinationModal', () => {
     });
   });
 
+  it('the webhook credential picker lists the five generic HTTP auth types the server accepts', async () => {
+    signedIn();
+    const types = ['httpBasicAuth', 'httpDigestAuth', 'httpHeaderAuth', 'httpQueryAuth', 'httpCustomAuth'];
+    for (const type of [...types, 'httpTemplatedCustomAuth', 'crmApi']) {
+      await call('POST', '/credentials', { name: `Cred ${type}`, type, data: {} });
+    }
+    open('webhook');
+    const dialog = await screen.findByRole('dialog', {}, T);
+    const picker = within(dialog).getByLabelText('Credential');
+    await waitFor(() => expect(within(picker).getAllByRole('option').length).toBeGreaterThan(1), T);
+    const names = within(picker)
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+    expect(names).toEqual(['None', ...types.map((t) => `Cred ${t}`)]);
+  });
+
+  it('a syslog destination over TLS needs a CA before Save sends, and the End of line labels are plain', async () => {
+    signedIn();
+    const user = userEvent.setup();
+    open('syslog');
+    const dialog = await screen.findByRole('dialog', {}, T);
+    const eol = within(dialog).getByLabelText('End of line');
+    expect(
+      within(eol)
+        .getAllByRole('option')
+        .map((o) => o.textContent),
+    ).toEqual(['LF', 'CRLF']);
+    await user.type(within(dialog).getByLabelText('Label'), 'No CA');
+    await user.type(within(dialog).getByLabelText('Host'), 'logs.example.test');
+    await user.selectOptions(within(dialog).getByLabelText('Protocol'), 'tls');
+    expect(within(dialog).getByText(/Required for TLS/)).toBeTruthy();
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect(await within(dialog).findByText('Paste the CA certificate for TLS.', {}, T)).toBeTruthy();
+    expect(lastSave()).toBeUndefined();
+  });
+
+  it('the demo backend refuses TLS without a CA, as the server does', async () => {
+    signedIn();
+    const res = await call('POST', '/eventbus/destination', {
+      type: 'syslog',
+      label: 'Raw TLS',
+      enabled: true,
+      subscribedEvents: [],
+      anonymizeAuditMessages: false,
+      settings: {
+        host: 'logs.example.test',
+        port: 6514,
+        protocol: 'tls',
+        facility: 16,
+        app_name: 'w',
+        eol: '\n',
+      },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error?.message).toBe('A CA certificate is required for TLS');
+  });
+
+  it('the demo backend blanks the password of a webhook URL and keeps it on a blank save', async () => {
+    signedIn();
+    const dest = await saved('Userinfo hook', webhookSettings('https://bob:s3cret@hooks.example.test/x'));
+    expect(JSON.stringify(dest)).not.toContain('s3cret');
+    expect((dest.settings as { url: string }).url).not.toContain('s3cret');
+    const again = await call('POST', '/eventbus/destination', {
+      id: dest.id,
+      type: 'webhook',
+      label: 'Userinfo hook',
+      enabled: true,
+      subscribedEvents: ['audit'],
+      anonymizeAuditMessages: false,
+      settings: webhookSettings((dest.settings as { url: string }).url),
+    });
+    expect(again.status).toBe(200);
+    expect(JSON.stringify(again.body)).not.toContain('s3cret');
+  });
+
   it('creates a Sentry destination and hides the key of a saved DSN', async () => {
     signedIn();
     const user = userEvent.setup();

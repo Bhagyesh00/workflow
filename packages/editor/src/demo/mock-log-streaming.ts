@@ -44,6 +44,7 @@ const sameOrigin = (a: URL, b: URL): boolean =>
 function maskUrl(text: string): string {
   const url = new URL(text);
   for (const key of [...url.searchParams.keys()]) url.searchParams.set(key, '');
+  url.password = '';
   return url.toString();
 }
 
@@ -105,6 +106,8 @@ function checkSettings(
       for (const [key, value] of [...url.searchParams.entries()])
         if (value === '' && savedUrl.searchParams.has(key))
           url.searchParams.set(key, savedUrl.searchParams.get(key) ?? '');
+    // a blank password of the URL keeps the saved one
+    if (savedUrl && keep && !url.password && savedUrl.password) url.password = savedUrl.password;
     if (!METHODS.includes(String(s.method))) throw bad('The method must be GET, POST, PUT or PATCH');
     s.url = url.toString();
     s.queryParameters = keepRowSecrets(s.queryParameters, saved?.queryParameters, keep, 'query parameter');
@@ -124,6 +127,8 @@ function checkSettings(
     const facility = Number(s.facility);
     if (!Number.isInteger(facility) || facility < 0 || facility > 23)
       throw bad('The facility must be between 0 and 23');
+    if (s.protocol === 'tls' && !(typeof s.tlsCa === 'string' && s.tlsCa.trim()))
+      throw bad('A CA certificate is required for TLS');
     s.host = s.host.trim();
     s.port = port;
     s.facility = facility;
