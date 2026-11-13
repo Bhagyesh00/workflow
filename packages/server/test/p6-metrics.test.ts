@@ -6,11 +6,17 @@
  * 127.0.0.1; fixed fake values only.
  */
 import { randomUUID } from 'node:crypto';
+import type { AddressInfo } from 'node:net';
+import { HttpClient } from '@workflow/core';
+import { nodesBasePackage } from '@workflow/nodes-base';
 import type { WorkflowNode } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { MetricsToggles } from '../src/config';
+import { createContext, type ServerContext } from '../src/context';
 import { Metrics } from '../src/services/metrics';
 import { DEFAULT_METRICS_TOGGLES } from '../src/services/metrics-collectors';
+import { ExecutionQueue } from '../src/services/queue';
+import { startWorkerServer, workerServerPort } from '../src/services/worker-server';
 import { startHttpSink } from './fakes/http-sink';
 import {
   chain,
@@ -23,6 +29,8 @@ import {
   signup,
   TEST_REDIS,
   type TestServer,
+  testConfig,
+  testPackage,
   waitFor,
   waitForExecution,
 } from './helpers';
@@ -107,7 +115,10 @@ describe('defaults (n8n: label families and the webhook and form families are of
       'workflow_scaling_mode_queue_jobs',
       'workflow_scheduler_',
       'workflow_poll_trigger_',
-      'workflow_statistics_',
+      'workflow_production_executions',
+      'workflow_manual_executions',
+      'workflow_users',
+      'workflow_credentials',
       'workflow_ssrf_',
       'workflow_dns_',
       'workflow_db_pool_',
@@ -252,14 +263,16 @@ describe('toggles on a bare Metrics', () => {
     });
     stream(labelled, 'node.finished', payload);
     stream(labelled, 'node.finished', payload);
+    const labelledBody = await labelled.registry.metrics();
     expect(
-      sample(await labelled.registry.metrics(), 'workflow_node_finished_total', {
+      sample(labelledBody, 'workflow_node_finished_total', {
         workflow_id: 'wf-9',
         workflow_name: 'My flow',
         node_type: 'core.code',
-        credential_type: 'httpBasic',
       }),
     ).toBe(2);
+    // credential_type belongs to the credential event counters only
+    expect(labelledBody).not.toContain('credential_type');
 
     const idOnly = new Metrics({
       toggles: toggles({ includeMessageEventBusMetrics: true, includeWorkflowIdLabel: true }),
@@ -271,13 +284,69 @@ describe('toggles on a bare Metrics', () => {
     expect(idBody).not.toContain('node_type');
   });
 
-  it('queue gauges come from jobCounts at the interval; completed and failed are counted from the events', async () => {
+  it('credential_type is on the credential event counters only: unknown when absent, dots as underscores', async () => {
+    const m = new Metrics({
+      toggles: toggles({
+        includeMessageEventBusMetrics: true,
+        includeCredentialTypeLabel: true,
+        includeNodeTypeLabel: true,
+      }),
+    });
+    const send = (eventName: string, payload: Record<string, unknown>) =>
+      m.eventsSink.deliver({
+        id: 'i',
+        ts: '',
+        eventName,
+        message: eventName,
+        payload: payload as never,
+        tenantId: 't',
+      });
+    send('audit.user.credentials.created', { credentialType: 'httpBasicAuth' });
+    send('audit.user.credentials.updated', { credentialType: 'google.oauth2' });
+    send('audit.user.credentials.deleted', {});
+    send('audit.user.credentials.shared', { type: 'httpBasicAuth' });
+    send('node.finished', { nodeType: 'core.code', credentialType: 'httpBasicAuth' });
+    const body = await m.registry.metrics();
+    expect(
+      sample(body, 'workflow_audit_user_credentials_created_total', { credential_type: 'httpBasicAuth' }),
+    ).toBe(1);
+    expect(
+      sample(body, 'workflow_audit_user_credentials_updated_total', { credential_type: 'google_oauth2' }),
+    ).toBe(1);
+    expect(
+      sample(body, 'workflow_audit_user_credentials_deleted_total', { credential_type: 'unknown' }),
+    ).toBe(1);
+    expect(sample(body, 'workflow_audit_user_credentials_shared_total', { credential_type: 'unknown' })).toBe(
+      1,
+    );
+    const nodeLine = body.split('\n').find((line) => line.startsWith('workflow_node_finished_total{'));
+    expect(nodeLine).toContain('node_type="core.code"');
+    expect(nodeLine).not.toContain('credential_type');
+
+    const off = new Metrics({ toggles: toggles({ includeMessageEventBusMetrics: true }) });
+    off.eventsSink.deliver({
+      id: 'i',
+      ts: '',
+      eventName: 'audit.user.credentials.created',
+      message: '',
+      payload: { credentialType: 'httpBasicAuth' } as never,
+      tenantId: 't',
+    });
+    expect(await off.registry.metrics()).not.toContain('credential_type');
+  });
+
+  it('queue gauges come from jobCounts at the interval; completed and failed come from the queue stream', async () => {
     let calls = 0;
     let counts = { waiting: 3, active: 2 };
+    let finished: (outcome: 'completed' | 'failed') => void = () => {};
     const queue = {
+      isWorker: false,
       jobCounts: async () => {
         calls += 1;
         return counts;
+      },
+      onFinished: async (fn: (outcome: 'completed' | 'failed') => void) => {
+        finished = fn;
       },
     };
     const m = new Metrics({
@@ -295,17 +364,74 @@ describe('toggles on a bare Metrics', () => {
     expect(calls).toBe(2);
     expect(sample(later, 'workflow_scaling_mode_queue_jobs_waiting')).toBe(7);
 
-    expect(m.eventsSink.accepts('t', 'queue.job.completed')).toBe(true);
-    expect(m.eventsSink.accepts('t', 'queue.job.failed')).toBe(true);
-    expect(m.eventsSink.accepts('t', 'queue.job.enqueued')).toBe(false);
-    const send = (eventName: string) =>
-      m.eventsSink.deliver({ id: 'i', ts: '', eventName, message: eventName, payload: {}, tenantId: 't' });
-    send('queue.job.completed');
-    send('queue.job.completed');
-    send('queue.job.failed');
+    // the counters follow the queue's global stream, not the worker-side queue.job.* events (those go to the event
+    // counters only, behind the event bus toggle)
+    expect(m.eventsSink.accepts('t', 'queue.job.completed')).toBe(false);
+    finished('completed');
+    finished('completed');
+    finished('failed');
     const end = await m.registry.metrics();
     expect(sample(end, 'workflow_scaling_mode_queue_jobs_completed')).toBe(2);
     expect(sample(end, 'workflow_scaling_mode_queue_jobs_failed')).toBe(1);
+
+    // a process that consumes the queue does not count, so the main counts each job once
+    const workerQueue = { ...queue, isWorker: true };
+    const w = new Metrics({
+      toggles: toggles({ includeQueueMetrics: true, queueMetricsInterval: 1 }),
+      queue: workerQueue as never,
+    });
+    finished('completed');
+    const wBody = await w.registry.metrics();
+    expect(sample(wBody, 'workflow_scaling_mode_queue_jobs_completed')).toBe(0);
+  });
+
+  it('a scrape finishes while the queue read never settles (Redis down) and keeps the last value', async () => {
+    let stuck = false;
+    const queue = {
+      isWorker: false,
+      jobCounts: () => (stuck ? new Promise<never>(() => {}) : Promise.resolve({ waiting: 4, active: 1 })),
+      onFinished: async () => {},
+    };
+    const m = new Metrics({
+      toggles: toggles({ includeQueueMetrics: true, queueMetricsInterval: 1 }),
+      queue: queue as never,
+      queueDepth: () => (stuck ? new Promise<never>(() => {}) : Promise.resolve(5)),
+    });
+    expect(sample(await m.registry.metrics(), 'workflow_scaling_mode_queue_jobs_waiting')).toBe(4);
+    stuck = true;
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const started = Date.now();
+    const body = await m.registry.metrics();
+    expect(Date.now() - started).toBeLessThan(8000);
+    expect(sample(body, 'workflow_scaling_mode_queue_jobs_waiting')).toBe(4);
+    expect(sample(body, 'workflow_queue_depth')).toBe(0);
+  }, 20_000);
+
+  it('the statistics and pool gauges use n8n twins of the family names', async () => {
+    const m = new Metrics({
+      toggles: toggles({ includeWorkflowStatistics: true, includeDbPoolMetrics: true }),
+      database: { pool: { totalCount: 1, idleCount: 1, waitingCount: 0 } } as never,
+    });
+    const body = await m.registry.metrics();
+    for (const gone of [
+      'workflow_statistics_',
+      'workflow_db_pool_connections_total',
+      'workflow_db_pool_connections_waiting',
+    ]) {
+      expect(body, gone).not.toContain(gone);
+    }
+    for (const name of [
+      'workflow_production_executions',
+      'workflow_manual_executions',
+      'workflow_users',
+      'workflow_workflows',
+      'workflow_credentials',
+      'workflow_db_pool_connections_active',
+      'workflow_db_pool_connections_idle',
+      'workflow_db_pool_requests_pending',
+    ]) {
+      expect(body, name).toMatch(new RegExp(`^${name} `, 'm'));
+    }
   });
 
   it('the pool gauges and the guard counters follow their toggles', async () => {
@@ -324,9 +450,9 @@ describe('toggles on a bare Metrics', () => {
     on.onGuard({ kind: 'lookup', ok: true, durationMs: 4 });
     on.onGuard({ kind: 'lookup', ok: false, durationMs: 9 });
     const body = await on.registry.metrics();
-    expect(sample(body, 'workflow_db_pool_connections_total')).toBe(4);
+    expect(sample(body, 'workflow_db_pool_connections_active')).toBe(4);
     expect(sample(body, 'workflow_db_pool_connections_idle')).toBe(3);
-    expect(sample(body, 'workflow_db_pool_connections_waiting')).toBe(1);
+    expect(sample(body, 'workflow_db_pool_requests_pending')).toBe(1);
     expect(sample(body, 'workflow_ssrf_checks_total', { result: 'allowed' })).toBe(1);
     expect(sample(body, 'workflow_ssrf_checks_total', { result: 'blocked' })).toBe(2);
     expect(sample(body, 'workflow_dns_lookups_total', { result: 'ok' })).toBe(1);
@@ -353,13 +479,22 @@ describe('toggles on a bare Metrics', () => {
     on.recordPoll('test.poll', false, 5);
     on.recordSchedule('core.scheduleTrigger', 5);
     const body = await on.registry.metrics();
-    expect(sample(body, 'workflow_poll_trigger_polls_total', { node_type: 'test.poll', result: 'ok' })).toBe(
+    expect(sample(body, 'workflow_poll_trigger_polls_total', { node_type: 'test.poll', status: 'ok' })).toBe(
       1,
     );
     expect(
-      sample(body, 'workflow_poll_trigger_polls_total', { node_type: 'test.poll', result: 'error' }),
+      sample(body, 'workflow_poll_trigger_polls_total', { node_type: 'test.poll', status: 'error' }),
     ).toBe(1);
-    expect(sample(body, 'workflow_poll_trigger_duration_seconds_count', { node_type: 'test.poll' })).toBe(2);
+    expect(body).not.toContain('result=');
+    expect(
+      sample(body, 'workflow_poll_trigger_duration_seconds_count', { node_type: 'test.poll', status: 'ok' }),
+    ).toBe(1);
+    expect(
+      sample(body, 'workflow_poll_trigger_duration_seconds_count', {
+        node_type: 'test.poll',
+        status: 'error',
+      }),
+    ).toBe(1);
     expect(sample(body, 'workflow_scheduler_triggers_total', { node_type: 'core.scheduleTrigger' })).toBe(1);
     expect(sample(body, 'workflow_scheduler_trigger_duration_seconds_count')).toBe(1);
   });
@@ -436,16 +571,16 @@ describe('every toggle on, a scrape of /metrics after each action', () => {
     );
     await waitForExecution(server.ctx, owner.tenant.id, executionId, ['success']);
     const body = await scrapeUntil(
-      (b) => (sample(b, 'workflow_statistics_manual_executions') ?? 0) >= 1,
+      (b) => (sample(b, 'workflow_manual_executions') ?? 0) >= 1,
       'the statistics gauges',
     );
     expect(
       sample(body, 'workflow_executions_total', { status: 'success', mode: 'manual' }),
     ).toBeGreaterThanOrEqual(1);
-    expect(sample(body, 'workflow_statistics_users')).toBeGreaterThanOrEqual(1);
-    expect(sample(body, 'workflow_statistics_workflows')).toBeGreaterThanOrEqual(1);
-    expect(sample(body, 'workflow_statistics_credentials')).toBe(0);
-    expect(sample(body, 'workflow_statistics_production_executions')).toBe(0);
+    expect(sample(body, 'workflow_users')).toBeGreaterThanOrEqual(1);
+    expect(sample(body, 'workflow_workflows')).toBeGreaterThanOrEqual(1);
+    expect(sample(body, 'workflow_credentials')).toBe(0);
+    expect(sample(body, 'workflow_production_executions')).toBe(0);
     expect(body).not.toContain('tenant');
   });
 
@@ -473,6 +608,28 @@ describe('every toggle on, a scrape of /metrics after each action', () => {
       sample(body, 'workflow_audit_user_credentials_created_total', { credential_type: 'httpBasicAuth' }),
     ).toBe(1);
     expect(body).not.toContain('not_in_the_catalog');
+  });
+
+  it('a credential saved through the API: its audit event counts under credential_type (R17)', async () => {
+    const counted = (b: string, family: string) =>
+      sample(b, `workflow_audit_user_credentials_${family}_total`, { credential_type: 'httpBasicAuth' }) ?? 0;
+    const start = await scrapeOf(server);
+    const created = await owner.client.data<{ id: string }>(
+      owner.client.post('/rest/credentials', {
+        name: `Basic ${randomUUID().slice(0, 8)}`,
+        type: 'httpBasicAuth',
+        data: { user: 'u', password: 'p' },
+      }),
+    );
+    await scrapeUntil(
+      (b) => counted(b, 'created') === counted(start, 'created') + 1,
+      'the credential created counter',
+    );
+    expect((await owner.client.delete(`/rest/credentials/${created.id}`)).statusCode).toBe(200);
+    await scrapeUntil(
+      (b) => counted(b, 'deleted') === counted(start, 'deleted') + 1,
+      'the credential deleted counter',
+    );
   });
 
   it('a blocked request and an allowed one: the SSRF and DNS counters', async () => {
@@ -557,7 +714,7 @@ describe('every toggle on, a scrape of /metrics after each action', () => {
     // the always-on family (test/api.test.ts pins it) still counts the same requests
     expect(body).toContain('workflow_webhook_duration_seconds_count');
     const stats = await scrapeUntil(
-      (b) => (sample(b, 'workflow_statistics_production_executions') ?? 0) >= 1,
+      (b) => (sample(b, 'workflow_production_executions') ?? 0) >= 1,
       'the production count',
     );
     expect(sample(stats, 'workflow_active_workflows')).toBeGreaterThanOrEqual(2);
@@ -572,20 +729,20 @@ describe('every toggle on, a scrape of /metrics after each action', () => {
     await waitForExecution(server.ctx, owner.tenant.id, run.id, ['success']);
     const body = await scrapeUntil(
       (b) =>
-        (sample(b, 'workflow_poll_trigger_polls_total', { node_type: 'test.poll', result: 'ok' }) ?? 0) >= 1,
+        (sample(b, 'workflow_poll_trigger_polls_total', { node_type: 'test.poll', status: 'ok' }) ?? 0) >= 1,
       'the poll counter',
     );
     expect(
-      sample(body, 'workflow_poll_trigger_duration_seconds_count', { node_type: 'test.poll' }),
+      sample(body, 'workflow_poll_trigger_duration_seconds_count', { node_type: 'test.poll', status: 'ok' }),
     ).toBeGreaterThanOrEqual(1);
     await owner.client.data(owner.client.post(`/rest/workflows/${wf.id}/deactivate`));
   });
 
   it('the pool, the leader and the version', async () => {
     const body = await scrapeOf(server);
-    expect(sample(body, 'workflow_db_pool_connections_total')).toBeGreaterThanOrEqual(1);
+    expect(sample(body, 'workflow_db_pool_connections_active')).toBeGreaterThanOrEqual(1);
     expect(sample(body, 'workflow_db_pool_connections_idle')).toBeGreaterThanOrEqual(0);
-    expect(sample(body, 'workflow_db_pool_connections_waiting')).toBeGreaterThanOrEqual(0);
+    expect(sample(body, 'workflow_db_pool_requests_pending')).toBeGreaterThanOrEqual(0);
     expect(sample(body, 'workflow_instance_role_leader')).toBe(1);
     expect(sample(body, 'workflow_version_info', { version: server.ctx.config.version })).toBe(1);
   });
@@ -593,24 +750,29 @@ describe('every toggle on, a scrape of /metrics after each action', () => {
 
 describe('queue mode on Redis', () => {
   let server: TestServer;
+  let worker: ServerContext | undefined;
+  const env = {
+    ...ALL_ON,
+    EXECUTIONS_MODE: 'queue',
+    REDIS_URL: TEST_REDIS,
+    QUEUE_PREFIX: `wfmetrics${randomUUID().slice(0, 6)}`,
+  };
   beforeAll(async () => {
     await flushRedis();
-    server = await createTestServer({
-      ...ALL_ON,
-      EXECUTIONS_MODE: 'queue',
-      REDIS_URL: TEST_REDIS,
-      QUEUE_PREFIX: `wfmetrics${randomUUID().slice(0, 6)}`,
-    });
+    server = await createTestServer(env);
   });
   afterAll(async () => {
+    await worker?.close();
     await server?.close();
   });
 
-  it('a queued job waits on Redis and shows in the waiting gauge; completed and failed come from events', async () => {
+  it('a queued job waits on Redis and shows in the waiting gauge; a worker finishes it and the main counts it', async () => {
     await resetDatabase(server.ctx);
     const { client, tenant } = await signup(server.app);
     const wf = await createWorkflow(client, { nodes: [node('Start', 'core.manualTrigger')] });
-    await client.data(client.post(`/rest/workflows/${wf.id}/run`, {}));
+    const { executionId } = await client.data<{ executionId: string }>(
+      client.post(`/rest/workflows/${wf.id}/run`, {}),
+    );
     const body = await waitFor(
       async () => {
         const text = await scrapeOf(server);
@@ -619,24 +781,169 @@ describe('queue mode on Redis', () => {
       { message: 'the waiting gauge', timeout: 15_000 },
     );
     expect(sample(body, 'workflow_scaling_mode_queue_jobs_active')).toBe(0);
-    server.ctx.events.emit(tenant.id, 'queue.job.completed', {
-      executionId: 'e1',
-      workflowId: wf.id,
-      jobId: '1',
+    expect(sample(body, 'workflow_scaling_mode_queue_jobs_completed')).toBe(0);
+    expect(sample(body, 'workflow_queue_depth')).toBeGreaterThanOrEqual(1);
+
+    // a second context in this process stands for the worker process: only Postgres and Redis are shared
+    worker = await createContext({
+      config: testConfig({ ...env, BINARY_DATA_DIR: server.ctx.config.binaryData.dir }),
+      nodePackages: [nodesBasePackage, testPackage],
+      http: new HttpClient({ ssrf: { enabled: true, allow: ['127.0.0.1'], deny: [] } }),
+      migrate: false,
     });
-    server.ctx.events.emit(tenant.id, 'queue.job.failed', {
-      executionId: 'e2',
-      workflowId: wf.id,
-      jobId: '2',
-    });
-    server.ctx.events.emit(tenant.id, 'queue.job.failed', {
-      executionId: 'e3',
-      workflowId: wf.id,
-      jobId: '3',
-    });
-    const end = await scrapeOf(server);
+    await worker.startWorker();
+    await waitForExecution(server.ctx, tenant.id, executionId, ['success']);
+    const end = await waitFor(
+      async () => {
+        const text = await scrapeOf(server);
+        return (sample(text, 'workflow_scaling_mode_queue_jobs_completed') ?? 0) >= 1 ? text : undefined;
+      },
+      { message: 'the completed counter on the main', timeout: 15_000 },
+    );
     expect(sample(end, 'workflow_scaling_mode_queue_jobs_completed')).toBe(1);
-    expect(sample(end, 'workflow_scaling_mode_queue_jobs_failed')).toBe(2);
-    expect(sample(end, 'workflow_queue_depth')).toBeGreaterThanOrEqual(1);
+    expect(sample(end, 'workflow_scaling_mode_queue_jobs_failed')).toBe(0);
+    // the worker consumes the queue, so it counts nothing itself (the main counts each job once)
+    const workerBody = await worker.metrics.registry.metrics();
+    expect(sample(workerBody, 'workflow_scaling_mode_queue_jobs_completed')).toBe(0);
+  });
+});
+
+describe('queue counters across processes (bare queues)', () => {
+  it('the main counts the jobs a worker finishes and the jobs it fails; the worker counts none', async () => {
+    const prefix = `wfmetricsq${randomUUID().slice(0, 6)}`;
+    const main = new ExecutionQueue(TEST_REDIS, prefix);
+    const workerQueue = new ExecutionQueue(TEST_REDIS, prefix);
+    const mainMetrics = new Metrics({
+      toggles: toggles({ includeQueueMetrics: true, queueMetricsInterval: 1 }),
+      queue: main,
+    });
+    const workerMetrics = new Metrics({
+      toggles: toggles({ includeQueueMetrics: true, queueMetricsInterval: 1 }),
+      queue: workerQueue,
+    });
+    try {
+      await main.onFinished(() => {});
+      workerQueue.startWorker(async (job) => {
+        if (job.executionId.startsWith('bad')) throw new Error('The job failed');
+      }, 2);
+      const job = (executionId: string) => ({ executionId, tenantId: 't', kind: 'run' as const });
+      await main.enqueue(job('good-1'));
+      await main.enqueue(job('good-2'));
+      await main.enqueue(job('bad-1'));
+      const body = await waitFor(
+        async () => {
+          const text = await mainMetrics.registry.metrics();
+          return (sample(text, 'workflow_scaling_mode_queue_jobs_completed') ?? 0) >= 2 &&
+            (sample(text, 'workflow_scaling_mode_queue_jobs_failed') ?? 0) >= 1
+            ? text
+            : undefined;
+        },
+        { message: 'the main counters', timeout: 15_000 },
+      );
+      expect(sample(body, 'workflow_scaling_mode_queue_jobs_completed')).toBe(2);
+      expect(sample(body, 'workflow_scaling_mode_queue_jobs_failed')).toBe(1);
+      const workerBody = await workerMetrics.registry.metrics();
+      expect(sample(workerBody, 'workflow_scaling_mode_queue_jobs_completed')).toBe(0);
+      expect(sample(workerBody, 'workflow_scaling_mode_queue_jobs_failed')).toBe(0);
+    } finally {
+      await workerQueue.close();
+      await main.close();
+    }
+  }, 30_000);
+});
+
+describe('a scrape while Redis is unreachable', () => {
+  it('finishes within the bound with the queue metrics on, and shows the other families', async () => {
+    // nothing listens on port 1: the queue connection retries without end, as it does when Redis goes down
+    const queue = new ExecutionQueue('redis://127.0.0.1:1', 'wfmetricsdown');
+    try {
+      const m = new Metrics({
+        toggles: toggles({ includeQueueMetrics: true }),
+        queue,
+        queueDepth: () => queue.depth(),
+      });
+      const started = Date.now();
+      const body = await m.registry.metrics();
+      expect(Date.now() - started).toBeLessThan(9000);
+      expect(body).toContain('workflow_executions_total');
+      expect(sample(body, 'workflow_scaling_mode_queue_jobs_waiting')).toBe(0);
+      expect(sample(body, 'workflow_queue_depth')).toBe(0);
+      // a later scrape does not wait on the stuck read either
+      const again = Date.now();
+      await m.registry.metrics();
+      expect(Date.now() - again).toBeLessThan(9000);
+    } finally {
+      // closing waits for a connection that never comes: let it go
+      void queue.close().catch(() => {});
+    }
+  }, 30_000);
+});
+
+describe('the worker server', () => {
+  it('serves /metrics with the token, the health paths, and nothing else', async () => {
+    const config = testConfig({ METRICS_TOKEN: 'worker-token', HOST: '127.0.0.1' });
+    const metrics = new Metrics({ toggles: config.metrics });
+    metrics.recordExecution('success', 'integrated', 5);
+    const database = { pool: { query: async () => ({ rows: [] }) } };
+    const redis = { ping: async () => 'PONG' };
+    const { server, close } = await startWorkerServer({ config, metrics, database, redis } as never, 0);
+    try {
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      expect((await fetch(`${base}/healthz`)).status).toBe(200);
+      const ready = await fetch(`${base}/healthz/readiness`);
+      expect(ready.status).toBe(200);
+      expect(await ready.json()).toEqual({ status: 'ok', checks: { database: 'ok', redis: 'ok' } });
+      expect((await fetch(`${base}/metrics`)).status).toBe(401);
+      expect((await fetch(`${base}/metrics`, { headers: { authorization: 'Bearer nope' } })).status).toBe(
+        401,
+      );
+      const scrape = await fetch(`${base}/metrics`, { headers: { authorization: 'Bearer worker-token' } });
+      expect(scrape.status).toBe(200);
+      expect(await scrape.text()).toContain(
+        'workflow_executions_total{status="success",mode="integrated"} 1',
+      );
+      expect((await fetch(`${base}/rest/workflows`)).status).toBe(404);
+      expect((await fetch(`${base}/metrics`, { method: 'POST' })).status).toBe(404);
+    } finally {
+      await close();
+    }
+  });
+
+  it('answers 503 on the readiness path when Redis does not answer', async () => {
+    const config = testConfig({ HOST: '127.0.0.1' });
+    const database = { pool: { query: async () => ({ rows: [] }) } };
+    const redis = {
+      ping: async () => {
+        throw new Error('down');
+      },
+    };
+    const { server, close } = await startWorkerServer(
+      { config, metrics: new Metrics(), database, redis } as never,
+      0,
+    );
+    try {
+      const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/healthz/readiness`);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ status: 'error', checks: { database: 'ok', redis: 'error' } });
+    } finally {
+      await close();
+    }
+  });
+
+  it('starts only when asked: the health flag or an opt-in family, on QUEUE_HEALTH_CHECK_PORT (default 5679)', () => {
+    const plain = testConfig();
+    expect(workerServerPort(plain, {})).toBeUndefined();
+    expect(workerServerPort(plain, { QUEUE_HEALTH_CHECK_ACTIVE: 'false' })).toBeUndefined();
+    expect(workerServerPort(plain, { QUEUE_HEALTH_CHECK_ACTIVE: 'true' })).toBe(5679);
+    expect(workerServerPort(plain, { QUEUE_HEALTH_CHECK_ACTIVE: '1', QUEUE_HEALTH_CHECK_PORT: '6000' })).toBe(
+      6000,
+    );
+    const family = testConfig({ METRICS_INCLUDE_MESSAGE_EVENT_BUS_METRICS: 'true' });
+    expect(workerServerPort(family, {})).toBe(5679);
+    // a label toggle alone is not a family
+    expect(workerServerPort(testConfig({ METRICS_INCLUDE_WORKFLOW_ID_LABEL: 'true' }), {})).toBeUndefined();
+    expect(() =>
+      workerServerPort(plain, { QUEUE_HEALTH_CHECK_ACTIVE: 'true', QUEUE_HEALTH_CHECK_PORT: 'x' }),
+    ).toThrow(/QUEUE_HEALTH_CHECK_PORT/);
   });
 });

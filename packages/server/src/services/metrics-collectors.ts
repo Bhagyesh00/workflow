@@ -55,18 +55,35 @@ function seconds(ms: number): number {
   return Number.isFinite(ms) && ms > 0 ? ms / 1000 : 0;
 }
 
+/** longest wait for one read of Redis or the database during a scrape, milliseconds */
+export const READ_TIMEOUT_MS = 5000;
+
 /**
- * Reads at most once per `intervalSeconds`; callers inside one read share it. A failed read keeps the last value
- * (`initial` before the first read), so a scrape never fails because of it.
+ * P6-71 (S5 fix, metrics-2): rejects when `promise` has not settled after `ms`. The queue's Redis connection retries
+ * without end (`maxRetriesPerRequest: null`), so a read made while Redis is down never settles by itself.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('The read timed out')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Reads at most once per `intervalSeconds`; callers inside one read share it. A failed read, or one that has not
+ * settled after 5 seconds (or the interval, if shorter), keeps the last value (`initial` before the first read), so a
+ * scrape never fails or hangs because of it.
  */
 export function cachedRead<T>(intervalSeconds: number, read: () => Promise<T>, initial: T): () => Promise<T> {
   let value = initial;
   let readAt = 0;
   let inflight: Promise<T> | undefined;
+  const limit = Math.min(READ_TIMEOUT_MS, intervalSeconds * 1000);
   return () => {
     if (inflight) return inflight;
     if (readAt !== 0 && Date.now() - readAt < intervalSeconds * 1000) return Promise.resolve(value);
-    inflight = read()
+    inflight = withTimeout(read(), limit)
       .then((next) => {
         value = next;
         return next;
@@ -123,7 +140,7 @@ export function webhookFormMetrics(registry: Registry, toggles: MetricsToggles):
   if (toggles.includeWebhookMetrics) {
     const histogram = new Histogram({
       name: 'workflow_webhook_request_duration_seconds',
-      help: 'Duration of production webhook requests',
+      help: 'Duration of webhook requests',
       labelNames: ['method', 'status_code', 'webhook_path', 'workflow_id'],
       buckets: REQUEST_BUCKETS,
       registers: [registry],
@@ -167,21 +184,22 @@ export function triggerMetrics(registry: Registry, toggles: MetricsToggles): Tri
   if (toggles.includePollTriggerMetrics) {
     const polls = new Counter({
       name: 'workflow_poll_trigger_polls_total',
-      help: 'Polls of polling triggers by node type and result',
-      labelNames: ['node_type', 'result'],
+      help: 'Polls of polling triggers by node type and status',
+      labelNames: ['node_type', 'status'],
       registers: [registry],
     });
     const duration = new Histogram({
       name: 'workflow_poll_trigger_duration_seconds',
       help: 'Duration of one poll of a polling trigger',
-      labelNames: ['node_type'],
+      labelNames: ['node_type', 'status'],
       buckets: REQUEST_BUCKETS,
       registers: [registry],
     });
     out.poll = (nodeType, ok, ms) => {
       const type = text(nodeType);
-      polls.inc({ node_type: type, result: ok ? 'ok' : 'error' });
-      duration.observe({ node_type: type }, seconds(ms));
+      const status = ok ? 'ok' : 'error';
+      polls.inc({ node_type: type, status });
+      duration.observe({ node_type: type, status }, seconds(ms));
     };
   }
   if (toggles.includeSchedulerMetrics) {
@@ -246,7 +264,7 @@ export function guardMetrics(
   };
 }
 
-/** `workflow_db_pool_connections_total|idle|waiting`, read from the pool on each scrape */
+/** `workflow_db_pool_connections_active|idle` and `workflow_db_pool_requests_pending`, read from the pool on each scrape */
 export function poolMetrics(
   registry: Registry,
   toggles: MetricsToggles,
@@ -263,7 +281,7 @@ export function poolMetrics(
       },
     });
   gauge(
-    'workflow_db_pool_connections_total',
+    'workflow_db_pool_connections_active',
     'Connections in the database pool',
     () => database?.pool.totalCount ?? 0,
   );
@@ -273,13 +291,17 @@ export function poolMetrics(
     () => database?.pool.idleCount ?? 0,
   );
   gauge(
-    'workflow_db_pool_connections_waiting',
+    'workflow_db_pool_requests_pending',
     'Requests waiting for a database connection',
     () => database?.pool.waitingCount ?? 0,
   );
 }
 
-/** platform totals (no tenant label), read at most every `workflowStatisticsInterval` seconds */
+/**
+ * `workflow_production_executions|manual_executions|users|workflows|credentials`: platform totals (no tenant label),
+ * read at most every `workflowStatisticsInterval` seconds. The execution gauges count finished runs only (success or
+ * error); n8n reads a counter table that pruning never touches, here the rows are counted, so pruning lowers them.
+ */
 export function statisticsMetrics(
   registry: Registry,
   toggles: MetricsToggles,
@@ -293,8 +315,8 @@ export function statisticsMetrics(
       if (!database) return zero;
       const { rows } = await database.pool.query<Record<keyof typeof zero, number>>(
         `select
-           (select count(*)::int from executions where mode = 'manual') as manual,
-           (select count(*)::int from executions where mode <> 'manual') as production,
+           (select count(*)::int from executions where mode = 'manual' and status in ('success', 'error')) as manual,
+           (select count(*)::int from executions where mode <> 'manual' and status in ('success', 'error')) as production,
            (select count(*)::int from users) as users,
            (select count(*)::int from workflows) as workflows,
            (select count(*)::int from credentials) as credentials`,
@@ -322,18 +344,18 @@ export function statisticsMetrics(
       },
     });
   gauge(
-    'workflow_statistics_production_executions',
-    'Executions started by a trigger, all workspaces',
+    'workflow_production_executions',
+    'Finished executions started by a trigger, all workspaces',
     'production',
   );
   gauge(
-    'workflow_statistics_manual_executions',
-    'Executions started from the editor, all workspaces',
+    'workflow_manual_executions',
+    'Finished executions started from the editor, all workspaces',
     'manual',
   );
-  gauge('workflow_statistics_users', 'Users, all workspaces', 'users');
-  gauge('workflow_statistics_workflows', 'Workflows, all workspaces', 'workflows');
-  gauge('workflow_statistics_credentials', 'Credentials, all workspaces', 'credentials');
+  gauge('workflow_users', 'Users, all workspaces', 'users');
+  gauge('workflow_workflows', 'Workflows, all workspaces', 'workflows');
+  gauge('workflow_credentials', 'Credentials, all workspaces', 'credentials');
 }
 
 /** `workflow_version_info` (version, major, minor, patch) and `workflow_instance_role_leader` (1 or 0) */
@@ -360,7 +382,12 @@ export function instanceMetrics(
   }).set({ version: text(version), major, minor, patch }, 1);
 }
 
-/** the gauges `waiting` and `active` of the execution queue, read at most every `queueMetricsInterval` seconds */
+/**
+ * The gauges `waiting` and `active` of the execution queue, read at most every `queueMetricsInterval` seconds, and
+ * the counters `completed` and `failed`. The counters are counted on the main from the queue's global events
+ * (`ExecutionQueue.onFinished`, as n8n counts Bull's global events), never in a worker process: a worker's own
+ * `completed` and `failed` events fire only there, and the main is the process a scrape reads.
+ */
 export function queueGauges(
   registry: Registry,
   toggles: MetricsToggles,
@@ -383,12 +410,25 @@ export function queueGauges(
     });
   gauge('workflow_scaling_mode_queue_jobs_waiting', 'Jobs waiting in the execution queue', 'waiting');
   gauge('workflow_scaling_mode_queue_jobs_active', 'Jobs running in the execution queue', 'active');
+  const completed = new Counter({
+    name: 'workflow_scaling_mode_queue_jobs_completed',
+    help: 'Jobs completed in the execution queue',
+    registers: [registry],
+  });
+  const failed = new Counter({
+    name: 'workflow_scaling_mode_queue_jobs_failed',
+    help: 'Jobs failed in the execution queue',
+    registers: [registry],
+  });
+  // a process that consumes the queue does not count: the main counts every job once
+  void queue?.onFinished((outcome) => {
+    if (queue.isWorker) return;
+    (outcome === 'completed' ? completed : failed).inc();
+  });
 }
 
-const QUEUE_COUNTED: ReadonlyMap<string, string> = new Map([
-  ['queue.job.completed', 'workflow_scaling_mode_queue_jobs_completed'],
-  ['queue.job.failed', 'workflow_scaling_mode_queue_jobs_failed'],
-]);
+/** n8n puts the `credential_type` label on the credential event counters only */
+const CREDENTIAL_EVENT_PREFIX = 'audit.user.credentials.';
 const CATALOG_NAMES: ReadonlySet<string> = new Set(EVENT_CATALOG.map((entry) => entry.name));
 
 /** `workflow_<event name, dots as underscores>_total` */
@@ -397,18 +437,19 @@ export function eventMetricName(eventName: string): string {
 }
 
 /**
- * The event counters (one per catalog event name, created on its first event) behind `includeMessageEventBusMetrics`,
- * and the queue job counters `completed` and `failed` behind `includeQueueMetrics`, counted from the
- * `queue.job.completed` and `queue.job.failed` events as n8n counts them in process (the queue removes finished
- * jobs, so BullMQ's own completed count stays 0). The sink accepts nothing when both toggles are off.
+ * The event counters (one per catalog event name, created on its first event) behind `includeMessageEventBusMetrics`.
+ * The sink accepts nothing when the toggle is off. The queue job counters are not here: `queueGauges` counts them.
+ * `credential_type` (payload `credentialType`, `unknown` when absent, dots as underscores) exists only on the
+ * credential event counters, and only behind its own toggle.
  */
 export function eventMetrics(registry: Registry, toggles: MetricsToggles): EventSink {
   const labelKeys: Array<[string, string]> = [];
   if (toggles.includeWorkflowIdLabel) labelKeys.push(['workflow_id', 'workflowId']);
   if (toggles.includeWorkflowNameLabel) labelKeys.push(['workflow_name', 'workflowName']);
   if (toggles.includeNodeTypeLabel) labelKeys.push(['node_type', 'nodeType']);
-  if (toggles.includeCredentialTypeLabel) labelKeys.push(['credential_type', 'credentialType']);
   const labelNames = labelKeys.map(([label]) => label);
+  const hasCredentialLabel = (eventName: string) =>
+    toggles.includeCredentialTypeLabel && eventName.startsWith(CREDENTIAL_EVENT_PREFIX);
 
   const counters = new Map<string, Counter<string>>();
   const counterFor = (eventName: string): Counter<string> => {
@@ -417,33 +458,25 @@ export function eventMetrics(registry: Registry, toggles: MetricsToggles): Event
       counter = new Counter({
         name: eventMetricName(eventName),
         help: `Events named ${eventName}`,
-        labelNames,
+        labelNames: hasCredentialLabel(eventName) ? [...labelNames, 'credential_type'] : labelNames,
         registers: [registry],
       });
       counters.set(eventName, counter);
     }
     return counter;
   };
-  const queueCounters = new Map<string, Counter<string>>();
-  if (toggles.includeQueueMetrics) {
-    for (const [eventName, name] of QUEUE_COUNTED) {
-      queueCounters.set(
-        eventName,
-        new Counter({ name, help: `Queue jobs counted from ${eventName} events`, registers: [registry] }),
-      );
-    }
-  }
 
   return {
     accepts(_tenantId: string, eventName: string): boolean {
-      if (toggles.includeMessageEventBusMetrics && CATALOG_NAMES.has(eventName)) return true;
-      return queueCounters.has(eventName);
+      return toggles.includeMessageEventBusMetrics && CATALOG_NAMES.has(eventName);
     },
     deliver(event: StreamEvent): void {
-      queueCounters.get(event.eventName)?.inc();
       if (!toggles.includeMessageEventBusMetrics || !CATALOG_NAMES.has(event.eventName)) return;
       const labels: Record<string, string> = {};
       for (const [label, key] of labelKeys) labels[label] = text(event.payload[key]);
+      if (hasCredentialLabel(event.eventName)) {
+        labels.credential_type = text(event.payload.credentialType).replace(/\./g, '_') || 'unknown';
+      }
       counterFor(event.eventName).inc(labels);
     },
   };

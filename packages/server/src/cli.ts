@@ -1,7 +1,8 @@
 /**
  * Command line entry point (run with `node --no-node-snapshot --import tsx src/cli.ts <command>`):
  *   start    main process: HTTP API, webhooks, triggers (leader), executions in regular mode
- *   worker   queue worker (EXECUTIONS_MODE=queue)
+ *   worker   queue worker (EXECUTIONS_MODE=queue); with QUEUE_HEALTH_CHECK_ACTIVE (or an opt-in METRICS_INCLUDE_*
+ *            family on) it also serves /metrics and /healthz on QUEUE_HEALTH_CHECK_PORT (5679)
  *   migrate  apply database migrations
  *   seed     create a demo workspace, owner and sample workflow
  *   mfa:disable  turn a user's two-factor sign-in off (`--email <address>`)
@@ -39,6 +40,7 @@ import { createContext, type ServerContext } from './context';
 import { createDatabase, runMigrations } from './db/client';
 import { createLogger } from './logger';
 import { seed } from './seed';
+import { startWorkerServer, workerServerPort } from './services/worker-server';
 
 /** P6-78 (S4 L11): the data commands; each returns its exit code */
 const DATA_COMMANDS: Record<string, (ctx: ServerContext, argv: string[], io?: CommandIo) => Promise<number>> =
@@ -141,7 +143,14 @@ async function main(command: string): Promise<void> {
     }
     const ctx = await createContext({ config, logger });
     await ctx.startWorker();
-    onShutdown(() => ctx.close(), logger);
+    // P6-71: the worker serves /metrics and the health paths when asked (n8n's WorkerServer)
+    const port = workerServerPort(config);
+    const health = port === undefined ? undefined : await startWorkerServer(ctx, port);
+    if (health) logger.info({ port }, 'Worker server listening for metrics and health checks');
+    onShutdown(async () => {
+      await health?.close();
+      await ctx.close();
+    }, logger);
     return;
   }
 

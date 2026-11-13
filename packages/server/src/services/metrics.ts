@@ -13,11 +13,13 @@ import {
   instanceMetrics,
   poolMetrics,
   queueGauges,
+  READ_TIMEOUT_MS,
   statisticsMetrics,
   type TriggerObservers,
   triggerMetrics,
   type WebhookFormObservers,
   webhookFormMetrics,
+  withTimeout,
 } from './metrics-collectors';
 import type { ExecutionQueue, Leadership } from './queue';
 
@@ -48,8 +50,8 @@ export class Metrics {
   readonly activeWorkflows: Gauge;
 
   /**
-   * P6-71: the event counters' sink (`ctx.events`): the per-event counters behind `includeMessageEventBusMetrics`
-   * and the queue job counters behind `includeQueueMetrics`; it accepts nothing when both are off.
+   * P6-71: the event counters' sink (`ctx.events`): the per-event counters behind `includeMessageEventBusMetrics`;
+   * it accepts nothing when the toggle is off. The queue job counters are counted by `queueGauges`.
    */
   readonly eventsSink: EventSink;
 
@@ -90,7 +92,7 @@ export class Metrics {
       help: 'Jobs waiting or running in the execution queue',
       registers: [this.registry],
       async collect() {
-        if (queueDepth) this.set(await queueDepth().catch(() => 0));
+        if (queueDepth) this.set(await withTimeout(queueDepth(), READ_TIMEOUT_MS).catch(() => 0));
       },
     });
     // read at most every METRICS_ACTIVE_WORKFLOW_METRIC_INTERVAL seconds
@@ -130,7 +132,7 @@ export class Metrics {
     this.observeApiRequest?.(method, route, status, ms);
   }
 
-  /** P6-71: one production webhook request, with the hook's registered path (behind `includeWebhookMetrics`). */
+  /** P6-71: one webhook request (a test URL's included, as n8n counts it), with the hook's registered path (behind `includeWebhookMetrics`). */
   observeWebhook(o: {
     method: string;
     statusCode: number;
