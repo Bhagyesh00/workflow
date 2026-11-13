@@ -5,8 +5,8 @@
  * only messages are captured). Never in an envelope, error or log: the DSN key beyond the auth header, node data.
  */
 import { randomBytes } from 'node:crypto';
-import { redactSecrets } from '@workflow/workflow';
 import type { SentryDestinationSettings } from '@workflow/workflow';
+import { redactSecrets } from '@workflow/workflow';
 import type { StreamEvent } from '../../events/stream';
 import type { DestinationFactory, DestinationSender, SenderDeps, StoredDestination } from '../types';
 
@@ -34,7 +34,8 @@ function parseDsn(dsn: unknown): ParsedDsn | string {
   } catch {
     return 'The Sentry DSN must be a URL';
   }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') return 'The Sentry DSN must start with https:// or http://';
+  if (url.protocol !== 'https:' && url.protocol !== 'http:')
+    return 'The Sentry DSN must start with https:// or http://';
   if (!url.username) return 'The Sentry DSN needs a public key before the @';
   let key: string;
   try {

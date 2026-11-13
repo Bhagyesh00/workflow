@@ -6,7 +6,10 @@ import { randomUUID } from 'node:crypto';
 import { HttpClient } from '@workflow/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { StreamEvent } from '../src/services/events/stream';
-import { createSentrySender, validateSentrySettings } from '../src/services/log-streaming/destinations/sentry';
+import {
+  createSentrySender,
+  validateSentrySettings,
+} from '../src/services/log-streaming/destinations/sentry';
 import type { SenderDeps, StoredDestination } from '../src/services/log-streaming/types';
 import { type HttpSink, loadTlsFixtures, startHttpSink } from './fakes/http-sink';
 
@@ -67,7 +70,9 @@ function parse(body: Buffer) {
 describe('validateSentrySettings', () => {
   it('accepts a DSN with key, host, optional prefix and project id', () => {
     expect(validateSentrySettings({ dsn: `https://${KEY}@o1.example.com/42`, sendPayload: true })).toBeNull();
-    expect(validateSentrySettings({ dsn: `https://${KEY}@host:9000/pre/fix/7`, sendPayload: false })).toBeNull();
+    expect(
+      validateSentrySettings({ dsn: `https://${KEY}@host:9000/pre/fix/7`, sendPayload: false }),
+    ).toBeNull();
   });
   it('refuses a bad DSN or rate', () => {
     for (const dsn of [
@@ -86,9 +91,9 @@ describe('validateSentrySettings', () => {
     expect(validateSentrySettings({ dsn: `https://${KEY}@h/1`, sendPayload: 'yes' })).toEqual(
       expect.any(String),
     );
-    expect(validateSentrySettings({ dsn: `https://${KEY}@h/1`, sendPayload: true, tracesSampleRate: 2 })).toEqual(
-      expect.any(String),
-    );
+    expect(
+      validateSentrySettings({ dsn: `https://${KEY}@h/1`, sendPayload: true, tracesSampleRate: 2 }),
+    ).toEqual(expect.any(String));
   });
 });
 
@@ -110,7 +115,11 @@ describe('sentry sender', () => {
     expect(payload.level).toBe('log');
     expect(payload.release).toBe('9.8.7');
     expect(payload.environment).toBe('staging');
-    expect(payload.tags).toEqual({ event: 'n8n.workflow.failed', logger: 'My Sentry', app: expect.any(String) });
+    expect(payload.tags).toEqual({
+      event: 'n8n.workflow.failed',
+      logger: 'My Sentry',
+      app: expect.any(String),
+    });
     expect(payload.extra).toEqual({ workflowId: 'w1' });
     expect(JSON.stringify(req.body.toString())).not.toContain(KEY);
   });
