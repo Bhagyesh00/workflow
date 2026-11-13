@@ -645,3 +645,197 @@ describe('P6-60 webhook destination: credential auth', () => {
     expect(secure.requests).toHaveLength(0);
   });
 });
+
+describe('P6-60 webhook destination: user and password in the URL', () => {
+  const withUserinfo = (url: string, userinfo: string, query = '') =>
+    `${url.replace('://', `://${userinfo}@`)}/in${query}`;
+
+  it('sends the URL user and password as Basic auth and keeps them out of the request URL', async () => {
+    // an encoded password: `pa{ss`
+    await send(
+      settings({
+        url: withUserinfo(secure.url, 'user:pa%7Bss', `?token=${FAKE_QUERY}`),
+        options: secureOptions() as never,
+      }),
+    );
+    const [request] = secure.requests;
+    expect(request.headers.authorization).toBe(`Basic ${Buffer.from('user:pa{ss').toString('base64')}`);
+    expect(request.path).toBe(`/in?token=${FAKE_QUERY}`);
+  });
+
+  it('hands the client a URL without user and password', async () => {
+    const seen: HttpRequestOptions[] = [];
+    const spy = {
+      request: async (options: HttpRequestOptions) => {
+        seen.push(options);
+        return { body: '', headers: {}, statusCode: 200, statusMessage: 'OK' };
+      },
+    } as unknown as SenderDeps['http'];
+    await send(settings({ url: 'https://user:pa%7Bss@hooks.example.test/in' }), {}, { deps: depsWith(spy) });
+    expect(seen[0].url).toBe('https://hooks.example.test/in');
+    expect(seen[0].auth).toEqual({ username: 'user', password: 'pa{ss' });
+  });
+
+  it('lets a credential win over the URL user and password', async () => {
+    const { tenantId, projectId } = await withWorld();
+    const credential = await credentialIn(server, tenantId, projectId, {
+      type: 'httpBasicAuth',
+      data: { user: 'cred-user', password: FAKE_VALUE },
+    });
+    await send(settings({ url: withUserinfo(secure.url, 'user:pw'), options: secureOptions() as never }), {
+      tenantId,
+      credentialId: credential.id,
+    });
+    expect(secure.requests[0].headers.authorization).toBe(
+      `Basic ${Buffer.from(`cred-user:${FAKE_VALUE}`).toString('base64')}`,
+    );
+  });
+
+  it('keeps any URL out of an error text, whatever the client echoes', async () => {
+    const echo = {
+      request: async () => {
+        throw new TypeError(
+          'Request cannot be constructed from a URL that includes credentials: https://user:pa%7Bss@hooks.example.test/in?token=abc+def%2Fxyz',
+        );
+      },
+    } as unknown as SenderDeps['http'];
+    const error = await send(
+      settings({ url: 'https://user:pa%7Bss@hooks.example.test/in?token=abc+def%2Fxyz' }),
+      {},
+      { deps: depsWith(echo) },
+    ).catch((e: Error) => e);
+    const text = (error as Error).message;
+    expect(text).toMatch(/^Couldn't reach the webhook/);
+    for (const leak of ['pa%7Bss', 'pa{ss', 'abc', 'hooks.example.test', 'user:']) {
+      expect(text, leak).not.toContain(leak);
+    }
+  });
+});
+
+describe('P6-60 webhook destination: followed redirects', () => {
+  const follow = (maxRedirects: number) => ({ redirect: { followRedirects: true, maxRedirects } }) as never;
+  const secureFollow = () => secureOptions({ redirect: { followRedirects: true, maxRedirects: 5 } }) as never;
+
+  async function plainHop(location: string): Promise<string> {
+    const s = createHttpServer((_req, res) => {
+      res.writeHead(302, { location });
+      res.end();
+    });
+    return `http://127.0.0.1:${await listen(s)}`;
+  }
+
+  /** an https receiver that records each request and answers a redirect for the paths `to` names */
+  async function secureHop(to: (path: string) => string | null, status = 302) {
+    const seen: Array<{ method: string; path: string; headers: IncomingHttpHeaders; body: Buffer }> = [];
+    const s = createHttpsServer({ key: tls.key, cert: tls.cert }, (req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const path = req.url ?? '/';
+        seen.push({ method: req.method ?? 'GET', path, headers: req.headers, body: Buffer.concat(chunks) });
+        const location = to(path);
+        if (location) res.writeHead(status, { location });
+        else res.writeHead(200);
+        res.end();
+      });
+    });
+    return { origin: `https://127.0.0.1:${await listen(s)}`, seen };
+  }
+
+  const headerPair = { sendHeaders: true, headerParameters: [{ name: 'X-Fake-One', value: FAKE_VALUE }] };
+
+  async function headerCredential() {
+    const { tenantId, projectId } = await withWorld();
+    const credential = await credentialIn(server, tenantId, projectId, {
+      type: 'httpHeaderAuth',
+      data: { name: 'X-Fake-Key', value: FAKE_VALUE },
+    });
+    return { tenantId, credentialId: credential.id };
+  }
+
+  it('stops after maxRedirects hops', async () => {
+    const last = await plainHop(`${plain.url}/landed`);
+    const first = await plainHop(last);
+    await expect(send(settings({ url: first, options: follow(1) }))).rejects.toThrow(/more than 1 times/);
+    expect(plain.requests).toHaveLength(0);
+    await send(settings({ url: first, options: follow(2) }));
+    expect(plain.requests.map((r) => r.path)).toEqual(['/landed']);
+    plain.requests.length = 0;
+    await expect(send(settings({ url: last, options: follow(0) }))).rejects.toThrow(/more than 0 times/);
+    expect(plain.requests).toHaveLength(0);
+  });
+
+  it('keeps the header pairs on a hop inside the same origin and turns a POST into a GET on a 302', async () => {
+    const hop = await secureHop((path) => (path === '/in' ? '/next' : null));
+    await send(settings({ url: `${hop.origin}/in`, ...headerPair, options: secureFollow() }));
+    expect(hop.seen.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /in', 'GET /next']);
+    expect(hop.seen[0].headers['x-fake-one']).toBe(FAKE_VALUE);
+    expect(hop.seen[1].headers['x-fake-one']).toBe(FAKE_VALUE);
+    expect(hop.seen[1].body.length).toBe(0);
+  });
+
+  it('keeps the method and the body on a 307', async () => {
+    const hop = await secureHop((path) => (path === '/in' ? '/next' : null), 307);
+    await send(settings({ url: `${hop.origin}/in`, options: secureFollow() }));
+    expect(hop.seen.map((r) => r.method)).toEqual(['POST', 'POST']);
+    expect(bodyOf(hop.seen[1]).eventName).toBe('n8n.workflow.success');
+  });
+
+  it('drops the header pairs and the query pairs on a hop to another origin', async () => {
+    const hop = await secureHop(() => `${secure.url}/landed`);
+    await send(
+      settings({
+        url: `${hop.origin}/in`,
+        ...headerPair,
+        sendQuery: true,
+        queryParameters: [{ name: 'key', value: FAKE_QUERY }],
+        options: secureFollow(),
+      }),
+    );
+    expect(hop.seen[0].headers['x-fake-one']).toBe(FAKE_VALUE);
+    expect(secure.requests).toHaveLength(1);
+    expect(secure.requests[0].path).toBe('/landed');
+    expect(secure.requests[0].headers['x-fake-one']).toBeUndefined();
+  });
+
+  it('drops the credential on a hop to another origin', async () => {
+    const over = await headerCredential();
+    const hop = await secureHop(() => `${secure.url}/landed`);
+    await send(settings({ url: `${hop.origin}/in`, options: secureFollow() }), over);
+    expect(hop.seen[0].headers['x-fake-key']).toBe(FAKE_VALUE);
+    expect(secure.requests).toHaveLength(1);
+    expect(secure.requests[0].headers['x-fake-key']).toBeUndefined();
+  });
+
+  it('drops the URL user and password on a hop to another origin', async () => {
+    const hop = await secureHop(() => `${secure.url}/landed`);
+    await send(settings({ url: `${hop.origin.replace('://', '://user:pw@')}/in`, options: secureFollow() }));
+    expect(hop.seen[0].headers.authorization).toBe(`Basic ${Buffer.from('user:pw').toString('base64')}`);
+    expect(secure.requests[0].headers.authorization).toBeUndefined();
+  });
+
+  it('refuses a hop to plain http:// when the request carries a secret, and sends nothing there', async () => {
+    const hop = await secureHop(() => `${plain.url}/landed`);
+    const error = await send(
+      settings({ url: `${hop.origin}/in`, ...headerPair, options: secureFollow() }),
+    ).catch((e: Error) => e);
+    expect((error as Error).message).toMatch(/plain http/);
+    expect((error as Error).message).not.toContain(FAKE_VALUE);
+    expect(plain.requests).toHaveLength(0);
+  });
+
+  it('refuses a hop to plain http:// when a credential is set', async () => {
+    const over = await headerCredential();
+    const hop = await secureHop(() => `${plain.url}/landed`);
+    await expect(send(settings({ url: `${hop.origin}/in`, options: secureFollow() }), over)).rejects.toThrow(
+      /plain http/,
+    );
+    expect(plain.requests).toHaveLength(0);
+  });
+
+  it('follows a hop to plain http:// when the request carries no secret', async () => {
+    const hop = await secureHop(() => `${plain.url}/landed`);
+    await send(settings({ url: `${hop.origin}/in`, options: secureFollow() }));
+    expect(plain.requests.map((r) => r.path)).toEqual(['/landed']);
+  });
+});

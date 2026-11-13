@@ -6,9 +6,12 @@
  *
  * Differences from n8n, on purpose:
  * - no proxy and no socket pool options (a tenant-chosen proxy would be an SSRF path);
- * - redirects are off by default; n8n's limit of 21 applies only where the credential's domain list is checked, while a
- *   plain follow stops at undici's own 20;
+ * - redirects are off by default. When they are on, the sender follows the hops itself (one `deps.http` call per hop,
+ *   so the guard checks each one), up to the destination's `maxRedirects`. A hop to plain `http://` is refused when
+ *   the request carries a secret, and a hop to another origin drops the header pairs, the query pairs and the
+ *   credential (n8n drops only Authorization, Proxy-Authorization and Cookie);
  * - a credential, a header value, a query value and a `user:password@` part are never sent over plain `http://`;
+ * - a `user:password@` part of the URL is sent as Basic auth (decoded, never left in the URL), unless a credential is set;
  * - `allowUnauthorizedCerts` is the only switch that skips certificate verification.
  *
  * A failure is an error whose text holds no header value, query value, credential or answer body.
@@ -232,11 +235,65 @@ function headersOf(pairs: Pair[]): Record<string, string | string[]> {
 
 const cut = (text: string) => redactSecrets(text).slice(0, ERROR_MAX);
 
-/** an error text from the client: the reason only (a connect code when fetch hides it), never a URL query */
+/** a `scheme://...` run in a client error: it can hold the URL with its userinfo and query */
+const URL_RUN = /[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+
+/** an error text from the client: the reason only (a connect code when fetch hides it), never a URL */
 function reasonOf(error: unknown): string {
   if (!(error instanceof Error)) return 'the request failed';
   const code = (error.cause as { code?: unknown } | undefined)?.code;
-  return typeof code === 'string' ? `${error.message} (${code})` : error.message;
+  const text = error.message.replace(URL_RUN, '<url>');
+  return typeof code === 'string' ? `${text} (${code})` : text;
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** headers that describe a request body, dropped when a redirect turns the request into a bodyless GET */
+const BODY_HEADERS = new Set([
+  'content-type',
+  'content-length',
+  'content-encoding',
+  'content-language',
+  'content-location',
+]);
+const REDIRECT_PLAIN_HTTP =
+  "Couldn't follow the redirect to a plain http:// URL: this webhook sends a header value, a query value, a password or a credential.";
+
+/** the URL without its `user:password@` part, and that part decoded as Basic auth */
+function splitUserinfo(url: URL): { url: URL; auth?: { username: string; password: string } } {
+  if (!url.username && !url.password) return { url };
+  const decode = (part: string) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  };
+  const auth = { username: decode(url.username), password: decode(url.password) };
+  const clean = new URL(url.toString());
+  clean.username = '';
+  clean.password = '';
+  return { url: clean, auth };
+}
+
+/** where a redirect answer points (null when it is no redirect); a hop that must not be followed throws */
+function redirectTarget(response: HttpFullResponse<unknown>, current: URL, secret: boolean): URL | null {
+  const location = response.headers.location;
+  if (!REDIRECT_STATUSES.has(response.statusCode) || !location) return null;
+  let next: URL;
+  try {
+    next = new URL(location, current);
+  } catch {
+    // the Location value is not echoed: it can carry a secret
+    throw new Error("Couldn't follow the redirect: the Location is not a valid URL.");
+  }
+  if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+    throw new Error("Couldn't follow the redirect: it points to a URL that is not http:// or https://.");
+  }
+  if (secret && next.protocol === 'http:') throw new Error(REDIRECT_PLAIN_HTTP);
+  // a user and password in a Location are not used
+  next.username = '';
+  next.password = '';
+  return next;
 }
 
 const MISMATCH = /^Credential ".*" is of type /;
@@ -283,8 +340,9 @@ export const createWebhookSender: DestinationFactory = (deps, destination): Dest
         throw new Error(PLAIN_HTTP_SECRET);
       }
 
+      const { url: firstUrl, auth: urlAuth } = splitUserinfo(config.url);
       let request: HttpRequestOptions = {
-        url: config.url.toString(),
+        url: firstUrl.toString(),
         method: config.method,
         headers: headersOf(config.headers),
         qs: queryOf(config.query, config.arrayFormat),
@@ -300,11 +358,16 @@ export const createWebhookSender: DestinationFactory = (deps, destination): Dest
         returnFullResponse: true,
         ignoreHttpStatusErrors: true,
         timeout: config.timeout,
-        followRedirects: config.followRedirects,
-        maxRedirects: config.maxRedirects,
+        // with redirects on, the hops are followed below, one call each
+        followRedirects: false,
         // the one switch that skips certificate verification
         ...(config.allowUnauthorizedCerts ? { skipSslCertificateValidation: true } : {}),
       };
+      // the secret-free request that follows a redirect to another origin
+      const { headers: _headers, qs: _qs, ...rest } = request;
+      const plain: HttpRequestOptions = { ...rest, headers: {}, qs: {} };
+      // a credential wins over the URL's own user and password
+      if (urlAuth && !credentialId) request = { ...request, auth: urlAuth };
 
       if (credentialId) {
         try {
@@ -330,6 +393,52 @@ export const createWebhookSender: DestinationFactory = (deps, destination): Dest
         response = (await deps.http.request(request)) as HttpFullResponse<unknown>;
       } catch (error) {
         throw new Error(cut(`Couldn't reach the webhook: ${reasonOf(error)}`));
+      }
+
+      if (config.followRedirects) {
+        const secret = Boolean(credentialId) || carriesSecret(config);
+        let current = firstUrl;
+        // the request with the pairs, the auth and the credential: kept only while the origin stays the same
+        let attached = true;
+        let method: string = config.method;
+        let withBody = request.body !== undefined;
+        const credentialed = request;
+        for (let hop = 0; ; hop++) {
+          const target = redirectTarget(response, current, secret);
+          if (!target) break;
+          if (hop >= config.maxRedirects) {
+            throw new Error(`The webhook redirected more than ${config.maxRedirects} times.`);
+          }
+          const code = response.statusCode;
+          if (
+            code === 303
+              ? method !== 'GET' && method !== 'HEAD'
+              : (code === 301 || code === 302) && method === 'POST'
+          ) {
+            method = 'GET';
+            withBody = false;
+          }
+          if (target.origin !== current.origin) attached = false;
+          const next: HttpRequestOptions = {
+            ...(attached ? credentialed : plain),
+            url: target.toString(),
+            qs: {},
+            method: method as NonNullable<HttpRequestOptions['method']>,
+          };
+          if (!withBody) {
+            delete next.body;
+            delete next.bodyType;
+            next.headers = Object.fromEntries(
+              Object.entries(next.headers ?? {}).filter(([name]) => !BODY_HEADERS.has(name.toLowerCase())),
+            );
+          }
+          current = target;
+          try {
+            response = (await deps.http.request(next)) as HttpFullResponse<unknown>;
+          } catch (error) {
+            throw new Error(cut(`Couldn't reach the webhook: ${reasonOf(error)}`));
+          }
+        }
       }
 
       const status = response.statusCode;
