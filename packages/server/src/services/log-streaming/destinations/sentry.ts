@@ -36,6 +36,12 @@ function parseDsn(dsn: unknown): ParsedDsn | string {
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return 'The Sentry DSN must start with https:// or http://';
   if (!url.username) return 'The Sentry DSN needs a public key before the @';
+  let key: string;
+  try {
+    key = decodeURIComponent(url.username);
+  } catch {
+    return 'The Sentry DSN key is not valid';
+  }
   if (!url.hostname) return 'The Sentry DSN needs a host';
   if (url.search || url.hash) return 'The Sentry DSN must not have a query or fragment';
   const segments = url.pathname.split('/').filter(Boolean);
@@ -43,7 +49,7 @@ function parseDsn(dsn: unknown): ParsedDsn | string {
   if (!project || !/^\d+$/.test(project)) return 'The Sentry DSN must end with a numeric project id';
   if (segments.some((s) => !/^[A-Za-z0-9._~-]+$/.test(s))) return 'The Sentry DSN path is not valid';
   return {
-    key: decodeURIComponent(url.username),
+    key,
     origin: `${url.protocol}//${url.host}`,
     prefix: segments.length ? `/${segments.join('/')}` : '',
     project,

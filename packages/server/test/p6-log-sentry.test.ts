@@ -78,6 +78,7 @@ describe('validateSentrySettings', () => {
       `https://${KEY}@host`,
       `https://${KEY}@host/abc`,
       `https://${KEY}@host/1?x=1`,
+      'https://%E0abc@o1.ingest.sentry.io/1',
     ]) {
       expect(validateSentrySettings({ dsn, sendPayload: true }), dsn).toEqual(expect.any(String));
     }
