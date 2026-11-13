@@ -5,6 +5,7 @@
  * sender a spy that returns the pinned lookup. Values are fixed fakes.
  */
 import { randomUUID } from 'node:crypto';
+import net from 'node:net';
 import { HttpClient } from '@workflow/core';
 import type { SyslogDestinationSettings } from '@workflow/workflow';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -221,6 +222,44 @@ describe('delivery', () => {
     await expect(sender.send(eventOf('n8n.workflow.success'), {})).rejects.toThrow();
     await sender.close?.();
   });
+
+  it('a peer that stops reading rejects the send after 5 seconds and the next send reconnects', async () => {
+    const sockets = new Set<net.Socket>();
+    let connections = 0;
+    let paused = true;
+    const server = net.createServer((socket) => {
+      connections += 1;
+      sockets.add(socket);
+      socket.on('error', () => undefined);
+      socket.on('close', () => sockets.delete(socket));
+      if (paused) socket.pause();
+      else socket.resume();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as net.AddressInfo;
+    const sender = createSyslogSender(depsFor(), destination(settingsFor('tcp', { port })));
+    try {
+      const big = eventOf('n8n.workflow.success', { big: 'x'.repeat(800_000) });
+      let error: unknown;
+      for (let i = 0; i < 60 && !error; i += 1) {
+        error = await sender.send(big, {}).then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+      }
+      expect(String((error as Error)?.message)).toBe(
+        'The syslog server did not take the event within 5 seconds',
+      );
+      expect(connections).toBe(1);
+      paused = false;
+      await sender.send(eventOf('n8n.workflow.success'), {});
+      expect(connections).toBe(2);
+    } finally {
+      await sender.close?.();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60_000);
 
   it('a payload too large for a datagram is cut to a marker, not dropped', async () => {
     const sender = createSyslogSender(depsFor(), destination(settingsFor('udp')));

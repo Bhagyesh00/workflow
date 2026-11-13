@@ -20,6 +20,8 @@ import type { DestinationFactory, DestinationSender, SenderDeps, StoredDestinati
 const DEFAULT_APP_NAME = 'workflow';
 const DEFAULT_FACILITY = 16;
 const CONNECT_TIMEOUT_MS = 5000;
+/** a stream write that has not drained in this long means the peer stopped reading */
+const WRITE_TIMEOUT_MS = 5000;
 /** the test send waits this long for a late refusal or reset before it answers */
 const TEST_WAIT_MS = 500;
 const MAX_DATAGRAM_BYTES = 65_000;
@@ -173,7 +175,20 @@ class SyslogSender implements DestinationSender {
   private async sendStream(data: string, test: boolean | undefined): Promise<void> {
     const connection = await this.connect();
     await new Promise<void>((resolve, reject) => {
-      connection.socket.write(data, 'utf8', (error) => (error ? reject(error) : resolve()));
+      // a peer that accepts the connection and stops reading never fires the write callback: give up, drop the
+      // socket (the next send reconnects) and let the manager count the failure
+      const timer = setTimeout(() => {
+        // 'close' fires a tick later: mark it now so the next send reconnects instead of writing to a dead socket
+        connection.closed = true;
+        if (this.current === connection) this.current = undefined;
+        connection.socket.destroy();
+        reject(new Error('The syslog server did not take the event within 5 seconds'));
+      }, WRITE_TIMEOUT_MS);
+      connection.socket.write(data, 'utf8', (error) => {
+        clearTimeout(timer);
+        if (error) reject(error);
+        else resolve();
+      });
     });
     if (!test) return;
     await new Promise((resolve) => setTimeout(resolve, TEST_WAIT_MS));
