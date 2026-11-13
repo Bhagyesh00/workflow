@@ -149,9 +149,13 @@ describe('API key scopes', () => {
       .map((g) => g.getAttribute('aria-label'))
       .filter((label): label is string => label !== null);
     // S3's and S5's groups appended last (S5 adds Log streaming and OpenTelemetry after S3's three)
-    for (const label of ['Node type policies', 'Credential type policies', 'Insights']) {
-      expect(groups).toContain(label);
-    }
+    const at = groups.indexOf('Insights');
+    expect(at).toBeGreaterThanOrEqual(2);
+    expect(groups.slice(at - 2, at + 1)).toEqual([
+      'Node type policies',
+      'Credential type policies',
+      'Insights',
+    ]);
   });
 });
 

@@ -56,7 +56,7 @@ export interface SyslogDestinationSettings {
   host: string;
   port: number;
   protocol: 'udp' | 'tcp' | 'tls';
-  /** PEM CA bundle for `tls` (a private CA); the system roots otherwise */
+  /** PEM CA bundle of the authority that signed the server's certificate; required for `tls` (no system roots) */
   tlsCa?: string;
   facility: number;
   app_name: string;

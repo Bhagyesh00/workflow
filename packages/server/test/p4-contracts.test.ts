@@ -856,7 +856,28 @@ describe('execution services', () => {
     expect(typeof built.dataTables?.insertRows).toBe('function');
     expect(built.formTokens).toBe(server.ctx.formTokens);
     expect(built.formAuth).toBe(server.ctx.formAuth);
-    expect(built.pythonRunner).toBeInstanceOf(PyodideCodeRunner);
+    // P6-58: the run's python runner is a PyodideCodeRunner behind the runner events wrapper,
+    // so the test checks that the wrapper hands each task to it
+    const inner = vi.spyOn(PyodideCodeRunner.prototype, 'run').mockResolvedValue([]);
+    try {
+      const input = {
+        code: 'return []',
+        mode: 'runOnceForAllItems' as const,
+        items: [],
+        nodeOutputs: {},
+        variables: {},
+        workflow: { id: UNKNOWN_ID, name: 'w', active: false },
+        execution: { id: 'e1', mode: 'manual' },
+        nodeName: 'Code',
+        timezone: 'UTC',
+      };
+      await expect(built.pythonRunner?.run(input)).resolves.toEqual([]);
+      expect(inner).toHaveBeenCalledTimes(1);
+      expect(inner).toHaveBeenCalledWith(input);
+      expect(inner.mock.contexts[0]).toBeInstanceOf(PyodideCodeRunner);
+    } finally {
+      inner.mockRestore();
+    }
   });
 
   it('binds the data tables to the tenant and the workflow', async () => {

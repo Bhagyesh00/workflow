@@ -168,6 +168,14 @@ describe('API key scopes', () => {
         .filter((name) => name.startsWith(prefix));
     expect(namesIn('Log streaming', 'eventBusDestination:')).toEqual(logScopes);
     expect(namesIn('OpenTelemetry', 'otel:')).toEqual(['otel:manage']);
+    // the two S5 groups follow S3's Insights, in the server's API_KEY_SCOPES order
+    const groups = screen
+      .getAllByRole('group')
+      .map((g) => g.getAttribute('aria-label'))
+      .filter((label): label is string => label !== null);
+    const at = groups.indexOf('Insights');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(groups.slice(at + 1, at + 3)).toEqual(['Log streaming', 'OpenTelemetry']);
   });
 });
 

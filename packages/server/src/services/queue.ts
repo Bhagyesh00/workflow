@@ -4,7 +4,7 @@
  * the wait tracker and pruning.
  */
 import { randomUUID } from 'node:crypto';
-import { type Job, Queue, Worker } from 'bullmq';
+import { type Job, Queue, QueueEvents, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 
 export interface ExecutionJob {
@@ -36,6 +36,7 @@ export class ExecutionQueue {
   private readonly connection: Redis;
   private readonly queue: Queue<ExecutionJob>;
   private worker?: Worker<ExecutionJob>;
+  private queueEvents?: QueueEvents;
 
   constructor(
     redisUrl: string,
@@ -96,6 +97,42 @@ export class ExecutionQueue {
     this.worker.on('stalled', (jobId) => this.notify((events) => events.stalled(String(jobId))));
   }
 
+  /** true once this process consumes the queue (`startWorker` ran) */
+  get isWorker(): boolean {
+    return this.worker !== undefined;
+  }
+
+  /**
+   * P6-71 (S5 fix, metrics-1): calls `fn` for every job that finishes, in any process (BullMQ `QueueEvents`, the
+   * queue's global `completed` and `failed` events; n8n counts them on the main from Bull's global events). The
+   * worker-side `completed` and `failed` events of `startWorker` fire only in the worker's own process. The
+   * stream is created on the first call and closed in `close()`; the returned promise settles when it is
+   * connected (a job that finishes earlier is not seen). A throwing `fn` is swallowed.
+   */
+  onFinished(fn: (outcome: 'completed' | 'failed') => void): Promise<void> {
+    if (!this.queueEvents) {
+      this.queueEvents = new QueueEvents(QUEUE_NAME, {
+        connection: this.connection.duplicate(),
+        prefix: `${this.prefix}:bull`,
+      });
+      this.queueEvents.on('error', () => {});
+    }
+    const events = this.queueEvents;
+    const call = (outcome: 'completed' | 'failed') => {
+      try {
+        fn(outcome);
+      } catch {
+        // a listener never fails the stream
+      }
+    };
+    events.on('completed', () => call('completed'));
+    events.on('failed', () => call('failed'));
+    return events.waitUntilReady().then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
   async depth(): Promise<number> {
     const counts = await this.queue.getJobCounts('waiting', 'active', 'delayed', 'prioritized');
     return Object.values(counts).reduce((a, b) => a + b, 0);
@@ -103,7 +140,7 @@ export class ExecutionQueue {
 
   /**
    * P6-71 (S5 C0, FULL): the waiting and active job counts (BullMQ `getJobCounts`), read by the queue gauges (L15).
-   * Completed jobs are removed at once (`enqueue`), so completed and failed are counted from the job events instead.
+   * Completed jobs are removed at once (`enqueue`), so completed and failed are counted from `onFinished` instead.
    */
   async jobCounts(): Promise<{ waiting: number; active: number }> {
     const counts = await this.queue.getJobCounts('waiting', 'active');
@@ -112,6 +149,7 @@ export class ExecutionQueue {
 
   async close(): Promise<void> {
     await this.worker?.close();
+    await this.queueEvents?.close().catch(() => {});
     await this.queue.close();
     await this.connection.quit().catch(() => {});
   }
