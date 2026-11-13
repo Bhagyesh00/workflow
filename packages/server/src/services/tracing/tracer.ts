@@ -1,6 +1,7 @@
 /**
  * P6-65 (S5 L9): one `TracingService` per process: a batch span processor per tenant (built from its effective
- * settings, rebuilt when they change, dropped after 10 idle minutes), span start and end with the tenant's
+ * settings, rebuilt when newer settings change them, never by older ones, dropped after 10 idle minutes), span
+ * start and end with the tenant's
  * parent-based ratio sampling, one startup probe per tenant per process (a warning with the tenant id and status
  * only), flush and close. A span holds names, ids, counts and status: its status message passes `redactSecrets`
  * and is cut to 1000 characters.
@@ -69,9 +70,24 @@ interface TenantEntry {
   lastUsed: number;
 }
 
+/** the processor a run with superseded settings gets when its tenant has none: its spans go nowhere */
+const NO_PROCESSOR: SpanProcessor = Object.freeze({
+  onEnd: () => undefined,
+  forceFlush: async () => undefined,
+  shutdown: async () => undefined,
+});
+
 export class TracingService {
   private readonly tenants = new Map<string, TenantEntry>();
   private readonly probed = new Set<string>();
+  /**
+   * The order settings objects were first handed in. `forTenant` answers one object while its cache holds and a new
+   * one after a save, so a later first sight is a newer load; a run hands back the object of its start.
+   */
+  private readonly loadOrder = new WeakMap<EffectiveOtelSettings, number>();
+  private loads = 0;
+  /** per tenant, the newest settings handed in: their load order and hash (no setting value) */
+  private readonly newest = new Map<string, { order: number; key: string }>();
   /** probes and the shutdowns of replaced or idle processors, awaited by `flush` and `close` */
   private readonly pending = new Set<Promise<unknown>>();
   private sweepTimer: ReturnType<typeof setInterval> | undefined;
@@ -82,12 +98,24 @@ export class TracingService {
     private readonly options: TracingServiceOptions = {},
   ) {}
 
-  /** the tenant's processor, rebuilt when its settings change; the first load in this process probes the collector */
+  /**
+   * The tenant's processor, rebuilt when newer settings change it; the first load in this process probes the
+   * collector. Settings older than the newest the tenant handed in (a run that started before a save) never rebuild
+   * it: they keep the current processor alive, or get none when the tenant has no processor.
+   */
   processorFor(tenantId: string, settings: EffectiveOtelSettings): SpanProcessor {
     this.sweepIdle();
     const key = settingsKey(settings);
     const now = this.now();
     const entry = this.tenants.get(tenantId);
+    const order = this.orderOf(settings);
+    const newest = this.newest.get(tenantId);
+    if (newest && order < newest.order && key !== newest.key) {
+      if (!entry) return NO_PROCESSOR;
+      entry.lastUsed = now;
+      return entry.processor;
+    }
+    if (!newest || order > newest.order) this.newest.set(tenantId, { order, key });
     if (entry && entry.key === key) {
       entry.lastUsed = now;
       entry.settings = settings;
@@ -187,12 +215,23 @@ export class TracingService {
     this.sweepTimer = undefined;
     const entries = [...this.tenants.values()];
     this.tenants.clear();
+    this.newest.clear();
     await Promise.allSettled([...this.pending]);
     await Promise.allSettled(entries.map((entry) => entry.processor.shutdown()));
   }
 
   private now(): number {
     return this.options.now ? this.options.now() : Date.now();
+  }
+
+  /** when these settings were first handed in (a test passing equal copies gets a new load each time) */
+  private orderOf(settings: EffectiveOtelSettings): number {
+    let order = this.loadOrder.get(settings);
+    if (order === undefined) {
+      order = ++this.loads;
+      this.loadOrder.set(settings, order);
+    }
+    return order;
   }
 
   private startSweep(): void {

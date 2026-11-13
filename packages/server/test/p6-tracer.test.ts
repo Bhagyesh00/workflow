@@ -448,6 +448,73 @@ describe('TracingService', () => {
   });
 });
 
+describe('settings older than the newest (a run that started before a save)', () => {
+  it('never rebuild the processor: spans go to the newest endpoint until a newer load', async () => {
+    const oldCollector = await startOtlpCollector();
+    const newCollector = await startOtlpCollector();
+    try {
+      const { deps } = makeDeps();
+      const tracing = new TracingService(deps, { probe: false });
+      const before = settingsFor(oldCollector.url);
+      const first = tracing.processorFor('tenant-a', before);
+      const after = settingsFor(newCollector.url);
+      const current = tracing.processorFor('tenant-a', after);
+      expect(current).not.toBe(first);
+      // the old run's node starts and ends hand back its start's settings
+      for (let i = 0; i < 3; i++) expect(tracing.processorFor('tenant-a', before)).toBe(current);
+      expect(tracing.processorFor('tenant-a', after)).toBe(current);
+      tracing.endSpan(tracing.startSpan({ tenantId: 'tenant-a', name: 'node.execute' }));
+      await tracing.flush();
+      expect(oldCollector.requests).toHaveLength(0);
+      expect(newCollector.requests).toHaveLength(1);
+      // a later save back to the old endpoint is a newer load: it rebuilds
+      expect(tracing.processorFor('tenant-a', { ...before })).not.toBe(current);
+      await tracing.close();
+    } finally {
+      await oldCollector.close();
+      await newCollector.close();
+    }
+  });
+
+  it('a tenant with no processor gets none from older settings, and one from the newest', async () => {
+    const { deps } = makeDeps();
+    let now = 1_000_000;
+    const exported: SpanData[] = [];
+    const tracing = new TracingService(deps, {
+      now: () => now,
+      probe: false,
+      processorOptions: {
+        exporter: async (spans) => {
+          exported.push(...spans);
+          return { success: true };
+        },
+      },
+    });
+    const before = settingsFor('http://127.0.0.1:1');
+    const after = settingsFor('http://127.0.0.1:2');
+    tracing.processorFor('tenant-a', before);
+    tracing.processorFor('tenant-a', after);
+    // the cache's next load of the same settings: a newer object, equal to `after`
+    tracing.processorFor('tenant-a', { ...after });
+    now += IDLE_PROCESSOR_MS + 1;
+    tracing.sweepIdle();
+    expect(tracing.activeTenants()).toEqual([]);
+    tracing.processorFor('tenant-a', before);
+    expect(tracing.activeTenants()).toEqual([]);
+    tracing.endSpan(tracing.startSpan({ tenantId: 'tenant-a', name: 'node.execute' }));
+    await tracing.flush();
+    expect(exported).toHaveLength(0);
+    // a run that started with settings equal to the newest builds it again
+    tracing.processorFor('tenant-a', after);
+    expect(tracing.activeTenants()).toEqual(['tenant-a']);
+    tracing.processorFor('tenant-a', before);
+    tracing.endSpan(tracing.startSpan({ tenantId: 'tenant-a', name: 'node.execute' }));
+    await tracing.flush();
+    expect(exported.map((s) => s.name)).toEqual(['node.execute']);
+    await tracing.close();
+  });
+});
+
 describe('startup probe (once per tenant per process)', () => {
   it('probes the collector when a tenant settings first load, never again', async () => {
     const collector = await startOtlpCollector();
