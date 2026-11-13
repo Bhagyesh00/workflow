@@ -16,6 +16,7 @@ import type { SpanData } from '../src/services/tracing/span';
 import { sendTestTrace } from '../src/services/tracing/test-trace';
 import { loadTlsFixtures } from './fakes/http-sink';
 import { startOtlpCollector } from './fakes/otlp';
+import { startOtlpGrpcCollector } from './fakes/otlp-grpc';
 
 const HEADER_VALUE = 'fake-otlp-header-value-l9';
 const SECOND_VALUE = 'fake-second-value-l9';
@@ -128,6 +129,37 @@ describe('exportSpans over HTTP protobuf', () => {
     }
   });
 
+  it('only the first 64 KB of an error answer are read for its detail', async () => {
+    const collector = await startOtlpCollector();
+    try {
+      // the words sit past 64 KB of blanks: the detail never reaches them
+      collector.respondWith({
+        status: 400,
+        body: `${' '.repeat(70 * 1024)}words past the head`,
+        headers: { 'content-type': 'text/plain' },
+      });
+      const result = await exportSpans(makeDeps(), settingsFor(collector.url), [span('x')]);
+      expect(result).toEqual({ success: false, error: '400 Bad Request' });
+
+      // a protobuf Status whose message runs past 64 KB keeps the words read
+      const message = Buffer.from(`token expired ${'y'.repeat(70 * 1024)}`);
+      const length = message.length;
+      collector.respondWith({
+        status: 401,
+        body: Buffer.concat([
+          Buffer.from([0x08, 16, 0x12, (length & 0x7f) | 0x80, ((length >> 7) & 0x7f) | 0x80, length >> 14]),
+          message,
+        ]),
+        headers: { 'content-type': 'application/x-protobuf' },
+      });
+      const status = await exportSpans(makeDeps(), settingsFor(collector.url), [span('x')]);
+      expect(status.error).toMatch(/^401 Unauthorized: token expired y+$/);
+      expect((status.error as string).length).toBeLessThanOrEqual(1000);
+    } finally {
+      await collector.close();
+    }
+  });
+
   it('a 307 to 127.0.0.1 is not followed and the export fails', async () => {
     const collector = await startOtlpCollector();
     try {
@@ -177,6 +209,27 @@ describe('exportSpans over HTTP protobuf', () => {
       expect(collector.requests).toHaveLength(1);
     } finally {
       tls.setDefaultCACertificates(system);
+      await collector.close();
+    }
+  });
+});
+
+describe('exportSpans over gRPC', () => {
+  it("passes the caller's timeout to the gRPC exporter", async () => {
+    const collector = await startOtlpGrpcCollector();
+    collector.respondWith({ hang: true });
+    try {
+      const started = Date.now();
+      const result = await exportSpans(
+        makeDeps(),
+        settingsFor(collector.url, { exporterProtocol: 'grpc' }),
+        [span('x')],
+        { timeoutMs: 300 },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/did not answer within 300 ms/);
+      expect(Date.now() - started).toBeLessThan(5000);
+    } finally {
       await collector.close();
     }
   });

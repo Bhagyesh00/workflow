@@ -22,6 +22,8 @@ export interface ExportResult {
 export const EXPORT_TIMEOUT_MS = 30_000;
 const ERROR_MAX_LENGTH = 1000;
 const DETAIL_MAX_LENGTH = 500;
+/** the most of an error answer read for its detail: 500 characters are kept, a huge answer is never decoded */
+const DETAIL_MAX_BYTES = 64 * 1024;
 /** the instrumentation scope our spans go out under */
 const SCOPE_NAME = 'workflow';
 
@@ -95,7 +97,7 @@ export async function sendExportBody(
 ): Promise<ExportOutcome> {
   if (settings.exporterProtocol === 'grpc') {
     try {
-      const result = await exportGrpc(deps, settings, body);
+      const result = await exportGrpc(deps, settings, body, { timeoutMs });
       return result.success
         ? { success: true, status: 200 }
         : {
@@ -145,14 +147,18 @@ function messageOf(error: unknown): string {
   return cause && cause !== error.message ? `${error.message}: ${cause}` : error.message || 'Export failed';
 }
 
-/** the collector's own words: google.rpc.Status `message` for protobuf, `message` or the text otherwise */
+/**
+ * the collector's own words: google.rpc.Status `message` for protobuf, `message` or the text otherwise. Only the
+ * first 64 KB are read (a JSON answer cut there gives its text).
+ */
 function detailOf(body: unknown, contentType: string): string {
   if (!(body instanceof Uint8Array) || body.length === 0) return '';
+  const head = body.subarray(0, DETAIL_MAX_BYTES);
   let detail = '';
   if (/protobuf/i.test(contentType)) {
-    detail = statusMessageOf(body);
+    detail = statusMessageOf(head, head.length < body.length);
   } else {
-    const text = Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('utf8');
+    const text = Buffer.from(head.buffer, head.byteOffset, head.byteLength).toString('utf8');
     if (/json/i.test(contentType)) {
       try {
         const parsed = JSON.parse(text) as { message?: unknown };
@@ -165,15 +171,17 @@ function detailOf(body: unknown, contentType: string): string {
     }
   }
   // printable text only, on one line
-  const clean = Array.from(detail, (c) => (c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f ? ' ' : c))
+  const clean = Array.from(detail.slice(0, DETAIL_MAX_LENGTH * 4), (c) =>
+    c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f ? ' ' : c,
+  )
     .join('')
     .replace(/\s+/g, ' ')
     .trim();
   return clean.slice(0, DETAIL_MAX_LENGTH);
 }
 
-/** field 2 (`message`) of a google.rpc.Status; '' when the bytes are not one */
-function statusMessageOf(bytes: Uint8Array): string {
+/** field 2 (`message`) of a google.rpc.Status; '' when the bytes are not one (`cut`: the bytes are the answer's head) */
+function statusMessageOf(bytes: Uint8Array, cut = false): string {
   let pos = 0;
   const varint = (): number => {
     let value = 0;
@@ -197,7 +205,8 @@ function statusMessageOf(bytes: Uint8Array): string {
       else if (wire === 5) pos += 4;
       else if (wire === 2) {
         const length = varint();
-        if (pos + length > bytes.length) return '';
+        // a message running past a cut head keeps the part read; past the whole answer, it is not a Status
+        if (pos + length > bytes.length && !(cut && field === 2)) return '';
         if (field === 2) return Buffer.from(bytes.subarray(pos, pos + length)).toString('utf8');
         pos += length;
       } else return '';
