@@ -259,19 +259,19 @@
 
 ### 1.15 Observability, scaling, APIs
 
-| Capability                                                               | M   | Status |
-| ------------------------------------------------------------------------ | --- | ------ |
-| Structured logs, `/healthz`, `/healthz/readiness`, Prometheus `/metrics` | M1  | 🔨     |
-| Regular mode and queue mode (BullMQ workers), Redis pub/sub push         | M1  | 🔨     |
-| Execution pruning                                                        | M1  | 🔨     |
-| Public REST API `/api/v1` with OpenAPI document                          | M1  | 🔨     |
-| Public API folder routes                                                 | M2  | ✅     |
-| Docker image + docker-compose (Postgres+pgvector, Redis, main, worker)   | M1  | 🔨     |
-| Insights dashboard (runs, failures, duration, time saved)                | M2  | ✅     |
-| OpenTelemetry traces, log streaming (webhook/syslog/Sentry)              | M2  | 📋     |
-| Webhook processor and ingress split, multi-main HA                       | M2  | 📋     |
-| Helm chart                                                               | M3  | 📋     |
-| Templates gallery + one-click import, import n8n workflow JSON           | M2  | 📋     |
+| Capability                                                                                                                     | M   | Status |
+| ------------------------------------------------------------------------------------------------------------------------------ | --- | ------ |
+| Structured logs, `/healthz`, `/healthz/readiness`, Prometheus `/metrics` with n8n's metric families behind env toggles         | M1  | 🔨     |
+| Regular mode and queue mode (BullMQ workers), Redis pub/sub push                                                               | M1  | 🔨     |
+| Execution pruning                                                                                                              | M1  | 🔨     |
+| Public REST API `/api/v1` with OpenAPI document                                                                                | M1  | 🔨     |
+| Public API folder routes                                                                                                       | M2  | ✅     |
+| Docker image + docker-compose (Postgres+pgvector, Redis, main, worker)                                                         | M1  | 🔨     |
+| Insights dashboard (runs, failures, duration, time saved)                                                                      | M2  | ✅     |
+| OpenTelemetry traces over OTLP (HTTP and gRPC) and log streaming to webhook, syslog and Sentry, set per workspace by its admin | M2  | ✅     |
+| Webhook processor and ingress split, multi-main HA                                                                             | M2  | 📋     |
+| Helm chart                                                                                                                     | M3  | 📋     |
+| Templates gallery + one-click import, import n8n workflow JSON                                                                 | M2  | 📋     |
 
 ## 2. New features (not in n8n), from user research
 
