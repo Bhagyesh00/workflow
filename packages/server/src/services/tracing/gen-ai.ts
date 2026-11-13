@@ -3,31 +3,46 @@
  * the model sub-node's logged model names and `tokenUsage`, and an agent's token sums over its connected model
  * runs. Never a message, prompt, tool argument or output text: only the `model` string and the two token counts
  * are read from the logged input and output, and no other key of either is touched.
+ *
+ * As n8n: the provider comes from the model node's type; only the agent node (`ai.agent`) is an agent and only chat
+ * model runs (`ai.lmChat*`) are calls; an agent span takes the provider and models of its first call, sums the
+ * tokens of its chat calls and flags `llm.usage_reported` false when a call reported no usage. Our model sub-node
+ * tasks carry no `previousNodeRun` (their source is only `previousNode`), so the calls of one agent run are told
+ * apart by the agent run's time span, not by run index as n8n does.
  */
 import type { Connections, RunData, TaskData, WorkflowNode } from '@workflow/workflow';
 
-type GenAiAttributes = Record<string, string | number>;
+type GenAiAttributes = Record<string, string | number | boolean>;
 
 const MODEL_TYPE_PREFIX = 'ai.lmChat';
-const AGENT_TYPES = new Set(['ai.agent', 'ai.agentTool']);
+const AGENT_TYPE = 'ai.agent';
+const USAGE_REPORTED = 'llm.usage_reported';
 const MAX_NAME_LENGTH = 200;
 
-/** `gen_ai.provider.name` well-known values for the model nodes whose vendor name differs from the node suffix */
+/** `gen_ai.provider.name` values, n8n's strings, keyed by the lower-case node type suffix after `ai.lmChat` */
 const PROVIDER_NAMES: Record<string, string> = {
-  openai: 'openai',
-  openaicompatible: 'openai',
+  alibabacloud: 'alibaba_cloud',
   anthropic: 'anthropic',
   awsbedrock: 'aws.bedrock',
   azureopenai: 'azure.ai.openai',
   cohere: 'cohere',
+  databricks: 'databricks',
+  deepseek: 'deepseek',
   googlegemini: 'gcp.gemini',
   googlevertex: 'gcp.vertex_ai',
-  mistralcloud: 'mistral_ai',
-  ollama: 'ollama',
-  deepseek: 'deepseek',
-  xaigrok: 'x_ai',
   groq: 'groq',
+  lemonade: 'lemonade',
+  minimax: 'minimax',
+  mistralcloud: 'mistral',
+  moonshot: 'moonshot_ai',
+  nvidia: 'nvidia',
+  ollama: 'ollama',
+  openai: 'openai',
+  // our OpenAI-compatible chat node speaks the OpenAI protocol
+  openaicompatible: 'openai',
   openrouter: 'openrouter',
+  vercelaigateway: 'vercel.ai_gateway',
+  xaigrok: 'x_ai',
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -66,6 +81,10 @@ function tokensOf(output: Record<string, unknown> | undefined): { input?: number
   return { input: count(usage.inputTokens), output: count(usage.outputTokens) };
 }
 
+function hasUsage(tokens: { input?: number; output?: number }): boolean {
+  return tokens.input !== undefined || tokens.output !== undefined;
+}
+
 function modelAttributes(node: WorkflowNode, task: TaskData): GenAiAttributes | undefined {
   const provider = providerOf(node.type);
   if (!provider) return undefined;
@@ -74,12 +93,13 @@ function modelAttributes(node: WorkflowNode, task: TaskData): GenAiAttributes | 
   const request = modelName(input);
   const response = modelName(output);
   const tokens = tokensOf(output);
-  if (!request && !response && tokens.input === undefined && tokens.output === undefined) return undefined;
+  if (!request && !response && !hasUsage(tokens)) return undefined;
   const attributes: GenAiAttributes = { 'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': provider };
   if (request) attributes['gen_ai.request.model'] = request;
   if (response) attributes['gen_ai.response.model'] = response;
   if (tokens.input !== undefined) attributes['gen_ai.usage.input_tokens'] = tokens.input;
   if (tokens.output !== undefined) attributes['gen_ai.usage.output_tokens'] = tokens.output;
+  if (!hasUsage(tokens)) attributes[USAGE_REPORTED] = false;
   return attributes;
 }
 
@@ -99,6 +119,7 @@ function agentAttributes(
   task: TaskData,
   runData: RunData,
   connections: Connections,
+  nodes: readonly WorkflowNode[] | undefined,
 ): GenAiAttributes {
   const attributes: GenAiAttributes = {
     'gen_ai.operation.name': 'invoke_agent',
@@ -107,20 +128,43 @@ function agentAttributes(
   };
   const from = task.startTime;
   const to = task.startTime + Math.max(0, task.executionTime);
-  let input: number | undefined;
-  let output: number | undefined;
+  const types = nodes ? new Map(nodes.map((n) => [n.name, n.type])) : undefined;
+  const calls: Array<{ type: string | undefined; run: TaskData }> = [];
   for (const name of modelNodesOf(node, connections)) {
+    const type = types?.get(name);
+    // only chat calls count; with no node list every wired model node is taken for a chat model
+    if (types && !type?.startsWith(MODEL_TYPE_PREFIX)) continue;
     for (const run of runData[name] ?? []) {
       // only the runs this agent run made: the sub-node ran for this agent, inside the agent's own time span
       if (run.source?.[0]?.previousNode !== node.name) continue;
       if (run.startTime < from || run.startTime > to) continue;
-      const tokens = tokensOf(channelJson(run.data));
-      if (tokens.input !== undefined) input = (input ?? 0) + tokens.input;
-      if (tokens.output !== undefined) output = (output ?? 0) + tokens.output;
+      calls.push({ type, run });
     }
+  }
+  if (!calls.length) return attributes;
+  // the first call (stable for equal start times) gives the provider and the models
+  const ordered = calls
+    .map((call, index) => ({ call, index }))
+    .sort((a, b) => a.call.run.startTime - b.call.run.startTime || a.index - b.index);
+  const first = ordered[0].call;
+  const provider = first.type ? providerOf(first.type) : undefined;
+  if (provider) attributes['gen_ai.provider.name'] = provider;
+  const request = modelName(channelJson(first.run.inputOverride));
+  const response = modelName(channelJson(first.run.data));
+  if (request) attributes['gen_ai.request.model'] = request;
+  if (response) attributes['gen_ai.response.model'] = response;
+  let input: number | undefined;
+  let output: number | undefined;
+  let missing = false;
+  for (const { run } of calls) {
+    const tokens = tokensOf(channelJson(run.data));
+    if (!hasUsage(tokens)) missing = true;
+    if (tokens.input !== undefined) input = (input ?? 0) + tokens.input;
+    if (tokens.output !== undefined) output = (output ?? 0) + tokens.output;
   }
   if (input !== undefined) attributes['gen_ai.usage.input_tokens'] = input;
   if (output !== undefined) attributes['gen_ai.usage.output_tokens'] = output;
+  if (missing) attributes[USAGE_REPORTED] = false;
   return attributes;
 }
 
@@ -133,7 +177,9 @@ export function genAiAttributes(
   taskData: TaskData,
   runData: RunData,
   connections: Connections,
+  /** the workflow's nodes: tells the agent's chat model calls from other model sub-nodes (without it all count) */
+  nodes?: readonly WorkflowNode[],
 ): GenAiAttributes | undefined {
-  if (AGENT_TYPES.has(node.type)) return agentAttributes(node, taskData, runData, connections);
+  if (node.type === AGENT_TYPE) return agentAttributes(node, taskData, runData, connections, nodes);
   return modelAttributes(node, taskData);
 }

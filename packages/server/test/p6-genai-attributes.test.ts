@@ -1,7 +1,8 @@
 /**
  * P6-70 (S5 L14): GenAI attributes on AI node spans. A model call span holds the operation, provider, request
- * and response model and the token counts, and no message text; an agent span sums the token counts of its model
- * runs; a node with no model data gets none. Unit cases on task data, one real run on the Phase 5 fake LLM
+ * and response model and the token counts, and no message text; an agent span takes the provider and models of
+ * its first chat call, sums the token counts of its chat calls and flags a call without usage; a node with no
+ * model data gets none. Unit cases on task data, one real run on the Phase 5 fake LLM
  * through the tracing observer and L9's in-process OTLP fake. Fixed fake values only.
  */
 import { nodesAiPackage } from '@workflow/nodes-ai';
@@ -84,7 +85,22 @@ describe('model sub-node attributes', () => {
     expect(of('ai.lmChatOpenAi')).toBe('openai');
     expect(of('ai.lmChatAwsBedrock')).toBe('aws.bedrock');
     expect(of('ai.lmChatGoogleGemini')).toBe('gcp.gemini');
-    expect(of('ai.lmChatMoonshot')).toBe('moonshot');
+    expect(of('ai.lmChatAzureOpenAi')).toBe('azure.ai.openai');
+    expect(of('ai.lmChatGoogleVertex')).toBe('gcp.vertex_ai');
+    expect(of('ai.lmChatMistralCloud')).toBe('mistral');
+    expect(of('ai.lmChatXAiGrok')).toBe('x_ai');
+    expect(of('ai.lmChatMoonshot')).toBe('moonshot_ai');
+  });
+
+  it('flags a call that reported no usage', () => {
+    const task = modelTask('Agent', 1, { model: 'gpt-x' }, { model: 'gpt-x-2' });
+    expect(genAiAttributes(wf('M', 'ai.lmChatOpenAi'), task, {}, {})).toEqual({
+      'gen_ai.operation.name': 'chat',
+      'gen_ai.provider.name': 'openai',
+      'gen_ai.request.model': 'gpt-x',
+      'gen_ai.response.model': 'gpt-x-2',
+      'llm.usage_reported': false,
+    });
   });
 
   it('leaves out a count or model the run did not log, and ignores bad values', () => {
@@ -96,6 +112,7 @@ describe('model sub-node attributes', () => {
       'gen_ai.request.model': 'gpt-x',
       'gen_ai.usage.input_tokens': 5,
     });
+    expect(genAiAttributes(model, only, {}, {})).not.toHaveProperty('llm.usage_reported');
     const bad = modelTask(
       'Agent',
       1,
@@ -119,6 +136,13 @@ describe('model sub-node attributes', () => {
 describe('agent attributes', () => {
   const agent = wf('Agent', 'ai.agent', 'agent-node-id');
   const usage = (i: number, o: number) => ({ tokenUsage: { inputTokens: i, outputTokens: o }, model: 'm' });
+  const nodes = [
+    agent,
+    wf('Model A', 'ai.lmChatAnthropic'),
+    wf('Model B', 'ai.lmChatOpenAi'),
+    wf('Other Model', 'ai.lmChatOpenAi'),
+    wf('Text Model', 'ai.lmCohere'),
+  ];
 
   it('sums two model calls', () => {
     const task: TaskData = { startTime: 1000, executionTime: 500, executionStatus: 'success', source: [] };
@@ -131,13 +155,74 @@ describe('agent attributes', () => {
       'Other Model': [modelTask('Elsewhere', 1100, { model: 'm' }, usage(900, 900))],
       Agent: [task],
     };
-    expect(genAiAttributes(agent, task, runData, wired)).toEqual({
+    expect(genAiAttributes(agent, task, runData, wired, nodes)).toEqual({
       'gen_ai.operation.name': 'invoke_agent',
       'gen_ai.agent.name': 'Agent',
       'gen_ai.agent.id': 'agent-node-id',
+      'gen_ai.provider.name': 'anthropic',
+      'gen_ai.request.model': 'm',
+      'gen_ai.response.model': 'm',
       'gen_ai.usage.input_tokens': 35,
       'gen_ai.usage.output_tokens': 8,
     });
+  });
+
+  it('takes the provider and models of the first call, and sums only chat calls', () => {
+    const task: TaskData = { startTime: 1000, executionTime: 500, executionStatus: 'success', source: [] };
+    const twoModels: Connections = {
+      ...wired,
+      'Text Model': { ai_languageModel: [[{ node: 'Agent', type: 'ai_languageModel', index: 0 }]] },
+    };
+    const runData: RunData = {
+      // Model B is called first (earlier start), Model A second
+      'Model A': [
+        modelTask('Agent', 1300, { model: 'claude-late' }, { ...usage(4, 1), model: 'claude-late-r' }),
+      ],
+      'Model B': [modelTask('Agent', 1100, { model: 'gpt-first' }, { ...usage(6, 2), model: 'gpt-first-r' })],
+      // a plain (non-chat) LLM node is no call
+      'Text Model': [modelTask('Agent', 1200, { model: 'cohere-x' }, usage(500, 500))],
+      Agent: [task],
+    };
+    expect(genAiAttributes(agent, task, runData, twoModels, nodes)).toEqual({
+      'gen_ai.operation.name': 'invoke_agent',
+      'gen_ai.agent.name': 'Agent',
+      'gen_ai.agent.id': 'agent-node-id',
+      'gen_ai.provider.name': 'openai',
+      'gen_ai.request.model': 'gpt-first',
+      'gen_ai.response.model': 'gpt-first-r',
+      'gen_ai.usage.input_tokens': 10,
+      'gen_ai.usage.output_tokens': 3,
+    });
+  });
+
+  it('flags usage not reported when a call had none, and keeps the sum of the others', () => {
+    const task: TaskData = { startTime: 1000, executionTime: 500, executionStatus: 'success', source: [] };
+    const runData: RunData = {
+      'Model A': [
+        modelTask('Agent', 1100, { model: 'm' }, usage(10, 3)),
+        modelTask('Agent', 1200, { model: 'm' }, { model: 'm' }),
+      ],
+      Agent: [task],
+    };
+    expect(genAiAttributes(agent, task, runData, wired, nodes)).toMatchObject({
+      'gen_ai.usage.input_tokens': 10,
+      'gen_ai.usage.output_tokens': 3,
+      'llm.usage_reported': false,
+    });
+    const none: RunData = {
+      'Model A': [modelTask('Agent', 1100, { model: 'm' }, { model: 'm' })],
+      Agent: [task],
+    };
+    const attributes = genAiAttributes(agent, task, none, wired, nodes);
+    expect(attributes).toMatchObject({ 'llm.usage_reported': false });
+    expect(attributes).not.toHaveProperty('gen_ai.usage.input_tokens');
+    expect(attributes).not.toHaveProperty('gen_ai.usage.output_tokens');
+  });
+
+  it('gives an agent tool no agent attributes, as n8n', () => {
+    const tool = wf('Agent Tool', 'ai.agentTool');
+    const task: TaskData = { startTime: 1, executionTime: 1, executionStatus: 'success', source: [] };
+    expect(genAiAttributes(tool, task, { 'Agent Tool': [task] }, wired)).toBeUndefined();
   });
 
   it('counts only the model runs inside this agent run', () => {
@@ -150,7 +235,7 @@ describe('agent attributes', () => {
       ],
       Agent: [first, second],
     };
-    expect(genAiAttributes(agent, second, runData, wired)).toMatchObject({
+    expect(genAiAttributes(agent, second, runData, wired, nodes)).toMatchObject({
       'gen_ai.usage.input_tokens': 7,
       'gen_ai.usage.output_tokens': 2,
     });
@@ -244,7 +329,12 @@ describe('spans of a real run on the fake LLM', () => {
     expect(agent?.attributes).toMatchObject({
       'gen_ai.operation.name': 'invoke_agent',
       'gen_ai.agent.name': 'Agent',
+      // the run's node list tells the chat model apart, so the agent takes its first call's provider
+      'gen_ai.provider.name': 'openai',
+      'gen_ai.request.model': 'gpt-4o-mini',
+      'gen_ai.response.model': 'fake-model-reply',
     });
+    expect(agent?.attributes['llm.usage_reported']).toBeUndefined();
     expect(Number(agent?.attributes['gen_ai.usage.input_tokens'])).toBe(21);
     expect(Number(agent?.attributes['gen_ai.usage.output_tokens'])).toBe(9);
     const wire = JSON.stringify(

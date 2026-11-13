@@ -9,7 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import type { TaskData, WorkflowDefinition, WorkflowNode } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { RunScope } from '../src/services/observability/lifecycle';
+import type { CrashContext, RunScope } from '../src/services/observability/lifecycle';
 import { type OtlpCollector, startOtlpCollector } from './fakes/otlp';
 import {
   chain,
@@ -71,6 +71,34 @@ const named = (spans: Span[], name: string) => spans.filter((s) => s.name === na
 const nodeSpan = (spans: Span[], nodeName: string) =>
   spans.find((s) => s.name === 'node.execute' && s.attributes['node.name'] === nodeName);
 
+const noRedaction = { production: false, manual: false };
+
+/** a run driven straight through the observer (a trigger run of one Set node), optionally a sub-workflow */
+function directRun(parentExecutionId: string | null = null) {
+  const definition = {
+    name: 'Direct',
+    nodes: [node('Slow', 'core.set')],
+    connections: {},
+    settings: {},
+  } as WorkflowDefinition;
+  const scope: RunScope = {
+    tenantId: owner.tenant.id,
+    executionId: randomUUID(),
+    row: {
+      mode: 'trigger',
+      workflowId: null,
+      parentExecutionId,
+      retryOf: null,
+      startedAt: new Date(),
+      stoppedAt: null,
+    },
+    definition,
+    options: {},
+    kind: 'run',
+  };
+  return { scope };
+}
+
 async function manualRun(nodes: WorkflowNode[], connections: unknown, settings?: Record<string, unknown>) {
   const workflow = await createWorkflow(owner.client, { nodes, connections, settings });
   const { executionId } = await owner.client.data<{ executionId: string }>(
@@ -131,7 +159,8 @@ describe('workflow and node spans', () => {
     expect(named(spans, 'node.execute')).toHaveLength(3);
     expect(run.parentSpanId).toBe('');
     expect(run.kind).toBe(1);
-    expect(run.status.code).not.toBe(2);
+    // OK (1): n8n gives OK to every end but an error or a crash
+    expect(run.status.code).toBe(1);
     expect(run.attributes).toMatchObject({
       'workflow.id': workflowId,
       'workflow.name': 'Test workflow',
@@ -229,6 +258,11 @@ describe('workflow and node spans', () => {
     expect(child.parentSpanId).toBe(sub.spanId);
     expect(child.attributes['execution.mode']).toBe('integrated');
     expect(nodeSpan(childSpans, 'Inside')?.parentSpanId).toBe(child.spanId);
+    // the stored context keeps the segment's parent, so a crash rebuilt elsewhere stays under it
+    const stored = (await server.ctx.repos.executions.tracingContextOf(owner.tenant.id, childRow.id)) as {
+      parentSpanId?: string;
+    } | null;
+    expect(stored?.parentSpanId).toBe(sub.spanId);
   });
 
   it("a failing run's error workflow is in the same trace, the failed run's workflow span its parent", async () => {
@@ -305,6 +339,10 @@ describe('workflow and node spans', () => {
     expect(second.traceId).toBe(first.traceId);
     expect(second.spanId).not.toBe(first.spanId);
     expect(second.links.map((l) => l.spanId)).toContain(first.spanId);
+    // the reason is on the link, as n8n
+    expect(second.links.find((l) => l.spanId === first.spanId)?.attributes['continuation.reason']).toBe(
+      'resume',
+    );
     expect(second.attributes['continuation.reason']).toBe('resume');
     const after = nodeSpan(await spansOf(collector, executionId, 5), 'After')!;
     expect(after.parentSpanId).toBe(second.spanId);
@@ -392,7 +430,7 @@ describe('who is traced', () => {
 });
 
 describe('crash', () => {
-  async function runningRow(storedContext?: { traceparent: string }) {
+  async function runningRow(storedContext?: { traceparent: string; parentSpanId?: string }) {
     const workflow = await createWorkflow(owner.client, { nodes: [node('Start', 'core.manualTrigger')] });
     const id = randomUUID();
     const startedAt = new Date(Date.now() - 5000);
@@ -440,7 +478,135 @@ describe('crash', () => {
     const [span] = await spansOf(collector, id, 1);
     expect(span.traceId).toBe(traceId);
     expect(span.spanId).toBe(spanId);
+    expect(span.parentSpanId).toBe('');
     expect(span.attributes['execution.reconstructed']).toBe(true);
+  });
+
+  it("a crash rebuilt from a stored context keeps that segment's parent", async () => {
+    const traceId = `${'c'.repeat(31)}1`;
+    const spanId = `${'d'.repeat(15)}2`;
+    const parentSpanId = `${'e'.repeat(15)}3`;
+    const { id } = await runningRow({ traceparent: `00-${traceId}-${spanId}-01`, parentSpanId });
+    await server.ctx.executions.markCrashed();
+    await waitForExecution(server.ctx, owner.tenant.id, id, ['crashed']);
+    const [span] = await spansOf(collector, id, 1);
+    expect(span.traceId).toBe(traceId);
+    expect(span.spanId).toBe(spanId);
+    expect(span.parentSpanId).toBe(parentSpanId);
+  });
+
+  it('an in-process crash ends the open node spans with ERROR', async () => {
+    const { scope } = directRun();
+    const observer = server.ctx.tracingObserver;
+    await observer.runStart?.(scope);
+    await observer.nodeStart?.({ ...scope, nodeName: 'Slow', nodeType: 'core.set', runIndex: 0 });
+    await observer.crash?.({
+      tenantId: scope.tenantId,
+      executionId: scope.executionId,
+      row: scope.row,
+      detector: 'persist',
+      error: 'Could not store the execution result: lost',
+      definition: scope.definition,
+      options: {},
+    });
+    const spans = await spansOf(collector, scope.executionId, 2);
+    const [run] = named(spans, 'workflow.execute');
+    expect(run.status.code).toBe(2);
+    const slow = nodeSpan(spans, 'Slow')!;
+    expect(slow.status.code).toBe(2);
+    expect(slow.attributes['node.termination_reason']).toBe('crashed');
+  });
+
+  it("an in-process crash keeps the message out when a sub-workflow raised the run's redaction", async () => {
+    const secret = `secret-crash-${randomUUID()}`;
+    const { scope } = directRun();
+    const observer = server.ctx.tracingObserver;
+    await observer.runStart?.(scope);
+    const state = {
+      resultData: {
+        runData: {
+          Sub: [
+            {
+              startTime: Date.now(),
+              executionTime: 1,
+              executionStatus: 'success',
+              source: [],
+              metadata: { subWorkflowRedaction: { production: true, manual: false } },
+            },
+          ],
+        },
+      },
+    } as unknown as NonNullable<CrashContext['state']>;
+    await observer.crash?.({
+      tenantId: scope.tenantId,
+      executionId: scope.executionId,
+      row: scope.row,
+      detector: 'persist',
+      error: `Could not store the execution result: ${secret}`,
+      definition: scope.definition,
+      options: {},
+      state,
+    });
+    const [run] = named(await spansOf(collector, scope.executionId, 1), 'workflow.execute');
+    expect(run.status.code).toBe(2);
+    expect(run.status.message).toBe('');
+    const exception = run.events.find((e) => e.name === 'exception');
+    expect(typeof exception?.attributes['exception.type']).toBe('string');
+    expect(exception?.attributes['exception.message']).toBeUndefined();
+    for (const request of collector.requests) expect(request.body.includes(secret)).toBe(false);
+  });
+
+  it('crashes of runs from another process keep only the newest ended runs to continue', async () => {
+    const observer = server.ctx.tracingObserver;
+    const ids = Array.from({ length: 1001 }, () => randomUUID());
+    for (const executionId of ids) {
+      await observer.crash?.({
+        tenantId: owner.tenant.id,
+        executionId,
+        row: {
+          mode: 'trigger',
+          workflowId: null,
+          parentExecutionId: null,
+          retryOf: null,
+          startedAt: new Date(),
+          stoppedAt: new Date(),
+        },
+        detector: 'startup',
+        error: 'The process stopped',
+      });
+    }
+    const childOf = async (parentExecutionId: string) => {
+      const { scope } = directRun(parentExecutionId);
+      await observer.runStart?.(scope);
+      await observer.runEnd?.({ ...scope, status: 'success', redaction: noRedaction, redacted: false });
+      const [run] = named(await spansOf(collector, scope.executionId, 1), 'workflow.execute');
+      return run;
+    };
+    // the oldest was dropped (and has no stored context): a new root
+    expect((await childOf(ids[0])).parentSpanId).toBe('');
+    // the newest still gives its span as the parent
+    expect((await childOf(ids[ids.length - 1])).parentSpanId).not.toBe('');
+  }, 120_000);
+});
+
+describe('open spans when a run ends', () => {
+  it("a canceled run's workflow span is OK and its open node spans ERROR", async () => {
+    const { scope } = directRun();
+    const observer = server.ctx.tracingObserver;
+    await observer.runStart?.(scope);
+    await observer.nodeStart?.({ ...scope, nodeName: 'Slow', nodeType: 'core.set', runIndex: 0 });
+    await observer.runCancelled?.({
+      tenantId: scope.tenantId,
+      executionId: scope.executionId,
+      row: scope.row,
+    });
+    const spans = await spansOf(collector, scope.executionId, 2);
+    const [run] = named(spans, 'workflow.execute');
+    expect(run.attributes['execution.status']).toBe('canceled');
+    expect(run.status.code).toBe(1);
+    const slow = nodeSpan(spans, 'Slow')!;
+    expect(slow.status.code).toBe(2);
+    expect(slow.attributes['node.termination_reason']).toBe('canceled');
   });
 });
 

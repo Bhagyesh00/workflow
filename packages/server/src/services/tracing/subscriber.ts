@@ -18,9 +18,11 @@
 import {
   type ExecutionErrorShape,
   type Item,
+  mergeChannels,
   type RedactionChannels,
   type RunData,
   redactSecrets,
+  reportedChannels,
   type TaskData,
   type TaskDataConnections,
   telemetryTagsOf,
@@ -28,7 +30,6 @@ import {
   type WorkflowNode,
 } from '@workflow/workflow';
 import type { ServiceDeps } from '../../context';
-import type { TracingContextRow } from '../../db/schema';
 import type {
   CancelContext,
   CrashContext,
@@ -38,7 +39,7 @@ import type {
   RunEndContext,
   RunStartContext,
 } from '../observability/lifecycle';
-import { loadTracingContext, saveTracingContext } from './context-store';
+import { loadTracingContext, type StoredTracingContext, saveTracingContext } from './context-store';
 import { customAttributes } from './custom-attributes';
 import { genAiAttributes } from './gen-ai';
 import { inboundBaggage, outboundTraceHeaders } from './propagation';
@@ -183,7 +184,7 @@ function failedRunOf(c: RunStartContext): string | undefined {
   return typeof execution?.id === 'string' ? execution.id : undefined;
 }
 
-function storedContextOf(stored: TracingContextRow | null): SpanContext | undefined {
+function storedContextOf(stored: StoredTracingContext | null): SpanContext | undefined {
   if (!stored) return undefined;
   const context = parseTraceparent(stored.traceparent);
   if (!context) return undefined;
@@ -207,19 +208,23 @@ export function createTracingObserver(deps: ServiceDeps): TracingObserver {
   const touch = (run: Pick<RunTrace, 'tenantId' | 'settings'>) =>
     tracing().processorFor(run.tenantId, run.settings);
 
-  const remember = (run: RunTrace) => {
-    recent.delete(run.executionId);
-    recent.set(run.executionId, {
-      tenantId: run.tenantId,
-      context: run.workflowSpan.context,
-      baggage: run.baggage,
-    });
+  /** keeps an ended run's span context, the newest RECENT_MAX only */
+  const rememberContext = (executionId: string, entry: RecentRun) => {
+    recent.delete(executionId);
+    recent.set(executionId, entry);
     while (recent.size > RECENT_MAX) {
       const oldest = recent.keys().next().value;
       if (oldest === undefined) break;
       recent.delete(oldest);
     }
   };
+
+  const remember = (run: RunTrace) =>
+    rememberContext(run.executionId, {
+      tenantId: run.tenantId,
+      context: run.workflowSpan.context,
+      baggage: run.baggage,
+    });
 
   /** zero-length marker spans (`*.started`), when the settings ask for them */
   const marker = (run: RunTrace, name: string, parent: SpanContext) => {
@@ -289,10 +294,13 @@ export function createTracingObserver(deps: ServiceDeps): TracingObserver {
     return projectId ? repos.projects.get(c.tenantId, projectId) : undefined;
   };
 
-  /** ends every open node span of a run that ends while they run */
+  /** ends every open node span of a run that ends while they run: ERROR, as n8n */
   const endOpenNodes = (run: RunTrace, reason: string) => {
     for (const { span } of run.open.values()) {
-      tracing().endSpan(span, { attributes: { 'node.termination_reason': reason } });
+      tracing().endSpan(span, {
+        attributes: { 'node.termination_reason': reason },
+        status: { code: 'error' },
+      });
     }
     run.open.clear();
   };
@@ -308,7 +316,8 @@ export function createTracingObserver(deps: ServiceDeps): TracingObserver {
     endOpenNodes(run, status);
     const span = run.workflowSpan;
     const end: SpanAttributes = { ...attributes, 'execution.status': status };
-    let spanStatus: SpanStatus | undefined;
+    // n8n: ERROR only for an error or a crash; every other end (success, canceled, waiting) is OK
+    let spanStatus: SpanStatus = { code: 'ok' };
     if (failure) {
       end['execution.error_type'] = failure.type;
       span.events.push(exceptionEvent(failure.type, failure.message, failure.redacted));
@@ -373,9 +382,10 @@ export function createTracingObserver(deps: ServiceDeps): TracingObserver {
           ?.resultData?.runData;
         if (before && typeof before === 'object') run.runData = { ...before };
       }
-      const context: TracingContextRow = { traceparent: formatTraceparent(span.context), identity };
+      const context: StoredTracingContext = { traceparent: formatTraceparent(span.context), identity };
       if (span.context.traceState) context.tracestate = span.context.traceState;
       if (origin.baggage) context.baggage = origin.baggage;
+      if (origin.parent) context.parentSpanId = origin.parent.spanId;
       await saveTracingContext(deps, c.tenantId, c.executionId, context);
       if (settings.emitWorkflowStartSpan) marker(run, WORKFLOW_START_MARKER, span.context);
     },
@@ -430,7 +440,13 @@ export function createTracingObserver(deps: ServiceDeps): TracingObserver {
         'node.items.output': countItems(task.data),
       };
       if (node) {
-        const genAi = genAiAttributes(node, task, run.runData, run.definition.connections ?? {});
+        const genAi = genAiAttributes(
+          node,
+          task,
+          run.runData,
+          run.definition.connections ?? {},
+          run.definition.nodes,
+        );
         if (genAi) Object.assign(end, genAi);
       }
       Object.assign(end, run.identity, attributes);
@@ -463,9 +479,13 @@ export function createTracingObserver(deps: ServiceDeps): TracingObserver {
     },
 
     async crash(c: CrashContext) {
-      const channels = c.options?.redaction as RedactionChannels | undefined;
-      const redacted =
-        String(c.row.mode) === 'manual' ? channels?.manual === true : channels?.production === true;
+      // the snapshot raised by what the sub-workflows reported, as runEnd gets it
+      const own = c.options?.redaction as RedactionChannels | undefined;
+      const channels = mergeChannels(
+        { production: own?.production === true, manual: own?.manual === true },
+        reportedChannels(c.state?.resultData?.runData),
+      );
+      const redacted = String(c.row.mode) === 'manual' ? channels.manual : channels.production;
       const type = c.state?.resultData?.error?.name || 'Error';
       const failure = { type, message: c.error, redacted };
       const crashAttributes: SpanAttributes = { 'execution.crash.detector': c.detector };
@@ -508,16 +528,22 @@ export function createTracingObserver(deps: ServiceDeps): TracingObserver {
         attributes,
       });
       if (context) {
-        // the lost segment's own span id, so the node spans it already sent find their parent
+        // the lost segment's own span id, so the node spans it already sent find their parent, under that
+        // segment's own parent (a caller, a parent run's node, a previous segment) when it had one
         span.context = { ...context };
-        delete span.parentSpanId;
+        if (stored?.parentSpanId) span.parentSpanId = stored.parentSpanId;
+        else delete span.parentSpanId;
       }
       span.events.push(exceptionEvent(type, c.error, redacted));
       tracing().endSpan(span, {
         endTimeUnixNano: nanosOf(stoppedAt),
         status: errorStatus(c.error, redacted),
       });
-      recent.set(c.executionId, { tenantId: c.tenantId, context: span.context, baggage: stored?.baggage });
+      rememberContext(c.executionId, {
+        tenantId: c.tenantId,
+        context: span.context,
+        baggage: stored?.baggage,
+      });
     },
 
     headersFor(executionId: string, nodeName: string) {
