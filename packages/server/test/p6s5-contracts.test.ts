@@ -151,6 +151,12 @@ describe('P6 S5 public rows', () => {
     for (const name of names) expect(schemas[name], name).toBeDefined();
     const tags = (doc.tags as Array<{ name: string }>).map((t) => t.name);
     expect(tags).toEqual(expect.arrayContaining(['LogStreaming', 'OpenTelemetry']));
+    // P6-67: the public project answer carries the project's telemetry tags on detail rows
+    const project = schemas.Project as { properties: Record<string, unknown> };
+    expect(project.properties.customTelemetryTags).toMatchObject({
+      type: 'array',
+      items: { type: 'object', properties: { key: { type: 'string' }, value: { type: 'string' } } },
+    });
   });
 
   it('every new public row answers at its path for a full key and refuses a key without its scope', async () => {

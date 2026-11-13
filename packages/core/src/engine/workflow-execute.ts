@@ -1017,7 +1017,10 @@ export class WorkflowExecute {
         deps ??= this.contextDeps(node, exec, runIndex, signal);
         return this.evaluator.resolve(value, buildExpressionContext(deps, 0));
       };
-      return resolveTelemetryTags(node, evaluate);
+      // P6-67: a skipped tag logs its key only, never the value
+      return resolveTelemetryTags(node, evaluate, (key) =>
+        this.services.logger.warn('Telemetry tag skipped', { node: node.name, key }),
+      );
     } catch (error) {
       this.services.logger.warn('Telemetry tags failed', {
         node: node.name,

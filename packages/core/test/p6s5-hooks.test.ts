@@ -1,17 +1,11 @@
 /**
  * P6 S5 C0: the engine hooks log streaming and tracing build on. A node's `logAiEvent` reaches `hooks.aiEvent`
  * (root and sub-node), `services.traceHeaders` reaches the HTTP helpers without replacing a header the node set,
- * the SSRF guard reports to `setGuardListener`, and the C0 telemetry tag resolver (a stub) leaves metadata as is.
+ * the SSRF guard reports to `setGuardListener`, and a node's telemetry tags (P6-67) reach `metadata.tracing`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import {
-  type Connections,
-  type NodeType,
-  type NodeTypeDescription,
-  Workflow,
-  type WorkflowNode,
-} from '@workflow/workflow';
+import { type Connections, type NodeTypeDescription, Workflow, type WorkflowNode } from '@workflow/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   type AiEventRecord,
@@ -235,15 +229,15 @@ describe('HttpClient.setGuardListener', () => {
   });
 });
 
-describe('telemetry tags (C0 stub, L11)', () => {
-  it('the stub resolver returns undefined', () => {
+describe('telemetry tags (P6-67)', () => {
+  it('the resolver returns the evaluated tags', () => {
     const tagged = node('Set', 'test.set', [0, 0], {
       customTelemetryTags: { tag: [{ key: 'team', value: 'core' }] },
     });
-    expect(resolveTelemetryTags(tagged, () => 'x')).toBeUndefined();
+    expect(resolveTelemetryTags(tagged, () => 'x')).toEqual({ team: 'x' });
   });
 
-  it('a node with tags gets no metadata.tracing, and its metadata stays as before', async () => {
+  it('a node with tags gets metadata.tracing with the resolved values', async () => {
     const result = await execute({
       name: 'tags',
       nodes: [
@@ -258,6 +252,38 @@ describe('telemetry tags (C0 stub, L11)', () => {
     expect(result.status).toBe('success');
     const task = result.state.resultData.runData.Set?.[0];
     expect(task?.executionStatus).toBe('success');
-    expect(task?.metadata).toBeUndefined();
+    expect(task?.metadata).toEqual({ tracing: { team: 2 } });
+  });
+
+  it('a skipped tag logs a warning with the key only, never the value', async () => {
+    const warnings: Array<{ message: string; meta: unknown }> = [];
+    const logger = {
+      debug: () => {},
+      info: () => {},
+      error: () => {},
+      warn: (message: string, meta?: unknown) => warnings.push({ message, meta }),
+    };
+    const result = await execute(
+      {
+        name: 'tags-skip',
+        nodes: [
+          node('Start', 'test.trigger'),
+          node('Set', 'test.set', [100, 0], {
+            customTelemetryTags: {
+              tag: [
+                { key: 'secretish', value: '={{ { token: "s3cret-value" } }}' },
+                { key: 'team', value: 'core' },
+              ],
+            },
+          }),
+        ],
+        connections: connect(['Start', 'Set']),
+      },
+      { logger },
+    ).run({ startNode: 'Start' });
+    expect(result.status).toBe('success');
+    expect(result.state.resultData.runData.Set?.[0]?.metadata).toEqual({ tracing: { team: 'core' } });
+    expect(warnings).toEqual([{ message: 'Telemetry tag skipped', meta: { node: 'Set', key: 'secretish' } }]);
+    expect(JSON.stringify(warnings)).not.toContain('s3cret-value');
   });
 });

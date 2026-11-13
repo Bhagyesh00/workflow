@@ -715,6 +715,14 @@ const COMPONENTS: Record<string, unknown> = {
       type: { enum: ['personal', 'team'] },
       icon: { type: ['object', 'null'], description: '{ type: icon | emoji, value }' },
       description: { type: ['string', 'null'] },
+      customTelemetryTags: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { key: { type: 'string' }, value: { type: 'string' } },
+        },
+        description: 'Custom span attributes (project.custom.<key>); detail answers only',
+      },
       role: { type: 'string', description: "The caller's role in the project, when it has one" },
       scopes: { type: 'array', items: { type: 'string' }, description: "The caller's scopes in the project" },
       createdAt: { type: 'string', format: 'date-time' },
