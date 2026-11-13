@@ -79,11 +79,14 @@ export function NodeSettingsForm({
   description,
   readOnly,
   onChange,
+  onTagsInvalid,
 }: {
   node: WorkflowNode;
   description?: NodeTypeDescription;
   readOnly: boolean;
   onChange: (patch: Partial<Omit<WorkflowNode, 'name' | 'id'>>) => void;
+  /** true while a telemetry attribute row is invalid (P6-67) */
+  onTagsInvalid?: (invalid: boolean) => void;
 }) {
   const settingProps = description?.properties.filter((p) => p.isNodeSetting) ?? [];
   const onError = node.onError ?? 'stopWorkflow';
@@ -184,7 +187,12 @@ export function NodeSettingsForm({
         <ParameterList properties={settingProps} values={node.parameters} path={[]} />
       )}
       {/* P6-67 (L11): custom OpenTelemetry attributes of this node's spans (expressions over item 0) */}
-      <NodeTelemetryTags node={node} onChange={onChange} readOnly={readOnly} />
+      <NodeTelemetryTags
+        node={node}
+        onChange={onChange}
+        readOnly={readOnly}
+        onValidityChange={onTagsInvalid}
+      />
       <Row label="Notes">
         {(id) => (
           <textarea

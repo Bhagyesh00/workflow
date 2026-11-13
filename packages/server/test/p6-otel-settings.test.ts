@@ -215,6 +215,26 @@ describe('GET and PUT /rest/otel/settings', () => {
     expect((await put(w, body())).statusCode).toBe(200);
   });
 
+  it('reads the scheme from the parsed URL: http:host, HTTP:/host and a tab in the scheme are plain http', async () => {
+    const w = await world();
+    const url = new URL('http://127.0.0.1:4318');
+    for (const endpoint of [
+      `http:${url.host}`,
+      `HTTP:/${url.host}`,
+      `http:\\${url.host}`,
+      `ht\ttp://${url.host}`,
+    ]) {
+      const saved = await put(w, body({ exporterEndpoint: endpoint }));
+      expect(saved.statusCode, `${JSON.stringify(endpoint)} ${saved.body}`).toBe(400);
+      expect(saved.body).toContain('https://');
+      noSecret(saved.body);
+      const tested = await w.client.post('/rest/otel/test-trace', body({ exporterEndpoint: endpoint }));
+      expect(tested.statusCode, JSON.stringify(endpoint)).toBe(400);
+      noSecret(tested.body);
+    }
+    expect(await server.ctx.repos.otelSettings.get(w.tenant.id)).toBeUndefined();
+  });
+
   it("refuses n8n's two header problems and bad header characters, without echoing a value", async () => {
     const w = await world();
     const noEquals = await put(w, body({ exporterHeaders: `X-Api-Key=${KEY_VALUE},broken` }));
@@ -395,17 +415,30 @@ describe('POST /rest/otel/test-trace', () => {
     expect(sent.headers['x-api-key']).toBe(KEY_VALUE);
     expect(sent.headers.authorization).toBe(TOKEN_VALUE);
 
+    // a moved endpoint with a blank saved value is refused like a save: nothing is sent, the reason says why
     const before = other.requests.length;
     const moved = await w.client.post(
       '/rest/otel/test-trace',
       body({ exporterEndpoint: other.url, exporterHeaders: 'X-Api-Key=,Authorization=' }),
     );
-    expect(moved.statusCode, moved.body).toBe(200);
-    const last = other.requests[other.requests.length - 1];
-    expect(other.requests.length).toBe(before + 1);
-    expect(last.headers['x-api-key'] ?? '').not.toBe(KEY_VALUE);
-    expect(last.headers.authorization ?? '').not.toBe(TOKEN_VALUE);
+    expect(moved.statusCode, moved.body).toBe(400);
+    expect(moved.body).toContain(
+      "Couldn't keep the saved header values: the endpoint changed. Re-enter them.",
+    );
+    expect(other.requests.length).toBe(before);
     noSecret(moved.body);
+
+    // new values for the new endpoint are tested as typed
+    const fresh = await w.client.post(
+      '/rest/otel/test-trace',
+      body({
+        exporterEndpoint: other.url,
+        exporterHeaders: `X-Api-Key=${NEW_VALUE},Authorization=${NEW_VALUE}`,
+      }),
+    );
+    expect(fresh.statusCode, fresh.body).toBe(200);
+    expect(other.requests.length).toBe(before + 1);
+    expect(other.requests[other.requests.length - 1].headers['x-api-key']).toBe(NEW_VALUE);
   });
 
   it('answers success false with the collector text, and 400 for a bad field', async () => {

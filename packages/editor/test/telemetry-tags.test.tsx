@@ -3,17 +3,25 @@
  * project settings): add, edit and remove rows; an empty or a duplicate key is refused (nothing is passed on, the
  * reason is shown); a disabled or read-only field cannot be changed; each wrapper writes its own shape.
  */
-import { screen, within } from '@testing-library/react';
+import { configure, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TELEMETRY_TAG_LIMITS, type WorkflowNode, type WorkflowSettings } from '@workflow/workflow';
 import { useState } from 'react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { workflowsApi } from '../src/api/endpoints';
 import type { TelemetryTag } from '../src/api/types';
+import { NodeDetailsView } from '../src/components/ndv/NodeDetailsView';
+import { NodeSettingsForm } from '../src/components/ndv/NodeSettingsForm';
 import { NodeTelemetryTags } from '../src/components/telemetry/NodeTelemetryTags';
 import { ProjectTelemetryTags } from '../src/components/telemetry/ProjectTelemetryTags';
 import { TelemetryTagsField } from '../src/components/telemetry/TelemetryTagsField';
 import { WorkflowTelemetryTags } from '../src/components/telemetry/WorkflowTelemetryTags';
-import { withProviders } from './utils';
+import { WorkflowSettingsModal } from '../src/components/workflow/WorkflowSettingsModal';
+import { useWorkflowStore } from '../src/stores/workflow-store';
+import { backend, signedIn } from './backend';
+import { renderApp, withProviders } from './utils';
+
+configure({ asyncUtilTimeout: 20_000 });
 
 function FieldHarness({
   initial,
@@ -273,5 +281,130 @@ describe('ProjectTelemetryTags', () => {
       <ProjectTelemetryTags value={[{ key: 'region', value: 'eu' }]} onChange={() => {}} disabled />,
     );
     expect((screen.getByLabelText('Key 1') as HTMLInputElement).disabled).toBe(true);
+  });
+});
+
+describe('an invalid row blocks the save (R6)', () => {
+  it('the field reports invalid while a row is wrong, valid when fixed, and valid when it goes away', async () => {
+    const calls: boolean[] = [];
+    const user = userEvent.setup();
+    const { unmount } = withProviders(
+      <TelemetryTagsField
+        value={[{ key: 'region', value: 'eu' }]}
+        onChange={() => {}}
+        onValidityChange={(invalid) => calls.push(invalid)}
+      />,
+    );
+    expect(calls.at(-1)).toBe(false);
+    await user.click(screen.getByRole('button', { name: 'Add attribute' }));
+    await user.type(screen.getByLabelText('Key 2'), 'region');
+    await user.type(screen.getByLabelText('Value 2'), 'us');
+    expect(calls.at(-1)).toBe(true);
+    await user.type(screen.getByLabelText('Key 2'), '2');
+    expect(calls.at(-1)).toBe(false);
+    await user.clear(screen.getByLabelText('Key 2'));
+    expect(calls.at(-1)).toBe(true);
+    unmount();
+    expect(calls.at(-1)).toBe(false);
+  });
+
+  it('the workflow settings modal disables Apply settings while a row is invalid', async () => {
+    signedIn();
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    withProviders(
+      <WorkflowSettingsModal
+        open
+        onClose={() => undefined}
+        value={{ customTelemetryTags: [{ key: 'env', value: 'prod' }] }}
+        workflowId="w1"
+        onSave={onSave}
+        readOnly={false}
+      />,
+    );
+    const apply = (await screen.findByRole('button', { name: 'Apply settings' })) as HTMLButtonElement;
+    expect(apply.disabled).toBe(false);
+    await user.click(screen.getByRole('button', { name: 'Add attribute' }));
+    await user.type(screen.getByLabelText('Value 2'), 'team-a');
+    expect(screen.getByRole('alert').textContent).toMatch(/needs a key/);
+    expect(apply.disabled).toBe(true);
+    await user.click(apply);
+    expect(onSave).not.toHaveBeenCalled();
+    await user.type(screen.getByLabelText('Key 2'), 'team');
+    expect(apply.disabled).toBe(false);
+    await user.click(apply);
+    expect(onSave.mock.calls[0][0].customTelemetryTags).toEqual([
+      { key: 'env', value: 'prod' },
+      { key: 'team', value: 'team-a' },
+    ]);
+  });
+
+  it('the project page disables Save while a row is invalid', async () => {
+    const demo = signedIn();
+    const project = demo.createProject({
+      tenantId: demo.auth().tenant.id,
+      name: 'Growth',
+      type: 'team',
+      description: 'Marketing',
+    });
+    renderApp(`/projects/${project.id}/settings`);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add attribute' }));
+    const save = screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement;
+    await user.type(screen.getByLabelText('Key 1'), 'env');
+    await user.type(screen.getByLabelText('Value 1'), 'prod');
+    expect(save.disabled).toBe(false);
+    await user.click(screen.getByRole('button', { name: 'Add attribute' }));
+    await user.type(screen.getByLabelText('Value 2'), 'orphan');
+    expect(screen.getByRole('alert').textContent).toMatch(/needs a key/);
+    expect(save.disabled).toBe(true);
+    await user.type(screen.getByLabelText('Key 2'), 'team');
+    expect(save.disabled).toBe(false);
+    await user.click(save);
+    await waitFor(() =>
+      expect(demo.projects.find((p) => p.id === project.id)?.customTelemetryTags).toEqual([
+        { key: 'env', value: 'prod' },
+        { key: 'team', value: 'orphan' },
+      ]),
+    );
+  });
+
+  it('the node settings form reports the state, and the node view holds back Execute step', async () => {
+    signedIn();
+    const reports: boolean[] = [];
+    const user = userEvent.setup();
+    const { unmount } = withProviders(
+      <NodeSettingsForm
+        node={baseNode}
+        readOnly={false}
+        onChange={() => {}}
+        onTagsInvalid={(v) => reports.push(v)}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Add attribute' }));
+    await user.type(screen.getByLabelText('Value 1'), 'orphan');
+    expect(reports.at(-1)).toBe(true);
+    unmount();
+    expect(reports.at(-1)).toBe(false);
+
+    const wf = backend().seedWorkflow({ name: 'Panel', nodes: [baseNode], connections: {} });
+    useWorkflowStore.getState().load(await workflowsApi.get(wf.id));
+    withProviders(
+      <NodeDetailsView
+        nodeName={baseNode.name}
+        readOnly={false}
+        onClose={() => undefined}
+        onExecuteNode={() => {}}
+      />,
+    );
+    await user.click(await screen.findByRole('tab', { name: 'Settings' }));
+    // the first one is in the header of the panel
+    const execute = screen.getAllByRole('button', { name: 'Execute step' })[0] as HTMLButtonElement;
+    expect(execute.disabled).toBe(false);
+    await user.click(screen.getByRole('button', { name: 'Add attribute' }));
+    await user.type(screen.getByLabelText('Value 1'), 'orphan');
+    expect(execute.disabled).toBe(true);
+    await user.type(screen.getByLabelText('Key 1'), 'k');
+    expect(execute.disabled).toBe(false);
   });
 });

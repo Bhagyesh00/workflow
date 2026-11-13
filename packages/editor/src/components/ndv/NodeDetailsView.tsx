@@ -228,6 +228,8 @@ export function NodeDetailsView({
   const openNdv = useUiStore((s) => s.openNdv);
   const [tab, setTab] = useState<'parameters' | 'settings'>('parameters');
   const [name, setName] = useState(nodeName);
+  // P6-67: a telemetry attribute row is invalid, so the node holds the last valid list; Execute step waits
+  const [tagsInvalid, setTagsInvalid] = useState(false);
   /** `bare`: one `input` that goes out under the tool's name, as n8n sends it for the listed tools */
   const [toolTest, setToolTest] = useState<{
     args: FromAiArgument[];
@@ -431,7 +433,13 @@ export function NodeDetailsView({
             </a>
           )}
           {!readOnly && onExecuteNode && canExecuteStep && (
-            <Button variant="primary" icon={<Play size={14} />} onClick={executeStep} loading={running}>
+            <Button
+              variant="primary"
+              icon={<Play size={14} />}
+              onClick={executeStep}
+              loading={running}
+              disabled={tagsInvalid}
+            >
               Execute step
             </Button>
           )}
@@ -528,6 +536,7 @@ export function NodeDetailsView({
                     description={description}
                     readOnly={readOnly}
                     onChange={(patch) => updateNode(node.name, patch)}
+                    onTagsInvalid={setTagsInvalid}
                   />
                 )}
               </div>

@@ -37,6 +37,8 @@ export function ProjectSettingsPage({ projectId }: ProjectSettingsPageProps) {
   const [icon, setIcon] = useState<ProjectIcon | null>(null);
   // P6-67: custom OpenTelemetry attributes of this project's spans
   const [tags, setTags] = useState<TelemetryTag[]>([]);
+  // a row is invalid: `tags` holds the last valid list, so Save waits
+  const [tagsInvalid, setTagsInvalid] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [candidate, setCandidate] = useState('');
   const [newRole, setNewRole] = useState('project:viewer');
@@ -169,12 +171,17 @@ export function ProjectSettingsPage({ projectId }: ProjectSettingsPageProps) {
           )}
         </FormField>
         {/* P6-67 (L11): custom OpenTelemetry attributes, `project.custom.<key>` on this project's spans */}
-        <ProjectTelemetryTags value={tags} onChange={setTags} disabled={!canUpdate} />
+        <ProjectTelemetryTags
+          value={tags}
+          onChange={setTags}
+          onValidityChange={setTagsInvalid}
+          disabled={!canUpdate}
+        />
         {canUpdate && (
           <div>
             <Button
               variant="primary"
-              disabled={!dirty || trimmed.length === 0}
+              disabled={!dirty || trimmed.length === 0 || tagsInvalid}
               loading={save.isPending}
               onClick={() => save.mutate()}
             >

@@ -225,6 +225,8 @@ export class OtelSettingsService {
    */
   private async check(tenantId: string, input: OtelSettings, forTest: boolean): Promise<Checked> {
     const endpoint = input.exporterEndpoint.trim();
+    // read from the parsed URL, not the raw text: `http:host`, `http:/host` and `HTTP:\host` are plain http too
+    let insecure = false;
     if (endpoint === '') {
       if (input.enabled || forTest) throw ApiError.badRequest("Couldn't save: enter the collector endpoint.");
     } else {
@@ -237,6 +239,7 @@ export class OtelSettingsService {
       if (url.protocol !== 'http:' && url.protocol !== 'https:') {
         throw ApiError.badRequest("Couldn't save: the endpoint must start with http:// or https://.");
       }
+      insecure = url.protocol === 'http:';
       if (url.username || url.password) {
         throw ApiError.badRequest("Couldn't save: the endpoint can't hold a user name or a password.");
       }
@@ -271,7 +274,7 @@ export class OtelSettingsService {
         throw ApiError.badRequest("Couldn't save: a header value has a character that isn't allowed.");
       }
     }
-    if (Object.keys(parsed.headers).length > 0 && endpoint.toLowerCase().startsWith('http://')) {
+    if (insecure && Object.keys(parsed.headers).length > 0) {
       throw ApiError.badRequest(
         "Couldn't send headers over http://. Use an https:// endpoint, or remove the headers.",
       );
@@ -363,7 +366,12 @@ export class OtelSettingsService {
    */
   async testTrace(auth: AuthContext, input: OtelSettings): Promise<OtelTestResult> {
     const tenantId = auth.tenant.id;
-    const { values, headers } = await this.check(tenantId, input, true);
+    const { values, headers, lostKeep } = await this.check(tenantId, input, true);
+    if (lostKeep) {
+      throw ApiError.badRequest(
+        "Couldn't keep the saved header values: the endpoint changed. Re-enter them.",
+      );
+    }
     return sendTestTrace(this.deps, {
       tenantId,
       enabled: values.enabled,

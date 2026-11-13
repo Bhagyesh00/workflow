@@ -44,6 +44,8 @@ export function WorkflowSettingsModal({
 }) {
   const settings = useSettings();
   const [draft, setDraft] = useState<WorkflowSettings>(value);
+  // P6-67: a telemetry attribute row is invalid; the draft holds the last valid list, so Apply waits
+  const [tagsInvalid, setTagsInvalid] = useState(false);
   useEffect(() => {
     if (open) setDraft(value);
   }, [open, value]);
@@ -68,7 +70,7 @@ export function WorkflowSettingsModal({
           <Button onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
-            disabled={readOnly}
+            disabled={readOnly || tagsInvalid}
             onClick={() => {
               onSave(draft);
               onClose();
@@ -235,7 +237,7 @@ export function WorkflowSettingsModal({
         {/* P6-56 (L12): time saved per run, fixed or from Track Time Saved nodes */}
         <TimeSavedFields draft={draft} set={set} />
         {/* P6-67 (L11): custom OpenTelemetry attributes of this workflow's spans */}
-        <WorkflowTelemetryTags draft={draft} set={set} />
+        <WorkflowTelemetryTags draft={draft} set={set} onValidityChange={setTagsInvalid} />
       </div>
     </Dialog>
   );

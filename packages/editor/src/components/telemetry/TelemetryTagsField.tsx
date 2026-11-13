@@ -5,6 +5,9 @@
  * The rows are kept here while they are edited. A list is passed to `onChange` only when it is valid: a row with
  * a value and no key, a repeated key or a list over the limit shows its reason and is not passed on, so the page
  * that saves never holds an invalid list. A row that is still blank is ignored.
+ *
+ * `onValidityChange(true)` tells the page that the rows on screen are not the list it holds, so it can disable its
+ * Save (n8n does); it reports `false` again when the rows are valid and when the field goes away.
  */
 import { TELEMETRY_TAG_LIMITS, validateTelemetryTags } from '@workflow/workflow';
 import { Plus, X } from 'lucide-react';
@@ -16,6 +19,8 @@ import { TextInput } from '../ui/Field';
 export interface TelemetryTagsFieldProps {
   value: TelemetryTag[];
   onChange(next: TelemetryTag[]): void;
+  /** true while a row is invalid (the list `onChange` last got is not what the rows show), false otherwise */
+  onValidityChange?(invalid: boolean): void;
   disabled?: boolean;
   /** the field's title (default "Custom telemetry attributes") */
   label?: string;
@@ -41,6 +46,7 @@ function listOf(rows: Row[]): TelemetryTag[] {
 export function TelemetryTagsField({
   value,
   onChange,
+  onValidityChange,
   disabled,
   label = 'Custom telemetry attributes',
   hint,
@@ -61,6 +67,20 @@ export function TelemetryTagsField({
   }, [value]);
 
   const problem = useMemo(() => validateTelemetryTags(listOf(rows)), [rows]);
+
+  // the page's callback is read through a ref, so an inline function does not fire the effect on every render
+  const validity = useRef(onValidityChange);
+  validity.current = onValidityChange;
+  const invalid = problem !== null;
+  useEffect(() => {
+    validity.current?.(invalid);
+  }, [invalid]);
+  useEffect(
+    () => () => {
+      validity.current?.(false);
+    },
+    [],
+  );
 
   const update = (next: Row[]) => {
     setRows(next);

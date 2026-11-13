@@ -8,13 +8,20 @@ export interface WorkflowTelemetryTagsProps {
   draft: WorkflowSettings;
   /** merges a patch into `draft` */
   set(patch: Partial<WorkflowSettings>): void;
+  /** true while a row is invalid: the modal disables its Save */
+  onValidityChange?(invalid: boolean): void;
 }
 
-export function WorkflowTelemetryTags({ draft, set }: WorkflowTelemetryTagsProps): ReactNode {
+export function WorkflowTelemetryTags({
+  draft,
+  set,
+  onValidityChange,
+}: WorkflowTelemetryTagsProps): ReactNode {
   return (
     <TelemetryTagsField
       value={draft.customTelemetryTags ?? []}
       onChange={(next) => set({ customTelemetryTags: next.length > 0 ? next : undefined })}
+      onValidityChange={onValidityChange}
       hint="Added to this workflow's spans as workflow.custom.<key> when the workspace sends traces."
     />
   );
