@@ -25,7 +25,11 @@ export function destinationSecretBinding(tenantId: string, destinationId: string
   return { tenantId, credentialId: `logDestination:${destinationId}` };
 }
 
-const URL_PARTS = /^([a-z][a-z0-9+.-]*:\/\/)(?:([^/?#@]*)@)?([^?#]*)(?:\?([^#]*))?(#.*)?$/i;
+/**
+ * The userinfo is everything before the LAST `@` of the authority, and the authority ends at the first `/`, `\`, `?`
+ * or `#`, as the WHATWG URL parser the sender uses reads it (so an unencoded `@` in a password stays in the userinfo).
+ */
+const URL_PARTS = /^([a-z][a-z0-9+.-]*:\/\/)(?:([^/\\?#]*)@)?([^?#]*)(?:\?([^#]*))?(#.*)?$/i;
 
 interface UrlParts {
   scheme: string;
@@ -142,7 +146,8 @@ function urlSlots(url: unknown): Slot[] {
   return slots;
 }
 
-const DSN = /^([a-z][a-z0-9+.-]*:\/\/)(?:([^:@/]*)(?::([^@/]*))?@)?(.*)$/i;
+/** a Sentry DSN: the public key, an optional legacy secret key, and the rest (host, port, path); same authority rule */
+const DSN = /^([a-z][a-z0-9+.-]*:\/\/)(?:([^:/\\?#]*)(?::([^/\\?#]*))?@)?(.*)$/i;
 
 function dsnSlots(dsn: unknown): Slot[] {
   if (typeof dsn !== 'string') return [];
@@ -233,12 +238,11 @@ export function destinationEndpoint(
 ): string | null {
   const address = type === 'webhook' ? settings.url : type === 'sentry' ? settings.dsn : undefined;
   if (typeof address !== 'string') return null;
-  const match = DSN.exec(address);
-  if (!match) return null;
   try {
-    const url = new URL(`${match[1]}${match[4]}`);
+    // the whole address through the parser the sender uses, so `?`, `#`, `\` and `@` end the authority the same way
+    const url = new URL(address);
     const port = url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '');
-    return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
+    return `${url.protocol}//${url.hostname.toLowerCase().replace(/\.$/, '')}:${port}`;
   } catch {
     return null;
   }

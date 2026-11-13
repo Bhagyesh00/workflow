@@ -122,6 +122,20 @@ const settle = async () => {
   await new Promise((r) => setTimeout(r, 150));
 };
 
+/**
+ * A new destination first replays its stored failed events (P6-63: they are older, so they go first) and only then
+ * takes the queue. Wait until that first loop is idle, so the test's first event is the one in flight.
+ */
+async function ready(w: World) {
+  const manager = server.ctx.logStreaming as unknown as {
+    tenants: Map<string, { runtimes: Map<string, { draining: boolean }> }>;
+  };
+  await waitFor(async () => {
+    const runtimes = [...(manager.tenants.get(w.tenant.id)?.runtimes.values() ?? [])];
+    return runtimes.length > 0 && runtimes.every((runtime) => !runtime.draining);
+  });
+}
+
 describe('circuit breaker', () => {
   it('opens after 5 failures in 60 s, half-opens after 3 minutes, closes after 2 good requests', () => {
     let at = 1_000_000;
@@ -345,6 +359,23 @@ describe('events reach the destinations', () => {
     expect(of(masked.id, 'workflow.started').event.payload._email).toBe('keep@example.test');
   });
 
+  it('a replay applies the anonymize switch as it is now (failed-4)', async () => {
+    const w = await world();
+    const created = await destination(w, { subscribedEvents: ['audit'] });
+    failure = 'upstream said no';
+    emit(w, 'audit.user.login.success', { userId: 'u1', _email: 'stored@example.test' });
+    await waitFor(async () => attempts >= 1);
+    await settle();
+    expect(sent).toHaveLength(0);
+    // the event was kept unmasked (the flag was off); turning it on and reloading replays it masked
+    failure = null;
+    await destination(w, { id: created.id, subscribedEvents: ['audit'], anonymizeAuditMessages: true });
+    await waitFor(async () => sent.length >= 1);
+    expect(sent[0].event.eventName).toBe('audit.user.login.success');
+    expect(sent[0].event.payload._email).toBe('*');
+    expect(sent[0].event.payload.userId).toBe('u1');
+  });
+
   it('a change of subscriptions takes effect on the next event', async () => {
     const w = await world();
     const created = await destination(w, { subscribedEvents: ['workflow'] });
@@ -445,6 +476,7 @@ describe('the bounded queue', () => {
   it('drops the oldest above 16 MB and counts it', async () => {
     const w = await world();
     const created = await destination(w, { subscribedEvents: ['*'] });
+    await ready(w);
     let release!: () => void;
     gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -469,6 +501,7 @@ describe('the bounded queue', () => {
   it('drops the oldest above 2000 events', async () => {
     const w = await world();
     await destination(w, { subscribedEvents: ['*'] });
+    await ready(w);
     let release!: () => void;
     gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -485,6 +518,31 @@ describe('the bounded queue', () => {
     expect(order.length).toBe(2001);
     const shown = await w.client.data<LogDestination[]>(w.client.get('/rest/eventbus/destination'));
     expect(shown[0].droppedEvents).toBe(4);
+  });
+});
+
+describe('events held before the destinations load (logstream-3)', () => {
+  it('keeps at most 16 MB of them, the oldest dropped, while the load keeps failing', async () => {
+    const tenantId = randomUUID();
+    vi.spyOn(server.ctx.repos.logDestinations, 'list').mockRejectedValue(new Error('database down'));
+    const blob = 'x'.repeat(5 * 1024 * 1024);
+    for (const n of [1, 2, 3, 4, 5, 6]) {
+      server.ctx.logStreaming.sink.deliver({
+        id: randomUUID(),
+        ts: new Date().toISOString(),
+        eventName: 'workflow.started',
+        message: 'workflow.started',
+        payload: { n, blob },
+        tenantId,
+      });
+    }
+    const state = (
+      server.ctx.logStreaming as unknown as {
+        tenants: Map<string, { pending: Array<{ event: StreamEvent }>; pendingBytes: number }>;
+      }
+    ).tenants.get(tenantId)!;
+    expect(state.pendingBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+    expect(state.pending.map((held) => held.event.payload.n)).toEqual([4, 5, 6]);
   });
 });
 

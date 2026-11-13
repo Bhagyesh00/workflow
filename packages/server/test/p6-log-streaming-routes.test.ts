@@ -207,6 +207,26 @@ describe('validation', () => {
   });
 });
 
+describe('the limit of destinations (sweep-4)', () => {
+  it('a workspace holds 20: the 21st create is 400, an update and another workspace are not', async () => {
+    const w = await world();
+    const other = await world();
+    const first = await created(w, { enabled: false });
+    for (let n = 1; n < 20; n++) await created(w, { enabled: false, label: `Hook ${n}` });
+    const over = await save(w, { enabled: false, label: 'One too many' });
+    expect(over.statusCode, over.body).toBe(400);
+    expect(over.json().error.message).toBe("Couldn't add another destination: the limit is 20.");
+    const update = await save(w, { id: first.id, label: 'Renamed', enabled: false });
+    expect(update.statusCode, update.body).toBe(200);
+    const list = await w.client.data<LogDestination[]>(w.client.get('/rest/eventbus/destination'));
+    expect(list).toHaveLength(20);
+    expect((await save(other, { enabled: false })).statusCode).toBe(200);
+    // a delete frees a place
+    await w.client.delete(`/rest/eventbus/destination?id=${first.id}`);
+    expect((await save(w, { enabled: false, label: 'Again' })).statusCode).toBe(200);
+  });
+});
+
 describe('credentials', () => {
   it('accepts a generic auth credential of the workspace', async () => {
     const w = await world();
@@ -240,6 +260,37 @@ describe('credentials', () => {
     expect(denied.statusCode).toBe(403);
     expect(denied.json().error.message).toBe(MISSING);
     expect((await save(a, { credentialId: mine.id })).statusCode).toBe(200);
+  });
+
+  it('the credential check runs on every save that ends with a credential, and on the test send (R5)', async () => {
+    const w = await world();
+    const credential = await credentialIn(server, w.tenant.id, w.client.defaultProjectId!, {
+      type: 'httpHeaderAuth',
+      data: { name: 'X-Auth', value: 'fake-value' },
+    });
+    const dest = await created(w, { credentialId: credential.id });
+    // the credential stays and only the URL changes: the check still runs
+    vi.spyOn(server.ctx.access, 'scopesFor').mockResolvedValueOnce(new Set());
+    const moved = await save(w, {
+      id: dest.id,
+      credentialId: credential.id,
+      settings: webhook({ url: 'https://other.example.test/in' }),
+    });
+    expect(moved.statusCode, moved.body).toBe(403);
+    expect(moved.json().error.message).toBe(MISSING);
+    // a save that names no credential keeps the stored one and is checked too
+    vi.spyOn(server.ctx.access, 'scopesFor').mockResolvedValueOnce(new Set());
+    const label = await w.client.post('/rest/eventbus/destination', {
+      id: dest.id,
+      type: 'webhook',
+      label: 'Renamed',
+    });
+    expect(label.statusCode, label.body).toBe(403);
+    // the test send is checked
+    vi.spyOn(server.ctx.access, 'scopesFor').mockResolvedValueOnce(new Set());
+    const tested = await w.client.post(`/rest/eventbus/testmessage?id=${dest.id}`);
+    expect(tested.statusCode, tested.body).toBe(403);
+    expect((await w.client.post(`/rest/eventbus/testmessage?id=${dest.id}`)).statusCode).toBe(200);
   });
 
   it('only a webhook destination takes a credential', async () => {
@@ -348,6 +399,51 @@ describe('secrets', () => {
     expect(reentered.statusCode, reentered.body).toBe(200);
     await w.client.post(`/rest/eventbus/testmessage?id=${dest.id}`);
     expect(seen.at(-1)!.settings.headerParameters[0].value).toBe('HEADER-SECRET-3');
+  });
+
+  it('a blank save cannot move the endpoint with a ? # or backslash before an @ (logstream-1)', async () => {
+    const w = await world();
+    const dest = await created(w, {
+      settings: secretHook('https://hooks.example.test/in?token=URL-SECRET-1'),
+    });
+    for (const url of [
+      'https://evil.example.test?token=&x=@hooks.example.test/in',
+      'https://evil.example.test#@hooks.example.test/in?token=',
+      'https://evil.example.test\\@hooks.example.test/in?token=',
+    ]) {
+      const res = await save(w, { id: dest.id, settings: secretHook(url, '', '') });
+      expect(res.statusCode, url).toBe(400);
+      expect(res.json().error.message, url).toBe(
+        "Couldn't keep the saved secret values: the endpoint changed. Re-enter them.",
+      );
+    }
+    seen.length = 0;
+    await w.client.post(`/rest/eventbus/testmessage?id=${dest.id}`);
+    expect(seen.at(-1)!.settings.url).toBe('https://hooks.example.test/in?token=URL-SECRET-1');
+  });
+
+  it('a password with an unencoded @ is split as the URL parser reads it (logstream-1)', async () => {
+    const w = await world();
+    const dest = await created(w, {
+      settings: webhook({ url: 'https://user:pass@word-1@hooks.example.test/in' }),
+    });
+    expect((dest.settings as { url: string }).url).toBe('https://user:@hooks.example.test/in');
+    const { rows } = await server.ctx.database.pool.query(
+      'select secrets_enc from log_destinations where id = $1',
+      [dest.id],
+    );
+    const plain = server.ctx.cipher.decrypt<Record<string, string>>(
+      rows[0].secrets_enc,
+      destinationSecretBinding(w.tenant.id, dest.id),
+    );
+    expect(plain['url.password']).toBe('pass@word-1');
+    const blank = await save(w, {
+      id: dest.id,
+      settings: webhook({ url: 'https://user:@hooks.example.test/in' }),
+    });
+    expect(blank.statusCode, blank.body).toBe(200);
+    await w.client.post(`/rest/eventbus/testmessage?id=${dest.id}`);
+    expect(seen.at(-1)!.settings.url).toBe('https://user:pass@word-1@hooks.example.test/in');
   });
 
   it('keeps the Sentry DSN key for the same host and refuses it for another', async () => {

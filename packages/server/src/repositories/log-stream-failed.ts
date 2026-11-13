@@ -12,6 +12,29 @@ export const LOG_STREAM_FAILED_RETENTION_DAYS = 7;
 
 const ERROR_LIMIT = 1000;
 
+/** Postgres refuses U+0000 in jsonb and text values (22P05, 22021); the live send path carries it, so it is replaced here */
+const NUL = '\u0000';
+const REPLACEMENT = '\ufffd';
+
+function withoutNul(value: unknown): unknown {
+  if (typeof value === 'string') return value.includes(NUL) ? value.split(NUL).join(REPLACEMENT) : value;
+  if (Array.isArray(value)) return value.map(withoutNul);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) out[withoutNul(key) as string] = withoutNul(entry);
+    return out;
+  }
+  return value;
+}
+
+/** the event as a jsonb value Postgres takes: a NUL character becomes U+FFFD, everything else is kept */
+function storable(event: Record<string, unknown>): Record<string, unknown> {
+  return JSON.stringify(event).includes('\\u0000') ? (withoutNul(event) as Record<string, unknown>) : event;
+}
+
+const storableText = (text: string): string =>
+  text.includes(NUL) ? text.split(NUL).join(REPLACEMENT) : text;
+
 export class LogStreamFailedRepository {
   constructor(protected readonly db: DbOrTx) {}
 
@@ -27,8 +50,8 @@ export class LogStreamFailedRepository {
       tenantId,
       destinationId,
       eventId,
-      event,
-      lastError: lastError == null ? null : lastError.slice(0, ERROR_LIMIT),
+      event: storable(event),
+      lastError: lastError == null ? null : storableText(lastError.slice(0, ERROR_LIMIT)),
     });
   }
 
@@ -56,7 +79,10 @@ export class LogStreamFailedRepository {
   async recordAttempt(tenantId: string, id: number, lastError: string): Promise<void> {
     await this.db
       .update(logStreamFailed)
-      .set({ attempts: sql`${logStreamFailed.attempts} + 1`, lastError: lastError.slice(0, ERROR_LIMIT) })
+      .set({
+        attempts: sql`${logStreamFailed.attempts} + 1`,
+        lastError: storableText(lastError.slice(0, ERROR_LIMIT)),
+      })
       .where(and(eq(logStreamFailed.tenantId, tenantId), eq(logStreamFailed.id, id)));
   }
 
@@ -82,6 +108,35 @@ export class LogStreamFailedRepository {
         ), 9223372036854775807)
     `);
     return result.rowCount ?? 0;
+  }
+
+  /**
+   * keeps the newest `maxRows` rows of a destination by dropping the older ones; an index walk over ids, no event
+   * is read, so it is cheap enough to run on every add; returns how many rows went
+   */
+  async trimRows(tenantId: string, destinationId: string, maxRows: number): Promise<number> {
+    const keep = Math.max(1, Math.floor(maxRows));
+    const result = await this.db.execute(sql`
+      DELETE FROM log_stream_failed
+      WHERE tenant_id = ${tenantId} AND destination_id = ${destinationId}
+        AND id < COALESCE((
+          SELECT id FROM log_stream_failed
+          WHERE tenant_id = ${tenantId} AND destination_id = ${destinationId}
+          ORDER BY id DESC OFFSET ${keep - 1} LIMIT 1
+        ), 0)
+    `);
+    return result.rowCount ?? 0;
+  }
+
+  /** the row count and the event JSON bytes a destination holds (one scan: call it rarely) */
+  async usage(tenantId: string, destinationId: string): Promise<{ rows: number; bytes: number }> {
+    const result = await this.db.execute(sql`
+      SELECT count(*)::int AS rows, coalesce(sum(octet_length(event::text)), 0)::float8 AS bytes
+      FROM log_stream_failed
+      WHERE tenant_id = ${tenantId} AND destination_id = ${destinationId}
+    `);
+    const row = result.rows[0] as { rows: number; bytes: number } | undefined;
+    return { rows: Number(row?.rows ?? 0), bytes: Number(row?.bytes ?? 0) };
   }
 
   /** removes every row created before `before` (the Pruner's 7 day rule); returns how many */

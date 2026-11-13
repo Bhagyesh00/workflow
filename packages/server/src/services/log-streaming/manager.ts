@@ -52,6 +52,8 @@ const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
 /** events held for a tenant whose destinations are still loading */
 const MAX_PENDING_EVENTS = 2000;
 const LAST_ERROR_MAX = 1000;
+/** destinations a workspace may hold: each one has its own queue (2000 events, 16 MB) and failed store */
+const MAX_DESTINATIONS = 20;
 /** how long `close` waits for the queues to drain */
 const CLOSE_WAIT_MS = 3000;
 /** n8n's default subscriptions, less the `n8n.` prefix */
@@ -103,17 +105,22 @@ interface TenantState {
   loaded: boolean;
   loading: Promise<void> | null;
   again: boolean;
-  /** events that arrived before the tenant's destinations were loaded */
-  pending: StreamEvent[];
+  /** events that arrived before the tenant's destinations were loaded (2000 events and 16 MB at most) */
+  pending: Queued[];
+  pendingBytes: number;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+const URL_RUN = /[a-z][a-z0-9+.-]*:\/\/\S*/gi;
+
 /** the error text a client or the store may see: scrubbed, redacted, cut, no stack */
 function errorText(error: unknown, secretValues: string[] = []): string {
   let text = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Send failed';
   for (const value of secretValues) text = text.split(value).join('[redacted]');
+  // a URL in an error text may carry a user, a password or a token: no scheme://... run is shown
+  text = text.replace(URL_RUN, '[url]');
   return redactSecrets(text).slice(0, LAST_ERROR_MAX);
 }
 
@@ -179,6 +186,9 @@ export class LogStreamingManager {
     }
     const entry = this.types.get(input.type);
     if (!entry) throw ApiError.badRequest(`Unknown destination type "${String(input.type)}"`);
+    if (!existing && (await repo.list(tenantId)).length >= MAX_DESTINATIONS) {
+      throw ApiError.badRequest(`Couldn't add another destination: the limit is ${MAX_DESTINATIONS}.`);
+    }
 
     const label = this.checkLabel(input.label ?? existing?.label ?? DEFAULT_LABEL);
     const subscribedEvents = this.checkEvents(
@@ -191,9 +201,8 @@ export class LogStreamingManager {
       if (input.type !== 'webhook') {
         throw ApiError.badRequest("Couldn't use a credential: only a webhook destination takes one.");
       }
-      if (credentialId !== existing?.credentialId) {
-        await assertDestinationCredential(this.deps, auth, credentialId);
-      }
+      // n8n checks the caller's right to the credential on every save that ends with one
+      await assertDestinationCredential(this.deps, auth, credentialId);
     }
 
     const id = existing?.id ?? randomUUID();
@@ -232,6 +241,7 @@ export class LogStreamingManager {
     if (!row) throw ApiError.notFound('Log destination');
     const entry = this.types.get(row.type);
     if (!entry) return { success: false, error: `Unknown destination type "${row.type}"` };
+    if (row.credentialId) await assertDestinationCredential(this.deps, auth, row.credentialId);
     let sender: DestinationSender | undefined;
     let secretValues: string[] = [];
     try {
@@ -272,7 +282,7 @@ export class LogStreamingManager {
   private accepts(tenantId: string, eventName: string): boolean {
     if (this.closed) return false;
     const state = this.tenants.get(tenantId);
-    if (!state || !state.loaded) {
+    if (!state?.loaded) {
       if (!state?.loading) void this.load(tenantId);
       return true;
     }
@@ -287,12 +297,30 @@ export class LogStreamingManager {
     const state = this.tenants.get(event.tenantId);
     if (!state?.loaded) {
       const target = state ?? this.stateOf(event.tenantId);
-      target.pending.push(event);
-      if (target.pending.length > MAX_PENDING_EVENTS) target.pending.shift();
+      this.hold(target, event);
       if (!target.loading) void this.load(event.tenantId);
       return;
     }
     this.route(state, event);
+  }
+
+  /** keeps an event for a tenant still loading; the oldest go first above 2000 events or 16 MB */
+  private hold(state: TenantState, event: StreamEvent): void {
+    let size: number;
+    try {
+      size = Buffer.byteLength(JSON.stringify(event));
+    } catch {
+      return;
+    }
+    if (size > MAX_QUEUE_BYTES) return;
+    while (
+      state.pending.length > 0 &&
+      (state.pending.length >= MAX_PENDING_EVENTS || state.pendingBytes + size > MAX_QUEUE_BYTES)
+    ) {
+      state.pendingBytes -= (state.pending.shift() as Queued).size;
+    }
+    state.pending.push({ event, size });
+    state.pendingBytes += size;
   }
 
   private route(state: TenantState, event: StreamEvent): void {
@@ -341,7 +369,7 @@ export class LogStreamingManager {
 
   private async drain(runtime: Runtime): Promise<void> {
     try {
-      if (runtime.replayWanted) {
+      if (runtime.replayWanted && !runtime.disposed) {
         runtime.replayWanted = false;
         await this.replay(runtime);
       }
@@ -403,16 +431,26 @@ export class LogStreamingManager {
   private async replay(runtime: Runtime): Promise<void> {
     if (runtime.breaker.state === 'open') return;
     try {
-      await this.store().replay(runtime.row.tenantId, runtime.row.id, async (event) => {
-        if (!runtime.breaker.canSend()) throw new Error('The circuit breaker is open');
-        try {
-          await runtime.sender.send(event, {});
-        } catch (error) {
-          runtime.breaker.recordFailure();
-          throw error;
-        }
-        runtime.breaker.recordSuccess();
-      });
+      await this.store().replay(
+        runtime.row.tenantId,
+        runtime.row.id,
+        async (stored) => {
+          if (!runtime.breaker.canSend()) throw new Error('The circuit breaker is open');
+          // as n8n: the destination's flag now decides, so a switch turned on later masks the kept events too
+          // (masking is idempotent; turning the flag off cannot unmask what was stored masked)
+          const event = runtime.row.anonymizeAuditMessages
+            ? { ...stored, payload: anonymizeAuditPayload(stored.eventName, stored.payload) }
+            : stored;
+          try {
+            await runtime.sender.send(event, {});
+          } catch (error) {
+            runtime.breaker.recordFailure();
+            throw error;
+          }
+          runtime.breaker.recordSuccess();
+        },
+        { shouldStop: () => runtime.disposed, secretValues: runtime.secretValues },
+      );
     } catch (error) {
       this.deps.logger.warn(
         { code: pgErrorCode(error), destinationId: runtime.row.id },
@@ -436,7 +474,14 @@ export class LogStreamingManager {
   private stateOf(tenantId: string): TenantState {
     let state = this.tenants.get(tenantId);
     if (!state) {
-      state = { runtimes: new Map(), loaded: false, loading: null, again: false, pending: [] };
+      state = {
+        runtimes: new Map(),
+        loaded: false,
+        loading: null,
+        again: false,
+        pending: [],
+        pendingBytes: 0,
+      };
       this.tenants.set(tenantId, state);
     }
     return state;
@@ -458,7 +503,9 @@ export class LogStreamingManager {
           await this.refresh(tenantId, state);
           state.loaded = true;
         } while (state.again && !this.closed);
-        for (const event of state.pending.splice(0)) this.route(state, event);
+        const held = state.pending.splice(0);
+        state.pendingBytes = 0;
+        for (const { event } of held) this.route(state, event);
       } catch (error) {
         this.deps.logger.warn({ code: pgErrorCode(error) }, 'Could not load the log destinations');
       } finally {
