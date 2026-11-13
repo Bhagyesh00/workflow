@@ -188,9 +188,11 @@ export class SsoLoginService {
 
     const name = profileName(profile);
     const passwordHash = path.kind === 'new' ? await ctx.auth.hashPassword(randomToken(32)) : '';
-    const user = await this.deps.database.db.transaction(async (tx) => {
+    const { user, joined } = await this.deps.database.db.transaction(async (tx) => {
       const txRepos = createRepositories(tx);
       let user: UserRow;
+      // the member.joined audit row is written after the commit: its event reads the user and the membership
+      let joined: Record<string, unknown> | undefined;
       if (path.kind === 'new') {
         user = await txRepos.users.create({ email, name: name || email.split('@')[0], passwordHash });
       } else {
@@ -218,21 +220,24 @@ export class SsoLoginService {
         if (oldProjectRole && team) {
           await txRepos.projects.relations.add(tenant.id, team.id, user.id, oldProjectRole);
         }
-        await txRepos.audit.add(tenant.id, {
-          userId: user.id,
-          action: 'member.joined',
-          resourceType: 'user',
-          resourceId: user.id,
-          metadata: { role, method, ...(invitation ? { invitationId: invitation.id } : { jit: true }) },
-          ip: meta.ip,
-        });
+        joined = { role, method, ...(invitation ? { invitationId: invitation.id } : { jit: true }) };
       }
       if (path.kind !== 'identity') {
         await txRepos.sso.linkIdentity(tenant.id, { providerType: method, providerId, userId: user.id });
       }
-      return user;
+      return { user, joined };
     });
     known(user.id);
+    if (joined) {
+      await repos.audit.add(tenant.id, {
+        userId: user.id,
+        action: 'member.joined',
+        resourceType: 'user',
+        resourceId: user.id,
+        metadata: joined,
+        ip: meta.ip,
+      });
+    }
 
     if (decision.instanceRole !== undefined || decision.projectRoles !== undefined) {
       await ctx.provisioning.apply(tenant.id, user.id, decision);

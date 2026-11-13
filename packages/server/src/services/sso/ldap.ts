@@ -721,13 +721,16 @@ export class LdapService {
           providerId: person.ldapId,
           userId: user.id,
         });
-        await txRepos.audit.add(tenantId, {
-          userId: user.id,
-          action: 'member.joined',
-          resourceType: 'user',
-          resourceId: user.id,
-          metadata: { role: 'member', method: 'ldap', sync: true },
-        });
+      });
+    }
+    // after the commit: the member.joined event reads the user and the membership
+    if (createdId) {
+      await repos.audit.add(tenantId, {
+        userId: createdId,
+        action: 'member.joined',
+        resourceType: 'user',
+        resourceId: createdId,
+        metadata: { role: 'member', method: 'ldap', sync: true },
       });
     }
     counts.created++;

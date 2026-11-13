@@ -141,7 +141,8 @@ export async function deleteCredential(
 ) {
   // P6-15: deleting a private credential also needs `credential:createEndUser` (n8n), on every path (REST,
   // public API, assistant); the caller's `credential:delete` is each path's own check
-  if ((await ctx.repos.credentials.get(tenantId, id))?.isResolvable) {
+  const current = await ctx.repos.credentials.get(tenantId, id);
+  if (current?.isResolvable) {
     const scopes = await ctx.access.scopesFor(tenantId, userId, { credentialId: id });
     if (!scopes.has('credential:createEndUser')) throw ApiError.forbidden(MISSING_SCOPE_MESSAGE);
   }
@@ -151,6 +152,8 @@ export async function deleteCredential(
     action: 'credential.deleted',
     resourceType: 'credential',
     resourceId: id,
+    // R17: the event's credentialType comes from metadata.type
+    metadata: current ? { type: current.type } : undefined,
     ip,
   });
 }
@@ -301,14 +304,12 @@ export function registerCredentialRoutes(app: FastifyInstance, ctx: ServerContex
       action: 'credential.updated',
       resourceType: 'credential',
       resourceId: id,
-      ...(body.isGlobal !== undefined || body.isResolvable !== undefined
-        ? {
-            metadata: {
-              ...(body.isGlobal !== undefined ? { isGlobal: body.isGlobal } : {}),
-              ...(body.isResolvable !== undefined ? { isResolvable: body.isResolvable } : {}),
-            },
-          }
-        : {}),
+      // R17: the event's credentialType comes from metadata.type
+      metadata: {
+        type: row.type,
+        ...(body.isGlobal !== undefined ? { isGlobal: body.isGlobal } : {}),
+        ...(body.isResolvable !== undefined ? { isResolvable: body.isResolvable } : {}),
+      },
       ip: request.ip,
     });
     return {

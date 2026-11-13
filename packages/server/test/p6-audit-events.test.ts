@@ -14,10 +14,12 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   AUDIT_EVENT_MAP,
   AUDIT_ONLY_ACTIONS,
+  AUDIT_PAYLOAD_KEYS,
   eventMetadata,
   eventNamesFor,
 } from '../src/services/events/audit-events';
 import { splitName } from '../src/services/events/user-fields';
+import { createFakeLdap } from './fakes/ldap-directory';
 import {
   signup as baseSignup,
   captureEvents,
@@ -230,9 +232,14 @@ describe('completeness', () => {
     for (const file of sourceFiles(join(__dirname, '..', 'src'))) {
       // the event files name the actions and the event names; they cannot vouch for themselves
       if (file.replace(/\\/g, '/').includes('/services/events/')) continue;
-      // span attribute names (workflow.id, execution.mode, ...) share the family names; tracing writes no audit row
-      if (file.replace(/\\/g, '/').includes('/services/tracing/')) continue;
       const text = readFileSync(file, 'utf8');
+      // an `action: 'x.y'` literal is an audit action in any file and any family (tracing writes one too:
+      // `otel.settings_updated`), so an action of a new family cannot slip past the check
+      for (const match of text.matchAll(/\baction:\s*'([A-Za-z_]+(?:\.[A-Za-z_]+)+)'/g)) {
+        if (!notAudit.has(match[1])) found.set(match[1], file);
+      }
+      // span attribute names (workflow.id, execution.mode, ...) share the family names; the scan below skips them
+      if (file.replace(/\\/g, '/').includes('/services/tracing/')) continue;
       for (const match of text.matchAll(/'([A-Za-z_]+(?:\.[A-Za-z_]+)+)'/g)) {
         const action = match[1];
         if (!families.has(action.split('.')[0]) || notAudit.has(action)) continue;
@@ -595,6 +602,179 @@ describe('the rows L1 adds', () => {
     );
     expect(deleted).toHaveLength(1);
     expect(deleted[0].payload).toMatchObject({ executionId, _email: o.user.email });
+  });
+});
+
+describe('the fields of an audit event (a fixed list per action)', () => {
+  it('every mapped action, and every row that maps by its metadata, has a list of metadata keys', () => {
+    const actions = new Set([
+      ...Object.keys(AUDIT_EVENT_MAP),
+      'provisioning.updated',
+      'mcp.settings_updated',
+      'tenant.settings_updated',
+      'tenant.security_policy_updated',
+    ]);
+    for (const action of actions) expect(AUDIT_PAYLOAD_KEYS[action], action).toBeDefined();
+    for (const action of Object.keys(AUDIT_PAYLOAD_KEYS)) expect(actions.has(action), action).toBe(true);
+  });
+
+  it('a row sends the keys its list names and nothing else from the metadata', async () => {
+    const o = await signup();
+    const before = await mark();
+    await server.ctx.repos.audit.add(o.tenant.id, {
+      userId: o.user.id,
+      action: 'member.role_changed',
+      resourceType: 'user',
+      resourceId: o.user.id,
+      metadata: { from: 'member', to: 'admin', email: 'someone@example.test', name: 'Some One', extra: 1 },
+    });
+    await server.ctx.repos.audit.add(o.tenant.id, {
+      userId: o.user.id,
+      action: 'auth.sso_login_failed',
+      metadata: {
+        method: 'oidc',
+        reason: 'sso_access_blocked',
+        detail: 'free text',
+        jit: true,
+        role: 'admin',
+      },
+    });
+    const [updated, failed] = await eventsFor(o.tenant.id, before);
+    expect(updated.eventName).toBe('audit.user.updated');
+    expect(updated.payload).toMatchObject({ fieldsChanged: ['role'], targetUserId: o.user.id });
+    for (const key of ['from', 'to', 'email', 'name', 'extra']) {
+      expect(key in updated.payload, key).toBe(false);
+    }
+    expect(failed.eventName).toBe('audit.user.login.failed');
+    expect(failed.payload).toMatchObject({ authenticationMethod: 'oidc', reason: 'sso_access_blocked' });
+    for (const key of ['method', 'detail', 'jit', 'role']) expect(key in failed.payload, key).toBe(false);
+  });
+
+  it('an invitation names the invitee by user id when there is one, and never sends the address or the role', async () => {
+    const o = await signup();
+    const known = await signup();
+    const fresh = `invitee-${suffix()}@example.test`;
+    const before = await mark();
+    await o.client.data(o.client.post('/rest/members/invite', { email: fresh, role: 'member' }));
+    await o.client.data(o.client.post('/rest/members/invite', { email: known.user.email, role: 'member' }));
+    // a resend writes the same metadata
+    await server.ctx.repos.audit.add(o.tenant.id, {
+      userId: o.user.id,
+      action: 'invitation.resent',
+      resourceType: 'invitation',
+      resourceId: randomUUID(),
+      metadata: { email: fresh, role: 'member' },
+    });
+    const heard = (await eventsFor(o.tenant.id, before)).filter((e) =>
+      ['audit.user.invited', 'audit.user.reinvited'].includes(e.eventName),
+    );
+    expect(heard.map((e) => e.eventName)).toEqual([
+      'audit.user.invited',
+      'audit.user.invited',
+      'audit.user.reinvited',
+    ]);
+    for (const event of heard) {
+      expect(event.payload).toMatchObject({ userId: o.user.id, _email: o.user.email });
+      expect('email' in event.payload).toBe(false);
+      expect('role' in event.payload).toBe(false);
+      const text = JSON.stringify(event.payload);
+      expect(text).not.toContain(fresh);
+      expect(text).not.toContain(known.user.email);
+    }
+    expect('targetUserId' in heard[0].payload).toBe(false);
+    expect(heard[1].payload.targetUserId).toBe(known.user.id);
+    expect(typeof heard[0].payload.invitationId).toBe('string');
+  });
+
+  it('a credential event carries credentialType from the row (created, updated, deleted)', async () => {
+    const o = await signup();
+    const before = await mark();
+    const created = await o.client.data<{ id: string; type: string }>(
+      o.client.post('/rest/credentials', {
+        name: `Cred ${suffix()}`,
+        type: 'testApi',
+        data: { apiKey: 'k' },
+      }),
+    );
+    expect(created.type).toBe('testApi');
+    // the update and the delete routes write the credential's type too (R17)
+    expect(
+      (await o.client.patch(`/rest/credentials/${created.id}`, { name: `Renamed ${suffix()}` })).statusCode,
+    ).toBe(200);
+    expect((await o.client.delete(`/rest/credentials/${created.id}`)).statusCode).toBe(200);
+    const heard = (await eventsFor(o.tenant.id, before)).filter((e) =>
+      e.eventName.startsWith('audit.user.credentials.'),
+    );
+    expect(heard.map((e) => e.eventName)).toEqual([
+      'audit.user.credentials.created',
+      'audit.user.credentials.updated',
+      'audit.user.credentials.deleted',
+    ]);
+    expect(heard[0].payload).toMatchObject({ credentialId: created.id, credentialType: 'testApi' });
+    expect(heard[1].payload).toMatchObject({ credentialId: created.id, credentialType: 'testApi' });
+    expect(heard[2].payload).toMatchObject({ credentialId: created.id, credentialType: 'testApi' });
+    // the row's `type` is no payload key of its own, and the credential's data never goes in
+    for (const event of heard) expect('type' in event.payload).toBe(false);
+    expect(JSON.stringify(heard)).not.toContain('"k"');
+  });
+});
+
+describe('a member who joins by SSO', () => {
+  it('signs up with the user fields: the row is written after the commit', async () => {
+    const o = await signup();
+    await ssoOn(server, o.tenant.id, 'oidc', {});
+    const tenant = (await server.ctx.repos.tenants.get(o.tenant.id))!;
+    const email = `jit-${suffix()}@example.test`;
+    const before = await mark();
+    await server.ctx.ssoLogin.signIn(
+      tenant,
+      { providerType: 'oidc', providerId: `sub-${email}`, email, emailVerified: true, claims: {} as never },
+      { ip: '10.9.9.8' },
+      { authMethod: 'oidc' },
+    );
+    const signedUp = (await eventsFor(o.tenant.id, before)).filter(
+      (e) => e.eventName === 'audit.user.signedup',
+    );
+    expect(signedUp).toHaveLength(1);
+    expect(signedUp[0].payload).toMatchObject({ _email: email, globalRole: 'member' });
+  });
+
+  it('an LDAP sync signs up a directory person with the user fields: the row is written after the commit', async () => {
+    const o = await signup();
+    const base = `dc=${suffix()},dc=test`;
+    const adminPassword = 'adminpw-secret-4711';
+    const fake = createFakeLdap({ baseDn: base, adminDn: `cn=admin,${base}`, adminPassword });
+    server.ctx.ldap.openDirectory = fake.open;
+    const config = await o.client.put('/rest/ldap/config', {
+      loginEnabled: true,
+      connectionUrl: 'ldap.test',
+      connectionSecurity: 'none',
+      connectionPort: 389,
+      baseDn: base,
+      bindingAdminDn: `cn=admin,${base}`,
+      bindingAdminPassword: adminPassword,
+      firstNameAttribute: 'givenName',
+      lastNameAttribute: 'sn',
+      emailAttribute: 'mail',
+      loginIdAttribute: 'uid',
+      ldapIdAttribute: 'entryUUID',
+      userFilter: '(objectClass=inetOrgPerson)',
+    });
+    expect(config.statusCode).toBe(200);
+    const email = `dir-${suffix()}@example.test`;
+    fake.addPerson({ uid: 'dora', mail: email, givenName: 'Dora', sn: 'Dir', password: 'dora-pw' });
+    const before = await mark();
+    expect((await o.client.post('/rest/ldap/sync', { type: 'live' })).statusCode).toBe(200);
+    const signedUp = (await eventsFor(o.tenant.id, before)).filter(
+      (e) => e.eventName === 'audit.user.signedup',
+    );
+    expect(signedUp).toHaveLength(1);
+    expect(signedUp[0].payload).toMatchObject({
+      _email: email,
+      _firstName: 'Dora',
+      _lastName: 'Dir',
+      globalRole: 'member',
+    });
   });
 });
 

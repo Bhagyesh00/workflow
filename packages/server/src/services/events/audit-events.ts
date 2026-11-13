@@ -6,8 +6,9 @@
  * `handleAuditEntry` with `addAuditListener` (repositories/resources.ts), after every audit insert.
  *
  * The payload is built lazily, so a workspace with no destination for the event pays nothing: the user's fields
- * (user-fields.ts: `userId`, `_email`, `_firstName`, `_lastName`, `globalRole`), the resource, and the row's
- * metadata with any key that could hold a secret or a value left out. The client address never goes in.
+ * (user-fields.ts: `userId`, `_email`, `_firstName`, `_lastName`, `globalRole`), the resource, and the metadata
+ * keys `AUDIT_PAYLOAD_KEYS` lists for the action (n8n sends fixed fields per event, never the whole row; a key
+ * that could hold a secret or a value is left out too). The client address never goes in.
  */
 import type { DataObject } from '@workflow/workflow';
 import type { ServiceDeps } from '../../context';
@@ -227,8 +228,103 @@ export function eventNamesFor(entry: AuditEntry): string[] {
   }
 }
 
+/** a metadata key an event carries, or `[metadata key, payload key]` when n8n names the field differently */
+type PayloadKey = string | readonly [string, string];
+
+/**
+ * The metadata keys each audit action sends in its event (n8n sends fixed fields per event, not the whole row;
+ * decisions S5 end review 10). A key missing here is never sent, so a new metadata key a route adds stays in the
+ * audit log; every mapped action has an entry (an empty list sends the user's fields and the resource id only).
+ * No email, name or other personal field: the invitee's address, for one, stays out.
+ */
+export const AUDIT_PAYLOAD_KEYS: Readonly<Record<string, readonly PayloadKey[]>> = Object.freeze({
+  'auth.login': [],
+  'auth.sso_login': [['method', 'authenticationMethod']],
+  'auth.login_failed': [],
+  'auth.sso_login_failed': [['method', 'authenticationMethod'], 'reason'],
+  'auth.signup': [],
+  'member.joined': ['invitationId'],
+  'member.role_changed': [],
+  'auth.email_changed': [],
+  'auth.password_changed': [],
+  'member.removed': ['transferToProjectId', 'deleteData'],
+  'member.invited': [],
+  'invitation.resent': [],
+  'auth.password_reset': [],
+  'auth.password_reset_requested': [],
+  // `credentialType` comes from `metadata.type` (CREDENTIAL_TYPE_ACTIONS)
+  'credential.created': ['isResolvable'],
+  'credential.updated': ['isGlobal', 'isResolvable'],
+  'credential.deleted': [],
+  'credential.shared': ['added', 'removed'],
+  'credential.user_disconnected': [],
+  'apikey.created': [],
+  'apikey.deleted': [],
+  'apikey.revoked_by_admin': ['ownerId'],
+  'apikey.rotated': [],
+  'auth.mfa_enabled': [],
+  'auth.mfa_disabled': [],
+  'execution.deleted': ['executionIds', 'deleted', 'deleteBefore'],
+  'workflow.created': [],
+  'workflow.updated': ['versionId'],
+  'workflow.deleted': [],
+  'workflow.archived': [],
+  'workflow.unarchived': [],
+  'workflow.activated': ['versionId'],
+  'workflow.deactivated': ['versionId'],
+  'workflow.version_updated': ['versionId'],
+  // the variable's key comes from `variableKey`, never its value
+  'variable.created': [],
+  'variable.updated': [],
+  'variable.deleted': [],
+  'secret_connection.created': ['providerKey', 'projectId'],
+  'secret_connection.updated': ['providerKey', 'projectId'],
+  'secret_connection.deleted': ['providerKey', 'projectId'],
+  'secret_connection.tested': ['providerKey', 'projectId'],
+  'secret_connection.reloaded': ['providerKey', 'projectId'],
+  'workflow_review.created': ['workflowId', 'versionId'],
+  'workflow_review.version_updated': ['versionId'],
+  'workflow_review.decided': [],
+  'workflow_review.closed': ['workflowId', 'reason'],
+  'type_policy.scope.updated': ['projectId', 'defaultAction', 'version'],
+  'type_policy.document.created': ['name'],
+  'type_policy.document.updated': ['name', 'version'],
+  'type_policy.document.deleted': [],
+  'type_policy.attachments.updated': ['projectId', 'policyIds', 'version'],
+  'policy.blocked': ['point', 'type', 'scope', 'blocked'],
+  'execution.data.revealed': ['workflowId', 'mode', 'reason'],
+  'execution.data.reveal_failed': ['workflowId', 'mode', 'reason'],
+  'public_api_rate_limit.updated': [],
+  'mcp.tool_called': ['tool', 'via', 'clientId'],
+  'mcp.oauth_consent_granted': [],
+  'provisioning.roles_resolved': ['provider', 'instanceRole', 'projectRoles', 'removedProjectIds'],
+  // the rows that map by their metadata (`eventNamesFor`)
+  'provisioning.updated': ['type', 'role', 'order', 'projectRulesDeleted'],
+  'mcp.settings_updated': ['enabled'],
+  'tenant.settings_updated': [],
+  'tenant.security_policy_updated': ['redactionFloor'],
+});
+
+/** n8n's `fieldsChanged` of a `user.updated` event, by the audit action */
+const FIELDS_CHANGED: Readonly<Record<string, readonly string[]>> = {
+  'member.role_changed': ['role'],
+  'auth.email_changed': ['email'],
+  'auth.password_changed': ['password'],
+};
+
+/** the credential actions whose event carries n8n's `credentialType` (from `metadata.type`) */
+const CREDENTIAL_TYPE_ACTIONS: ReadonlySet<string> = new Set([
+  'credential.created',
+  'credential.updated',
+  'credential.deleted',
+]);
+
+/** the invitation actions: the event names the invitee by user id (when one exists), never by address */
+const INVITE_ACTIONS: ReadonlySet<string> = new Set(['member.invited', 'invitation.resent']);
+
 /** the payload key of a resource id, by the audit row's resource type */
 const RESOURCE_KEYS: Record<string, string> = {
+  invitation: 'invitationId',
   user: 'targetUserId',
   credential: 'credentialId',
   workflow: 'workflowId',
@@ -297,10 +393,20 @@ async function auditPayload(
   if (entry.action.startsWith('variable.')) {
     // the key only, never the value
     payload.variableKey = metadata.key;
-    metadata.key = undefined;
   }
-  for (const [key, value] of Object.entries(metadata)) {
-    if (value !== undefined) payload[key] = value;
+  for (const rule of AUDIT_PAYLOAD_KEYS[entry.action] ?? []) {
+    const [from, to] = typeof rule === 'string' ? [rule, rule] : rule;
+    if (metadata[from] !== undefined) payload[to] = metadata[from];
+  }
+  const fieldsChanged = FIELDS_CHANGED[entry.action];
+  if (fieldsChanged) payload.fieldsChanged = [...fieldsChanged];
+  if (CREDENTIAL_TYPE_ACTIONS.has(entry.action) && typeof metadata.type === 'string') {
+    payload.credentialType = metadata.type;
+  }
+  if (INVITE_ACTIONS.has(entry.action) && typeof metadata.email === 'string') {
+    // the address is looked up, never sent: a person who already has an account is named by id
+    const invitee = await deps.repos.users.getByEmail(metadata.email);
+    if (invitee) payload.targetUserId = invitee.id;
   }
   if (eventName === 'audit.mcp.oauth.completed' && entry.resourceId) {
     const client = await deps.repos.mcpOAuth.getClient(tenantId, entry.resourceId);
